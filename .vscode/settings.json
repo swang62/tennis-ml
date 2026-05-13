@@ -1,0 +1,38 @@
+{
+  "[python]": {
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.fixAll": "explicit",
+      "source.organizeImports": "explicit"
+    },
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.rulers": [
+      100
+    ]
+  },
+  "notebook.formatOnSave.enabled": true,
+  "notebook.defaultFormatter": "charliermarsh.ruff",
+  "notebook.codeActionsOnSave": {
+    "notebook.source.fixAll": "explicit",
+    "notebook.source.organizeImports": "explicit"
+  },
+  "[jsonc]": {
+    "editor.defaultFormatter": "vscode.json-language-features"
+  },
+  "ruff.configuration": "--config=.code_quality/ruff.toml",
+  "mypy.configFile": "--config-file=.code_quality/mypy.ini",
+  "workbench.colorCustomizations": {
+    "commandCenter.border": "#15202b99",
+    "sash.hoverBorder": "#e8fe9e",
+    "statusBar.background": "#dcfd6c",
+    "statusBar.foreground": "#15202b",
+    "statusBarItem.hoverBackground": "#d0fc3a",
+    "statusBarItem.remoteBackground": "#dcfd6c",
+    "statusBarItem.remoteForeground": "#15202b",
+    "titleBar.activeBackground": "#dcfd6c",
+    "titleBar.activeForeground": "#15202b",
+    "titleBar.inactiveBackground": "#dcfd6c99",
+    "titleBar.inactiveForeground": "#15202b99"
+  },
+  "peacock.color": "#dcfd6c"
+}

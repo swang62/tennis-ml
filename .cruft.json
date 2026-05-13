@@ -1,0 +1,34 @@
+{
+  "template": "https://github.com/JoseRZapata/data-science-project-template",
+  "commit": "67d81fae3cbbe42b3dc6b839398a9b3e4eec0ff2",
+  "checkout": null,
+  "context": {
+    "cookiecutter": {
+      "project_name": "tennis-ml",
+      "repo_name": "tennis-ml",
+      "github_username": "swang62",
+      "author_name": "Steve Wang",
+      "author_email": "me@stevewang.dev",
+      "description": "ML showcase off a full E2E production-grade model for predicting tennis match winners",
+      "compatible_python_versions": "3.13",
+      "mkdocs": false,
+      "codecov": false,
+      "license": "MIT License",
+      "_copy_without_render": [
+        ".code_quality/*",
+        ".vscode/*",
+        "config/*",
+        "data/*",
+        "src/*",
+        "tests/*",
+        ".editorconfig",
+        ".pre-commit-config.yaml",
+        "codecov.yaml",
+        "docs/*"
+      ],
+      "_template": "https://github.com/JoseRZapata/data-science-project-template",
+      "_commit": "67d81fae3cbbe42b3dc6b839398a9b3e4eec0ff2"
+    }
+  },
+  "directory": null
+}
