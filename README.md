@@ -1,6 +1,6 @@
 # tennis-ml
 
-End-to-end tennis match prediction pipeline.
+Production-grade MLOps pipeline for tennis match prediction. Prefect, ClickHouse, MLflow, BentoML — the full stack.
 
 ## Stack
 
@@ -15,13 +15,14 @@ End-to-end tennis match prediction pipeline.
 ## Project Structure
 
 ```
-infra/           — k3d config, vendored Helm charts, static K8s manifests
+infra/           — k3d config, static K8s manifests, ClickHouse init SQL
 notebooks/       — EDA + parameterized Papermill notebooks
 src/
   features/      — Feature column definitions (shared)
-  flows/         — Prefect pipelines (training, ETL, monitoring, ingest)
+  flows/         — Prefect pipelines (training, ETL, pipeline, ingest)
+  models/        — Player similarity index (FAISS)
   serving/       — BentoML service
-  pipeline.py    — Standalone pipeline runner (no Prefect needed)
+  dashboard/     — Streamlit dashboard
   db/            — ClickHouse client
 ```
 
@@ -58,15 +59,14 @@ just setup
 
 | Event | Action | Method |
 |---|---|---|
-| Manual ingest | Load CSV → bronze | `just ingest` |
+| Manual ingest | Load CSV → bronze | `just seed-clickhouse` |
 | Manual trigger | Training pipeline | `just pipeline` |
-| Model promoted | BentoML rebuild | Prefect task + `just build-image` |
+| Model promoted | BentoML rebuild | Prefect task + `just bento-build` |
 
 ## Pipelines
 
 - `etl_flow` — bronze → gold transforms (ClickHouse SQL), player profile enrichment
 - `training_flow` — on demand: features → tune 3 models → pick best → train final → evaluate → promote
-- `monitor_flow` — daily: detect drift → trigger retraining
 
 ## Access
 
