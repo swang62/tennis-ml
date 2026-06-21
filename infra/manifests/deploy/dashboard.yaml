@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tennis-dashboard
+  labels:
+    app: tennis-dashboard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tennis-dashboard
+  template:
+    metadata:
+      labels:
+        app: tennis-dashboard
+    spec:
+      containers:
+        - name: dashboard
+          image: tennis-dashboard:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8501
+          envFrom:
+            - configMapRef:
+                name: tennis-default-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tennis-dashboard
+  labels:
+    app: tennis-dashboard
+spec:
+  ports:
+    - name: http
+      port: 8501
+      targetPort: http
+  selector:
+    app: tennis-dashboard

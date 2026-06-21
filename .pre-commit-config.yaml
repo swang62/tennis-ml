@@ -1,0 +1,18 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+        types_or: [python, jupyter]
+      - id: ruff-format
+        types_or: [python, jupyter]
+
+  - repo: local
+    hooks:
+      - id: kubeconform
+        name: kubeconform
+        description: Validate Kubernetes YAML manifests
+        language: system
+        entry: kubeconform -ignore-missing-schemas -summary
+        files: ^infra/manifests/.*\.yaml$

@@ -1,0 +1,27 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: deploy-ingress
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: bento.macsteve.lan
+      http:
+        paths:
+          - pathType: Prefix
+            path: "/"
+            backend:
+              service:
+                name: bento-serving
+                port:
+                  number: 3000
+    - host: dashboard.macsteve.lan
+      http:
+        paths:
+          - pathType: Prefix
+            path: "/"
+            backend:
+              service:
+                name: tennis-dashboard
+                port:
+                  number: 8501

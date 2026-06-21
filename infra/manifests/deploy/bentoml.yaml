@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bento-serving
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bento-serving
+  template:
+    metadata:
+      labels:
+        app: bento-serving
+    spec:
+      containers:
+        - name: bentoml
+          image: bento-serving:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3000
+          envFrom:
+            - configMapRef:
+                name: tennis-default-config
+          resources:
+            requests:
+              cpu: 250m
+          livenessProbe:
+            tcpSocket:
+              port: http
+          readinessProbe:
+            tcpSocket:
+              port: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bento-serving
+  labels:
+    app: bento-serving
+spec:
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http
+  selector:
+    app: bento-serving
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: bento-serving
+  labels:
+    release: prometheus
+spec:
+  endpoints:
+    - port: http
+      path: /metrics
+  selector:
+    matchLabels:
+      app: bento-serving

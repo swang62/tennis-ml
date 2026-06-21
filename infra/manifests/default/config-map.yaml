@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tennis-default-config
+  labels:
+    app: tennis-ml
+data:
+  CLICKHOUSE_HOST: "clickhouse"
+  CLICKHOUSE_USER: "default"
+  CLICKHOUSE_PASSWORD: "password"
+  MLFLOW_TRACKING_URI: "http://mlflow:5000"
+  PREFECT_API_URL: "http://prefect-server:4200/api"
+  PREFECT_SERVER_API_HOST: "0.0.0.0"
+  PREFECT_SERVER_API_PORT: "4200"
+  PREFECT_UI_API_URL: "https://prefect.macsteve.lan/api"
+  PREFECT_SERVER_DATABASE_CONNECTION_URL: "sqlite+aiosqlite:////data/prefect.db"
+  PREFECT_API_ENABLE_METRICS: "true"
+  PREFECT_LOGGING_SERVER_LEVEL: "INFO"

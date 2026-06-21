@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
+[project]
+name = "tennis-ml"
+version = "0.1.0"
+description = "Tennis match prediction pipeline using Prefect, MLflow, and BentoML"
+readme = "README.md"
+requires-python = ">=3.12, <3.13"
+dependencies = [
+  "prefect>=3.0",
+  "mlflow>=2.20",
+  "bentoml>=1.4",
+  "torch>=2.0",
+  "lightning>=2.0",
+  "scikit-learn>=1.6",
+  "xgboost>=2.0",
+  "lightgbm>=4.5",
+  "optuna>=4.0",
+  "papermill>=2.6",
+  "pandas>=2.2",
+  "numpy>=1.26",
+  "clickhouse-connect>=0.8.0",
+  "scipy>=1.14",
+  "matplotlib>=3.9",
+  "seaborn>=0.13",
+  "shap>=0.46",
+  "numba>=0.65",
+  "llvmlite>=0.45",
+  "ipykernel>=6.30",
+  "rich>=13.0",
+  "requests>=2.32",
+  "streamlit>=1.40",
+  "plotly>=5.24",
+  "faiss-cpu>=1.14.3",
+  "fastembed>=0.5.0",
+  "ipywidgets>=8.1.8",
+  "jupyter>=1.1.1",
+  "optuna-integration[pytorch-lightning]>=4.9.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-include = ["*.ipynb"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP", "RUF", "SIM", "TRY", "ARG"]
+ignore = ["F401", "TRY003"]
+
+[tool.ruff.lint.per-file-ignores]
+"notebooks/**/*" = ["I001", "E702", "E402", "E501"]
+
+[tool.uv.workspace]
+members = ["."]
+
+[tool.uv.sources]
+tennis-ml = { workspace = true, editable = true }
+
+[dependency-groups]
+dev = ["python-dotenv>=1.2.2", "ruff>=0.7", "pre-commit>=3.8", "tennis-ml"]

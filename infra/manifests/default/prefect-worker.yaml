@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prefect-worker
+  labels:
+    app: prefect-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prefect-worker
+  template:
+    metadata:
+      labels:
+        app: prefect-worker
+    spec:
+      containers:
+        - name: prefect-worker
+          image: prefecthq/prefect:3.7.3-python3.11
+          command:
+            - prefect
+            - worker
+            - start
+            - --pool
+            - tennis-pool
+          envFrom:
+            - configMapRef:
+                name: tennis-default-config
