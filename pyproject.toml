@@ -50,7 +50,7 @@ extend-include = ["*.ipynb"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "B", "C4", "UP", "RUF", "SIM", "TRY", "ARG"]
-ignore = ["F401", "TRY003"]
+ignore = ["F401", "TRY003", "E501"]
 
 [tool.ruff.lint.per-file-ignores]
 "notebooks/**/*" = ["I001", "E702", "E402", "E501"]

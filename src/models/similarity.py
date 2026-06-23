@@ -1,9 +1,10 @@
-"""Content-based player similarity using bio embeddings + FAISS."""
+"""Content-based player similarity using text embeddings + FAISS storage and retrieval."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import NotRequired, TypedDict
 
 import faiss
 import numpy as np
@@ -17,103 +18,139 @@ MODEL_NAME = "BAAI/bge-small-en-v1.5"
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_INDEX = ROOT / "data" / "processed" / "player_similarity.index"
-DEFAULT_NAMES = ROOT / "data" / "processed" / "player_names.json"
-DEFAULT_DISPLAY_NAMES = ROOT / "data" / "processed" / "player_display_names.json"
+DEFAULT_METADATA = ROOT / "data" / "processed" / "player_metadata.json"
 
 
-def build_index(
-    index_path: str | Path = DEFAULT_INDEX,
-    names_path: str | Path = DEFAULT_NAMES,
-    display_names_path: str | Path = DEFAULT_DISPLAY_NAMES,
-) -> None:
-    """Build FAISS similarity index from player profiles and save to disk."""
-    client = get_client()
-    df = to_dataframe(
-        (f"SELECT player_id, display_name, backhand, play_style, summary FROM {PROFILES_TABLE}"),
-        client,
-    )
-    df = df[df["player_id"] != ""].reset_index(drop=True)
-    if df.empty:
-        return
-
-    player_ids = df["player_id"].tolist()
-    display_names_map: dict[str, str] = dict(zip(df["player_id"], df["display_name"], strict=True))
-
-    model = TextEmbedding(MODEL_NAME)
-    summaries = [s if s else "" for s in df["summary"].astype("string")]
-    embeddings = np.array(list(model.embed(summaries)), dtype=np.float32)
-
-    ohe_cols = ["play_style", "backhand"]
-    encoded = pd.get_dummies(
-        df.drop(columns=["player_id", "display_name", "summary"]),
-        columns=ohe_cols,
-    )
-    style_features = pd.concat([encoded, pd.DataFrame(embeddings)], axis=1).to_numpy(np.float32)
-    faiss.normalize_L2(style_features)
-
-    base_index = faiss.IndexFlatIP(style_features.shape[1])
-    index = faiss.IndexIDMap(base_index)
-    index.add_with_ids(style_features, np.arange(len(player_ids), dtype=np.int64))
-
-    faiss.write_index(index, str(index_path))
-    with open(names_path, "w") as f:
-        json.dump(player_ids, f)
-    with open(display_names_path, "w") as f:
-        json.dump(display_names_map, f)
-
-    print(f"Index ({len(player_ids)} players) saved to {index_path}")
+class PlayerData(TypedDict):
+    player_id: str
+    display_name: str
+    score: NotRequired[str]
 
 
 class PlayerSimilarity:
-    """Loads a pre-built FAISS index and finds similar players by name."""
+    """Builds or loads a FAISS index of player bios and finds similar players.
 
-    def __init__(
-        self,
-        index_path: str | Path = DEFAULT_INDEX,
-        names_path: str | Path = DEFAULT_NAMES,
-        display_names_path: str | Path = DEFAULT_DISPLAY_NAMES,
-    ):
-        self.index = faiss.read_index(str(index_path))
-        with open(names_path) as f:
-            self.player_ids: list[str] = json.load(f)
-        with open(display_names_path) as f:
-            self.display_names: dict[str, str] = json.load(f)
+    Usage:
+        finder = PlayerSimilarity()
+        finder.build()
+        finder.search("alcaraz")
+        finder.search("Carlos Alcaraz")
+    """
 
-    def __contains__(self, player_id: str) -> bool:
-        return player_id in self.player_ids
+    def __init__(self):
+        self.index: faiss.Index | None = None
+        self.players: list[PlayerData] = []
+        self.player_ids: list[str] = []
 
-    def __len__(self) -> int:
-        return len(self.player_ids)
+    # ── Build ───────────────────────────────────────
+
+    def build(self) -> None:
+        """Query player profiles, build FAISS index, save to disk, and load in memory."""
+        client = get_client()
+        df = to_dataframe(
+            (
+                f"SELECT player_id, display_name, backhand, play_style,"
+                f" handedness, height, turned_pro, summary FROM {PROFILES_TABLE}"
+            ),
+            client,
+        )
+        df = df[df["player_id"] != ""].reset_index(drop=True)
+        if df.empty:
+            return
+
+        model = TextEmbedding(MODEL_NAME)
+        summaries = [s if s else "" for s in df["summary"].astype("string")]
+        embeddings = np.array(list(model.embed(summaries)), dtype=np.float32)
+
+        # One-hot encode categoricals, numeric features, then stack with embeddings
+        encoded = pd.get_dummies(df[["play_style", "backhand", "handedness"]]).astype(np.float32)
+        height = pd.to_numeric(df["height"], errors="coerce").fillna(0).astype(np.float32)
+        years_pro = (
+            (pd.Timestamp.now().year - pd.to_numeric(df["turned_pro"], errors="coerce"))
+            .fillna(0)
+            .astype(np.float32)
+        )
+
+        features = np.ascontiguousarray(
+            pd.concat(
+                [
+                    encoded,
+                    height.rename("height"),
+                    years_pro.rename("years_pro"),
+                    pd.DataFrame(embeddings),
+                ],
+                axis=1,
+            ).to_numpy(np.float32)
+        )
+        faiss.normalize_L2(features)
+
+        self.index = faiss.IndexFlatIP(features.shape[1])
+        self.index.add(features)
+        self.players = [
+            {"player_id": player_id, "display_name": display_name}
+            for player_id, display_name in zip(df["player_id"], df["display_name"], strict=True)
+        ]
+        self.player_ids = df["player_id"].tolist()
+
+        faiss.write_index(self.index, str(DEFAULT_INDEX))
+        with open(DEFAULT_METADATA, "w") as f:
+            json.dump(self.players, f)
+
+        print(f"Index ({len(self.players)} players) saved to {DEFAULT_INDEX}")
+
+    # ── Load saved index ────────────────────────────
+
+    def load(self) -> None:
+        """Load a previously saved index from disk."""
+        if not DEFAULT_INDEX.exists():
+            raise FileNotFoundError(f"Index not found at {DEFAULT_INDEX}. Call build() first.")
+
+        self.index = faiss.read_index(str(DEFAULT_INDEX))
+        with open(DEFAULT_METADATA) as f:
+            self.players = json.load(f)
+        self.player_ids = [p["player_id"] for p in self.players]
+
+    # ── Query ───────────────────────────────────────
 
     def find_by_name(self, display_name: str) -> str | None:
         """Look up a player_id by display name (case-insensitive partial match)."""
         lower = display_name.lower()
-        for pid, dname in self.display_names.items():
-            if lower in dname.lower():
-                return pid
-        return None
+        return next(
+            (p["player_id"] for p in self.players if p["display_name"].lower() == lower), None
+        )
 
-    def similar(self, player_id: str, top_k: int = 5) -> list[dict[str, str]]:
-        """Return top_k similar players as [{player_id, display_name}, ...].
+    def search(
+        self,
+        query: str,
+        top_k: int = 5,
+    ) -> list[dict[str, str]]:
+        """Find players similar to *query* (player_id or display name).
 
-        Uses vector reconstruction from the FAISS index to find nearest neighbors.
+        Returns entries sorted by similarity (highest first), each with
+        player_id, display_name, and score (3 decimal places).
         """
-        if player_id not in self.player_ids:
+        # Load index if not exist
+        if self.index is None:
+            self.load()
+
+        player_id = query if query in self.player_ids else self.find_by_name(query)
+        if player_id is None or self.index is None:
             return []
 
         player_idx = self.player_ids.index(player_id)
         vector = self.index.reconstruct(player_idx).reshape(1, -1)
-        _, ids = self.index.search(vector, top_k + 1)
+        n_results = min(top_k, len(self.player_ids) - 1)
+        if n_results < 1:
+            return []
+
+        scores, ids = self.index.search(vector, n_results + 1)
         results = []
-        for i in ids[0]:
-            if i != player_idx:
-                pid = self.player_ids[i]
-                results.append(
-                    {
-                        "player_id": pid,
-                        "display_name": self.display_names.get(pid, pid),
-                    }
-                )
-            if len(results) == top_k:
+        for idx, score in zip(ids[0], scores[0], strict=True):
+            if idx < 0 or idx == player_idx:
+                continue
+            entry = dict(self.players[idx])
+            entry["score"] = f"{score:.3f}"
+            results.append(entry)
+            if len(results) == n_results:
                 break
         return results
