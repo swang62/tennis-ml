@@ -41,6 +41,13 @@ spec:
             - /data/artifacts
             - --serve-artifacts
 
+          resources:
+            limits:
+              cpu: 500m
+              memory: 1Gi
+            requests:
+              cpu: 100m
+              memory: 512Mi
           envFrom:
             - configMapRef:
                 name: tennis-default-config
@@ -53,9 +60,14 @@ spec:
           livenessProbe:
             tcpSocket:
               port: http
+            periodSeconds: 120
+            timeoutSeconds: 5
           readinessProbe:
             tcpSocket:
               port: http
+            initialDelaySeconds: 60
+            periodSeconds: 120
+            timeoutSeconds: 5
       volumes:
         - name: data
           persistentVolumeClaim:

@@ -1,7 +1,7 @@
 """Cross-player feature construction.
 
 Per-player rolling features (win_rate_5/10/20, ace_rate, serve_pct, etc.)
-are pre-computed in the ClickHouse ETL. This module handles the rest:
+are pre-computed in the DuckDB ETL. This module handles the rest:
 
 - Head-to-head rolling (per player-opponent pair)
 - Pairwise match construction (self-join by match_id)

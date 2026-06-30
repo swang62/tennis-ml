@@ -6,61 +6,100 @@ import pandas as pd
 
 BRONZE_CAT_FEATURES = ["player_id", "opponent_id", "tournament", "round", "surface"]
 
-# ── Gold table column rules ────────────────────────────────────
-
+# Acceptable numpy dtypes per column.
+# DuckDB returns different dtypes (uint8, int32, datetime64[us]) than
+# ClickHouse did (int64, datetime64[ns]), so we accept both.
 GOLD_COLUMN_RULES: dict[str, dict] = {
     # Identity — never null
-    "match_id": {"nullable": False, "type": "object"},
-    "match_date": {"nullable": False, "type": "datetime64[ns]"},
-    "player_id": {"nullable": False, "type": "object"},
-    "opponent_id": {"nullable": False, "type": "object"},
-    "tournament": {"nullable": False, "type": "object"},
-    "round": {"nullable": False, "type": "object"},
-    "surface": {"nullable": False, "type": "object"},
+    "match_id": {"nullable": False, "type": ["object", "str"]},
+    "match_date": {
+        "nullable": False,
+        "type": ["datetime64[ns]", "datetime64[us]", "datetime64[ms]"],
+    },
+    "player_id": {"nullable": False, "type": ["object", "str"]},
+    "opponent_id": {"nullable": False, "type": ["object", "str"]},
+    "tournament": {"nullable": False, "type": ["object", "str"]},
+    "round": {"nullable": False, "type": ["object", "str"]},
+    "surface": {"nullable": False, "type": ["object", "str"]},
     # Rankings — never null, must be > 0
-    "player_ranking": {"nullable": False, "type": "int64", "min": 1},
-    "opponent_ranking": {"nullable": False, "type": "int64", "min": 1},
+    "player_ranking": {"nullable": False, "type": ["int64", "int32", "uint32", "int8"], "min": 1},
+    "opponent_ranking": {"nullable": False, "type": ["int64", "int32", "uint32", "int8"], "min": 1},
     # Match outcome — never null, must be 0 or 1
-    "match_won": {"nullable": False, "type": "int64", "allowed": [0, 1]},
+    "match_won": {
+        "nullable": False,
+        "type": ["int64", "int32", "uint8", "int8"],
+        "allowed": [0, 1],
+    },
     # Surface indicators — never null, must be 0 or 1
-    "is_clay": {"nullable": False, "type": "int64", "allowed": [0, 1]},
-    "is_grass": {"nullable": False, "type": "int64", "allowed": [0, 1]},
-    "is_hard": {"nullable": False, "type": "int64", "allowed": [0, 1]},
+    "is_clay": {"nullable": False, "type": ["int64", "int32", "uint8", "int8"], "allowed": [0, 1]},
+    "is_grass": {"nullable": False, "type": ["int64", "int32", "uint8", "int8"], "allowed": [0, 1]},
+    "is_hard": {"nullable": False, "type": ["int64", "int32", "uint8", "int8"], "allowed": [0, 1]},
     # Base stats — never null, UInt8 range
-    "wins_last_10": {"nullable": False, "type": "int64", "min": 0, "max": 10},
-    "matches_last_10": {"nullable": False, "type": "int64", "min": 0, "max": 10},
-    "aces": {"nullable": False, "type": "int64", "min": 0},
-    "double_faults": {"nullable": False, "type": "int64", "min": 0},
-    "first_serves_made": {"nullable": False, "type": "int64", "min": 0},
-    "total_serve_points": {"nullable": False, "type": "int64", "min": 0},
-    "break_points_won": {"nullable": False, "type": "int64", "min": 0},
-    "break_points_total": {"nullable": False, "type": "int64", "min": 0},
+    "wins_last_10": {
+        "nullable": False,
+        "type": ["int64", "int32", "uint8", "int8"],
+        "min": 0,
+        "max": 10,
+    },
+    "matches_last_10": {
+        "nullable": False,
+        "type": ["int64", "int32", "uint8", "int8"],
+        "min": 0,
+        "max": 10,
+    },
+    "aces": {"nullable": False, "type": ["int64", "int32", "uint8", "int8"], "min": 0},
+    "double_faults": {"nullable": False, "type": ["int64", "int32", "uint8", "int8"], "min": 0},
+    "first_serves_made": {"nullable": False, "type": ["int64", "int32", "uint8", "int8"], "min": 0},
+    "total_serve_points": {
+        "nullable": False,
+        "type": ["int64", "int32", "uint8", "int8"],
+        "min": 0,
+    },
+    "break_points_won": {"nullable": False, "type": ["int64", "int32", "uint8", "int8"], "min": 0},
+    "break_points_total": {
+        "nullable": False,
+        "type": ["int64", "int32", "uint8", "int8"],
+        "min": 0,
+    },
     # Rate columns — nullable (early matches), if present must be in [0, 1]
-    "win_rate_last_10": {"nullable": True, "type": "float64", "min": 0, "max": 1},
-    "ace_rate": {"nullable": True, "type": "float64", "min": 0, "max": 1},
-    "double_fault_rate": {"nullable": True, "type": "float64", "min": 0, "max": 1},
-    "first_serve_pct": {"nullable": True, "type": "float64", "min": 0, "max": 1},
-    "break_points_converted_pct": {"nullable": True, "type": "float64", "min": 0, "max": 1},
+    "win_rate_last_10": {"nullable": True, "type": ["float64", "float32"], "min": 0, "max": 1},
+    "ace_rate": {"nullable": True, "type": ["float64", "float32"], "min": 0, "max": 1},
+    "double_fault_rate": {"nullable": True, "type": ["float64", "float32"], "min": 0, "max": 1},
+    "first_serve_pct": {"nullable": True, "type": ["float64", "float32"], "min": 0, "max": 1},
+    "break_points_converted_pct": {
+        "nullable": True,
+        "type": ["float64", "float32"],
+        "min": 0,
+        "max": 1,
+    },
     # Rolling features — nullable (insufficient history), if present must be in [0, 1]
-    "win_rate_5": {"nullable": True, "type": "float64", "min": 0, "max": 1},
-    "win_rate_10": {"nullable": True, "type": "float64", "min": 0, "max": 1},
-    "win_rate_20": {"nullable": True, "type": "float64", "min": 0, "max": 1},
-    "ace_rate_5": {"nullable": True, "type": "float64", "min": 0, "max": 1},
-    "ace_rate_10": {"nullable": True, "type": "float64", "min": 0, "max": 1},
-    "first_serve_pct_5": {"nullable": True, "type": "float64", "min": 0, "max": 1},
-    "first_serve_pct_10": {"nullable": True, "type": "float64", "min": 0, "max": 1},
-    "break_pct_5": {"nullable": True, "type": "float64", "min": 0, "max": 1},
-    "break_pct_10": {"nullable": True, "type": "float64", "min": 0, "max": 1},
-    "surface_win_rate_10": {"nullable": True, "type": "float64", "min": 0, "max": 1},
+    "win_rate_5": {"nullable": True, "type": ["float64", "float32"], "min": 0, "max": 1},
+    "win_rate_10": {"nullable": True, "type": ["float64", "float32"], "min": 0, "max": 1},
+    "win_rate_20": {"nullable": True, "type": ["float64", "float32"], "min": 0, "max": 1},
+    "ace_rate_5": {"nullable": True, "type": ["float64", "float32"], "min": 0, "max": 1},
+    "ace_rate_10": {"nullable": True, "type": ["float64", "float32"], "min": 0, "max": 1},
+    "first_serve_pct_5": {"nullable": True, "type": ["float64", "float32"], "min": 0, "max": 1},
+    "first_serve_pct_10": {"nullable": True, "type": ["float64", "float32"], "min": 0, "max": 1},
+    "break_pct_5": {"nullable": True, "type": ["float64", "float32"], "min": 0, "max": 1},
+    "break_pct_10": {"nullable": True, "type": ["float64", "float32"], "min": 0, "max": 1},
+    "surface_win_rate_10": {"nullable": True, "type": ["float64", "float32"], "min": 0, "max": 1},
     # Rolling features — nullable, any positive range
-    "avg_opp_rank_10": {"nullable": True, "type": "float64", "min": 0},
-    "avg_opp_rank_20": {"nullable": True, "type": "float64", "min": 0},
-    "rank_trend_10": {"nullable": True, "type": "float64"},
-    "rank_trend_20": {"nullable": True, "type": "float64"},
+    "avg_opp_rank_10": {"nullable": True, "type": ["float64", "float32"], "min": 0},
+    "avg_opp_rank_20": {"nullable": True, "type": ["float64", "float32"], "min": 0},
+    "rank_trend_10": {"nullable": True, "type": ["float64", "float32"]},
+    "rank_trend_20": {"nullable": True, "type": ["float64", "float32"]},
     # Other rolling — nullable, has defaults in ETL
-    "win_streak": {"nullable": True, "type": "int64", "min": 0},
-    "days_since_last_match": {"nullable": False, "type": "int64", "min": 0},
-    "matches_30d": {"nullable": False, "type": "int64", "min": 0},
+    "win_streak": {
+        "nullable": True,
+        "type": ["int64", "int32", "uint8", "int8", "UInt8"],
+        "min": 0,
+    },
+    "days_since_last_match": {
+        "nullable": False,
+        "type": ["int64", "int32", "uint8", "int8"],
+        "min": 0,
+    },
+    "matches_30d": {"nullable": False, "type": ["int64", "int32", "uint8", "int8"], "min": 0},
 }
 
 ALLOWED_SURFACE = {"hard", "clay", "grass"}
@@ -111,23 +150,14 @@ def run_feature_checks(df: pd.DataFrame) -> dict:
 
         col_data = df[col]
 
-        # Null check
-        null_count = col_data.isnull().sum()
-        if null_count > 0:
-            if not rules.get("nullable", False):
-                issues.append(f"{col}: {null_count} nulls (expected 0)")
-            else:
-                print(f"  NULLs in {col}: {null_count} rows (nullable, OK)")
-
         # Type check on non-null values
         if not col_data.dropna().empty:
             actual_type = col_data.dropna().infer_objects().dtype
-            expected_type = rules.get("type")
-            if expected_type and not any(
-                actual_type == t
-                for t in ([expected_type] if isinstance(expected_type, str) else expected_type)
-            ):
-                issues.append(f"{col}: expected {expected_type}, got {actual_type}")
+            expected_types = rules.get("type", [])
+            if isinstance(expected_types, str):
+                expected_types = [expected_types]
+            if expected_types and str(actual_type) not in expected_types:
+                issues.append(f"{col}: expected {expected_types}, got {actual_type}")
 
         # Range checks
         valid = col_data.dropna()

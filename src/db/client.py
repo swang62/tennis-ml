@@ -1,41 +1,36 @@
-"""ClickHouse client for the tennis-ml pipeline."""
+"""DuckDB client for the tennis-ml pipeline."""
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
 
-import clickhouse_connect
+import duckdb
 import pandas as pd
-from dotenv import load_dotenv
 
-if TYPE_CHECKING:
-    from clickhouse_connect.driver import Client
+DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
+DB_PATH = DATA_DIR / "tennis.duckdb"
 
-load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
-
-CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "clickhouse")
-CLICKHOUSE_PORT = int(os.getenv("CLICKHOUSE_PORT", "8123"))
-CLICKHOUSE_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD", "")
-CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER", "")
+_conn: duckdb.DuckDBPyConnection | None = None
 
 
-def get_client(host: str | None = None, port: int | None = None):
-    return clickhouse_connect.get_client(
-        host=host or CLICKHOUSE_HOST,
-        port=port or CLICKHOUSE_PORT,
-        password=CLICKHOUSE_PASSWORD,
-        username=CLICKHOUSE_USER,
-    )
+def get_conn() -> duckdb.DuckDBPyConnection:
+    global _conn
+    if _conn is None:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        _conn = duckdb.connect(str(DB_PATH))
+    return _conn
 
 
-def query(sql: str, client: Client | None = None) -> list[dict[str, Any]]:
-    c = client or get_client()
-    result = c.query(sql)
-    return [dict(row) for row in result.result_rows]
+def get_client():
+    return get_conn()
 
 
-def to_dataframe(sql: str, client: Client | None = None) -> pd.DataFrame:
-    c = client or get_client()
-    return cast(pd.DataFrame, c.query_df(sql))
+def query(sql: str) -> list[dict]:
+    conn = get_conn()
+    rows = conn.sql(sql).fetchall()
+    columns = [desc[0] for desc in conn.sql(sql).description]
+    return [dict(zip(columns, row, strict=False)) for row in rows]
+
+
+def to_dataframe(sql: str) -> pd.DataFrame:
+    return get_conn().sql(sql).fetchdf()

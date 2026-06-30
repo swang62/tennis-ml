@@ -25,13 +25,4 @@ spec:
                 name: prefect-server
                 port:
                   number: 4200
-    - host: clickhouse.macsteve.lan
-      http:
-        paths:
-          - pathType: Prefix
-            path: "/"
-            backend:
-              service:
-                name: clickhouse
-                port:
-                  number: 8123
+

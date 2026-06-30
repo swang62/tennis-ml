@@ -1,12 +1,12 @@
 """Prefect flow: Bronze → Gold ETL.
 
-All per-player rolling features computed in ClickHouse SQL via window functions
+All per-player rolling features computed in DuckDB SQL via window functions
 so the gold table is the single source of truth for training and inference.
 """
 
 from prefect import flow, task
 
-from src.db.client import get_client, to_dataframe
+from src.db.client import get_conn, to_dataframe
 from src.features.validate import run_feature_checks
 from src.flows.ingest import enrich_missing as _enrich_missing
 
@@ -18,14 +18,14 @@ GOLD_SQL = f"""
     WITH base AS (
         SELECT
             *,
-            wins_last_10 / nullIf(matches_last_10, 0) AS win_rate_last_10,
-            aces / nullIf(first_serves_made, 0) AS ace_rate,
-            double_faults / nullIf(total_serve_points, 0) AS double_fault_rate,
-            first_serves_made / nullIf(total_serve_points, 0) AS first_serve_pct,
-            break_points_won / nullIf(break_points_total, 0) AS break_points_converted_pct,
-            if(surface = 'clay',  1, 0) AS is_clay,
-            if(surface = 'grass', 1, 0) AS is_grass,
-            if(surface = 'hard',  1, 0) AS is_hard
+            wins_last_10 / NULLIF(matches_last_10, 0) AS win_rate_last_10,
+            aces / NULLIF(first_serves_made, 0) AS ace_rate,
+            double_faults / NULLIF(total_serve_points, 0) AS double_fault_rate,
+            first_serves_made / NULLIF(total_serve_points, 0) AS first_serve_pct,
+            break_points_won / NULLIF(break_points_total, 0) AS break_points_converted_pct,
+            CASE WHEN surface = 'clay'  THEN 1 ELSE 0 END AS is_clay,
+            CASE WHEN surface = 'grass' THEN 1 ELSE 0 END AS is_grass,
+            CASE WHEN surface = 'hard'  THEN 1 ELSE 0 END AS is_hard
         FROM {BRONZE_TABLE}
         WHERE match_id IS NOT NULL
           AND match_date IS NOT NULL
@@ -41,18 +41,18 @@ GOLD_SQL = f"""
             avg(match_won)  OVER w10 AS win_rate_10,
             avg(match_won)  OVER w20 AS win_rate_20,
 
-            sum(aces) OVER w5  / nullIf(sum(first_serves_made) OVER w5,  0) AS ace_rate_5,
-            sum(aces) OVER w10 / nullIf(sum(first_serves_made) OVER w10, 0) AS ace_rate_10,
+            sum(aces) OVER w5  / NULLIF(sum(first_serves_made) OVER w5,  0) AS ace_rate_5,
+            sum(aces) OVER w10 / NULLIF(sum(first_serves_made) OVER w10, 0) AS ace_rate_10,
 
             sum(first_serves_made) OVER w5
-                / nullIf(sum(total_serve_points) OVER w5,  0) AS first_serve_pct_5,
+                / NULLIF(sum(total_serve_points) OVER w5,  0) AS first_serve_pct_5,
             sum(first_serves_made) OVER w10
-                / nullIf(sum(total_serve_points) OVER w10, 0) AS first_serve_pct_10,
+                / NULLIF(sum(total_serve_points) OVER w10, 0) AS first_serve_pct_10,
 
             sum(break_points_won) OVER w5
-                / nullIf(sum(break_points_total) OVER w5,  0) AS break_pct_5,
+                / NULLIF(sum(break_points_total) OVER w5,  0) AS break_pct_5,
             sum(break_points_won) OVER w10
-                / nullIf(sum(break_points_total) OVER w10, 0) AS break_pct_10,
+                / NULLIF(sum(break_points_total) OVER w10, 0) AS break_pct_10,
 
             avg(opponent_ranking) OVER w10 AS avg_opp_rank_10,
             avg(opponent_ranking) OVER w20 AS avg_opp_rank_20,
@@ -61,10 +61,10 @@ GOLD_SQL = f"""
             avg(player_ranking) OVER w20 - player_ranking AS rank_trend_20,
 
             -- Days since player's last match
-            dateDiff('day', lagInFrame(match_date) OVER w_all, match_date) AS days_since_last_match,
+            DATEDIFF('day', LAG(match_date) OVER w_all, match_date) AS days_since_last_match,
 
             -- Matches in last 30 days before this match
-            sum(if(match_date >= subtractDays(match_date, 30), 1, 0))
+            SUM(CASE WHEN match_date >= match_date - INTERVAL '30 days' THEN 1 ELSE 0 END)
                 OVER (PARTITION BY player_id ORDER BY match_date
                       ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS matches_30d,
 
@@ -95,7 +95,7 @@ GOLD_SQL = f"""
         SELECT
             *,
             rn - (
-                max(CASE WHEN match_won = 0 THEN rn ELSE 0 END) OVER (
+                MAX(CASE WHEN match_won = 0 THEN rn ELSE 0 END) OVER (
                     PARTITION BY player_id ORDER BY match_date
                     ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
                 )
@@ -120,9 +120,9 @@ GOLD_SQL = f"""
         avg_opp_rank_10, avg_opp_rank_20,
         rank_trend_10, rank_trend_20,
         win_streak,
-        ifNull(days_since_last_match, 365) AS days_since_last_match,
-        ifNull(matches_30d, 0) AS matches_30d,
-        ifNull(surface_win_rate_10, 0) AS surface_win_rate_10,
+        COALESCE(days_since_last_match, 365) AS days_since_last_match,
+        COALESCE(matches_30d, 0) AS matches_30d,
+        COALESCE(surface_win_rate_10, 0) AS surface_win_rate_10,
 
         is_clay, is_grass, is_hard
     FROM with_streak
@@ -132,11 +132,11 @@ GOLD_SQL = f"""
 
 @task(retries=2, retry_delay_seconds=30)
 def bronze_to_gold() -> int:
-    client = get_client()
-    client.command(f"TRUNCATE TABLE IF EXISTS {GOLD_TABLE}")
-    client.command(GOLD_SQL)
-    result = client.query(f"SELECT count() AS cnt FROM {GOLD_TABLE}")
-    row_count = result.result_rows[0][0]
+    conn = get_conn()
+    conn.sql(f"DELETE FROM {GOLD_TABLE}")
+    conn.sql(GOLD_SQL)
+    result = conn.sql(f"SELECT COUNT(*) AS cnt FROM {GOLD_TABLE}")
+    row_count = result.fetchone()[0]
     print(f"Gold: {row_count} rows")
     return row_count
 

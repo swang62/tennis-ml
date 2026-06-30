@@ -16,5 +16,4 @@ else
     --volume "$PWD/$MACHINE_ID:/etc/machine-id"
 fi
 
-kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
 kubectl cluster-info

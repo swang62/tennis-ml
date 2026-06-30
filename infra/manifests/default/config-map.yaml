@@ -5,9 +5,6 @@ metadata:
   labels:
     app: tennis-ml
 data:
-  CLICKHOUSE_HOST: "clickhouse"
-  CLICKHOUSE_USER: "default"
-  CLICKHOUSE_PASSWORD: "password"
   MLFLOW_TRACKING_URI: "http://mlflow:5000"
   PREFECT_API_URL: "http://prefect-server:4200/api"
   PREFECT_SERVER_API_HOST: "0.0.0.0"

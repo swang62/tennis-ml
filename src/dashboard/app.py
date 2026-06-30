@@ -110,8 +110,8 @@ st.title("🎾 Tennis Matchup Explorer")
 try:
     players = get_players()
 except Exception as e:
-    st.error(f"Cannot connect to ClickHouse: {e}")
-    st.info("Make sure the cluster is running and ClickHouse is accessible.")
+    st.error(f"Cannot connect to DuckDB: {e}")
+    st.info("Make sure the database file exists (run `just db-init`).")
     st.stop()
 
 tab_matchup, tab_explorer = st.tabs(["Matchup Analysis", "Player Explorer"])

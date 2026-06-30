@@ -10,16 +10,13 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
 import pandas as pd
 import requests
 
-from src.db.client import get_client, to_dataframe
+from src.db.client import get_conn, to_dataframe
 from src.features.validate import run_ingestion_checks
-
-if TYPE_CHECKING:
-    from clickhouse_connect.driver import Client
 
 BRONZE_TABLE = "bronze.match_events"
 GOLD_TABLE = "gold.match_features"
@@ -64,14 +61,14 @@ def load_csv(path: str) -> pd.DataFrame:
 # ── Wikipedia Profile Enrichment ────────────────────────────────
 
 
-def get_players_without_profiles(client: Client) -> list[str]:
+def get_players_without_profiles() -> list[str]:
     sql = f"""
         SELECT DISTINCT gold.player_id
         FROM {GOLD_TABLE} gold
         LEFT JOIN {PROFILES_TABLE} prof ON gold.player_id = prof.player_id
         WHERE prof.player_id IS NULL
     """
-    df = to_dataframe(sql, client)
+    df = to_dataframe(sql)
     return df["player_id"].tolist()
 
 
@@ -155,7 +152,7 @@ def classify_style(extract: str) -> list[str]:
     return found if found else ["unknown"]
 
 
-def enrich_player(client: Client, player: str) -> bool:
+def enrich_player(player: str) -> bool:
     """Fetch Wikipedia bio for a single player and insert into profiles table.
 
     Returns True if profile was inserted, False if skipped.
@@ -176,7 +173,8 @@ def enrich_player(client: Client, player: str) -> bool:
     safe_summary = page["summary"][:1000].replace("'", "\\'")
     safe_title = page["title"].replace("'", "\\'")
 
-    client.command(f"""
+    conn = get_conn()
+    conn.sql(f"""
         INSERT INTO {PROFILES_TABLE}
             (player_id, display_name, summary, handedness, backhand,
              play_style, height, turned_pro)
@@ -191,18 +189,16 @@ def enrich_player(client: Client, player: str) -> bool:
             {int(infobox.get("turned_pro", 0))}
         )
     """)
-    print(f"  OK {player} → {page['title']}")
+    print(f"  OK {player} -> {page['title']}")
     return True
 
 
-def enrich_missing(client: Client | None = None) -> int:
+def enrich_missing() -> int:
     """Find all players in gold missing from profiles, fetch from Wikipedia.
 
     Returns count of profiles inserted.
     """
-    client = client or get_client()
-
-    missing = get_players_without_profiles(client)
+    missing = get_players_without_profiles()
     if not missing:
         print("All players have profiles. Nothing to do.")
         return 0
@@ -211,7 +207,7 @@ def enrich_missing(client: Client | None = None) -> int:
     inserted = 0
     for player in missing:
         try:
-            if enrich_player(client, player):
+            if enrich_player(player):
                 inserted += 1
         except Exception as e:
             print(f"  ERROR {player}: {e}")
@@ -238,9 +234,9 @@ if __name__ == "__main__":
         print("Validation failed. Fix the data or adjust the checks.")
         sys.exit(1)
 
-    client = get_client()
-    client.insert_df(BRONZE_TABLE, df)
+    conn = get_conn()
+    conn.sql(f"INSERT INTO {BRONZE_TABLE} SELECT * FROM df")
     print(f"Inserted {len(df)} rows into {BRONZE_TABLE}")
 
-    enriched = enrich_missing(client)
+    enriched = enrich_missing()
     print(f"Enriched {enriched} player profiles")

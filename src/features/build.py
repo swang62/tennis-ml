@@ -1,6 +1,6 @@
 """Feature column definitions used across training and serving.
 
-Rolling features are pre-computed in the ClickHouse ETL.
+Rolling features are pre-computed in the DuckDB ETL.
 H2H, pairwise diffs, and bio embeddings are added in the notebook.
 This file re-exports the stable feature list from rolling.py for use
 in serving validation and column ordering.

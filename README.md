@@ -1,6 +1,6 @@
 # tennis-ml
 
-Production-grade MLOps pipeline for tennis match prediction. Prefect, ClickHouse, MLflow, BentoML — the full stack.
+Production-grade MLOps pipeline for tennis match prediction. Prefect, DuckDB, MLflow, BentoML — the full stack.
 
 ## Stack
 
@@ -9,13 +9,13 @@ Production-grade MLOps pipeline for tennis match prediction. Prefect, ClickHouse
 | Orchestration | Prefect (retries, ETL triggers) |
 | Experiment tracking | MLflow (model registry, trial comparison) |
 | Model serving | BentoML |
-| Data warehouse | ClickHouse |
+| Data warehouse | DuckDB (embedded) |
 | Development | Jupyter + Papermill |
 
 ## Project Structure
 
 ```
-infra/           — k3d config, static K8s manifests, ClickHouse init SQL
+infra/           — k3d config, static K8s manifests, DuckDB init SQL
 notebooks/       — EDA + parameterized Papermill notebooks
 src/
   features/      — Feature column definitions (shared)
@@ -23,13 +23,13 @@ src/
   models/        — Player similarity index (FAISS)
   serving/       — BentoML service
   dashboard/     — Streamlit dashboard
-  db/            — ClickHouse client
+  db/            — DuckDB client
 ```
 
 ## Quick Start
 
 ```bash
-# 1. Full local dev setup (deps + k3d cluster + Helm deploy)
+# 1. Full local dev setup (deps + k3d cluster + DuckDB init)
 just setup
 ```
 
@@ -38,34 +38,34 @@ just setup
 ```
         CSV match data → ingest.py (validate + insert)
                       ↓
-           ┌──────────────────────┐
-           │ ClickHouse bronze    │ ← persistent MergeTree table
-           │ (match_events)       │
-           └──────────┬───────────┘
-                      │ Prefect etl_flow
-                      ↓
-           ┌──────────────────────┐
-           │ ClickHouse gold      │ ← derived features
-           │ (match_features)     │
-           └──────────┬───────────┘
-                      │
-                      ↓
-        Papermill notebooks (training, evaluation)
-                      ↓
-        MLflow registry → BentoML serving
+            ┌──────────────────────┐
+            │ DuckDB bronze        │ ← persistent DuckDB file
+            │ (match_events)       │
+            └──────────┬───────────┘
+                       │ Prefect etl_flow
+                       ↓
+            ┌──────────────────────┐
+            │ DuckDB gold          │ ← derived features
+            │ (match_features)     │
+            └──────────┬───────────┘
+                       │
+                       ↓
+         Papermill notebooks (training, evaluation)
+                       ↓
+         MLflow registry → BentoML serving
 ```
 
 ## Trigger Model
 
 | Event | Action | Method |
 |---|---|---|
-| Manual ingest | Load CSV → bronze | `just seed-clickhouse` |
+| Manual ingest | Load CSV → bronze | `just db-ingest` |
 | Manual trigger | Training pipeline | `just pipeline` |
 | Model promoted | BentoML rebuild | Prefect task + `just bento-build` |
 
 ## Pipelines
 
-- `etl_flow` — bronze → gold transforms (ClickHouse SQL), player profile enrichment
+- `etl_flow` — bronze → gold transforms (DuckDB SQL), player profile enrichment
 - `training_flow` — on demand: features → tune 3 models → pick best → train final → evaluate → promote
 
 ## Access
@@ -73,10 +73,8 @@ just setup
 All services are exposed via Traefik ingress on k3d's loadbalancer (port 8080).
 
 | Service | URL |
-|---|---|---|
+|---|---|
 | MLflow | `mlflow.macsteve.lan` 
 | Prefect | `prefect.macsteve.lan` 
-| ClickHouse | `clickhouse.macsteve.lan` 
 | BentoML | `bento.macsteve.lan` 
 | Dashboard | `dashboard.macsteve.lan` 
-| Grafana | `grafana.macsteve.lan`
