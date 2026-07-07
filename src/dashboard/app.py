@@ -1,51 +1,46 @@
-"""Streamlit dashboard for tennis match data exploration.
+"""Panel dashboard for tennis match data exploration.
 
 Usage:
-    streamlit run src/dashboard/app.py
+    panel serve src/dashboard/app.py
 """
 
 import pandas as pd
+import panel as pn
 import plotly.express as px
 import plotly.graph_objects as go
-import streamlit as st
 
 from src.db.client import to_dataframe
+
+pn.extension("plotly", "tabulator")
 
 GOLD_TABLE = "gold.match_features"
 
 
-@st.cache_data(ttl=60)
 def get_players() -> list[str]:
-    sql = f"SELECT DISTINCT player_id FROM {GOLD_TABLE} ORDER BY player_id"
-    df = to_dataframe(sql)
+    df = to_dataframe(f"SELECT DISTINCT player_id FROM {GOLD_TABLE} ORDER BY player_id")
     return df["player_id"].tolist()
 
 
-@st.cache_data(ttl=60)
 def get_head_to_head(player_a: str, player_b: str) -> pd.DataFrame:
-    sql = f"""
+    return to_dataframe(f"""
         SELECT * FROM {GOLD_TABLE}
         WHERE (player_id = '{player_a}' AND opponent_id = '{player_b}')
            OR (player_id = '{player_b}' AND opponent_id = '{player_a}')
         ORDER BY match_date
-    """
-    return to_dataframe(sql)
+    """)
 
 
-@st.cache_data(ttl=60)
 def get_player_rank_history(player: str) -> pd.DataFrame:
-    sql = f"""
+    return to_dataframe(f"""
         SELECT match_date, player_ranking, opponent_ranking, match_won, surface
         FROM {GOLD_TABLE}
         WHERE player_id = '{player}'
         ORDER BY match_date
-    """
-    return to_dataframe(sql)
+    """)
 
 
-@st.cache_data(ttl=60)
 def get_player_match_history(player: str, limit: int = 50) -> pd.DataFrame:
-    sql = f"""
+    return to_dataframe(f"""
         SELECT match_date, opponent_id, surface, tournament, round,
                player_ranking, opponent_ranking, match_won,
                ace_rate, double_fault_rate, first_serve_pct
@@ -53,8 +48,7 @@ def get_player_match_history(player: str, limit: int = 50) -> pd.DataFrame:
         WHERE player_id = '{player}'
         ORDER BY match_date DESC
         LIMIT {limit}
-    """
-    return to_dataframe(sql)
+    """)
 
 
 def compute_h2h_summary(df: pd.DataFrame, player_a: str, player_b: str):
@@ -99,181 +93,217 @@ def draw_form_sequence(df: pd.DataFrame, player: str):
     return fig
 
 
-st.set_page_config(
-    page_title="Tennis Matchup Explorer",
-    page_icon="🎾",
-    layout="wide",
-)
-
-st.title("🎾 Tennis Matchup Explorer")
+# ── Load data & create widgets ──
 
 try:
     players = get_players()
 except Exception as e:
-    st.error(f"Cannot connect to DuckDB: {e}")
-    st.info("Make sure the database file exists (run `just db-init`).")
-    st.stop()
+    print(f"Cannot connect to DuckDB: {e}")
+    print("Make sure the database file exists (run `just db-init`).")
+    raise
 
-tab_matchup, tab_explorer = st.tabs(["Matchup Analysis", "Player Explorer"])
+initial_a = players[0] if players else None
+initial_b = players[1] if len(players) > 1 else None
 
-# ── Matchup Tab ──────────────────────────────────────────────
+player_a = pn.widgets.Select(name="Player A", options=players, value=initial_a)
+player_b = pn.widgets.Select(
+    name="Player B",
+    options=[p for p in players if p != initial_a] if players else [],
+    value=initial_b,
+)
 
-with tab_matchup:
-    col_a, col_b = st.columns(2)
-    with col_a:
-        player_a = st.selectbox("Player A", players, index=0 if players else None, key="a")
-    with col_b:
-        available_b = [p for p in players if p != player_a]
-        player_b = st.selectbox(
-            "Player B",
-            available_b,
-            index=min(1, len(available_b) - 1) if available_b else None,
-            key="b",
+
+def _update_b_options(event):
+    remaining = [p for p in players if p != event.new]
+    player_b.options = remaining
+    if event.new == player_b.value or player_b.value not in remaining:
+        idx = 1 if len(remaining) > 1 else 0
+        player_b.value = remaining[idx] if remaining else None
+
+
+player_a.param.watch(_update_b_options, "value")
+
+
+# ── Matchup tab ──
+
+
+@pn.depends(player_a.param.value, player_b.param.value)
+def matchup_content(a, b):
+    if not a or not b:
+        return pn.pane.Markdown("*Select both players*")
+
+    h2h = get_head_to_head(a, b)
+
+    if h2h.empty:
+        return pn.pane.Markdown(f"*No matches found between {a} and {b}*")
+
+    h2h_summary = compute_h2h_summary(h2h, a, b)
+    wins_a = h2h_summary["a"]["wins"]
+    losses_a = h2h_summary["a"]["losses"]
+    wins_b = h2h_summary["b"]["wins"]
+    losses_b = h2h_summary["b"]["losses"]
+    total_a = wins_a + losses_a
+    total_b = wins_b + losses_b
+    pct_a = f"{wins_a / total_a * 100:.0f}%" if total_a > 0 else ""
+    pct_b = f"{wins_b / total_b * 100:.0f}%" if total_b > 0 else ""
+
+    h2h_fig = go.Figure()
+    h2h_fig.add_trace(
+        go.Bar(
+            x=[a, b],
+            y=[wins_a, wins_b],
+            marker_color=["#3498db", "#e67e22"],
+            text=[str(wins_a), str(wins_b)],
+            textposition="outside",
         )
+    )
+    h2h_fig.update_layout(
+        height=250,
+        margin={"l": 0, "r": 0, "t": 0, "b": 0},
+        yaxis={"title": "Wins", "dtick": 1},
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
 
-    if player_a and player_b:
-        h2h = get_head_to_head(player_a, player_b)
+    rank_a = get_player_rank_history(a)
+    rank_a["player_id"] = a
+    rank_b = get_player_rank_history(b)
+    rank_b["player_id"] = b
+    rank_both = pd.concat([rank_a, rank_b])
 
-        if h2h.empty:
-            st.info(f"No matches found between {player_a} and {player_b}.")
-        else:
-            h2h_summary = compute_h2h_summary(h2h, player_a, player_b)
+    rank_fig = px.line(
+        rank_both,
+        x="match_date",
+        y="player_ranking",
+        color="player_id",
+        markers=True,
+        color_discrete_map={a: "#3498db", b: "#e67e22"},
+    )
+    rank_fig.update_layout(
+        yaxis={"autorange": "reversed", "title": "Ranking"},
+        height=400,
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
 
-            st.subheader("Head-to-Head")
-            ca, cb, cc = st.columns([1, 2, 1])
-            with ca:
-                wins_a = h2h_summary["a"]["wins"]
-                losses_a = h2h_summary["a"]["losses"]
-                total_a = wins_a + losses_a
-                pct_a = wins_a / total_a * 100 if total_a > 0 else 0
-                st.metric(
-                    f"{player_a}", f"{wins_a}-{losses_a}", f"{pct_a:.0f}%" if total_a > 0 else None
-                )
+    display_cols = [
+        "match_date",
+        "player_id",
+        "opponent_id",
+        "surface",
+        "tournament",
+        "round",
+        "player_ranking",
+        "match_won",
+        "ace_rate",
+        "double_fault_rate",
+        "first_serve_pct",
+    ]
+    available_cols = [c for c in display_cols if c in h2h.columns]
+    match_table = h2h[available_cols].sort_values("match_date", ascending=False)
 
-            with cb:
-                h2h_fig = go.Figure()
-                h2h_fig.add_trace(
-                    go.Bar(
-                        x=[player_a, player_b],
-                        y=[wins_a, h2h_summary["b"]["wins"]],
-                        marker_color=["#3498db", "#e67e22"],
-                        text=[str(wins_a), str(h2h_summary["b"]["wins"])],
-                        textposition="outside",
-                    )
-                )
-                h2h_fig.update_layout(
-                    height=250,
-                    margin={"l": 0, "r": 0, "t": 0, "b": 0},
-                    yaxis={"title": "Wins", "dtick": 1},
-                    plot_bgcolor="rgba(0,0,0,0)",
-                )
-                st.plotly_chart(h2h_fig, use_container_width=True)
+    return pn.Column(
+        pn.Row(
+            pn.Column(
+                pn.pane.Markdown(f"**{a}**"),
+                pn.pane.Markdown(f"### {wins_a}-{losses_a}"),
+                pn.pane.Markdown(f"*{pct_a}*"),
+                width=180,
+            ),
+            pn.pane.Plotly(h2h_fig, sizing_mode="stretch_width"),
+            pn.Column(
+                pn.pane.Markdown(f"**{b}**"),
+                pn.pane.Markdown(f"### {wins_b}-{losses_b}"),
+                pn.pane.Markdown(f"*{pct_b}*"),
+                width=180,
+            ),
+        ),
+        pn.pane.Markdown("#### Recent Form"),
+        pn.Row(
+            pn.pane.Plotly(draw_form_sequence(h2h, a), sizing_mode="stretch_width"),
+            pn.pane.Plotly(draw_form_sequence(h2h, b), sizing_mode="stretch_width"),
+        ),
+        pn.pane.Markdown("#### Match History"),
+        pn.widgets.Tabulator(match_table, sizing_mode="stretch_width"),
+        pn.pane.Markdown("#### Rank Progression"),
+        pn.pane.Plotly(rank_fig, sizing_mode="stretch_width"),
+    )
 
-            with cc:
-                wins_b = h2h_summary["b"]["wins"]
-                losses_b = h2h_summary["b"]["losses"]
-                total_b = wins_b + losses_b
-                pct_b = wins_b / total_b * 100 if total_b > 0 else 0
-                st.metric(
-                    f"{player_b}", f"{wins_b}-{losses_b}", f"{pct_b:.0f}%" if total_b > 0 else None
-                )
 
-            st.subheader("Recent Form (last 10 matches)")
-            fcol_a, fcol_b = st.columns(2)
-            with fcol_a:
-                fig_a = draw_form_sequence(h2h, player_a)
-                st.plotly_chart(fig_a, use_container_width=True)
-            with fcol_b:
-                fig_b = draw_form_sequence(h2h, player_b)
-                st.plotly_chart(fig_b, use_container_width=True)
+# ── Explorer tab ──
 
-            st.subheader("Match History")
-            display_cols = [
-                "match_date",
-                "player_id",
-                "opponent_id",
-                "surface",
-                "tournament",
-                "round",
-                "player_ranking",
-                "match_won",
-                "ace_rate",
-                "double_fault_rate",
-                "first_serve_pct",
-            ]
-            available_cols = [c for c in display_cols if c in h2h.columns]
-            st.dataframe(
-                h2h[available_cols].sort_values("match_date", ascending=False),
-                use_container_width=True,
-                hide_index=True,
-            )
+explorer_player = pn.widgets.Select(name="Select Player", options=players, value=initial_a)
 
-            st.subheader("Rank Progression")
-            rank_a = get_player_rank_history(player_a)
-            rank_a["player_id"] = player_a
-            rank_b = get_player_rank_history(player_b)
-            rank_b["player_id"] = player_b
-            rank_both = pd.concat([rank_a, rank_b])
 
-            rank_fig = px.line(
-                rank_both,
-                x="match_date",
-                y="player_ranking",
-                color="player_id",
-                markers=True,
-                color_discrete_map={player_a: "#3498db", player_b: "#e67e22"},
-            )
-            rank_fig.update_layout(
-                yaxis={"autorange": "reversed", "title": "Ranking"},
-                height=400,
-                plot_bgcolor="rgba(0,0,0,0)",
-            )
-            st.plotly_chart(rank_fig, use_container_width=True)
+@pn.depends(explorer_player.param.value)
+def explorer_content(player):
+    if not player:
+        return pn.pane.Markdown("*Select a player*")
 
-# ── Player Explorer Tab ──────────────────────────────────────
+    rank_history = get_player_rank_history(player)
 
-with tab_explorer:
-    player = st.selectbox("Select Player", players, key="explore")
+    rank_fig = px.line(
+        rank_history,
+        x="match_date",
+        y="player_ranking",
+        markers=True,
+    )
+    rank_fig.update_layout(
+        yaxis={"autorange": "reversed", "title": "Ranking"},
+        height=350,
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
 
-    if player:
-        rank_history = get_player_rank_history(player)
+    surface_stats = (
+        rank_history.groupby("surface")["match_won"].agg(["mean", "count"]).reset_index()
+    )
+    surface_stats.columns = ["surface", "win_rate", "matches"]
+    surface_stats["win_rate"] = (surface_stats["win_rate"] * 100).round(1)
 
-        st.subheader("Rank Over Time")
-        rank_fig = px.line(
-            rank_history,
-            x="match_date",
-            y="player_ranking",
-            markers=True,
-        )
-        rank_fig.update_layout(
-            yaxis={"autorange": "reversed", "title": "Ranking"},
-            height=350,
-            plot_bgcolor="rgba(0,0,0,0)",
-        )
-        st.plotly_chart(rank_fig, use_container_width=True)
+    surface_fig = px.bar(
+        surface_stats,
+        x="surface",
+        y="win_rate",
+        text=surface_stats.apply(lambda r: f"{r['win_rate']}% (n={r['matches']})", axis=1),
+        color="win_rate",
+        color_continuous_scale="RdYlGn",
+    )
+    surface_fig.update_layout(
+        height=300,
+        plot_bgcolor="rgba(0,0,0,0)",
+        yaxis={"title": "Win %", "range": [0, 100]},
+    )
 
-        st.subheader("Win Rate by Surface")
-        surface_stats = (
-            rank_history.groupby("surface")["match_won"].agg(["mean", "count"]).reset_index()
-        )
-        surface_stats.columns = ["surface", "win_rate", "matches"]
-        surface_stats["win_rate"] = (surface_stats["win_rate"] * 100).round(1)
+    match_history = get_player_match_history(player)
 
-        surface_fig = px.bar(
-            surface_stats,
-            x="surface",
-            y="win_rate",
-            text=surface_stats.apply(lambda r: f"{r['win_rate']}% (n={r['matches']})", axis=1),
-            color="win_rate",
-            color_continuous_scale="RdYlGn",
-        )
-        surface_fig.update_layout(
-            height=300,
-            plot_bgcolor="rgba(0,0,0,0)",
-            yaxis={"title": "Win %", "range": [0, 100]},
-        )
-        st.plotly_chart(surface_fig, use_container_width=True)
+    return pn.Column(
+        pn.pane.Markdown("#### Rank Over Time"),
+        pn.pane.Plotly(rank_fig, sizing_mode="stretch_width"),
+        pn.pane.Markdown("#### Win Rate by Surface"),
+        pn.pane.Plotly(surface_fig, sizing_mode="stretch_width"),
+        pn.pane.Markdown("#### Recent Matches"),
+        pn.widgets.Tabulator(match_history, sizing_mode="stretch_width"),
+    )
 
-        st.subheader("Recent Matches")
-        match_history = get_player_match_history(player)
-        st.dataframe(match_history, use_container_width=True, hide_index=True)
+
+# ── Layout ──
+
+matchup_tab = pn.Column(
+    pn.Row(player_a, player_b),
+    matchup_content,
+)
+
+explorer_tab = pn.Column(
+    explorer_player,
+    explorer_content,
+)
+
+tabs = pn.Tabs(
+    ("Matchup Analysis", matchup_tab),
+    ("Player Explorer", explorer_tab),
+)
+
+pn.template.FastListTemplate(
+    title="Tennis Matchup Explorer",
+    main=[tabs],
+    accent_base_color="#3498db",
+    header_background="#057052",
+).servable()

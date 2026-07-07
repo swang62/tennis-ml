@@ -26,7 +26,7 @@ db-reset:
     just db-init
 
 dashboard-local:
-    streamlit run src/dashboard/app.py
+    panel serve src/dashboard/app.py
 
 dashboard-build:
     docker build -t tennis-dashboard:latest -f infra/manifests/deploy/Dockerfile .

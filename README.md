@@ -67,14 +67,3 @@ just setup
 
 - `etl_flow` — bronze → gold transforms (DuckDB SQL), player profile enrichment
 - `training_flow` — on demand: features → tune 3 models → pick best → train final → evaluate → promote
-
-## Access
-
-All services are exposed via Traefik ingress on k3d's loadbalancer (port 8080).
-
-| Service | URL |
-|---|---|
-| MLflow | `mlflow.macsteve.lan` 
-| Prefect | `prefect.macsteve.lan` 
-| BentoML | `bento.macsteve.lan` 
-| Dashboard | `dashboard.macsteve.lan` 
