@@ -18,11 +18,15 @@ spec:
         - name: prefect-worker
           image: prefecthq/prefect:3.7.3-python3.11
           command:
-            - prefect
-            - worker
-            - start
-            - --pool
-            - tennis-pool
+            - /bin/bash
+            - -c
+            - |
+              for i in $(seq 1 30); do
+                python3 -c "import urllib.request; urllib.request.urlopen('http://prefect-server:4200/api/ready')" 2>/dev/null && break
+                echo "Waiting for prefect-server (attempt $i/30)..."
+                sleep 2
+              done
+              exec prefect worker start --pool tennis-pool
           resources:
             limits:
               cpu: 200m

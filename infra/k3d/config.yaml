@@ -6,6 +6,8 @@ metadata:
 servers: 1
 agents: 0
 
+network: tennis-ml-net
+
 ports:
   - port: 8080:80
     nodeFilters:
