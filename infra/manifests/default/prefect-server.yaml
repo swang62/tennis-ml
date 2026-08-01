@@ -38,7 +38,7 @@ spec:
                 python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:4200/api/ready')" 2>/dev/null && break
                 sleep 2
               done
-              prefect work-pool create tennis-pool --type kubernetes 2>/dev/null || true
+              prefect work-pool create tennis-pool --type process 2>/dev/null || true
               wait $SERVER_PID
 
           resources:
