@@ -17,7 +17,7 @@ DATA_PROCESSED = ROOT / "data" / "processed"
 
 # --- Candidate manifest (written by 04, evaluated by 05) ---
 CANDIDATE_MANIFEST = DATA_PROCESSED / "candidate_manifest.json"
-PRODUCTION_MODEL = "production_model"  # MLflow registered model 05 promotes to
+PRODUCTION_MODEL = "ensemble_lr_model"  # MLflow registered model 05 promotes to
 
 # --- Gold tables ---
 GOLD_TABLE = "gold.match_features"
