@@ -3,14 +3,13 @@ version: 2
 models:
   - name: match_features
     description: >
-      Canonical match-level training table: ONE ROW PER MATCH (not per player).
-      The two sides are canonicalized by ATP id ordering — the lower/stable
-      ATP id is the `player_*` side, the other is the `opponent_*` side — so
-      the table is order-invariant (swapping player1/player2 in
-      bronze.match_events changes nothing). Includes the full balanced feature
-      set: canonical player-side rolling stats, opponent-side rolling stats,
-      differential (comparison) and context features. `match_won` = 1 iff the
-      canonical player_* side won.
+      ONE ROW PER MATCH, lower-id player_* side, built by pairing each
+      player_match row with that player's immediately preceding post-match
+      snapshot (player_match_number - 1) from gold.player_rolling_features,
+      then collapsing the two perspectives into one canonical row. The current
+      event supplies match context and current rankings; the prior snapshot
+      supplies all rolling history, so no value leaks from the current match
+      into the features. `match_won` = 1 iff the canonical player_* side won.
     tests:
       # One row per match (composite key collapsed: each match appears once).
       - unique:
@@ -52,7 +51,7 @@ models:
               arguments:
                 values: [clay, grass, hard]
       - name: match_won
-        description: 1 if the canonical player_* side won, else 0.
+        description: 1 if the canonical player_* side won, else 0 (the label).
         tests:
           - not_null
           - accepted_values:
@@ -67,123 +66,72 @@ models:
         tests:
           - not_null
 
-      # Canonical player-side stats (un-prefixed)
-      - name: wins_last_10
-        description: Canonical player wins in the 10 matches before this one.
-      - name: matches_last_10
-        description: Canonical player matches played in the 10 before this one.
-      - name: aces
-        description: Canonical player aces in this match.
-      - name: double_faults
-        description: Canonical player double faults in this match.
-      - name: first_serves_made
-        description: Canonical player first serves made in this match.
-      - name: total_serve_points
-        description: Canonical player total serve points in this match.
-      - name: break_points_won
-        description: Canonical player break points won in this match.
-      - name: break_points_total
-        description: Canonical player break points faced in this match.
-      - name: win_rate_last_10
-        description: Canonical player win rate over the last 10 matches.
-      - name: ace_rate
-        description: Canonical player ace rate in this match.
-      - name: double_fault_rate
-        description: Canonical player double fault rate in this match.
-      - name: first_serve_pct
-        description: Canonical player first serve pct in this match.
-      - name: break_points_converted_pct
-        description: Canonical player break point conversion in this match.
-
-      # Canonical player-side rolling stats (player_ prefix)
+      # Canonical player-side rolling stats (player_ prefix), from the prior
+      # snapshot — all refer to completed matches before this one; NULL on the
+      # player's first match (cold start, no zero filling).
       - name: player_win_rate_5
-        description: Canonical player rolling win rate, last 5 matches.
+        description: Canonical player rolling win rate, last 5 matches before this one.
       - name: player_win_rate_10
-        description: Canonical player rolling win rate, last 10 matches.
+        description: Canonical player rolling win rate, last 10 matches before this one.
       - name: player_win_rate_20
-        description: Canonical player rolling win rate, last 20 matches.
+        description: Canonical player rolling win rate, last 20 matches before this one.
       - name: player_ace_rate_5
-        description: Canonical player rolling ace rate, last 5 matches.
+        description: Canonical player rolling ace rate, last 5 matches before this one.
       - name: player_ace_rate_10
-        description: Canonical player rolling ace rate, last 10 matches.
+        description: Canonical player rolling ace rate, last 10 matches before this one.
       - name: player_first_serve_pct_5
-        description: Canonical player rolling first serve pct, last 5 matches.
+        description: Canonical player rolling first serve pct, last 5 matches before this one.
       - name: player_first_serve_pct_10
-        description: Canonical player rolling first serve pct, last 10 matches.
+        description: Canonical player rolling first serve pct, last 10 matches before this one.
       - name: player_break_pct_5
-        description: Canonical player rolling break pct, last 5 matches.
+        description: Canonical player rolling break pct, last 5 matches before this one.
       - name: player_break_pct_10
-        description: Canonical player rolling break pct, last 10 matches.
+        description: Canonical player rolling break pct, last 10 matches before this one.
       - name: player_rank_trend_10
-        description: Canonical player rank trend over last 10 matches.
+        description: Prior rolling avg ranking (10) minus current event ranking.
       - name: player_rank_trend_20
-        description: Canonical player rank trend over last 20 matches.
+        description: Prior rolling avg ranking (20) minus current event ranking.
       - name: player_win_streak
-        description: Canonical player current win streak.
+        description: Canonical player win streak entering this match (NULL on first match).
       - name: player_days_since_last_match
         description: Days since canonical player's last match (365 if none).
       - name: player_matches_30d
-        description: Canonical player matches in the 30 days before this match.
+        description: Canonical player matches in the 30 days before this match (0 if none).
       - name: player_surface_win_rate_10
-        description: Canonical player win rate on this surface, last 10 matches.
+        description: Canonical player win rate on this surface, last 10 matches (NULL until first match on surface).
 
-      # Opponent-side stats (opponent_ prefix)
-      - name: opponent_wins_last_10
-        description: Opponent wins in the 10 matches before this one.
-      - name: opponent_matches_last_10
-        description: Opponent matches played in the 10 before this one.
-      - name: opponent_aces
-        description: Opponent aces in this match.
-      - name: opponent_double_faults
-        description: Opponent double faults in this match.
-      - name: opponent_first_serves_made
-        description: Opponent first serves made in this match.
-      - name: opponent_total_serve_points
-        description: Opponent total serve points in this match.
-      - name: opponent_break_points_won
-        description: Opponent break points won in this match.
-      - name: opponent_break_points_total
-        description: Opponent break points faced in this match.
-      - name: opponent_win_rate_last_10
-        description: Opponent win rate over the last 10 matches.
-      - name: opponent_ace_rate
-        description: Opponent ace rate in this match.
-      - name: opponent_double_fault_rate
-        description: Opponent double fault rate in this match.
-      - name: opponent_first_serve_pct
-        description: Opponent first serve pct in this match.
-      - name: opponent_break_points_converted_pct
-        description: Opponent break point conversion in this match.
+      # Opponent-side rolling stats (opponent_ prefix), same prior-snapshot
+      # semantics as the player side.
       - name: opponent_win_rate_5
-        description: Opponent rolling win rate, last 5 matches.
+        description: Opponent rolling win rate, last 5 matches before this one.
       - name: opponent_win_rate_10
-        description: Opponent rolling win rate, last 10 matches.
+        description: Opponent rolling win rate, last 10 matches before this one.
       - name: opponent_win_rate_20
-        description: Opponent rolling win rate, last 20 matches.
+        description: Opponent rolling win rate, last 20 matches before this one.
       - name: opponent_ace_rate_5
-        description: Opponent rolling ace rate, last 5 matches.
+        description: Opponent rolling ace rate, last 5 matches before this one.
       - name: opponent_ace_rate_10
-        description: Opponent rolling ace rate, last 10 matches.
+        description: Opponent rolling ace rate, last 10 matches before this one.
       - name: opponent_first_serve_pct_5
-        description: Opponent rolling first serve pct, last 5 matches.
+        description: Opponent rolling first serve pct, last 5 matches before this one.
       - name: opponent_first_serve_pct_10
-        description: Opponent rolling first serve pct, last 10 matches.
+        description: Opponent rolling first serve pct, last 10 matches before this one.
       - name: opponent_break_pct_5
-        description: Opponent rolling break pct, last 5 matches.
+        description: Opponent rolling break pct, last 5 matches before this one.
       - name: opponent_break_pct_10
-        description: Opponent rolling break pct, last 10 matches.
+        description: Opponent rolling break pct, last 10 matches before this one.
       - name: opponent_rank_trend_10
-        description: Opponent rank trend over last 10 matches.
+        description: Prior rolling avg ranking (10) minus current event ranking.
       - name: opponent_rank_trend_20
-        description: Opponent rank trend over last 20 matches.
+        description: Prior rolling avg ranking (20) minus current event ranking.
       - name: opponent_win_streak
-        description: Opponent current win streak.
+        description: Opponent win streak entering this match (NULL on first match).
       - name: opponent_days_since_last_match
         description: Days since opponent's last match (365 if none).
       - name: opponent_matches_30d
-        description: Opponent matches in the 30 days before this match.
+        description: Opponent matches in the 30 days before this match (0 if none).
       - name: opponent_surface_win_rate_10
-        description: Opponent win rate on this surface, last 10 matches.
+        description: Opponent win rate on this surface, last 10 matches (NULL until first match on surface).
 
       # Comparison (differential) features: canonical player minus opponent
       - name: rank_diff

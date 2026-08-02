@@ -32,7 +32,7 @@ Commands run via `just` (not make). `uv` is the package manager (not pip/poetry)
 
 ## Architecture overview
 
-**Data flow:** CSV → bronze.match_events (ingest) → gold.match_features (DuckDB SQL rolling transforms in ETL) → training notebooks → MLflow model registry → BentoML serving.
+**Data flow:** CSV → bronze.match_events (ingest) → gold.match_features (DuckDB SQL rolling transforms in ETL) → training notebooks → MLflow model registry → BentoML serving. Per-match player snapshots in `gold.player_rolling_features` are the single source of truth for player form; `gold.match_features` derives the canonical training rows from prior snapshots.
 
 **Model strategy:** Three model classes compete independently via Optuna (linear, GBDT, neural net). The best from each is stacked via a simple logistic regression meta-model on their probability outputs. Architecturally designed for 80k match samples.
 
@@ -63,7 +63,7 @@ models.**
 - Current tournament / round context: `tournament` -> `tournament_level`
   (`grand_slam=4, masters=3, atp_500=2, atp_250=1, else 0`),
   `round` -> `round_encoded` (`r128=1, r64=2, r32=3, r16=4, qf=5, sf=6, f=7,
-  else 0`). Same mapping as `dbt/models/gold/match_features.sql:222-233`.
+  else 0`). Same mapping as `dbt/models/gold/match_features.sql:138-145`.
 - Per-player rolling stats computed from each player's prior matches up to
   (not including) the current match: `win_rate_5/10/20`, `ace_rate_5/10`,
   `first_serve_pct_5/10`, `break_pct_5/10`,
@@ -103,7 +103,9 @@ Over HTTP this is split-orientation JSON:
 ```
 
 The row must be canonical: the lower/stable ATP id on the `player_*` side
-(see `build_inference_features` in `src/features/rolling.py`). Bento does NOT
+(see `build_inference_features` in `src/features/inference.py` —
+`(player_id, opponent_id, surface, *, as_of_date=None, tournament_level=0,
+round_encoded=0)`). Bento does NOT
 re-canonicalize — `p_win` is P(canonical player wins) as you send it.
 
 ## What Bento does internally

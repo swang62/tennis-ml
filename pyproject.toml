@@ -64,4 +64,10 @@ members = ["."]
 tennis-ml = { workspace = true, editable = true }
 
 [dependency-groups]
-dev = ["python-dotenv>=1.2.2", "ruff>=0.7", "pre-commit>=3.8", "tennis-ml"]
+dev = [
+    "python-dotenv>=1.2.2",
+    "ruff>=0.7",
+    "pre-commit>=3.8",
+    "pytest>=8",  # test runner for tests/ (inference feature builder tests)
+    "tennis-ml",
+]

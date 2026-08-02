@@ -38,11 +38,13 @@ dashboard-build:
 bento-local:
     bentoml serve src/serving/service.py --reload
 
-# Single deployment path: build and deploy the serving Bento for the latest
-# promoted production model. No-ops when production_model has no version newer
-# than the last deployed one. Invoked by the deploy flow (src/flows/deploy.py)
-# or directly for a re-deploy. Evaluation/promotion (05) already ran in the
-# training pipeline — this target never runs it.
+# Build the production Bento image in the local Docker engine. Does not require
+# k3d to exist or be running.
+bento-build:
+    uv run python -c "from src.flows.deploy import build_bento_image; build_bento_image()"
+
+# Build locally, push to the k3d-managed registry, and roll out when the cluster
+# is running. Evaluation/promotion already ran in the training pipeline.
 deploy-bento:
     uv run python -c "from src.flows.deploy import deploy_bento; deploy_bento()"
 

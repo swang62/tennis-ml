@@ -9,7 +9,8 @@ sources:
         description: >
           One row per match with both players' stats in the row (player1_* /
           player2_* columns) plus winner_id. The gold layer expands each row
-          into two player-perspective rows before computing rolling features.
+          into two player-perspective rows in gold.player_matches, which
+          downstream models build rolling features from.
         columns:
           - name: match_id
             description: Unique match identifier.

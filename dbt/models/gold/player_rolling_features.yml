@@ -1,0 +1,108 @@
+version: 2
+
+models:
+  - name: player_rolling_features
+    description: >
+      Post-match player snapshots: one row per (player_id, match_id) recording
+      the player's rolling form state immediately after that completed match.
+      All rolling windows are INCLUSIVE of the snapshot match — the Nth
+      snapshot's win_rate_5 is the average of match_won over the last 5
+      completed matches including this one — so the newest snapshot is
+      immediately usable for future inference. match_features pairs each match
+      with the player's immediately preceding snapshot (player_match_number - 1)
+      to build leakage-free training rows.
+
+      Snapshot grain: exactly one row per (player_id, match_id); equivalently
+      one per (player_id, player_match_number). snapshot_date is the completed
+      match date. Materialized as a table: it is expensive and reused by both
+      training and inference.
+
+      Cold start: rates are computed over however many completed matches fall
+      in the window (the first snapshot's win_rate_5 is that match's own
+      match_won); there is no zero-filling. Ratio rates (ace_rate_*,
+      first_serve_pct_*, break_pct_*) are NULL when the window's denominator
+      sums to 0; clay/grass/hard_win_rate_10 are NULL until the player has
+      played on that surface. Every rate is either NULL or in [0, 1].
+    columns:
+      - name: player_id
+        description: Player this post-match snapshot describes.
+        tests:
+          - not_null
+      - name: match_id
+        description: Match that produced this snapshot. One snapshot per (player_id, match_id).
+        tests:
+          - not_null
+      - name: snapshot_date
+        description: Date of the completed match this snapshot was taken after.
+        tests:
+          - not_null
+      - name: player_match_number
+        description: >
+          1-based ordinal of the player's matches (from gold.player_matches);
+          the snapshot's position in the player's history. Snapshot N is the
+          post-match state of the player's Nth match.
+        tests:
+          - not_null
+      - name: surface
+        description: Surface of the snapshot match (clay, grass, hard).
+      - name: latest_player_ranking
+        description: >
+          The player's ATP ranking at the snapshot match — the latest observed
+          ranking in the player's history at this point.
+      - name: latest_opponent_ranking
+        description: The opponent's ATP ranking at the snapshot match.
+      - name: win_rate_5
+        description: Average of match_won over the last 5 completed matches including this one; NULL only when the window is empty.
+      - name: win_rate_10
+        description: Average of match_won over the last 10 completed matches including this one.
+      - name: win_rate_20
+        description: Average of match_won over the last 20 completed matches including this one.
+      - name: ace_rate_5
+        description: Sum(aces) / sum(first_serves_made) over the last 5 matches including this one; NULL when no first serves were made in the window.
+      - name: ace_rate_10
+        description: Sum(aces) / sum(first_serves_made) over the last 10 matches including this one; NULL when no first serves were made in the window.
+      - name: first_serve_pct_5
+        description: Sum(first_serves_made) / sum(total_serve_points) over the last 5 matches including this one; NULL when the window has no serve points.
+      - name: first_serve_pct_10
+        description: Sum(first_serves_made) / sum(total_serve_points) over the last 10 matches including this one; NULL when the window has no serve points.
+      - name: break_pct_5
+        description: Sum(break_points_won) / sum(break_points_total) over the last 5 matches including this one; NULL when the window has no break points.
+      - name: break_pct_10
+        description: Sum(break_points_won) / sum(break_points_total) over the last 10 matches including this one; NULL when the window has no break points.
+      - name: avg_player_rank_10
+        description: >
+          Average of the player's own ranking over the last 10 matches including
+          this one. match_features derives rank_trend_10 by subtracting the next
+          match's current ranking from this stored average.
+      - name: avg_player_rank_20
+        description: >
+          Average of the player's own ranking over the last 20 matches including
+          this one. match_features derives rank_trend_20 from this stored average.
+      - name: avg_opponent_rank_10
+        description: Average of opponent_ranking over the last 10 matches including this one.
+      - name: avg_opponent_rank_20
+        description: Average of opponent_ranking over the last 20 matches including this one.
+      - name: win_streak
+        description: >
+          Consecutive wins ending at and including this snapshot's match. 0 when
+          the current match is a loss (the run is over); never negative. The
+          first match is 1 if won, 0 if lost.
+      - name: last_match_date
+        description: >
+          Most recent completed match date in the rolling history. Equal to
+          snapshot_date because the windows are inclusive of the snapshot match.
+      - name: clay_win_rate_10
+        description: >
+          Average of match_won over the last 10 matches on clay, including any
+          clay match in this snapshot's window. Carried forward unchanged on
+          non-clay snapshots; NULL until the player's first clay match.
+      - name: grass_win_rate_10
+        description: >
+          Average of match_won over the last 10 matches on grass, including any
+          grass match in this snapshot's window. Carried forward unchanged on
+          non-grass snapshots; NULL until the player's first grass match.
+      - name: hard_win_rate_10
+        description: >
+          Average of match_won over the last 10 matches on hard, including any
+          hard match in this snapshot's window. Carried forward unchanged on
+          non-hard snapshots; NULL until the player's first hard match.
