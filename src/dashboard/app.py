@@ -4,6 +4,7 @@ Usage:
     panel serve src/dashboard/app.py
 """
 
+import numpy as np
 import pandas as pd
 import panel as pn
 import plotly.express as px
@@ -17,8 +18,33 @@ GOLD_TABLE = "gold.match_features"
 
 
 def get_players() -> list[str]:
-    df = to_dataframe(f"SELECT DISTINCT player_id FROM {GOLD_TABLE} ORDER BY player_id")
+    df = to_dataframe(
+        f"SELECT DISTINCT player_id FROM {GOLD_TABLE} "
+        f"UNION SELECT DISTINCT opponent_id FROM {GOLD_TABLE} ORDER BY 1"
+    )
     return df["player_id"].tolist()
+
+
+def _orient(df: pd.DataFrame, player: str) -> pd.DataFrame:
+    """Flip canonical rows so `player` appears on the player_* side.
+
+    gold.match_features is one row per match with the canonical (lower ATP id)
+    player on the player_* side; match_won and player_ranking refer to that
+    side. This rewrites the rows from `player`'s perspective.
+    """
+    out = df.copy()
+    side = out["player_id"] == player
+    pid = out["player_id"].to_numpy()
+    oid = out["opponent_id"].to_numpy()
+    p_rank = out["player_ranking"].to_numpy()
+    o_rank = out["opponent_ranking"].to_numpy()
+    won = out["match_won"].to_numpy()
+    out["player_id"] = np.where(side, pid, oid)
+    out["opponent_id"] = np.where(side, oid, pid)
+    out["player_ranking"] = np.where(side, p_rank, o_rank)
+    out["opponent_ranking"] = np.where(side, o_rank, p_rank)
+    out["match_won"] = np.where(side, won, 1 - won)
+    return out
 
 
 def get_head_to_head(player_a: str, player_b: str) -> pd.DataFrame:
@@ -31,34 +57,35 @@ def get_head_to_head(player_a: str, player_b: str) -> pd.DataFrame:
 
 
 def get_player_rank_history(player: str) -> pd.DataFrame:
-    return to_dataframe(f"""
-        SELECT match_date, player_ranking, opponent_ranking, match_won, surface
+    df = to_dataframe(f"""
+        SELECT match_date, player_id, opponent_id,
+               player_ranking, opponent_ranking, match_won, surface
         FROM {GOLD_TABLE}
-        WHERE player_id = '{player}'
+        WHERE player_id = '{player}' OR opponent_id = '{player}'
         ORDER BY match_date
     """)
+    return _orient(df, player)
 
 
 def get_player_match_history(player: str, limit: int = 50) -> pd.DataFrame:
-    return to_dataframe(f"""
-        SELECT match_date, opponent_id, surface, tournament, round,
+    df = to_dataframe(f"""
+        SELECT match_date, player_id, opponent_id, surface, tournament, round,
                player_ranking, opponent_ranking, match_won,
                ace_rate, double_fault_rate, first_serve_pct
         FROM {GOLD_TABLE}
-        WHERE player_id = '{player}'
+        WHERE player_id = '{player}' OR opponent_id = '{player}'
         ORDER BY match_date DESC
         LIMIT {limit}
     """)
+    return _orient(df, player)
 
 
 def compute_h2h_summary(df: pd.DataFrame, player_a: str, player_b: str):
-    a_wins = df[(df["player_id"] == player_a) & (df["match_won"] == 1)].shape[0]
-    a_losses = df[(df["player_id"] == player_a) & (df["match_won"] == 0)].shape[0]
-    b_wins = df[(df["player_id"] == player_b) & (df["match_won"] == 1)].shape[0]
-    b_losses = df[(df["player_id"] == player_b) & (df["match_won"] == 0)].shape[0]
+    a = _orient(df, player_a)
+    b = _orient(df, player_b)
     return {
-        "a": {"player_id": player_a, "wins": a_wins, "losses": a_losses},
-        "b": {"player_id": player_b, "wins": b_wins, "losses": b_losses},
+        "a": {"wins": int(a["match_won"].sum()), "losses": int((1 - a["match_won"]).sum())},
+        "b": {"wins": int(b["match_won"].sum()), "losses": int((1 - b["match_won"]).sum())},
     }
 
 
@@ -218,8 +245,8 @@ def matchup_content(a, b):
         ),
         pn.pane.Markdown("#### Recent Form"),
         pn.Row(
-            pn.pane.Plotly(draw_form_sequence(h2h, a), sizing_mode="stretch_width"),
-            pn.pane.Plotly(draw_form_sequence(h2h, b), sizing_mode="stretch_width"),
+            pn.pane.Plotly(draw_form_sequence(_orient(h2h, a), a), sizing_mode="stretch_width"),
+            pn.pane.Plotly(draw_form_sequence(_orient(h2h, b), b), sizing_mode="stretch_width"),
         ),
         pn.pane.Markdown("#### Match History"),
         pn.widgets.Tabulator(match_table, sizing_mode="stretch_width"),

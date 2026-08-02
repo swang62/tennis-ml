@@ -1,0 +1,245 @@
+version: 2
+
+models:
+  - name: match_features
+    description: >
+      Canonical match-level training table: ONE ROW PER MATCH (not per player).
+      The two sides are canonicalized by ATP id ordering — the lower/stable
+      ATP id is the `player_*` side, the other is the `opponent_*` side — so
+      the table is order-invariant (swapping player1/player2 in
+      bronze.match_events changes nothing). Includes the full balanced feature
+      set: canonical player-side rolling stats, opponent-side rolling stats,
+      differential (comparison) and context features. `match_won` = 1 iff the
+      canonical player_* side won.
+    tests:
+      # One row per match (composite key collapsed: each match appears once).
+      - unique:
+          arguments:
+            column_name: "match_id"
+    columns:
+      - name: match_id
+        description: Unique match identifier.
+        tests:
+          - not_null
+      - name: match_date
+        description: Match date.
+        tests:
+          - not_null
+      - name: player_id
+        description: Canonical player (lower/stable ATP id).
+        tests:
+          - not_null
+      - name: opponent_id
+        description: Opponent (higher ATP id).
+        tests:
+          - not_null
+      - name: tournament
+        description: Tournament name.
+        tests:
+          - not_null
+      - name: round
+        description: Draw round (r128, r64, r32, r16, qf, sf, f).
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [r128, r64, r32, r16, qf, sf, f]
+      - name: surface
+        description: Court surface (clay, grass, hard).
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [clay, grass, hard]
+      - name: match_won
+        description: 1 if the canonical player_* side won, else 0.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+      - name: player_ranking
+        description: Canonical player ranking at match time.
+        tests:
+          - not_null
+      - name: opponent_ranking
+        description: Opponent ranking at match time.
+        tests:
+          - not_null
+
+      # Canonical player-side stats (un-prefixed)
+      - name: wins_last_10
+        description: Canonical player wins in the 10 matches before this one.
+      - name: matches_last_10
+        description: Canonical player matches played in the 10 before this one.
+      - name: aces
+        description: Canonical player aces in this match.
+      - name: double_faults
+        description: Canonical player double faults in this match.
+      - name: first_serves_made
+        description: Canonical player first serves made in this match.
+      - name: total_serve_points
+        description: Canonical player total serve points in this match.
+      - name: break_points_won
+        description: Canonical player break points won in this match.
+      - name: break_points_total
+        description: Canonical player break points faced in this match.
+      - name: win_rate_last_10
+        description: Canonical player win rate over the last 10 matches.
+      - name: ace_rate
+        description: Canonical player ace rate in this match.
+      - name: double_fault_rate
+        description: Canonical player double fault rate in this match.
+      - name: first_serve_pct
+        description: Canonical player first serve percentage in this match.
+      - name: break_points_converted_pct
+        description: Canonical player break point conversion in this match.
+      - name: win_rate_5
+        description: Canonical player rolling win rate, last 5 matches.
+      - name: win_rate_10
+        description: Canonical player rolling win rate, last 10 matches.
+      - name: win_rate_20
+        description: Canonical player rolling win rate, last 20 matches.
+      - name: ace_rate_5
+        description: Canonical player rolling ace rate, last 5 matches.
+      - name: ace_rate_10
+        description: Canonical player rolling ace rate, last 10 matches.
+      - name: first_serve_pct_5
+        description: Canonical player rolling first serve pct, last 5 matches.
+      - name: first_serve_pct_10
+        description: Canonical player rolling first serve pct, last 10 matches.
+      - name: break_pct_5
+        description: Canonical player rolling break pct, last 5 matches.
+      - name: break_pct_10
+        description: Canonical player rolling break pct, last 10 matches.
+      - name: avg_opp_rank_10
+        description: Canonical player avg opponent rank, last 10 matches.
+      - name: avg_opp_rank_20
+        description: Canonical player avg opponent rank, last 20 matches.
+      - name: rank_trend_10
+        description: Canonical player rank trend over last 10 matches.
+      - name: rank_trend_20
+        description: Canonical player rank trend over last 20 matches.
+      - name: win_streak
+        description: Canonical player current win streak.
+      - name: days_since_last_match
+        description: Days since canonical player's last match (365 if none).
+      - name: matches_30d
+        description: Canonical player matches in the 30 days before this match.
+      - name: surface_win_rate_10
+        description: Canonical player win rate on this surface, last 10 matches.
+
+      # Opponent-side stats (opp_ prefix)
+      - name: opp_wins_last_10
+        description: Opponent wins in the 10 matches before this one.
+      - name: opp_matches_last_10
+        description: Opponent matches played in the 10 before this one.
+      - name: opp_aces
+        description: Opponent aces in this match.
+      - name: opp_double_faults
+        description: Opponent double faults in this match.
+      - name: opp_first_serves_made
+        description: Opponent first serves made in this match.
+      - name: opp_total_serve_points
+        description: Opponent total serve points in this match.
+      - name: opp_break_points_won
+        description: Opponent break points won in this match.
+      - name: opp_break_points_total
+        description: Opponent break points faced in this match.
+      - name: opp_win_rate_last_10
+        description: Opponent win rate over the last 10 matches.
+      - name: opp_ace_rate
+        description: Opponent ace rate in this match.
+      - name: opp_double_fault_rate
+        description: Opponent double fault rate in this match.
+      - name: opp_first_serve_pct
+        description: Opponent first serve percentage in this match.
+      - name: opp_break_points_converted_pct
+        description: Opponent break point conversion in this match.
+      - name: opp_win_rate_5
+        description: Opponent rolling win rate, last 5 matches.
+      - name: opp_win_rate_10
+        description: Opponent rolling win rate, last 10 matches.
+      - name: opp_win_rate_20
+        description: Opponent rolling win rate, last 20 matches.
+      - name: opp_ace_rate_5
+        description: Opponent rolling ace rate, last 5 matches.
+      - name: opp_ace_rate_10
+        description: Opponent rolling ace rate, last 10 matches.
+      - name: opp_first_serve_pct_5
+        description: Opponent rolling first serve pct, last 5 matches.
+      - name: opp_first_serve_pct_10
+        description: Opponent rolling first serve pct, last 10 matches.
+      - name: opp_break_pct_5
+        description: Opponent rolling break pct, last 5 matches.
+      - name: opp_break_pct_10
+        description: Opponent rolling break pct, last 10 matches.
+      - name: opp_avg_opp_rank_10
+        description: Opponent avg opponent rank, last 10 matches.
+      - name: opp_avg_opp_rank_20
+        description: Opponent avg opponent rank, last 20 matches.
+      - name: opp_rank_trend_10
+        description: Opponent rank trend over last 10 matches.
+      - name: opp_rank_trend_20
+        description: Opponent rank trend over last 20 matches.
+      - name: opp_win_streak
+        description: Opponent current win streak.
+      - name: opp_days_since_last_match
+        description: Days since opponent's last match (365 if none).
+      - name: opp_matches_30d
+        description: Opponent matches in the 30 days before this match.
+      - name: opp_surface_win_rate_10
+        description: Opponent win rate on this surface, last 10 matches.
+
+      # Comparison (differential) features: canonical player minus opponent
+      - name: rank_diff
+        description: player_ranking - opponent_ranking.
+      - name: win_rate_diff
+        description: win_rate_10 - opp_win_rate_10.
+      - name: ace_rate_diff
+        description: ace_rate_10 - opp_ace_rate_10.
+      - name: break_diff
+        description: break_pct_10 - opp_break_pct_10.
+      - name: streak_diff
+        description: win_streak - opp_win_streak.
+      - name: matches_30d_diff
+        description: matches_30d - opp_matches_30d.
+      - name: surface_win_diff
+        description: surface_win_rate_10 - opp_surface_win_rate_10.
+      - name: rank_trend_diff
+        description: rank_trend_10 - opp_rank_trend_10.
+
+      # Context
+      - name: is_clay
+        description: 1 if surface = clay, else 0.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+      - name: is_grass
+        description: 1 if surface = grass, else 0.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+      - name: is_hard
+        description: 1 if surface = hard, else 0.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+      - name: tournament_level
+        description: Tournament tier ordinal (grand_slam=4, masters=3, atp_500=2, atp_250=1, else 0).
+        tests:
+          - accepted_values:
+              arguments:
+                values: [0, 1, 2, 3, 4]
+      - name: round_encoded
+        description: Round ordinal (r128=1 ... f=7, else 0).
+        tests:
+          - accepted_values:
+              arguments:
+                values: [0, 1, 2, 3, 4, 5, 6, 7]

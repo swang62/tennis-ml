@@ -570,13 +570,13 @@ notebooks/parameters/01_feature_engineering.ipynb   ← Preprocessing, feature e
 notebooks/parameters/02_tune_linear.ipynb   ← Optuna: LR, SVM, NB on static features
 notebooks/parameters/02_tune_gbdt.ipynb     ← Optuna: XGBoost, LightGBM, CatBoost
 notebooks/parameters/02_tune_nn.ipynb       ← Optuna: encoder as cat (LSTM/GRU/TCN)
-notebooks/parameters/03_pick_best.ipynb     ← Select best per class
-notebooks/parameters/04_stack_ensemble.ipynb ← Meta-model on 3 best predictions, final training on holdout set
+notebooks/parameters/03_assemble_ensemble_inputs.ipynb     ← Select best per class
+notebooks/parameters/04_ensemble_stack.ipynb ← Meta-model on 3 best predictions, final training on holdout set
 notebooks/parameters/05_evaluate.ipynb      ← SHAP, ROC AUC, error analysis, final report, compare against production model and decide to promote or not
 ```
 
 The first three can run in parallel since they're independent. After all three
-finish, `02_pick_winners` compares them and `03_stack_ensemble` builds the
+finish, `02_pick_winners` compares them and `03_ensemble_stack` builds the
 meta-model.
 
 New notebooks follow the same pattern: Papermill takes params, runs Optuna,

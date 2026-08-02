@@ -4,17 +4,11 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+.codegraph/
 
 # Data
-data/raw/*
-data/processed/*
-!data/raw/.gitkeep
-!data/processed/.gitkeep
-data/external/*
-
-# Output notebooks
-notebooks/outputs/*
-!notebooks/outputs/.gitkeep
+**/data/processed/*
+artifacts/*
 
 # MLflow
 mlruns/
@@ -37,3 +31,9 @@ mlartifacts/
 .ipynb_checkpoints/
 *.egg-info
 *.egg
+
+# dbt
+target/
+dbt_packages/
+logs/
+.user.yml

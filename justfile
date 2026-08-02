@@ -21,6 +21,9 @@ db-seed:
 db-etl:
     uv run python src/flows/etl.py
 
+db-dbt:
+    uv run dbt build --project-dir dbt --profiles-dir dbt
+
 db-reset:
     rm -f data/tennis.duckdb
     just db-init
@@ -35,10 +38,13 @@ dashboard-build:
 bento-local:
     bentoml serve src/serving/service.py --reload
 
-bento-build:
-    uv run bentoml build --bentofile bentofile.yaml
-    uv run bentoml containerize tennis_prediction:latest -t bento-serving:latest
-    k3d image import bento-serving:latest -c tennis-ml
+# Single deployment path: build and deploy the serving Bento for the latest
+# promoted production model. No-ops when production_model has no version newer
+# than the last deployed one. Invoked by the deploy flow (src/flows/deploy.py)
+# or directly for a re-deploy. Evaluation/promotion (05) already ran in the
+# training pipeline — this target never runs it.
+deploy-bento:
+    uv run python -c "from src.flows.deploy import deploy_bento; deploy_bento()"
 
 restart:
     kubectl rollout restart deployment
@@ -46,7 +52,7 @@ restart:
     kubectl rollout restart statefulset
 
 train:
-    uv run python src/flows/training.py
+    uv run python src/flows/pipeline.py
 
 pipeline:
     uv run python src/flows/pipeline.py

@@ -1,0 +1,8 @@
+tennis_ml:
+  target: local
+  outputs:
+    local:
+      type: duckdb
+      path: data/tennis.duckdb
+      schema: gold
+      threads: 4

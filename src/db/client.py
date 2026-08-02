@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import duckdb
 import pandas as pd
 
-DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
+from src.constants import ROOT
+
+DATA_DIR = ROOT / "data"
 DB_PATH = DATA_DIR / "tennis.duckdb"
 
 _conn: duckdb.DuckDBPyConnection | None = None

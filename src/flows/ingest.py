@@ -15,12 +15,36 @@ from typing import cast
 import pandas as pd
 import requests
 
+from src.constants import ROOT
 from src.db.client import get_conn, to_dataframe
 from src.features.validate import run_ingestion_checks
 
 BRONZE_TABLE = "bronze.match_events"
 GOLD_TABLE = "gold.match_features"
 PROFILES_TABLE = "gold.player_profiles"
+
+# ATP_Database.csv is the identity backbone for player_profiles; the Wikipedia
+# flow below is the enrichment fallback for players it does not cover.
+ATP_DATABASE_CSV = ROOT / "data" / "raw" / "ATP_Database.csv"
+
+# Base metadata columns mirrored from ATP_Database.csv (id, player, atpname,
+# birthdate, weight, height, turnedpro, birthplace, coaches, hand, backhand, ioc).
+# Enrichment columns (summary, play_style, wiki_title, enriched_at) are not
+# loaded here; they are filled by the Wikipedia fallback in enrich_player().
+ATP_PROFILE_COLUMNS = [
+    "player_id",
+    "display_name",
+    "atp_name",
+    "birthdate",
+    "weight",
+    "height",
+    "turned_pro",
+    "birthplace",
+    "coaches",
+    "handedness",
+    "backhand",
+    "ioc",
+]
 
 EXPECTED_COLUMNS = [
     "match_id",
@@ -58,6 +82,113 @@ def load_csv(path: str) -> pd.DataFrame:
     return cast(pd.DataFrame, df[EXPECTED_COLUMNS])
 
 
+# ── ATP Database Identity Load ─────────────────────────────────
+
+
+def _parse_int(
+    series: pd.Series, column: str, player_ids: pd.Series, low: int, high: int
+) -> pd.Series:
+    """Parse an ATP integer column once at load time (fail loudly on garbage).
+
+    Empty cells become NULL; '0' is the ATP CSV's missing marker and also
+    becomes NULL. Any other non-empty value that is not an integer within
+    [low, high] raises, so malformed strings never silently land in the
+    table as a real number.
+    """
+    s = series.fillna("").astype(str).str.strip()
+    nonempty = s != ""
+    nums = cast(pd.Series, pd.to_numeric(s.mask(~nonempty), errors="coerce"))
+    is_int = nums.notna() & (nums == nums.astype("float64").round())
+    valid = is_int & (nums >= low) & (nums <= high)
+    bad = nonempty & ~valid & (nums != 0)
+    if bad.any():
+        offenders = ", ".join(
+            f"{pid}={val!r}" for pid, val in zip(player_ids[bad], s[bad], strict=True)
+        )
+        raise ValueError(
+            f"ATP {column} malformed (expected integer in [{low}, {high}], "
+            f"or 0/empty for unknown): {offenders}"
+        )
+    result = pd.Series(pd.NA, index=series.index, dtype="Int64")
+    result[valid] = nums[valid].astype("int64")
+    return result
+
+
+def _parse_birthdate(series: pd.Series, player_ids: pd.Series) -> pd.Series:
+    """Parse ATP birthdate (YYYYMMDD) once at load time; NULL when empty.
+
+    Raises on any non-empty value that is not a plausible date so malformed
+    strings never land in the table.
+    """
+    s = series.fillna("").astype(str).str.strip()
+    nonempty = s != ""
+    parsed = pd.to_datetime(s.mask(~nonempty), format="%Y%m%d", errors="coerce")
+    bad = nonempty & (parsed.isna() | (parsed.dt.year < 1900) | (parsed.dt.year > 2100))
+    if bad.any():
+        offenders = ", ".join(
+            f"{pid}={val!r}" for pid, val in zip(player_ids[bad], s[bad], strict=True)
+        )
+        raise ValueError(
+            f"ATP birthdate malformed (expected YYYYMMDD in 1900-2100, or empty): {offenders}"
+        )
+    return parsed
+
+
+def load_atp_profiles(csv_path: str | Path = ATP_DATABASE_CSV) -> int:
+    """Load ATP_Database.csv into gold.player_profiles (identity backbone).
+
+    Maps the ATP header (id, player, atpname, birthdate, weight, height,
+    turnedpro, birthplace, coaches, hand, backhand, ioc) onto the table's
+    base metadata columns. Typed fields (birthdate, weight, height,
+    turned_pro) are parsed exactly once here and land in the table with
+    their real DB types; malformed non-empty values raise. Enrichment
+    columns are left untouched, so existing Wikipedia enrichment survives
+    re-loads. Returns rows loaded.
+    """
+    atp = pd.read_csv(csv_path, dtype=str)
+    if not {"id", "player", "atpname", "hand", "backhand", "ioc"} <= set(atp.columns):
+        raise ValueError(f"ATP database CSV missing expected columns: {csv_path}")
+
+    player_ids = cast(pd.Series, atp["id"])
+    birthdate = _parse_birthdate(cast(pd.Series, atp["birthdate"]), player_ids)
+    weight = _parse_int(
+        cast(pd.Series, atp["weight"]), "weight", player_ids, low=20, high=300
+    ).astype("Int16")
+    height = _parse_int(
+        cast(pd.Series, atp["height"]), "height", player_ids, low=100, high=250
+    ).astype("Int16")
+    turned_pro = _parse_int(
+        cast(pd.Series, atp["turnedpro"]), "turnedpro", player_ids, low=1900, high=2100
+    ).astype("Int32")
+    df = pd.DataFrame(
+        {
+            "player_id": player_ids,
+            "display_name": atp["player"],
+            "atp_name": atp["atpname"],
+            "birthdate": birthdate,
+            "weight": weight,
+            "height": height,
+            "turned_pro": turned_pro,
+            "birthplace": atp["birthplace"],
+            "coaches": atp["coaches"],
+            "handedness": atp["hand"],
+            "backhand": atp["backhand"],
+            "ioc": atp["ioc"],
+        }
+    )
+
+    base_updates = ", ".join(
+        f"{col} = excluded.{col}" for col in ATP_PROFILE_COLUMNS if col != "player_id"
+    )
+    conn = get_conn()
+    conn.sql(f"""
+        INSERT INTO {PROFILES_TABLE} ({", ".join(ATP_PROFILE_COLUMNS)})
+        SELECT * FROM df
+        ON CONFLICT (player_id) DO UPDATE SET {base_updates}
+    """)
+    return len(df)
+
+
 # ── Wikipedia Profile Enrichment ────────────────────────────────
 
 
@@ -86,7 +217,7 @@ def search_wikipedia(name: str) -> str | None:
     return pages[0]["title"] if pages else None
 
 
-def fetch_summary(title: str) -> dict | None:
+def fetch_summary(title: str) -> dict[str, str] | None:
     params = {
         "action": "query",
         "titles": title,
@@ -108,7 +239,7 @@ def fetch_summary(title: str) -> dict | None:
     return None
 
 
-def extract_infobox_fields(summary: str) -> dict:
+def extract_infobox_fields(summary: str) -> dict[str, str]:
     fields = {}
     patterns = {
         "plays": r"Plays?\s*[:\-]\s*([A-Za-z\-]+)",
@@ -170,6 +301,15 @@ def enrich_player(player: str) -> bool:
     infobox = extract_infobox_fields(page["summary"])
     styles = classify_style(page["summary"])
 
+    # Typed fields: infobox height is meters ("1.85 m") but the column is cm;
+    # both height and turned_pro become NULL when Wikipedia has no value.
+    height_m = cast(str | None, infobox.get("height"))
+    height_cm = round(float(height_m) * 100) if height_m else None
+    turned_pro_raw = cast(str | None, infobox.get("turned_pro"))
+    turned_pro = int(turned_pro_raw) if turned_pro_raw else None
+    height_value = str(height_cm) if height_cm is not None else "NULL"
+    turned_pro_value = str(turned_pro) if turned_pro is not None else "NULL"
+
     safe_summary = page["summary"][:1000].replace("'", "\\'")
     safe_title = page["title"].replace("'", "\\'")
 
@@ -177,7 +317,7 @@ def enrich_player(player: str) -> bool:
     conn.sql(f"""
         INSERT INTO {PROFILES_TABLE}
             (player_id, display_name, summary, handedness, backhand,
-             play_style, height, turned_pro)
+             play_style, height, turned_pro, wiki_title, enriched_at)
         VALUES (
             '{player}',
             '{safe_title}',
@@ -185,8 +325,10 @@ def enrich_player(player: str) -> bool:
             '{infobox.get("plays", "").lower().replace(" ", "_")}',
             '{infobox.get("backhand", "").lower().replace(" ", "_")}',
             '{", ".join(styles).lower().replace(" ", "_")}',
-            '{infobox.get("height", "")}',
-            {int(infobox.get("turned_pro", 0))}
+            {height_value},
+            {turned_pro_value},
+            '{safe_title}',
+            CURRENT_TIMESTAMP
         )
     """)
     print(f"  OK {player} -> {page['title']}")
@@ -237,6 +379,12 @@ if __name__ == "__main__":
     conn = get_conn()
     conn.sql(f"INSERT INTO {BRONZE_TABLE} SELECT * FROM df")
     print(f"Inserted {len(df)} rows into {BRONZE_TABLE}")
+
+    if ATP_DATABASE_CSV.exists():
+        loaded = load_atp_profiles(ATP_DATABASE_CSV)
+        print(f"Loaded {loaded} player profiles from {ATP_DATABASE_CSV.name}")
+    else:
+        print(f"ATP database not found at {ATP_DATABASE_CSV}, skipping identity load")
 
     enriched = enrich_missing()
     print(f"Enriched {enriched} player profiles")
