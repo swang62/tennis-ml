@@ -34,3 +34,15 @@ def query(sql: str) -> list[dict]:
 
 def to_dataframe(sql: str) -> pd.DataFrame:
     return get_conn().sql(sql).fetchdf()
+
+
+def execute_df(sql: str, params: list[object] | None = None) -> pd.DataFrame:
+    """Run a query and return results as a DataFrame.
+
+    When `params` is provided, the SQL uses positional `?` placeholders and
+    the query is executed as a prepared statement (no string interpolation).
+    """
+    conn = get_conn()
+    if params is None:
+        return conn.sql(sql).fetchdf()
+    return conn.execute(sql, params).fetchdf()

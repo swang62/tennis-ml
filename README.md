@@ -42,13 +42,15 @@ just setup
             │ DuckDB bronze        │ ← persistent DuckDB file
             │ (match_events)       │
             └──────────┬───────────┘
-                       │ Prefect etl_flow
+                       │ Prefect etl_flow (dbt build)
                        ↓
             ┌──────────────────────┐
-            │ DuckDB gold          │ ← derived features
-            │ (match_features)     │
+            │ DuckDB gold           │ ← derived features
+            │ (player_matches →     │
+            │  player_rolling_      │
+            │  features →           │
+            │  match_features)      │
             └──────────┬───────────┘
-                       │
                        ↓
          Papermill notebooks (training, evaluation)
                        ↓
@@ -65,5 +67,11 @@ just setup
 
 ## Pipelines
 
-- `etl_flow` — bronze → gold transforms (DuckDB SQL), player profile enrichment (Prefect)
+- `etl_flow` — bronze → player_matches → player_rolling_features → match_features (DuckDB SQL in dbt), plus player profile enrichment (Prefect)
 - `pipeline.py` — standalone training runner (no Prefect): features → tune 3 models → pick best → train final → evaluate → promote
+
+## Inspecting the data
+
+Inspect each stage directly in DuckDB: `bronze.match_events` (raw),
+`gold.player_matches` (per-player rows), `gold.player_rolling_features`
+(post-match snapshots), `gold.match_features` (final canonical training rows).

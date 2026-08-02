@@ -1,0 +1,329 @@
+"""ID-based inference feature builder backed by DuckDB gold tables.
+
+Builds ONE finalized canonical `FEATURE_COLS` row for a match between two
+players as of a given date, mirroring `gold.match_features` semantics:
+
+* Canonicalization: the lexicographically lower player id is the `player_*`
+  side and the higher is `opponent_*`, so `(X, Y)` and `(Y, X)` produce
+  identical rows (same as `match_features.sql`'s `WHERE p.player_id < o.player_id`).
+* Rolling form comes from each player's newest
+  `gold.player_rolling_features` snapshot STRICTLY BEFORE the as-of date
+  (no dedicated latest table/view; the newest snapshot is immediately usable).
+* `days_since_last_match` (as-of date minus that snapshot's date) and
+  `matches_30d` (count of `gold.player_matches` rows in
+  `[as_of - 30 days, as_of)`) are computed at the as-of date.
+* Missing players (no eligible snapshot) and NULL snapshot cells are imputed
+  from on-demand global aggregates over the eligible snapshot pool: MEDIAN
+  for ranking/streak-related values, MEAN for other numerics. When BOTH
+  players are missing, both sides receive the same imputed values, so every
+  pairwise differential is 0 (neutral).
+* If the eligible pool is empty, constant fallbacks are used:
+  ranking=100, rates=0.0, streak=0, days_since_last_match=365, matches_30d=0.
+
+Player ids and dates NEVER appear inside SQL strings: every one flows through
+`?` placeholders and a params list.
+"""
+
+from __future__ import annotations
+
+from datetime import date, datetime
+from numbers import Real
+
+import pandas as pd
+
+from src.db.client import execute_df
+from src.features.rolling import (
+    CONTEXT_COLS,
+    DIFF_COLS,
+    FEATURE_COLS,
+    GOLD_ROLLING_COLS,
+    OPPONENT_COLS,
+    PLAYER_COLS,
+)
+
+VALID_SURFACES = {"clay", "grass", "hard"}
+VALID_TOURNAMENT_LEVELS = {0, 1, 2, 3, 4}
+VALID_ROUND_ENCODINGS = {0, 1, 2, 3, 4, 5, 6, 7}
+
+# Constant fallbacks when the imputation pool is empty (no eligible snapshots
+# anywhere before the as-of date). Mirrors the documented cold-start fallback
+# days_since_last_match=365 from gold.match_features.
+_DEFAULT_RANKING = 100
+_DEFAULT_RATE = 0.0
+_DEFAULT_STREAK = 0
+_DEFAULT_DAYS_SINCE = 365
+_DEFAULT_MATCHES_30D = 0
+
+_SURFACE_TO_SNAPSHOT_COL = {
+    "clay": "clay_win_rate_10",
+    "grass": "grass_win_rate_10",
+    "hard": "hard_win_rate_10",
+}
+
+# Latest snapshot per player strictly before the as-of date.
+_LATEST_SNAPSHOT_SQL = """
+SELECT * FROM gold.player_rolling_features
+WHERE player_id = ?
+  AND snapshot_date < ?::DATE
+ORDER BY player_match_number DESC
+LIMIT 1
+"""
+
+# 30-day pre-match activity count, same window semantics as player_matches'
+# matches_30d_before ([as_of - 30 days, as_of), strictly).
+_MATCHES_30D_SQL = """
+SELECT COUNT(*) AS n
+FROM gold.player_matches
+WHERE player_id = ?
+  AND match_date >= ?::DATE - INTERVAL '30 days'
+  AND match_date < ?::DATE
+"""
+
+# On-demand global imputation pool over all snapshots strictly before the
+# as-of date. One row; MEDIAN for ranking/streak-related, MEAN for others.
+_POOL_AGG_SQL = """
+SELECT
+    MEDIAN(latest_player_ranking) AS latest_player_ranking,
+    MEDIAN(win_streak)            AS win_streak,
+    AVG(win_rate_5)               AS win_rate_5,
+    AVG(win_rate_10)              AS win_rate_10,
+    AVG(win_rate_20)              AS win_rate_20,
+    AVG(ace_rate_5)               AS ace_rate_5,
+    AVG(ace_rate_10)              AS ace_rate_10,
+    AVG(first_serve_pct_5)        AS first_serve_pct_5,
+    AVG(first_serve_pct_10)       AS first_serve_pct_10,
+    AVG(break_pct_5)              AS break_pct_5,
+    AVG(break_pct_10)             AS break_pct_10,
+    AVG(avg_player_rank_10)       AS avg_player_rank_10,
+    AVG(avg_player_rank_20)       AS avg_player_rank_20,
+    AVG(clay_win_rate_10)         AS clay_win_rate_10,
+    AVG(grass_win_rate_10)        AS grass_win_rate_10,
+    AVG(hard_win_rate_10)         AS hard_win_rate_10
+FROM gold.player_rolling_features
+WHERE snapshot_date < ?::DATE
+"""
+
+# MEDIAN of per-player days_since_last_match at the as-of date, over players
+# that have an eligible snapshot. One row; NULL when the pool is empty.
+_MEDIAN_DAYS_SQL = """
+SELECT MEDIAN(days_since) AS median_days_since
+FROM (
+    SELECT DATEDIFF('day', MAX(snapshot_date), ?::DATE) AS days_since
+    FROM gold.player_rolling_features
+    WHERE snapshot_date < ?::DATE
+    GROUP BY player_id
+)
+"""
+
+# MEDIAN of per-player matches_30d at the as-of date, over players that have
+# an eligible snapshot (players with zero window matches contribute 0).
+_MEDIAN_MATCHES_30D_SQL = """
+SELECT MEDIAN(matches_30d) AS median_matches_30d
+FROM (
+    SELECT pr.player_id, COUNT(pm.match_id) AS matches_30d
+    FROM (
+        SELECT DISTINCT player_id
+        FROM gold.player_rolling_features
+        WHERE snapshot_date < ?::DATE
+    ) pr
+    LEFT JOIN gold.player_matches pm
+        ON pm.player_id = pr.player_id
+       AND pm.match_date >= ?::DATE - INTERVAL '30 days'
+       AND pm.match_date < ?::DATE
+    GROUP BY pr.player_id
+)
+"""
+
+
+def _to_date(value: object) -> date:
+    """Coerce a DuckDB DATE cell (Timestamp/date/datetime/str) to a plain date."""
+    if isinstance(value, pd.Timestamp):
+        return value.date()
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        return date.fromisoformat(value)
+    raise TypeError(f"cannot coerce {value!r} to a date")
+
+
+def _agg_or(agg: dict[str, float], col: str, default: float) -> float:
+    """Return the pool aggregate for `col`, or `default` if NULL/missing."""
+    value = agg.get(col)
+    if value is None or pd.isna(value):
+        return default
+    return float(value)
+
+
+def _side_values(
+    row: dict[str, object] | None,
+    as_of_date: date,
+    surface: str,
+    agg: dict[str, float],
+    median_days_since: float,
+    median_matches_30d: float,
+) -> dict[str, int | float]:
+    """Build one canonical side's 16 values, imputing NULLs and cold starts.
+
+    Keys: "ranking" plus the GOLD_ROLLING_COLS names. `row` is the side's
+    latest eligible snapshot (None on cold start).
+    """
+
+    def cell(snapshot_col: str, default: float) -> float:
+        if row is not None:
+            value = row.get(snapshot_col)
+            # NaN self-compares unequal, so `value == value` is the NaN test.
+            if value is not None and isinstance(value, Real) and value == value:
+                return float(value)
+        return _agg_or(agg, snapshot_col, default)
+
+    ranking = round(cell("latest_player_ranking", _DEFAULT_RANKING))
+    avg_rank_10 = cell("avg_player_rank_10", _DEFAULT_RANKING)
+    avg_rank_20 = cell("avg_player_rank_20", _DEFAULT_RANKING)
+
+    if row is not None:
+        days_since = int((as_of_date - _to_date(row["snapshot_date"])).days)
+        matches_30d = int(
+            execute_df(
+                _MATCHES_30D_SQL,
+                [row["player_id"], as_of_date.isoformat(), as_of_date.isoformat()],
+            ).iloc[0]["n"]
+        )
+    else:
+        days_since = round(median_days_since)
+        matches_30d = round(median_matches_30d)
+
+    return {
+        "ranking": ranking,
+        "win_rate_5": cell("win_rate_5", _DEFAULT_RATE),
+        "win_rate_10": cell("win_rate_10", _DEFAULT_RATE),
+        "win_rate_20": cell("win_rate_20", _DEFAULT_RATE),
+        "ace_rate_5": cell("ace_rate_5", _DEFAULT_RATE),
+        "ace_rate_10": cell("ace_rate_10", _DEFAULT_RATE),
+        "first_serve_pct_5": cell("first_serve_pct_5", _DEFAULT_RATE),
+        "first_serve_pct_10": cell("first_serve_pct_10", _DEFAULT_RATE),
+        "break_pct_5": cell("break_pct_5", _DEFAULT_RATE),
+        "break_pct_10": cell("break_pct_10", _DEFAULT_RATE),
+        "rank_trend_10": avg_rank_10 - ranking,
+        "rank_trend_20": avg_rank_20 - ranking,
+        "win_streak": int(cell("win_streak", _DEFAULT_STREAK)),
+        "days_since_last_match": days_since,
+        "matches_30d": matches_30d,
+        "surface_win_rate_10": cell(_SURFACE_TO_SNAPSHOT_COL[surface], _DEFAULT_RATE),
+    }
+
+
+def build_inference_features(
+    player_id: str,
+    opponent_id: str,
+    surface: str,
+    *,
+    as_of_date: date | None = None,
+    tournament_level: int = 0,
+    round_encoded: int = 0,
+) -> pd.DataFrame:
+    """Build ONE finalized canonical inference row.
+
+    Returns a 1-row DataFrame with columns exactly:
+        [*FEATURE_COLS, "player_id", "opponent_id"]
+    (in that order). The canonical lower-id player is always the player_*
+    side, matching gold.match_features' orientation. No NaNs in any cell.
+    """
+    # ── Boundary validation ──
+    if surface not in VALID_SURFACES:
+        raise ValueError(f"surface must be one of {sorted(VALID_SURFACES)}, got {surface!r}")
+    if isinstance(tournament_level, bool) or (
+        not isinstance(tournament_level, int) or tournament_level not in VALID_TOURNAMENT_LEVELS
+    ):
+        raise ValueError(
+            f"tournament_level must be an int in {sorted(VALID_TOURNAMENT_LEVELS)}, "
+            f"got {tournament_level!r}"
+        )
+    if isinstance(round_encoded, bool) or (
+        not isinstance(round_encoded, int) or round_encoded not in VALID_ROUND_ENCODINGS
+    ):
+        raise ValueError(
+            f"round_encoded must be an int in {sorted(VALID_ROUND_ENCODINGS)}, "
+            f"got {round_encoded!r}"
+        )
+    if not isinstance(player_id, str) or not player_id.strip():
+        raise ValueError(f"player_id must be a non-empty string, got {player_id!r}")
+    if not isinstance(opponent_id, str) or not opponent_id.strip():
+        raise ValueError(f"opponent_id must be a non-empty string, got {opponent_id!r}")
+    if as_of_date is None:
+        as_of_date = date.today()
+    elif isinstance(as_of_date, datetime):
+        # A datetime is accepted and truncated to its date component.
+        as_of_date = as_of_date.date()
+    elif not isinstance(as_of_date, date):
+        raise TypeError(f"as_of_date must be a datetime.date (or datetime), got {as_of_date!r}")
+
+    # ── Canonicalization: lower id is the player_* side ──
+    lower_id, higher_id = sorted([player_id.strip(), opponent_id.strip()])
+
+    # ── On-demand global imputation pool (one set of aggregates) ──
+    as_of_iso = as_of_date.isoformat()
+    agg = execute_df(_POOL_AGG_SQL, [as_of_iso]).iloc[0].to_dict()
+    median_days = _agg_or(
+        execute_df(_MEDIAN_DAYS_SQL, [as_of_iso, as_of_iso]).iloc[0].to_dict(),
+        "median_days_since",
+        _DEFAULT_DAYS_SINCE,
+    )
+    median_matches = _agg_or(
+        execute_df(_MEDIAN_MATCHES_30D_SQL, [as_of_iso, as_of_iso, as_of_iso]).iloc[0].to_dict(),
+        "median_matches_30d",
+        _DEFAULT_MATCHES_30D,
+    )
+
+    def _latest_snapshot(pid: str) -> dict[str, object] | None:
+        df = execute_df(_LATEST_SNAPSHOT_SQL, [pid, as_of_iso])
+        if df.empty:
+            return None
+        return df.iloc[0].to_dict()
+
+    player_side = _side_values(
+        _latest_snapshot(lower_id), as_of_date, surface, agg, median_days, median_matches
+    )
+    opponent_side = _side_values(
+        _latest_snapshot(higher_id), as_of_date, surface, agg, median_days, median_matches
+    )
+
+    # ── Assemble the canonical row in FEATURE_COLS order ──
+    row: dict[str, int | float | str] = {}
+    for col in PLAYER_COLS:
+        row[col] = player_side[
+            "ranking" if col == "player_ranking" else col.removeprefix("player_")
+        ]
+    for col in OPPONENT_COLS:
+        row[col] = opponent_side[
+            "ranking" if col == "opponent_ranking" else col.removeprefix("opponent_")
+        ]
+
+    # Differentials, computed after imputation (canonical side minus opponent)
+    row["rank_diff"] = player_side["ranking"] - opponent_side["ranking"]
+    row["win_rate_diff"] = player_side["win_rate_10"] - opponent_side["win_rate_10"]
+    row["ace_rate_diff"] = player_side["ace_rate_10"] - opponent_side["ace_rate_10"]
+    row["break_pct_diff"] = player_side["break_pct_10"] - opponent_side["break_pct_10"]
+    row["win_streak_diff"] = player_side["win_streak"] - opponent_side["win_streak"]
+    row["matches_30d_diff"] = player_side["matches_30d"] - opponent_side["matches_30d"]
+    row["surface_win_rate_diff"] = (
+        player_side["surface_win_rate_10"] - opponent_side["surface_win_rate_10"]
+    )
+    row["rank_trend_diff"] = player_side["rank_trend_10"] - opponent_side["rank_trend_10"]
+
+    # Context
+    row["is_clay"] = int(surface == "clay")
+    row["is_grass"] = int(surface == "grass")
+    row["is_hard"] = int(surface == "hard")
+    row["tournament_level"] = tournament_level
+    row["round_encoded"] = round_encoded
+
+    # Preserve the canonical ids, not the raw input order.
+    row["player_id"] = lower_id
+    row["opponent_id"] = higher_id
+
+    final_cols = [*FEATURE_COLS, "player_id", "opponent_id"]
+    out = pd.DataFrame({col: [row[col]] for col in final_cols})
+    assert not out.isnull().to_numpy().any(), "inference row contains NaN"
+    return out

@@ -1,9 +1,9 @@
 """Prefect flow: Bronze → Gold ETL.
 
-The gold table is built by the dbt model `gold.match_features`
-(dbt/models/gold/match_features.sql); this flow runs `dbt build` (which also
-runs the gold data tests) and then enriches player bios once the gold table
-exists.
+Runs `dbt build` which builds gold in dependency order: gold.player_matches
+(player-perspective rows) → gold.player_rolling_features (post-match
+snapshots) → gold.match_features (canonical one-row-per-match training
+table). Also enriches player bios once the gold layer exists.
 """
 
 import subprocess
@@ -13,6 +13,7 @@ from prefect import flow, task
 from src.constants import GOLD_TABLE, ROOT
 from src.db.client import get_conn
 from src.flows.ingest import enrich_missing as _enrich_missing
+from src.utils import load_env
 
 
 @task(retries=2, retry_delay_seconds=30)
@@ -38,6 +39,7 @@ def enrich_bios():
 
 @flow(log_prints=True)
 def etl_flow():
+    load_env()
     rows = bronze_to_gold()
     if rows > 0:
         enrich_bios()

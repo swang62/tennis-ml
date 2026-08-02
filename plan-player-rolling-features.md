@@ -42,7 +42,7 @@ No `player_latest_features` or defaults table is added. Latest/as-of snapshots a
 
 ## Tasks
 
-### [ ] Task 1: Add the normalized player-match model
+### [x] Task 1: Add the normalized player-match model
 
 - **Description**: Add a dbt model that expands every Bronze match into two player-perspective rows. Give each player a deterministic `player_match_number` ordered by `match_date, match_id`; retain current-match ranking, opponent ranking, surface/context, raw serve/break statistics, and outcome. Calculate event-relative activity fields such as previous-match date and the count of prior matches in the requested 30-day range using a correct date-range window.
 - **Files**:
@@ -60,7 +60,7 @@ No `player_latest_features` or defaults table is added. Latest/as-of snapshots a
   - Do not calculate pairwise differential or encoded context columns here.
   - Do not change ingestion behavior or Bronze schema.
 
-### [ ] Task 2: Build post-match player rolling snapshots
+### [x] Task 2: Build post-match player rolling snapshots
 
 - **Description**: Add one post-match snapshot per player event. Compute count-based rolling state inclusive of that completed match so the newest row is immediately usable for future inference. Store the intermediate state needed to reconstruct current match features, including rolling avg ranking values rather than prematurely binding rank trend to a future ranking.
 - **Files**:
@@ -89,7 +89,7 @@ No `player_latest_features` or defaults table is added. Latest/as-of snapshots a
   - Do not add pre-match and post-match copies of the same rolling columns.
   - Do not add a latest snapshot table/view.
 
-### [ ] Task 3: Rebuild the canonical match training table from snapshots
+### [x] Task 3: Rebuild the canonical match training table from snapshots
 
 - **Description**: Rewrite `gold.match_features` to pair each player-match row with that player's immediately preceding post-match snapshot (`player_match_number - 1`), then collapse the two perspectives into the existing canonical lower-ID orientation. Use the current event for current ranking/context and the prior snapshot for historical form.
 - **Files**:
@@ -113,7 +113,7 @@ No `player_latest_features` or defaults table is added. Latest/as-of snapshots a
   - Do not use current-match serve/break/outcome values as model features.
   - Do not preserve the known incorrect all-history `matches_30d` behavior.
 
-### [ ] Task 4: Add dbt integrity and leakage tests
+### [x] Task 4: Add dbt integrity and leakage tests
 
 - **Description**: Add schema and singular tests that prove model grain, rolling chronology, current-match exclusion, surface behavior, and final schema integrity.
 - **Files**:
@@ -128,7 +128,7 @@ No `player_latest_features` or defaults table is added. Latest/as-of snapshots a
 - **Guardrails**:
   - Prefer data invariants over tests coupled to a single full-dataset row count.
 
-### [ ] Task 5: Replace the stale inference helper with an ID-based builder
+### [x] Task 5: Replace the stale inference helper with an ID-based builder
 
 - **Description**: Keep feature column definitions in `src/features/rolling.py`, remove its unused dict-merging `build_inference_features`, and add a dedicated upstream builder that queries DuckDB by ID and as-of date.
 - **Files**:
@@ -164,7 +164,7 @@ No `player_latest_features` or defaults table is added. Latest/as-of snapshots a
   - Do not duplicate rolling-window transformations in Python.
   - Keep Bento model execution unchanged.
 
-### [ ] Task 6: Add focused inference tests
+### [x] Task 6: Add focused inference tests
 
 - **Description**: Test the feature builder against a small deterministic DuckDB fixture or seed dataset.
 - **Files**:
@@ -183,7 +183,7 @@ No `player_latest_features` or defaults table is added. Latest/as-of snapshots a
   - At least one regression case catches the old one-match-stale lookup.
   - At least one regression case catches the old `matches_30d` bug.
 
-### [ ] Task 7: Wire and document the separate ETL/debug workflow
+### [x] Task 7: Wire and document the separate ETL/debug workflow
 
 - **Description**: Keep ingestion and ETL separate. Ensure the Bronze-to-Gold Prefect flow explicitly loads the selected environment and continues to run one `dbt build`, letting dbt dependencies refresh all Gold models.
 - **Files**:

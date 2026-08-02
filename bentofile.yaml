@@ -6,6 +6,13 @@
 # run params), and runs the build against that generated
 # `data/processed/bentofile.pinned.yaml`. The `:latest` refs below are
 # placeholders only — the deploy target never builds from this file directly.
+#
+# v2 spec: image/requirements live in src/serving/service.py via
+# `bentoml.images.Image(...)` passed to @bentoml.service(image=...). This file
+# only carries the service pointer, file includes, and model deps. BentoML
+# generates the Dockerfile from the service Image spec. `nn_best` is
+# intentionally NOT in `models:` — it is served from the ONNX artifact under
+# `include:` instead.
 name: stacked_ensemble
 service: "src/serving/service.py:TennisPredictor"
 include:
@@ -13,20 +20,8 @@ include:
   - "data/processed/linear_scaler.pkl"
   - "data/processed/bio_embeddings.parquet"
   - "data/processed/bio_feature_cols.json"
+  - "data/processed/nn_best.onnx"
 models:
   - "linear_best:latest"
   - "gbdt_best:latest"
-  - "nn_best:latest"
   - "production_model:latest"
-python:
-  packages:
-    - bentoml==1.4.39
-    - mlflow>=2.20
-    - scikit-learn>=1.6
-    - xgboost>=2.0
-    - lightgbm>=4.5
-    - torch>=2.0
-    - lightning>=2.0
-    - pandas>=2.2
-    - pyarrow>=15.0
-    - numpy>=1.26
