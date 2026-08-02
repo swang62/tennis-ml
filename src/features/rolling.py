@@ -3,7 +3,8 @@
 `gold.match_features` is one row per match, canonicalized by ATP id ordering:
 the lower/stable ATP id is the `player_*` side, the other is `opponent_*`,
 with the full balanced feature set (player + opponent rolling stats,
-differentials, context) and `match_won` relative to the canonical player side.
+profile-derived identity, differentials, context) and `match_won` relative to
+the canonical player side.
 
 This module holds the shared column definitions (training and serving).
 The ID-based inference row builder lives in `src.features.inference`
@@ -36,15 +37,26 @@ GOLD_ROLLING_COLS: list[str] = [
 
 # ── Per-side feature columns of the canonical match-level table ──
 
+# Profile-derived identity features (from gold.player_profiles), exposed
+# per side in the canonical row. years_pro is time-aware: years pro as of the
+# match date, not the raw turned_pro year.
+PROFILE_COLS: list[str] = [
+    "height",
+    "is_left_handed",
+    "years_pro",
+]
+
 
 PLAYER_COLS: list[str] = [
     "player_ranking",
     *[f"player_{c}" for c in GOLD_ROLLING_COLS],
+    *[f"player_{c}" for c in PROFILE_COLS],
 ]
 
 OPPONENT_COLS: list[str] = [
     "opponent_ranking",
     *[f"opponent_{c}" for c in GOLD_ROLLING_COLS],
+    *[f"opponent_{c}" for c in PROFILE_COLS],
 ]
 
 DIFF_COLS: list[str] = [
@@ -56,6 +68,9 @@ DIFF_COLS: list[str] = [
     "matches_30d_diff",
     "surface_win_rate_diff",
     "rank_trend_diff",
+    "height_diff",
+    "handedness_diff",
+    "years_pro_diff",
 ]
 
 CONTEXT_COLS: list[str] = [

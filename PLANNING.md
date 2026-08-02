@@ -371,14 +371,14 @@ from sentence_transformers import SentenceTransformer
 import faiss
 
 encoder = SentenceTransformer("all-MiniLM-L6-v2")  # 384-dim
-play_style = encoder.encode([
+bios = encoder.encode([
     "aggressive baseliner, powerful forehand, strong return",
     "serve-and-volleyer, prefers grass, quick at net",
     ...
 ])  # (n_players, 384)
 
 # Combine with engineered style features (ace_rate, first_serve_pct, etc.)
-style_features = np.column_stack([play_style, ace_rate, first_serve_pct, ...])
+style_features = np.column_stack([bios, ace_rate, first_serve_pct, ...])
 faiss.normalize_L2(style_features)
 
 # Build index

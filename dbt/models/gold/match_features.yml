@@ -100,6 +100,16 @@ models:
       - name: player_surface_win_rate_10
         description: Canonical player win rate on this surface, last 10 matches (NULL until first match on surface).
 
+      # Profile-derived identity (from gold.player_profiles; NULL when the
+      # player has no profile or a cell is missing, same no-zero-filling
+      # policy as the rolling cols).
+      - name: player_height
+        description: Canonical player height in cm at match time.
+      - name: player_is_left_handed
+        description: 1 if the canonical player is left-handed (handedness = L), 0 if right-handed (R); NULL when handedness is missing.
+      - name: player_years_pro
+        description: Years the canonical player has been pro as of the match date (match year - turned_pro).
+
       # Opponent-side rolling stats (opponent_ prefix), same prior-snapshot
       # semantics as the player side.
       - name: opponent_win_rate_5
@@ -132,6 +142,12 @@ models:
         description: Opponent matches in the 30 days before this match (0 if none).
       - name: opponent_surface_win_rate_10
         description: Opponent win rate on this surface, last 10 matches (NULL until first match on surface).
+      - name: opponent_height
+        description: Opponent height in cm at match time.
+      - name: opponent_is_left_handed
+        description: 1 if the opponent is left-handed (handedness = L), 0 if right-handed (R); NULL when handedness is missing.
+      - name: opponent_years_pro
+        description: Years the opponent has been pro as of the match date (match year - turned_pro).
 
       # Comparison (differential) features: canonical player minus opponent
       - name: rank_diff
@@ -150,6 +166,12 @@ models:
         description: player_surface_win_rate_10 - opponent_surface_win_rate_10.
       - name: rank_trend_diff
         description: player_rank_trend_10 - opponent_rank_trend_10.
+      - name: height_diff
+        description: player_height - opponent_height.
+      - name: handedness_diff
+        description: player_is_left_handed - opponent_is_left_handed.
+      - name: years_pro_diff
+        description: player_years_pro - opponent_years_pro.
 
       # Context
       - name: is_clay

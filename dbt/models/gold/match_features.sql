@@ -62,12 +62,26 @@ WITH player_match_enriched AS (
             WHEN 'clay'  THEN pr.clay_win_rate_10
             WHEN 'grass' THEN pr.grass_win_rate_10
             WHEN 'hard'  THEN pr.hard_win_rate_10
-        END AS surface_win_rate_10
+        END AS surface_win_rate_10,
+
+        -- Profile-derived identity (static; NULL when the player has no
+        -- profile or a cell is missing, same no-zero-filling policy as the
+        -- rolling features — train-time imputation handles the NULLs)
+        prof.height,
+        -- Non-L/R handedness (including NULL) stays NULL so train-time
+        -- imputation treats missing handedness like any other missing cell
+        CAST(CASE WHEN prof.handedness = 'L' THEN 1
+                  WHEN prof.handedness = 'R' THEN 0 END AS UTINYINT)
+            AS is_left_handed,
+        -- Years pro AT THIS MATCH (time-aware), not the raw turned_pro year
+        CAST(YEAR(pm.match_date) - prof.turned_pro AS INTEGER) AS years_pro
 
     FROM {{ ref('player_matches') }} pm
     LEFT JOIN {{ ref('player_rolling_features') }} pr
         ON pr.player_id = pm.player_id
        AND pr.player_match_number = pm.player_match_number - 1
+    LEFT JOIN gold.player_profiles prof
+        ON prof.player_id = pm.player_id
     WHERE pm.player_ranking > 0
       AND pm.opponent_ranking > 0
 )
@@ -103,6 +117,11 @@ SELECT
     p.matches_30d           AS player_matches_30d,
     p.surface_win_rate_10   AS player_surface_win_rate_10,
 
+    -- Profile-derived identity (canonical player side)
+    p.height            AS player_height,
+    p.is_left_handed    AS player_is_left_handed,
+    p.years_pro         AS player_years_pro,
+
     -- Opponent side (higher ATP id)
     o.player_ranking AS opponent_ranking,
     o.win_rate_5            AS opponent_win_rate_5,
@@ -121,6 +140,11 @@ SELECT
     o.matches_30d           AS opponent_matches_30d,
     o.surface_win_rate_10   AS opponent_surface_win_rate_10,
 
+    -- Profile-derived identity (opponent side)
+    o.height            AS opponent_height,
+    o.is_left_handed    AS opponent_is_left_handed,
+    o.years_pro         AS opponent_years_pro,
+
     -- Comparison (differential) features: canonical side minus opponent side
     p.player_ranking - o.player_ranking AS rank_diff,
     p.win_rate_10 - o.win_rate_10 AS win_rate_diff,
@@ -130,6 +154,10 @@ SELECT
     p.matches_30d - o.matches_30d AS matches_30d_diff,
     p.surface_win_rate_10 - o.surface_win_rate_10 AS surface_win_rate_diff,
     p.rank_trend_10 - o.rank_trend_10 AS rank_trend_diff,
+    p.height - o.height AS height_diff,
+    CAST(p.is_left_handed AS INTEGER) - CAST(o.is_left_handed AS INTEGER)
+        AS handedness_diff,
+    p.years_pro - o.years_pro AS years_pro_diff,
 
     -- Context
     CAST(CASE WHEN p.surface = 'clay'  THEN 1 ELSE 0 END AS UTINYINT) AS is_clay,

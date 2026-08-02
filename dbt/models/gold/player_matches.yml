@@ -11,7 +11,12 @@ models:
       matches_30d_before). No canonical player/opponent orientation and no
       rolling or differential features — downstream models build those from
       this expansion. Composite grain (match_id, player_id) is unique; the
-      composite uniqueness test is added in Task 4.
+      composite uniqueness test below mirrors the (player_id, match_id) PK
+      enforced by the model's post-hook.
+    tests:
+      - unique:
+          arguments:
+            column_name: "player_id || '_' || match_id"
     columns:
       - name: match_id
         description: Match identifier. Each match appears exactly twice, once per player.

@@ -23,6 +23,10 @@ models:
       first_serve_pct_*, break_pct_*) are NULL when the window's denominator
       sums to 0; clay/grass/hard_win_rate_10 are NULL until the player has
       played on that surface. Every rate is either NULL or in [0, 1].
+    tests:
+      - unique:
+          arguments:
+            column_name: "player_id || '_' || match_id"
     columns:
       - name: player_id
         description: Player this post-match snapshot describes.
