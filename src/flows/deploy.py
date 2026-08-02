@@ -64,7 +64,7 @@ FINGERPRINT_FILES = [
     *AUX_FILES,
 ]
 
-# The deploy gate reads the promoted `production_model` from MLflow; local
+# The deploy gate reads the promoted `ensemble_lr_model` from MLflow; local
 # runs without an explicit tracking URI default to a repo-root mlruns/, so
 # redirect those to the shared artifacts/ area. Deployed workers (k8s
 # config-map sets MLFLOW_TRACKING_URI=http://mlflow:5000) are untouched.
@@ -85,7 +85,7 @@ def deploy_flow() -> None:
 
 
 def _latest_production_version(client: Any) -> Any:
-    """Return the version `models:/production_model/latest` resolves to.
+    """Return the version `models:/ensemble_lr_model/latest` resolves to.
 
     MLflow's `latest` alias means the most recent version in stage "None";
     mirror that exactly instead of guessing. Returns None when there is no
@@ -112,7 +112,7 @@ def _write_state(state: dict[str, Any]) -> None:
 def _resolve_pins(client: Any, production: Any) -> dict[str, dict[str, Any]]:
     """Resolve the exact MLflow identities for all four models.
 
-    Source of truth is the source run of `production_model`'s latest version
+    Source of truth is the source run of `ensemble_lr_model`'s latest version
     — the promoted 04 candidate run that logged the three base pins. The
     recorded values are used as-is (no validation); a missing pin just means
     there is nothing pinned to build from.
@@ -210,7 +210,15 @@ def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
                 "bio_o": {0: "batch"},
                 "logit": {0: "batch"},
             },
+            # Single-file artifact: keep weights inline so ONNX Runtime needs
+            # no nn_best.onnx.data sidecar in the image.
+            external_data=False,
         )
+    # Drop any stale external-data sidecar from an older export so local
+    # rebuilds never pick up an orphan nn_best.onnx.data.
+    stale_data = NN_ONNX_FILE.with_suffix(".onnx.data")
+    if stale_data.exists():
+        stale_data.unlink()
     print(f"Wrote ONNX: {NN_ONNX_FILE} ({NN_ONNX_FILE.stat().st_size} bytes)")
 
 
@@ -340,7 +348,7 @@ def build_bento_image() -> tuple[str, int]:
     client = MlflowClient()
     production = _latest_production_version(client)
     if production is None:
-        raise RuntimeError("No promoted 'production_model' — nothing to build.")
+        raise RuntimeError("No promoted 'ensemble_lr_model' — nothing to build.")
 
     state = _read_state()
     pins = _resolve_pins(client, production)
@@ -395,13 +403,18 @@ def deploy_bento() -> None:
         subprocess.run(["docker", "push", target], cwd=ROOT, check=True)
 
     # In-cluster pull reference resolves to the same registry/repo as the push.
+    # Render the manifest with the pinned tag and apply once: applying the
+    # manifest's :latest then `set image` to the pinned tag creates an extra
+    # ReplicaSet (and the 'old replicas pending termination' noise) every deploy.
     pull_image = f"{REGISTRY_PULL_REPOSITORY}:{image_version}"
-    subprocess.run(["kubectl", "apply", "-f", str(BENTO_MANIFEST)], cwd=ROOT, check=True)
-    subprocess.run(
-        ["kubectl", "set", "image", "deployment/bento-serving", f"bentoml={pull_image}"],
-        cwd=ROOT,
-        check=True,
-    )
+    manifest = BENTO_MANIFEST.read_text()
+    rendered = manifest.replace(f"{REGISTRY_PULL_REPOSITORY}:latest", pull_image)
+    if rendered == manifest:
+        raise RuntimeError(
+            f"manifest {BENTO_MANIFEST} does not reference "
+            f"{REGISTRY_PULL_REPOSITORY}:latest — cannot pin the deploy image"
+        )
+    subprocess.run(["kubectl", "apply", "-f", "-"], input=rendered, cwd=ROOT, check=True, text=True)
     subprocess.run(
         ["kubectl", "rollout", "status", "deployment/bento-serving", "--timeout=180s"],
         cwd=ROOT,

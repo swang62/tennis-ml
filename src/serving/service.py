@@ -1,7 +1,7 @@
 """BentoML service composing the 4 stacked-ensemble artifacts.
 
 `linear_best` and `gbdt_best` are sklearn classifiers, `nn_best` is the
-PyTorch MLP with the bio-embedding pathway, and `production_model` is the
+PyTorch MLP with the bio-embedding pathway, and `ensemble_lr_model` is the
 logistic-regression stack head over `[p_linear, p_gbdt, p_nn]`.
 
 The NN path runs through ONNX Runtime, not torch: the deploy flow exports the
@@ -27,7 +27,7 @@ import onnxruntime as ort
 import pandas as pd
 from bentoml.images import Image
 
-from src.constants import ROOT
+from src.constants import PRODUCTION_MODEL, ROOT
 from src.features.rolling import FEATURE_COLS
 
 AUX_DIR = ROOT / "data" / "processed"
@@ -63,12 +63,12 @@ class TennisPredictor:
     bento_gbdt = bentoml.models.BentoModel("gbdt_best:latest")
     # NN is not a BentoModel here — served from data/processed/nn_best.onnx
     # (materialized at deploy time from the pinned nn_best MLflow version).
-    bento_production = bentoml.models.BentoModel("production_model:latest")
+    bento_production = bentoml.models.BentoModel(f"{PRODUCTION_MODEL}:latest")
 
     def __init__(self):
-        self.linear = bentoml.mlflow.load_model(self.bento_linear).unwrap_python_model()
-        self.gbdt = bentoml.mlflow.load_model(self.bento_gbdt).unwrap_python_model()
-        self.production = bentoml.mlflow.load_model(self.bento_production).unwrap_python_model()
+        self.linear = bentoml.mlflow.load_model(self.bento_linear).get_raw_model()
+        self.gbdt = bentoml.mlflow.load_model(self.bento_gbdt).get_raw_model()
+        self.production = bentoml.mlflow.load_model(self.bento_production).get_raw_model()
         self.nn_session = ort.InferenceSession(str(AUX_DIR / "nn_best.onnx"))
 
         with open(AUX_DIR / "linear_scaler.pkl", "rb") as f:

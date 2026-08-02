@@ -2,7 +2,7 @@
 #
 # This file is a TEMPLATE: `just deploy-bento` (src/flows/deploy.py) copies
 # it, replaces the `models:` list with the exact BentoML tags imported from
-# the pinned MLflow versions (resolved from the `production_model` source
+# the pinned MLflow versions (resolved from the `ensemble_lr_model` source
 # run params), and runs the build against that generated
 # `data/processed/bentofile.pinned.yaml`. The `:latest` refs below are
 # placeholders only — the deploy target never builds from this file directly.
@@ -24,4 +24,4 @@ include:
 models:
   - "linear_best:latest"
   - "gbdt_best:latest"
-  - "production_model:latest"
+  - "ensemble_lr_model:latest"
