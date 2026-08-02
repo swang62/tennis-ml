@@ -64,7 +64,7 @@ class PlayerSimilarity:
     def build(self) -> None:
         """Query player profiles, build FAISS index, save to disk, and load in memory."""
         df = to_dataframe(
-            f"SELECT player_id, display_name, backhand, play_style,"
+            f"SELECT player_id, display_name, backhand,"
             f" handedness, height, turned_pro, summary FROM {PROFILES_TABLE}"
         )
         df = df[df["player_id"] != ""].reset_index(drop=True)
@@ -72,7 +72,7 @@ class PlayerSimilarity:
             return
 
         # One-hot encode categoricals, numeric features, then stack with embeddings
-        encoded = pd.get_dummies(df[["play_style", "backhand", "handedness"]]).astype(np.float32)
+        encoded = pd.get_dummies(df[["backhand", "handedness"]]).astype(np.float32)
         # height/turned_pro are typed SMALLINT/INTEGER in gold.player_profiles;
         # only missing values (NULL) need filling.
         height = df["height"].fillna(0).astype(np.float32)

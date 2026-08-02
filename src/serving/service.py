@@ -20,6 +20,7 @@ and loaded from disk at init.
 
 import json
 import pickle
+from datetime import date
 
 import bentoml
 import numpy as np
@@ -28,6 +29,7 @@ import pandas as pd
 from bentoml.images import Image
 
 from src.constants import PRODUCTION_MODEL, ROOT
+from src.features.inference import build_inference_features
 from src.features.rolling import FEATURE_COLS
 
 AUX_DIR = ROOT / "data" / "processed"
@@ -45,6 +47,8 @@ SERVING_IMAGE = Image(
     "scikit-learn==1.8.0",
     "xgboost-cpu==3.2.0",
     "lightgbm==4.6.0",
+    "catboost==1.2.10",  # 02_tune_gbdt tries xgb/lgbm/catboost; image must support whichever wins
+    "duckdb==1.5.4",
     "pandas==2.3.3",
     "pyarrow==24.0.0",
     "numpy==2.4.6",
@@ -79,7 +83,12 @@ class TennisPredictor:
         self.bio_by_player = {pid: i for i, pid in enumerate(bio_df["player_id"])}
         self.bio_array = bio_df[self.bio_feature_cols].to_numpy(np.float32)
 
-    @bentoml.api(batchable=True, batch_dim=0)
+    # Non-batchable: BentoML 1.4.39's batch dispatcher has a bug sizing pandas
+    # DataFrame inputs (`get_batch_size = lambda x: x.sample.batch_size` hits
+    # `DataFrame.sample` the method and returns a tuple, not an int), raising
+    # `TypeError: int + tuple` and surfacing as `ServiceUnavailable: process is
+    # overloaded`. Single-match predictions don't need batch concat anyway.
+    @bentoml.api
     def predict(self, input: pd.DataFrame) -> pd.DataFrame:
         required = [*FEATURE_COLS, "player_id", "opponent_id"]
         missing = [c for c in required if c not in input.columns]
@@ -121,6 +130,47 @@ class TennisPredictor:
             },
             index=input.index,
         )
+
+    @bentoml.api
+    def predict_from_ids(
+        self,
+        player_id: str,
+        opponent_id: str,
+        surface: str,
+        *,
+        tournament_level: int = 0,
+        round_encoded: int = 0,
+        tournament: str | None = None,
+        round: str | None = None,
+        as_of_date: date | None = None,
+    ) -> dict[str, object]:
+        """Build the feature row on demand from the baked-in DuckDB and predict.
+
+        Minimal human inputs: two player ids + surface, optional integer
+        tournament_level/round_encoded (or their string aliases tournament/
+        round, e.g. "grand_slam" / "f") and as_of_date. Queries the bundled
+        gold tables (snapshot from deploy time).
+        """
+        row = build_inference_features(
+            player_id,
+            opponent_id,
+            surface,
+            tournament_level=tournament_level,
+            round_encoded=round_encoded,
+            tournament=tournament,
+            round=round,
+            as_of_date=as_of_date,
+        )
+        # Reuse the existing predict path (returns a DataFrame).
+        out_df = self.predict(row)
+        # One row in, one row out — return the first record as a flat dict for
+        # ergonomic JSON over HTTP.
+        rec = out_df.iloc[0].to_dict()
+        rec["p_win"] = float(rec["p_win"])
+        rec["p_linear"] = float(rec["p_linear"])
+        rec["p_gbdt"] = float(rec["p_gbdt"])
+        rec["p_nn"] = float(rec["p_nn"])
+        return rec
 
     def _row_bio_np(self, ids: np.ndarray) -> np.ndarray:
         """Map player ids to bio vectors (np.float32), zero-filled for unknown players."""

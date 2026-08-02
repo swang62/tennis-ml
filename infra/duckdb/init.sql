@@ -29,13 +29,21 @@ CREATE TABLE IF NOT EXISTS bronze.match_events (
     player2_total_serve_points UTINYINT,
     player2_break_points_won   UTINYINT,
     player2_break_points_total UTINYINT,
-    winner_id                  VARCHAR
+    winner_id                  VARCHAR,
+    PRIMARY KEY (match_id)
 );
 
--- Identity backbone for players, sourced from ATP_Database.csv
--- (canonical ATP id/name + base metadata). Enrichment columns at the bottom
--- are left empty by the ATP load and filled by the Wikipedia fallback in
--- src/flows/ingest.py for players missing from the ATP database.
+-- Secondary indexes for the common gold-layer expansion/rolling query
+-- patterns (player1/player2 sides of bronze are scanned per player + date).
+CREATE INDEX IF NOT EXISTS idx_match_events_p1_date
+    ON bronze.match_events (player1_id, match_date);
+CREATE INDEX IF NOT EXISTS idx_match_events_p2_date
+    ON bronze.match_events (player2_id, match_date);
+
+-- Identity backbone for players, sourced from the ATP player database
+-- (data/ATP_player_database.csv, canonical ATP id/name + base metadata).
+-- Enrichment columns at the bottom are left empty by the ATP load and filled
+-- by the Wikipedia fallback in src/flows/ingest.py for players it covers.
 CREATE TABLE IF NOT EXISTS gold.player_profiles (
     player_id    VARCHAR PRIMARY KEY,  -- canonical ATP id (ATP_Database.id)
     display_name VARCHAR,              -- canonical ATP name (ATP_Database.player)
@@ -51,7 +59,5 @@ CREATE TABLE IF NOT EXISTS gold.player_profiles (
     ioc          VARCHAR,              -- ATP_Database.ioc country code
     -- Wikipedia enrichment (fallback for incomplete ATP rows)
     summary      VARCHAR,
-    play_style   VARCHAR,
-    wiki_title   VARCHAR,
     enriched_at  TIMESTAMP
 );

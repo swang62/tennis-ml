@@ -126,7 +126,9 @@ try:
     players = get_players()
 except Exception as e:
     print(f"Cannot connect to DuckDB: {e}")
-    print("Make sure the database file exists (run `just db-init`).")
+    print(
+        "Make sure the database is initialized and seeded (run `just db-reset` then `just db-seed`)."
+    )
     raise
 
 initial_a = players[0] if players else None

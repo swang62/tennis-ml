@@ -13,10 +13,10 @@ deploy: validate
     kubectl apply -f infra/manifests/deploy/
 
 db-init:
-    uv run python infra/duckdb/run_init.py init
+    uv run python infra/duckdb/initialize_schemas.py init
 
 db-seed:
-    uv run python infra/duckdb/run_init.py seed
+    uv run python infra/duckdb/seed.py
 
 db-etl:
     uv run python src/flows/etl.py
@@ -35,18 +35,13 @@ dashboard-build:
     docker build -t tennis-dashboard:latest -f infra/manifests/deploy/Dockerfile .
     k3d image import tennis-dashboard:latest -c tennis-ml
 
-bento-local:
+deploy-local:
     bentoml serve src/serving/service.py --reload
 
-# Build the production Bento image in the local Docker engine. Does not require
-# k3d to exist or be running.
-bento-build:
-    uv run python -c "from src.flows.deploy import build_bento_image; build_bento_image()"
-
-# Build locally, push to the k3d-managed registry, and roll out when the cluster
-# is running. Evaluation/promotion already ran in the training pipeline.
+# Build docker image locally, push to the k3d-managed registry and deploy on k3d 
+# if the cluster is running AND the latest trained model has been promoted
 deploy-bento:
-    uv run python -c "from src.flows.deploy import deploy_bento; deploy_bento()"
+    uv run python src/flows/deploy.py
 
 restart:
     kubectl rollout restart deployment
@@ -54,9 +49,6 @@ restart:
     kubectl rollout restart statefulset
 
 train:
-    uv run python src/flows/pipeline.py
-
-pipeline:
     uv run python src/flows/pipeline.py
 
 validate:

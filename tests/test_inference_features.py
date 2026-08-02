@@ -3,7 +3,7 @@
 Target: `src.features.inference.build_inference_features`.
 
 Tests run against the seeded DuckDB at `data/tennis.duckdb` (built from
-`infra/duckdb/init.sql` + `infra/duckdb/seed.sql` + the dbt gold models). A
+`infra/duckdb/init.sql` + `infra/duckdb/seed.py` + the dbt gold models). A
 session-scoped autouse fixture rebuilds the gold tables once if they are
 missing or empty; otherwise it skips so repeated runs stay fast. All
 date-dependent tests pass an explicit `as_of_date` for determinism, except the
@@ -20,12 +20,13 @@ import pytest
 
 from src.constants import ROOT
 from src.db.client import execute_df
+from src.features import inference
 from src.features.inference import build_inference_features
 from src.features.rolling import DIFF_COLS, FEATURE_COLS
 
 DB_PATH = ROOT / "data" / "tennis.duckdb"
 
-# All seeded matches are in 2026 (2026-01-13 .. 2026-08-27); a fixed as-of date
+# All seeded matches are in 2026 (2026-03-15 .. 2026-07-15); a fixed as-of date
 # after the last match exercises the full snapshot history deterministically.
 AS_OF_AFTER_ALL_MATCHES = date(2026, 9, 1)
 
@@ -49,17 +50,20 @@ def seeded_gold_db():
     """Rebuild the gold tables once if missing/empty; skip otherwise.
 
     Runs the bootstrap steps behind `just db-reset` + `just db-seed` +
-    `just db-dbt`: init the schemas, seed the 20-match bronze fixture, then
-    `dbt build` the gold models. Subprocess output is captured so a bootstrap
-    failure reports the exact failing command.
+    `just db-dbt`: init the schemas, seed ~100 real matches via
+    `infra/duckdb/seed.py` (raw ATP -> bronze + filtered ATP profiles), then
+    `dbt build` the gold models. The seed's best-effort Wikipedia enrichment
+    is skipped with `--offline` so tests never depend on live Wikipedia.
+    Subprocess output is captured so a bootstrap failure reports the exact
+    failing command.
     """
     if _gold_rolling_ready():
         yield
         return
 
     commands = [
-        ["uv", "run", "python", "infra/duckdb/run_init.py", "init"],
-        ["uv", "run", "python", "infra/duckdb/run_init.py", "seed"],
+        ["uv", "run", "python", "infra/duckdb/initialize_schemas.py", "init"],
+        ["uv", "run", "python", "infra/duckdb/seed.py", "--offline"],
         ["uv", "run", "dbt", "build", "--project-dir", "dbt", "--profiles-dir", "dbt"],
     ]
     for command in commands:
@@ -82,7 +86,7 @@ def test_output_schema_contract():
     """Exact column order [*FEATURE_COLS, "player_id", "opponent_id"], one row."""
     out = build_inference_features("S0AG", "Z355", "clay", as_of_date=AS_OF_AFTER_ALL_MATCHES)
     assert out.columns.tolist() == [*FEATURE_COLS, "player_id", "opponent_id"]
-    assert len(out.columns) == 47  # 45 features + 2 ids
+    assert len(out.columns) == 56  # 54 features + 2 ids
     assert len(out) == 1
     assert out["player_id"].dtype == object
     assert out["opponent_id"].dtype == object
@@ -114,26 +118,65 @@ def test_reversed_ids_canonical_identical():
     pd.testing.assert_frame_equal(row_ab, row_ba, check_exact=True)
 
 
-def test_historical_as_of_excludes_later_snapshots():
-    """Regression: the as-of lookup must use snapshot #1, not #2 or the latest.
+def test_known_players_profile_features():
+    """Profile-derived features for two known players, in canonical order.
 
-    S0AG's snapshot sequence: #1 = 2026-01-13 (2026-ao-r1-002), #2 = 2026-01-15
-    (2026-ao-r1-005). At as_of 2026-01-14 only snapshot #1 is strictly before
-    the date; a builder that used snapshot #2 (or the latest snapshot) is
-    one-match stale. S0AG won its first match, so snapshot #1 win_rate_10 is
-    1.0. This test fails loudly if the builder ever drifts to snapshot #2.
+    S0AG (Sinner): height 191, right-handed, turned pro 2018. Z355 (Zverev):
+    height 198, right-handed, turned pro 2013. Canonical order puts S0AG on
+    the player_* side; years_pro is years-pro AT the as-of date (2026 - year),
+    not the raw turned_pro year.
     """
-    out = build_inference_features("S0AG", "Z355", "hard", as_of_date=date(2026, 1, 14))
-    assert out.loc[0, "player_win_rate_10"] == 1.0
+    out = build_inference_features("S0AG", "Z355", "clay", as_of_date=AS_OF_AFTER_ALL_MATCHES)
+    row = out.iloc[0]
+    assert row["player_height"] == 191.0
+    assert row["opponent_height"] == 198.0
+    assert row["height_diff"] == -7.0
+    assert row["player_is_left_handed"] == 0.0
+    assert row["opponent_is_left_handed"] == 0.0
+    assert row["handedness_diff"] == 0.0
+    assert row["player_years_pro"] == 8.0  # 2026 - 2018
+    assert row["opponent_years_pro"] == 13.0  # 2026 - 2013
+    assert row["years_pro_diff"] == -5.0
+
+
+def test_years_pro_time_aware_and_cold_start():
+    """years_pro derives from as_of_date, not a fixed snapshot of turned_pro.
+
+    At an as-of date before any seeded match (empty snapshot pool), profile
+    values still come from gold.player_profiles and years_pro tracks the
+    as-of year, while all rolling features fall back to their constants.
+    """
+    out = build_inference_features("S0AG", "Z355", "hard", as_of_date=date(2025, 6, 1))
+    row = out.iloc[0]
+    assert row["player_years_pro"] == 7.0  # 2025 - 2018
+    assert row["opponent_years_pro"] == 12.0  # 2025 - 2013
+    assert row["years_pro_diff"] == -5.0
+    for col in FEATURE_COLS:
+        assert math.isfinite(row[col]), f"{col} is not finite: {row[col]!r}"
+
+
+def test_historical_as_of_excludes_later_snapshots():
+    """Regression: the as-of lookup must use the newest snapshot strictly before
+    the date, not the first or the overall latest.
+
+    S0AG's seeded snapshot sequence: #1 = 2026-04-12 (Monte Carlo, won),
+    #2..#3 won, #4 = 2026-05-28 (Roland Garros, loss), #5 = 2026-06-29
+    (Wimbledon R128, won). At as_of 2026-06-30 the newest strictly-before
+    snapshot is #5 with win_rate_10 = 4/5 = 0.8; snapshot #6 (2026-07-01) is
+    one-match stale (5/6 = 0.833). A builder that used snapshot #1 (win_rate
+    1.0) or the overall latest (0.9) fails loudly.
+    """
+    out = build_inference_features("S0AG", "Z355", "hard", as_of_date=date(2026, 6, 30))
+    assert out.loc[0, "player_win_rate_10"] == 0.8
     # Cross-check the expected snapshot directly in the gold table.
     snapshot = execute_df(
         "SELECT player_match_number, win_rate_10 FROM gold.player_rolling_features "
         "WHERE player_id = ? AND snapshot_date < ?::DATE "
         "ORDER BY player_match_number DESC LIMIT 1",
-        ["S0AG", "2026-01-14"],
+        ["S0AG", "2026-06-30"],
     ).iloc[0]
-    assert snapshot["player_match_number"] == 1
-    assert snapshot["win_rate_10"] == 1.0
+    assert snapshot["player_match_number"] == 5
+    assert snapshot["win_rate_10"] == 0.8
     assert out.loc[0, "player_win_rate_10"] == snapshot["win_rate_10"]
 
 
@@ -205,6 +248,21 @@ def test_one_missing_player_imputed_no_nans(args):
     assert row["opponent_win_streak"] == int(float(pool["win_streak"]))
     assert row["opponent_win_rate_10"] == pytest.approx(pool["win_rate_10"])
     assert row["opponent_surface_win_rate_10"] == pytest.approx(pool["hard_win_rate_10"])
+    # Profile-derived features for the unknown player come from the on-demand
+    # aggregate over ALL profiles (mean height / left-handed rate / years-pro
+    # at the as-of date), so they are finite and non-NaN.
+    profile_pool = execute_df(
+        "SELECT AVG(height) AS avg_height, "
+        "AVG(CASE WHEN handedness = 'L' THEN 1 ELSE 0 END) AS left_handed_rate, "
+        "AVG(2026 - turned_pro) AS avg_years_pro "
+        "FROM gold.player_profiles",
+    ).iloc[0]
+    assert row["opponent_height"] == pytest.approx(profile_pool["avg_height"])
+    assert row["opponent_is_left_handed"] == pytest.approx(profile_pool["left_handed_rate"])
+    assert row["opponent_years_pro"] == pytest.approx(profile_pool["avg_years_pro"])
+    assert math.isfinite(row["height_diff"])
+    assert math.isfinite(row["handedness_diff"])
+    assert math.isfinite(row["years_pro_diff"])
 
 
 def test_one_missing_player_reversed_identical():
@@ -241,7 +299,7 @@ def test_invalid_surface_raises(surface):
         build_inference_features("S0AG", "Z355", surface, as_of_date=AS_OF_AFTER_ALL_MATCHES)
 
 
-@pytest.mark.parametrize("tournament_level", [-1, 5, 9, "4"])
+@pytest.mark.parametrize("tournament_level", [-1, 5, True, "4", 4.0])
 def test_invalid_tournament_level_raises(tournament_level):
     with pytest.raises((ValueError, TypeError)):
         build_inference_features(
@@ -253,7 +311,7 @@ def test_invalid_tournament_level_raises(tournament_level):
         )
 
 
-@pytest.mark.parametrize("round_encoded", [-1, 8, 9, "7"])
+@pytest.mark.parametrize("round_encoded", [-1, 8, True, "7", 7.0])
 def test_invalid_round_encoded_raises(round_encoded):
     with pytest.raises((ValueError, TypeError)):
         build_inference_features(
@@ -265,8 +323,17 @@ def test_invalid_round_encoded_raises(round_encoded):
         )
 
 
-@pytest.mark.parametrize("tournament_level", list(range(0, 5)))
-def test_valid_tournament_levels_accepted(tournament_level):
+@pytest.mark.parametrize(
+    "tournament_level, expected",
+    [
+        (4, 4),
+        (3, 3),
+        (2, 2),
+        (1, 1),
+        (0, 0),
+    ],
+)
+def test_valid_tournament_levels_accepted(tournament_level, expected):
     out = build_inference_features(
         "S0AG",
         "Z355",
@@ -274,11 +341,23 @@ def test_valid_tournament_levels_accepted(tournament_level):
         as_of_date=AS_OF_AFTER_ALL_MATCHES,
         tournament_level=tournament_level,
     )
-    assert out.iloc[0]["tournament_level"] == tournament_level
+    assert out.iloc[0]["tournament_level"] == expected
 
 
-@pytest.mark.parametrize("round_encoded", list(range(0, 8)))
-def test_valid_round_encodings_accepted(round_encoded):
+@pytest.mark.parametrize(
+    "round_encoded, expected",
+    [
+        (7, 7),
+        (6, 6),
+        (5, 5),
+        (4, 4),
+        (3, 3),
+        (2, 2),
+        (1, 1),
+        (0, 0),
+    ],
+)
+def test_valid_round_encodings_accepted(round_encoded, expected):
     out = build_inference_features(
         "S0AG",
         "Z355",
@@ -286,27 +365,174 @@ def test_valid_round_encodings_accepted(round_encoded):
         as_of_date=AS_OF_AFTER_ALL_MATCHES,
         round_encoded=round_encoded,
     )
-    assert out.iloc[0]["round_encoded"] == round_encoded
+    assert out.iloc[0]["round_encoded"] == expected
 
 
 @pytest.mark.parametrize(
-    "as_of, expected",
+    "tournament, expected",
     [
-        # A0E2's last prior match is 2026-01-15, 54 days before 2026-03-10, so
-        # the [2026-02-08, 2026-03-10) window contains zero A0E2 matches. The
-        # old ROWS-frame formulation returned 3 here (every preceding AO match,
-        # regardless of date) — this regression case catches that exact bug.
-        (date(2026, 3, 10), 0),
-        # [2025-12-16, 2026-01-15): A0E2's 2026-01-13 and 2026-01-14 matches
-        # are inside; the 2026-01-15 match itself is excluded (strict <).
-        (date(2026, 1, 15), 2),
+        ("grand_slam", 4),
+        ("masters", 3),
+        ("atp_500", 2),
+        ("atp_250", 1),
+    ],
+)
+def test_tournament_string_convenience_maps_to_codebook(tournament, expected):
+    """String tournament names map to the SAME encodings as the dbt codebook."""
+    out = build_inference_features(
+        "S0AG",
+        "Z355",
+        "hard",
+        as_of_date=AS_OF_AFTER_ALL_MATCHES,
+        tournament=tournament,
+    )
+    assert out.iloc[0]["tournament_level"] == expected
+
+
+@pytest.mark.parametrize(
+    "round, expected",
+    [
+        ("r128", 1),
+        ("r64", 2),
+        ("r32", 3),
+        ("r16", 4),
+        ("qf", 5),
+        ("sf", 6),
+        ("f", 7),
+    ],
+)
+def test_round_string_convenience_maps_to_codebook(round, expected):
+    """String round names map to the SAME encodings as the dbt codebook."""
+    out = build_inference_features(
+        "S0AG",
+        "Z355",
+        "hard",
+        as_of_date=AS_OF_AFTER_ALL_MATCHES,
+        round=round,
+    )
+    assert out.iloc[0]["round_encoded"] == expected
+
+
+@pytest.mark.parametrize("tournament", ["Roland Garros", "grand slam", "Grand_Slam", "random", ""])
+def test_unknown_tournament_string_maps_to_zero(tournament):
+    """Unknown tournament strings map to 0, matching the codebook's ELSE branch."""
+    out = build_inference_features(
+        "S0AG",
+        "Z355",
+        "hard",
+        as_of_date=AS_OF_AFTER_ALL_MATCHES,
+        tournament=tournament,
+    )
+    assert out.iloc[0]["tournament_level"] == 0
+
+
+@pytest.mark.parametrize("round", ["final", "F", "QF", "unknown", ""])
+def test_unknown_round_string_maps_to_zero(round):
+    """Unknown round strings map to 0, matching the codebook's ELSE branch."""
+    out = build_inference_features(
+        "S0AG",
+        "Z355",
+        "hard",
+        as_of_date=AS_OF_AFTER_ALL_MATCHES,
+        round=round,
+    )
+    assert out.iloc[0]["round_encoded"] == 0
+
+
+def test_tournament_string_equals_int_encoding():
+    """String and int paths produce byte-identical rows for the same encoding."""
+    out_str = build_inference_features(
+        "S0AG",
+        "Z355",
+        "clay",
+        as_of_date=AS_OF_AFTER_ALL_MATCHES,
+        tournament="grand_slam",
+        round="f",
+    )
+    out_int = build_inference_features(
+        "S0AG",
+        "Z355",
+        "clay",
+        as_of_date=AS_OF_AFTER_ALL_MATCHES,
+        tournament_level=4,
+        round_encoded=7,
+    )
+    pd.testing.assert_frame_equal(out_str, out_int, check_exact=True)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"tournament_level": 4, "tournament": "grand_slam"},
+        {"round_encoded": 7, "round": "f"},
+    ],
+)
+def test_tournament_string_and_int_conflict_raises(kwargs):
+    """Passing both the int and the string alias for one context feature is ambiguous."""
+    with pytest.raises(ValueError):
+        build_inference_features(
+            "S0AG",
+            "Z355",
+            "hard",
+            as_of_date=AS_OF_AFTER_ALL_MATCHES,
+            **kwargs,
+        )
+
+
+@pytest.mark.parametrize("kwargs", [{"tournament": 4}, {"round": 7}])
+def test_tournament_string_non_string_raises(kwargs):
+    """The string aliases reject non-string values instead of silently mapping to 0."""
+    with pytest.raises(TypeError):
+        build_inference_features(
+            "S0AG",
+            "Z355",
+            "hard",
+            as_of_date=AS_OF_AFTER_ALL_MATCHES,
+            **kwargs,
+        )
+
+
+@pytest.mark.parametrize(
+    "player_id, as_of, expected",
+    [
+        # F0FV's only prior seeded match is 2026-03-21 (vs A0E2); the
+        # [2026-04-28, 2026-05-28) window contains none of his matches, so the
+        # count is 0. The old ROWS-frame formulation returned 1 here (every
+        # preceding match, regardless of date) — this case catches that bug.
+        ("F0FV", date(2026, 5, 28), 0),
+        # [2026-02-20, 2026-03-22): A0E2's 2026-03-15 and 2026-03-21 matches
+        # are inside; the 2026-03-22 match itself is excluded (strict <).
+        ("A0E2", date(2026, 3, 22), 2),
     ],
     ids=["30d-window-empty", "30d-window-two"],
 )
-def test_matches_30d_window_regression(as_of, expected):
+def test_matches_30d_window_regression(player_id, as_of, expected):
     """Regression: matches_30d uses a real date window, not a ROWS frame."""
-    out = build_inference_features("A0E2", "UNKNOWN_PLAYER", "hard", as_of_date=as_of)
+    out = build_inference_features(player_id, "UNKNOWN_PLAYER", "hard", as_of_date=as_of)
     row = out.iloc[0]
-    assert row["player_id"] == "A0E2"  # 'A0E2' < 'UNKNOWN_PLAYER'
+    assert row["player_id"] == player_id  # 'A0E2'/'F0FV' < 'UNKNOWN_PLAYER'
     assert row["opponent_id"] == "UNKNOWN_PLAYER"
     assert row["player_matches_30d"] == expected
+
+
+def test_null_handedness_falls_back_to_pool_rate(monkeypatch):
+    """A profile with NULL handedness uses the pool left-handed rate, not a
+    silent hardcoded 0 (parity with match_features.sql, which keeps non-L/R
+    handedness NULL for train-time imputation)."""
+    profile = pd.DataFrame(
+        [
+            {
+                "player_id": "S0AG",
+                "height": 191.0,
+                "handedness": None,
+                "turned_pro": 2018,
+            }
+        ]
+    )
+    monkeypatch.setattr("src.features.inference.execute_df", lambda _sql, _params=None: profile)
+    agg = {"avg_height": 185.0, "left_handed_rate": 0.08, "avg_years_pro": 8.0}
+    values = inference._profile_values("S0AG", date(2026, 9, 1), agg)
+    assert values["is_left_handed"] == pytest.approx(0.08)
+    # Non-NULL cells are still read directly.
+    assert values["height"] == 191.0
+    assert values["years_pro"] == 8.0  # 2026 - 2018

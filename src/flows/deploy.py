@@ -1,15 +1,11 @@
 """Build and deploy the production Bento serving image.
 
-Deploy-only: no notebook runs here. The training pipeline already ran 05
-(evaluation/promotion) as part of its notebook chain; this flow just invokes
-`build_bento_image()` builds in the local Docker engine and never depends on
-k3d. `deploy_bento()` additionally pushes that image to the k3d-managed local
-registry and updates Kubernetes when the cluster is running.
+Deploy-only: deploy_bento() just invokes `build_bento_image()` which builds in the local Docker engine first
+and never depends on k3d. If the cluster is up, it should push that image to the k3d-managed local
+registry and force rollout.
 
 Usage:
     uv run python src/flows/deploy.py
-    just bento-build
-    just deploy-bento
 """
 
 import json
@@ -21,6 +17,7 @@ from typing import Any
 from prefect import flow
 
 from src.constants import ARTIFACTS, DATA_PROCESSED, PRODUCTION_MODEL, ROOT
+from src.utils import load_env
 
 # --- Deploy-only paths and names ---
 TEMPLATE_BENTOFILE = ROOT / "bentofile.yaml"
@@ -29,15 +26,11 @@ PINNED_BENTOFILE = DATA_PROCESSED / "bentofile.pinned.yaml"
 BENTO_TAG_FILE = DATA_PROCESSED / "bento_tag.txt"
 STATE_FILE = DATA_PROCESSED / "bento_build_state.json"
 LOCAL_BENTO_REPOSITORY = "bento-serving"
-REGISTRY_NAME = "tennis-ml-registry"
-# Host-side push endpoint: Docker trusts localhost as an insecure registry by
-# default, so `localhost:5000` needs no daemon config. The cluster-internal
-# endpoint below is what k8s pulls; the registry stores by repository path
-# (bento-serving), so a push to localhost:5000 is pullable as the in-cluster
-# hostname. See infra/manifests/deploy/bentoml.yaml for the pull-side image.
-REGISTRY_PUSH_REPOSITORY = "localhost:5000/bento-serving"
-REGISTRY_PULL_REPOSITORY = "tennis-ml-registry:5000/bento-serving"
+
 K3D_CLUSTER = "tennis-ml"
+REGISTRY_NAME = "tennis-ml-registry"
+REGISTRY_PUSH_REPOSITORY = "localhost:5000/bento-serving"  # from host
+REGISTRY_PULL_REPOSITORY = "tennis-ml-registry:5000/bento-serving"  # inside k3d
 BENTO_MANIFEST = ROOT / "infra" / "manifests" / "deploy" / "bentoml.yaml"
 
 # The BentoML model name each pinned MLflow registered model maps to —
@@ -55,6 +48,7 @@ AUX_FILES = [
     DATA_PROCESSED / "bio_embeddings.parquet",
     DATA_PROCESSED / "bio_feature_cols.json",
     NN_ONNX_FILE,
+    ROOT / "data" / "tennis.duckdb",
 ]
 
 # Files whose content changes should trigger a rebuild.
@@ -64,38 +58,34 @@ FINGERPRINT_FILES = [
     *AUX_FILES,
 ]
 
-# The deploy gate reads the promoted `ensemble_lr_model` from MLflow; local
-# runs without an explicit tracking URI default to a repo-root mlruns/, so
-# redirect those to the shared artifacts/ area. Deployed workers (k8s
-# config-map sets MLFLOW_TRACKING_URI=http://mlflow:5000) are untouched.
-if not os.environ.get("MLFLOW_TRACKING_URI"):
-    os.environ["MLFLOW_TRACKING_URI"] = f"sqlite:///{ARTIFACTS / 'mlflow.db'}"
-    os.environ["_MLFLOW_SERVER_ARTIFACT_ROOT"] = str(ARTIFACTS / "mlruns")
+load_env()
 
 
 @flow(log_prints=True)
-def deploy_flow() -> None:
+def deploy_flow(force: bool = False) -> None:
     """Deploy-only flow: run the single deployment path for the promoted model.
 
     No-op unless 05 promoted a production version newer than the last
     deployed one. Evaluation/promotion already ran in the training pipeline;
-    no notebook runs here.
+    no notebook runs here. With force=True, bypass the Bento/image cache and
+    rebuild + redeploy regardless.
     """
-    deploy_bento()
+    deploy_bento(force=force)
 
 
 def _latest_production_version(client: Any) -> Any:
-    """Return the version `models:/ensemble_lr_model/latest` resolves to.
+    """Return the version `models:/ensemble_lr_model@champion` resolves to.
 
-    MLflow's `latest` alias means the most recent version in stage "None";
-    mirror that exactly instead of guessing. Returns None when there is no
-    such version.
+    MLflow's `champion` alias points at the promoted production version;
+    mirror that exactly instead of guessing. Returns None when no version
+    has been aliased yet (no champion).
     """
-    versions = client.search_model_versions(f"name = '{PRODUCTION_MODEL}'")
-    staged = [v for v in versions if v.current_stage == "None"]
-    if not staged:
+    from mlflow.exceptions import MlflowException
+
+    try:
+        return client.get_model_version_by_alias(PRODUCTION_MODEL, "champion")
+    except MlflowException:
         return None
-    return max(staged, key=lambda v: int(v.version))
 
 
 def _read_state() -> dict[str, Any]:
@@ -120,18 +110,18 @@ def _resolve_pins(client: Any, production: Any) -> dict[str, dict[str, Any]]:
     run = client.get_run(production.run_id)
 
     pins: dict[str, dict[str, Any]] = {
-        "production": {"registered_model_name": PRODUCTION_MODEL, "version": production.version}
+        "production": {"registered_model_name": PRODUCTION_MODEL, "alias": "champion"}
     }
     for cls in BASE_BENTO_NAMES:
         registered_name = run.data.params.get(f"base_{cls}_registered_name")
-        version = run.data.params.get(f"base_{cls}_version")
-        if not registered_name or not version:
+        alias = run.data.params.get(f"base_{cls}_alias")
+        if not registered_name or not alias:
             raise RuntimeError(
                 f"production run {run.info.run_id} has no recorded "
-                f"base_{cls}_registered_name / base_{cls}_version params — "
+                f"base_{cls}_registered_name / base_{cls}_alias params — "
                 "run the training pipeline first. Nothing to build."
             )
-        pins[cls] = {"registered_model_name": registered_name, "version": version}
+        pins[cls] = {"registered_model_name": registered_name, "alias": alias}
     return pins
 
 
@@ -172,7 +162,7 @@ def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
     warnings.filterwarnings("ignore", category=UserWarning, module="torch.*")
     warnings.filterwarnings("ignore", category=FutureWarning, message=".*LeafSpec.*")
 
-    uri = f"models:/{nn_pin['registered_model_name']}/{nn_pin['version']}"
+    uri = f"models:/{nn_pin['registered_model_name']}@{nn_pin['alias']}"
     print(f"Materializing ONNX from {uri}")
 
     # Import (or reuse) the pinned MLflow model into the local BentoML store so
@@ -235,7 +225,7 @@ def _file_hash(path: Path) -> str:
 def _state_fingerprint(pins: dict[str, dict[str, Any]]) -> str:
     """Hash the model pins plus the content of everything baked into the Bento."""
     parts = [
-        f"{key}={pins[key]['registered_model_name']}:{pins[key]['version']}"
+        f"{key}={pins[key]['registered_model_name']}@{pins[key]['alias']}"
         for key in ["linear", "gbdt", "nn", "production"]
     ]
     parts.extend(f"{path.relative_to(ROOT)}:{_file_hash(path)}" for path in FINGERPRINT_FILES)
@@ -248,7 +238,7 @@ def _import_models(pins: dict[str, dict[str, Any]]) -> dict[str, str]:
 
     tags: dict[str, str] = {}
     for key, pin in pins.items():
-        uri = f"models:/{pin['registered_model_name']}/{pin['version']}"
+        uri = f"models:/{pin['registered_model_name']}@{pin['alias']}"
         try:
             stored = bentoml.models.get(pin["registered_model_name"])
         except Exception:
@@ -340,8 +330,12 @@ def _image_exists(image: str) -> bool:
     )
 
 
-def build_bento_image() -> tuple[str, int]:
-    """Build the promoted Bento into local Docker without requiring k3d."""
+def build_bento_image(force: bool = False) -> tuple[str, int]:
+    """Build the promoted Bento into local Docker without requiring k3d.
+
+    force=True skips the fingerprint and image cache checks so the Bento and
+    local image are always rebuilt.
+    """
     import bentoml
     from mlflow.tracking.client import MlflowClient
 
@@ -356,7 +350,11 @@ def build_bento_image() -> tuple[str, int]:
     _check_aux_files()
     fingerprint = _state_fingerprint(pins)
 
-    tag = _cached_tag(state, fingerprint)
+    if force:
+        print("Force: rebuilding Bento and image regardless of cache.")
+        tag = None
+    else:
+        tag = _cached_tag(state, fingerprint)
     if tag is None:
         tags = _import_models(pins)
         pinned = _write_pinned_bentofile(tags)
@@ -369,22 +367,28 @@ def build_bento_image() -> tuple[str, int]:
         print(f"No Bento rebuild needed — reusing {tag}.")
 
     image = f"{LOCAL_BENTO_REPOSITORY}:{tag.split(':', 1)[1]}"
-    if _image_exists(image):
-        print(f"Local image already exists — reusing {image}.")
+    if force:
+        print(f"Force: containerizing {tag} -> {image} regardless of cache.")
+        containerize = True
     else:
-        print(f"Containerizing {tag} -> {image} with BentoML's native v2 image spec...")
+        containerize = not _image_exists(image)
+    if containerize:
+        print(f"Containerizing {tag} -> {image} with BentoML...")
         bentoml.container.build(tag, backend="docker", image_tag=(image,))
+    else:
+        print(f"Local image already exists — reusing {image}.")
     subprocess.run(["docker", "tag", image, f"{LOCAL_BENTO_REPOSITORY}:latest"], check=True)
     return image, int(production.version)
 
 
-def deploy_bento() -> None:
+def deploy_bento(force: bool = False) -> None:
     """Build locally, then push and roll out through the k3d registry.
 
     A stopped or absent cluster does not prevent the local image build. A
     running cluster must have the registry declared in infra/k3d/config.yaml.
+    force=True rebuilds the Bento and image even when cached.
     """
-    local_image, production_version = build_bento_image()
+    local_image, production_version = build_bento_image(force=force)
 
     if not _cluster_running():
         print(f"k3d cluster {K3D_CLUSTER} is not running — local image is ready: {local_image}")
@@ -395,6 +399,8 @@ def deploy_bento() -> None:
             "infra/k3d/config.yaml"
         )
 
+    if force:
+        print("Force: re-pushing image and re-applying manifest in the cluster.")
     image_version = local_image.split(":", 1)[1]
     push_image = f"{REGISTRY_PUSH_REPOSITORY}:{image_version}"
     push_latest = f"{REGISTRY_PUSH_REPOSITORY}:latest"
@@ -422,8 +428,19 @@ def deploy_bento() -> None:
     )
     state = _read_state()
     _write_state({**state, "deployed_version": production_version, "deployed_image": pull_image})
-    print(f"Deployed {pull_image} (production v{production_version}) to {K3D_CLUSTER}")
+    print(f"Deployed production {pull_image} to {K3D_CLUSTER}")
 
 
 if __name__ == "__main__":
-    deploy_flow()
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Build and deploy the production Bento serving image."
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force rebuild + redeploy of the latest ensemble_lr_model, bypassing the Bento/image cache.",
+    )
+    args = parser.parse_args()
+    deploy_flow(force=args.force)

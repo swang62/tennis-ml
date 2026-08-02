@@ -6,6 +6,7 @@ import pandas as pd
 
 
 def run_ingestion_checks(df: pd.DataFrame) -> dict[str, bool | list[str]]:
+    """Validate bronze.match_events-shaped rows (player1_*/player2_* columns)."""
     issues = []
 
     nulls = df.isnull().sum()
@@ -17,11 +18,9 @@ def run_ingestion_checks(df: pd.DataFrame) -> dict[str, bool | list[str]]:
     if dupes:
         issues.append(f"{dupes} duplicate match_ids")
 
-    if (df["player_ranking"] <= 0).any():
-        issues.append("player_ranking <= 0 found")
-
-    if (df["opponent_ranking"] <= 0).any():
-        issues.append("opponent_ranking <= 0 found")
+    for side in ("player1", "player2"):
+        if (df[f"{side}_ranking"] <= 0).any():
+            issues.append(f"{side}_ranking <= 0 found")
 
     for col in df.select_dtypes("object"):
         for _name, group in df.groupby(col):

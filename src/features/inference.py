@@ -17,8 +17,14 @@ players as of a given date, mirroring `gold.match_features` semantics:
   for ranking/streak-related values, MEAN for other numerics. When BOTH
   players are missing, both sides receive the same imputed values, so every
   pairwise differential is 0 (neutral).
+* Profile-derived identity (height, is_left_handed, years_pro-at-as-of-date)
+  comes from `gold.player_profiles`; players without a profile and NULL cells
+  are imputed from on-demand aggregates over all profiles (mean height, mean
+  left-handed rate, mean years-pro at the as-of date), so the same neutral
+  differentials hold for two profile-less players.
 * If the eligible pool is empty, constant fallbacks are used:
-  ranking=100, rates=0.0, streak=0, days_since_last_match=365, matches_30d=0.
+  ranking=100, rates=0.0, streak=0, days_since_last_match=365, matches_30d=0,
+  height=183, left-handed rate=0.0, years_pro=8.
 
 Player ids and dates NEVER appear inside SQL strings: every one flows through
 `?` placeholders and a params list.
@@ -45,6 +51,26 @@ VALID_SURFACES = {"clay", "grass", "hard"}
 VALID_TOURNAMENT_LEVELS = {0, 1, 2, 3, 4}
 VALID_ROUND_ENCODINGS = {0, 1, 2, 3, 4, 5, 6, 7}
 
+# Optional convenience layer: human-readable tournament/round strings mapped to
+# the SAME integer encodings as the CASE expressions in
+# dbt/models/gold/match_features.sql. Unknown strings map to 0 (that codebook's
+# ELSE branch), so stored encodings are unchanged (finals stays 7, unknown 0).
+_TOURNAMENT_LEVELS = {
+    "grand_slam": 4,
+    "masters": 3,
+    "atp_500": 2,
+    "atp_250": 1,
+}
+_ROUND_ENCODINGS = {
+    "r128": 1,
+    "r64": 2,
+    "r32": 3,
+    "r16": 4,
+    "qf": 5,
+    "sf": 6,
+    "f": 7,
+}
+
 # Constant fallbacks when the imputation pool is empty (no eligible snapshots
 # anywhere before the as-of date). Mirrors the documented cold-start fallback
 # days_since_last_match=365 from gold.match_features.
@@ -53,6 +79,9 @@ _DEFAULT_RATE = 0.0
 _DEFAULT_STREAK = 0
 _DEFAULT_DAYS_SINCE = 365
 _DEFAULT_MATCHES_30D = 0
+_DEFAULT_HEIGHT = 183.0
+_DEFAULT_LEFT_HANDED_RATE = 0.0
+_DEFAULT_YEARS_PRO = 8.0
 
 _SURFACE_TO_SNAPSHOT_COL = {
     "clay": "clay_win_rate_10",
@@ -132,6 +161,25 @@ FROM (
        AND pm.match_date < ?::DATE
     GROUP BY pr.player_id
 )
+"""
+
+# Per-player static identity from gold.player_profiles (one row per player).
+_PROFILE_SQL = """
+SELECT player_id, height, handedness, turned_pro
+FROM gold.player_profiles
+WHERE player_id = ?
+"""
+
+# On-demand profile imputation pool over ALL profiles (identity is static, so
+# no as-of window applies beyond the years_pro computation): mean height, mean
+# left-handed rate, and mean years-pro at the as-of date. One row; NULL when
+# no profiles exist.
+_PROFILE_POOL_AGG_SQL = """
+SELECT
+    AVG(height) AS avg_height,
+    AVG(CASE WHEN handedness = 'L' THEN 1 ELSE 0 END) AS left_handed_rate,
+    AVG(?::INTEGER - turned_pro) AS avg_years_pro
+FROM gold.player_profiles
 """
 
 
@@ -214,6 +262,47 @@ def _side_values(
     }
 
 
+def _profile_values(pid: str, as_of_date: date, agg: dict[str, float]) -> dict[str, float]:
+    """Fetch one side's profile-derived values from gold.player_profiles.
+
+    Keys: "height", "is_left_handed", "years_pro". A missing profile (or a
+    NULL height/turned_pro/handedness cell) falls back to the on-demand pool
+    aggregates, so two unknown players get identical defaults (every profile
+    differential collapses to 0) and the row stays NaN-free. years_pro is
+    time-aware: as-of year minus turned_pro, not the raw year.
+    """
+    df = execute_df(_PROFILE_SQL, [pid])
+    if df.empty:
+        return {
+            "height": _agg_or(agg, "avg_height", _DEFAULT_HEIGHT),
+            "is_left_handed": _agg_or(agg, "left_handed_rate", _DEFAULT_LEFT_HANDED_RATE),
+            "years_pro": _agg_or(agg, "avg_years_pro", _DEFAULT_YEARS_PRO),
+        }
+    row = df.iloc[0]
+    height = row["height"]
+    height = float(height) if not pd.isna(height) else _agg_or(agg, "avg_height", _DEFAULT_HEIGHT)
+    turned_pro = row["turned_pro"]
+    years_pro = (
+        float(as_of_date.year - int(turned_pro))
+        if not pd.isna(turned_pro)
+        else _agg_or(agg, "avg_years_pro", _DEFAULT_YEARS_PRO)
+    )
+    # Missing/unknown handedness (NULL or any value other than L/R) uses the
+    # pool left-handed rate, mirroring the SQL side where non-L/R handedness
+    # stays NULL for train-time imputation. Never hardcode 0 here.
+    handedness = row["handedness"]
+    is_left_handed = (
+        float(handedness == "L")
+        if isinstance(handedness, str) and handedness in ("L", "R")
+        else _agg_or(agg, "left_handed_rate", _DEFAULT_LEFT_HANDED_RATE)
+    )
+    return {
+        "height": height,
+        "is_left_handed": is_left_handed,
+        "years_pro": years_pro,
+    }
+
+
 def build_inference_features(
     player_id: str,
     opponent_id: str,
@@ -222,6 +311,8 @@ def build_inference_features(
     as_of_date: date | None = None,
     tournament_level: int = 0,
     round_encoded: int = 0,
+    tournament: str | None = None,
+    round: str | None = None,
 ) -> pd.DataFrame:
     """Build ONE finalized canonical inference row.
 
@@ -229,10 +320,31 @@ def build_inference_features(
         [*FEATURE_COLS, "player_id", "opponent_id"]
     (in that order). The canonical lower-id player is always the player_*
     side, matching gold.match_features' orientation. No NaNs in any cell.
+
+    `tournament_level` and `round_encoded` are the integer context features
+    (default 0), validated to the same value sets as the CASE expressions in
+    dbt/models/gold/match_features.sql.
+
+    Optional `tournament`/`round` string aliases are a convenience layer that
+    maps through `_TOURNAMENT_LEVELS`/`_ROUND_ENCODINGS` to those SAME integer
+    encodings; unknown strings map to 0 (the codebook's ELSE branch). Pass
+    either the int or the string for each, never both.
     """
     # ── Boundary validation ──
     if surface not in VALID_SURFACES:
         raise ValueError(f"surface must be one of {sorted(VALID_SURFACES)}, got {surface!r}")
+    if tournament is not None:
+        if tournament_level != 0:
+            raise ValueError("pass either tournament_level (int) or tournament (str), not both")
+        if not isinstance(tournament, str):
+            raise TypeError(f"tournament must be a string, got {tournament!r}")
+        tournament_level = _TOURNAMENT_LEVELS.get(tournament, 0)
+    if round is not None:
+        if round_encoded != 0:
+            raise ValueError("pass either round_encoded (int) or round (str), not both")
+        if not isinstance(round, str):
+            raise TypeError(f"round must be a string, got {round!r}")
+        round_encoded = _ROUND_ENCODINGS.get(round, 0)
     if isinstance(tournament_level, bool) or (
         not isinstance(tournament_level, int) or tournament_level not in VALID_TOURNAMENT_LEVELS
     ):
@@ -275,6 +387,7 @@ def build_inference_features(
         "median_matches_30d",
         _DEFAULT_MATCHES_30D,
     )
+    profile_agg = execute_df(_PROFILE_POOL_AGG_SQL, [as_of_date.year]).iloc[0].to_dict()
 
     def _latest_snapshot(pid: str) -> dict[str, object] | None:
         df = execute_df(_LATEST_SNAPSHOT_SQL, [pid, as_of_iso])
@@ -288,6 +401,8 @@ def build_inference_features(
     opponent_side = _side_values(
         _latest_snapshot(higher_id), as_of_date, surface, agg, median_days, median_matches
     )
+    player_side.update(_profile_values(lower_id, as_of_date, profile_agg))
+    opponent_side.update(_profile_values(higher_id, as_of_date, profile_agg))
 
     # ── Assemble the canonical row in FEATURE_COLS order ──
     row: dict[str, int | float | str] = {}
@@ -311,6 +426,9 @@ def build_inference_features(
         player_side["surface_win_rate_10"] - opponent_side["surface_win_rate_10"]
     )
     row["rank_trend_diff"] = player_side["rank_trend_10"] - opponent_side["rank_trend_10"]
+    row["height_diff"] = player_side["height"] - opponent_side["height"]
+    row["handedness_diff"] = player_side["is_left_handed"] - opponent_side["is_left_handed"]
+    row["years_pro_diff"] = player_side["years_pro"] - opponent_side["years_pro"]
 
     # Context
     row["is_clay"] = int(surface == "clay")
