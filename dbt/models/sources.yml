@@ -1,0 +1,65 @@
+version: 2
+
+sources:
+  - name: bronze
+    description: Raw match data ingested from CSV by the Prefect ingest flow.
+    schema: bronze
+    tables:
+      - name: match_events
+        description: >
+          One row per match with both players' stats in the row (player1_* /
+          player2_* columns) plus winner_id. The gold layer expands each row
+          into two player-perspective rows before computing rolling features.
+        columns:
+          - name: match_id
+            description: Unique match identifier.
+          - name: match_date
+            description: Match date.
+          - name: player1_id
+            description: First player.
+          - name: player2_id
+            description: Second player.
+          - name: tournament
+            description: Tournament name.
+          - name: round
+            description: Draw round (r128, r64, r32, r16, qf, sf, f).
+          - name: surface
+            description: Court surface (clay, grass, hard).
+          - name: player1_ranking
+            description: ATP ranking of player1 at match time.
+          - name: player2_ranking
+            description: ATP ranking of player2 at match time.
+          - name: player1_wins_last_10
+            description: Player1 wins in the 10 matches before this one.
+          - name: player1_matches_last_10
+            description: Player1 matches played in the 10 before this one.
+          - name: player1_aces
+            description: Player1 aces in this match.
+          - name: player1_double_faults
+            description: Player1 double faults in this match.
+          - name: player1_first_serves_made
+            description: Player1 first serves made in this match.
+          - name: player1_total_serve_points
+            description: Player1 total serve points in this match.
+          - name: player1_break_points_won
+            description: Player1 break points won in this match.
+          - name: player1_break_points_total
+            description: Player1 break points faced in this match.
+          - name: player2_wins_last_10
+            description: Player2 wins in the 10 matches before this one.
+          - name: player2_matches_last_10
+            description: Player2 matches played in the 10 before this one.
+          - name: player2_aces
+            description: Player2 aces in this match.
+          - name: player2_double_faults
+            description: Player2 double faults in this match.
+          - name: player2_first_serves_made
+            description: Player2 first serves made in this match.
+          - name: player2_total_serve_points
+            description: Player2 total serve points in this match.
+          - name: player2_break_points_won
+            description: Player2 break points won in this match.
+          - name: player2_break_points_total
+            description: Player2 break points faced in this match.
+          - name: winner_id
+            description: Player who won the match (player1_id or player2_id).

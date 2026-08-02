@@ -1,7 +1,5 @@
-"""Tennis ML pipeline package."""
+"""Tennis ML pipeline package.
 
-from pathlib import Path
-
-from dotenv import load_dotenv
-
-load_dotenv(Path(__file__).parent.parent / ".env")
+Environment loading is explicit only: call src.utils.load_env() at process
+entry points (pipeline runner, notebooks). Nothing is loaded on import.
+"""

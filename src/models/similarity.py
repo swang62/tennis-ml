@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import NotRequired, TypedDict
 
 import faiss
@@ -11,14 +10,32 @@ import numpy as np
 import pandas as pd
 from fastembed import TextEmbedding
 
+from src.constants import ROOT
 from src.db.client import get_client, to_dataframe
 
 PROFILES_TABLE = "gold.player_profiles"
 MODEL_NAME = "BAAI/bge-small-en-v1.5"
 
-ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_INDEX = ROOT / "data" / "processed" / "player_similarity.index"
 DEFAULT_METADATA = ROOT / "data" / "processed" / "player_metadata.json"
+
+BIO_COL_PREFIX = "bio_"
+
+
+def embed_bio_summaries(profiles: pd.DataFrame, model_name: str = MODEL_NAME) -> pd.DataFrame:
+    """Embed each profile's summary into a player_id -> bio_* embedding frame.
+
+    Pure function of the input frame: no DB access, no disk writes. Empty or
+    missing summaries embed as the empty-string vector so every player stays
+    joinable. Shared by the FAISS similarity index and the NN static pathway.
+    """
+    model = TextEmbedding(model_name)
+    texts = [s if isinstance(s, str) and s else "" for s in profiles["summary"]]
+    embeddings = np.array(list(model.embed(texts)), dtype=np.float32)
+    out = pd.DataFrame(embeddings)
+    out.columns = [f"{BIO_COL_PREFIX}{i}" for i in range(embeddings.shape[1])]
+    out.insert(0, "player_id", profiles["player_id"].to_numpy())
+    return out
 
 
 class PlayerData(TypedDict):
@@ -46,30 +63,24 @@ class PlayerSimilarity:
 
     def build(self) -> None:
         """Query player profiles, build FAISS index, save to disk, and load in memory."""
-        client = get_client()
         df = to_dataframe(
-            (
-                f"SELECT player_id, display_name, backhand, play_style,"
-                f" handedness, height, turned_pro, summary FROM {PROFILES_TABLE}"
-            ),
-            client,
+            f"SELECT player_id, display_name, backhand, play_style,"
+            f" handedness, height, turned_pro, summary FROM {PROFILES_TABLE}"
         )
         df = df[df["player_id"] != ""].reset_index(drop=True)
         if df.empty:
             return
 
-        model = TextEmbedding(MODEL_NAME)
-        summaries = [s if s else "" for s in df["summary"].astype("string")]
-        embeddings = np.array(list(model.embed(summaries)), dtype=np.float32)
-
         # One-hot encode categoricals, numeric features, then stack with embeddings
         encoded = pd.get_dummies(df[["play_style", "backhand", "handedness"]]).astype(np.float32)
-        height = pd.to_numeric(df["height"], errors="coerce").fillna(0).astype(np.float32)
-        years_pro = (
-            (pd.Timestamp.now().year - pd.to_numeric(df["turned_pro"], errors="coerce"))
-            .fillna(0)
-            .astype(np.float32)
-        )
+        # height/turned_pro are typed SMALLINT/INTEGER in gold.player_profiles;
+        # only missing values (NULL) need filling.
+        height = df["height"].fillna(0).astype(np.float32)
+        years_pro = (pd.Timestamp.now().year - df["turned_pro"].fillna(0)).astype(np.float32)
+
+        # Shared embedding path (also used by the NN static features in 02_tune_nn).
+        embeddings = embed_bio_summaries(df[["player_id", "summary"]])
+        bio_cols = [c for c in embeddings.columns if c != "player_id"]
 
         features = np.ascontiguousarray(
             pd.concat(
@@ -77,7 +88,7 @@ class PlayerSimilarity:
                     encoded,
                     height.rename("height"),
                     years_pro.rename("years_pro"),
-                    pd.DataFrame(embeddings),
+                    embeddings[bio_cols],
                 ],
                 axis=1,
             ).to_numpy(np.float32)

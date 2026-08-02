@@ -19,10 +19,10 @@ infra/           — k3d config, static K8s manifests, DuckDB init SQL
 notebooks/       — EDA + parameterized Papermill notebooks
 src/
   features/      — Feature column definitions (shared)
-  flows/         — Prefect pipelines (training, ETL, pipeline, ingest)
+  flows/         — ETL Prefect flow + standalone training pipeline (src/flows/pipeline.py)
   models/        — Player similarity index (FAISS)
   serving/       — BentoML service
-  dashboard/     — Streamlit dashboard
+  dashboard/     — Panel dashboard
   db/            — DuckDB client
 ```
 
@@ -59,11 +59,11 @@ just setup
 
 | Event | Action | Method |
 |---|---|---|
-| Manual ingest | Load CSV → bronze | `just db-ingest` |
+| Manual ingest | Load CSV → bronze | `uv run python -m src.flows.ingest data/matches.csv` |
 | Manual trigger | Training pipeline | `just pipeline` |
-| Model promoted | BentoML rebuild | Prefect task + `just bento-build` |
+| Model promoted | BentoML rebuild | Prefect task + `just deploy-bento` |
 
 ## Pipelines
 
-- `etl_flow` — bronze → gold transforms (DuckDB SQL), player profile enrichment
-- `training_flow` — on demand: features → tune 3 models → pick best → train final → evaluate → promote
+- `etl_flow` — bronze → gold transforms (DuckDB SQL), player profile enrichment (Prefect)
+- `pipeline.py` — standalone training runner (no Prefect): features → tune 3 models → pick best → train final → evaluate → promote

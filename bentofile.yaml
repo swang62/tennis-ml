@@ -1,8 +1,23 @@
+# Bento build template for the stacked-ensemble serving image.
+#
+# This file is a TEMPLATE: `just deploy-bento` (src/flows/deploy.py) copies
+# it, replaces the `models:` list with the exact BentoML tags imported from
+# the pinned MLflow versions (resolved from the `production_model` source
+# run params), and runs the build against that generated
+# `data/processed/bentofile.pinned.yaml`. The `:latest` refs below are
+# placeholders only — the deploy target never builds from this file directly.
+name: stacked_ensemble
 service: "src/serving/service.py:TennisPredictor"
 include:
   - "src/"
+  - "data/processed/linear_scaler.pkl"
+  - "data/processed/bio_embeddings.parquet"
+  - "data/processed/bio_feature_cols.json"
 models:
-  - "tennis_prediction:latest"
+  - "linear_best:latest"
+  - "gbdt_best:latest"
+  - "nn_best:latest"
+  - "production_model:latest"
 python:
   packages:
     - bentoml==1.4.39
@@ -10,5 +25,8 @@ python:
     - scikit-learn>=1.6
     - xgboost>=2.0
     - lightgbm>=4.5
+    - torch>=2.0
+    - lightning>=2.0
     - pandas>=2.2
+    - pyarrow>=15.0
     - numpy>=1.26
