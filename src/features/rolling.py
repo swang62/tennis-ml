@@ -28,8 +28,6 @@ GOLD_ROLLING_COLS: list[str] = [
     "first_serve_pct_10",
     "break_pct_5",
     "break_pct_10",
-    "avg_opp_rank_10",
-    "avg_opp_rank_20",
     "rank_trend_10",
     "rank_trend_20",
     "win_streak",
@@ -44,22 +42,22 @@ GOLD_ROLLING_COLS: list[str] = [
 
 PLAYER_COLS: list[str] = [
     "player_ranking",
-    *GOLD_ROLLING_COLS,
+    *[f"player_{c}" for c in GOLD_ROLLING_COLS],
 ]
 
 OPPONENT_COLS: list[str] = [
     "opponent_ranking",
-    *[f"opp_{c}" for c in GOLD_ROLLING_COLS],
+    *[f"opponent_{c}" for c in GOLD_ROLLING_COLS],
 ]
 
 DIFF_COLS: list[str] = [
     "rank_diff",
     "win_rate_diff",
     "ace_rate_diff",
-    "break_diff",
-    "streak_diff",
+    "break_pct_diff",
+    "win_streak_diff",
     "matches_30d_diff",
-    "surface_win_diff",
+    "surface_win_rate_diff",
     "rank_trend_diff",
 ]
 
@@ -86,27 +84,34 @@ def build_inference_features(
     Order-invariant: the lower ATP id is treated as the canonical player, so
     swapping player_row/opponent_row yields the same feature row (same
     prediction). The prediction is always P(canonical player wins).
+
+    Each per-player dict uses the player-perspective naming: the player's own
+    ranking under `player_ranking` and rolling stats under their unprefixed
+    names (e.g. `win_rate_5`, `first_serve_pct_5`).
     """
     if str(player_row["player_id"]) > str(opponent_row["player_id"]):
         player_row, opponent_row = opponent_row, player_row
 
+    def _player(col: str) -> str:
+        return "player_ranking" if col == "player_ranking" else col.removeprefix("player_")
+
+    def _opponent(col: str) -> str:
+        return "player_ranking" if col == "opponent_ranking" else col.removeprefix("opponent_")
+
     row = {}
     for col in PLAYER_COLS:
-        row[col] = player_row.get(col, 0)
+        row[col] = player_row.get(_player(col), 0)
     for col in OPPONENT_COLS:
-        # opponent_ranking is stored un-prefixed as player_ranking in the
-        # opponent's own perspective row; the rest carry the opp_ prefix.
-        opp_col = "player_ranking" if col == "opponent_ranking" else col.removeprefix("opp_")
-        row[col] = opponent_row.get(opp_col, 0)
+        row[col] = opponent_row.get(_opponent(col), 0)
 
     # Differentials
     row["rank_diff"] = player_row.get("player_ranking", 0) - opponent_row.get("player_ranking", 0)
     row["win_rate_diff"] = player_row.get("win_rate_10", 0) - opponent_row.get("win_rate_10", 0)
     row["ace_rate_diff"] = player_row.get("ace_rate_10", 0) - opponent_row.get("ace_rate_10", 0)
-    row["break_diff"] = player_row.get("break_pct_10", 0) - opponent_row.get("break_pct_10", 0)
-    row["streak_diff"] = player_row.get("win_streak", 0) - opponent_row.get("win_streak", 0)
+    row["break_pct_diff"] = player_row.get("break_pct_10", 0) - opponent_row.get("break_pct_10", 0)
+    row["win_streak_diff"] = player_row.get("win_streak", 0) - opponent_row.get("win_streak", 0)
     row["matches_30d_diff"] = player_row.get("matches_30d", 0) - opponent_row.get("matches_30d", 0)
-    row["surface_win_diff"] = player_row.get("surface_win_rate_10", 0) - opponent_row.get(
+    row["surface_win_rate_diff"] = player_row.get("surface_win_rate_10", 0) - opponent_row.get(
         "surface_win_rate_10", 0
     )
     row["rank_trend_diff"] = player_row.get("rank_trend_10", 0) - opponent_row.get(

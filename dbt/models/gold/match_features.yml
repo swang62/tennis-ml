@@ -91,123 +91,117 @@ models:
       - name: double_fault_rate
         description: Canonical player double fault rate in this match.
       - name: first_serve_pct
-        description: Canonical player first serve percentage in this match.
+        description: Canonical player first serve pct in this match.
       - name: break_points_converted_pct
         description: Canonical player break point conversion in this match.
-      - name: win_rate_5
+
+      # Canonical player-side rolling stats (player_ prefix)
+      - name: player_win_rate_5
         description: Canonical player rolling win rate, last 5 matches.
-      - name: win_rate_10
+      - name: player_win_rate_10
         description: Canonical player rolling win rate, last 10 matches.
-      - name: win_rate_20
+      - name: player_win_rate_20
         description: Canonical player rolling win rate, last 20 matches.
-      - name: ace_rate_5
+      - name: player_ace_rate_5
         description: Canonical player rolling ace rate, last 5 matches.
-      - name: ace_rate_10
+      - name: player_ace_rate_10
         description: Canonical player rolling ace rate, last 10 matches.
-      - name: first_serve_pct_5
+      - name: player_first_serve_pct_5
         description: Canonical player rolling first serve pct, last 5 matches.
-      - name: first_serve_pct_10
+      - name: player_first_serve_pct_10
         description: Canonical player rolling first serve pct, last 10 matches.
-      - name: break_pct_5
+      - name: player_break_pct_5
         description: Canonical player rolling break pct, last 5 matches.
-      - name: break_pct_10
+      - name: player_break_pct_10
         description: Canonical player rolling break pct, last 10 matches.
-      - name: avg_opp_rank_10
-        description: Canonical player avg opponent rank, last 10 matches.
-      - name: avg_opp_rank_20
-        description: Canonical player avg opponent rank, last 20 matches.
-      - name: rank_trend_10
+      - name: player_rank_trend_10
         description: Canonical player rank trend over last 10 matches.
-      - name: rank_trend_20
+      - name: player_rank_trend_20
         description: Canonical player rank trend over last 20 matches.
-      - name: win_streak
+      - name: player_win_streak
         description: Canonical player current win streak.
-      - name: days_since_last_match
+      - name: player_days_since_last_match
         description: Days since canonical player's last match (365 if none).
-      - name: matches_30d
+      - name: player_matches_30d
         description: Canonical player matches in the 30 days before this match.
-      - name: surface_win_rate_10
+      - name: player_surface_win_rate_10
         description: Canonical player win rate on this surface, last 10 matches.
 
-      # Opponent-side stats (opp_ prefix)
-      - name: opp_wins_last_10
+      # Opponent-side stats (opponent_ prefix)
+      - name: opponent_wins_last_10
         description: Opponent wins in the 10 matches before this one.
-      - name: opp_matches_last_10
+      - name: opponent_matches_last_10
         description: Opponent matches played in the 10 before this one.
-      - name: opp_aces
+      - name: opponent_aces
         description: Opponent aces in this match.
-      - name: opp_double_faults
+      - name: opponent_double_faults
         description: Opponent double faults in this match.
-      - name: opp_first_serves_made
+      - name: opponent_first_serves_made
         description: Opponent first serves made in this match.
-      - name: opp_total_serve_points
+      - name: opponent_total_serve_points
         description: Opponent total serve points in this match.
-      - name: opp_break_points_won
+      - name: opponent_break_points_won
         description: Opponent break points won in this match.
-      - name: opp_break_points_total
+      - name: opponent_break_points_total
         description: Opponent break points faced in this match.
-      - name: opp_win_rate_last_10
+      - name: opponent_win_rate_last_10
         description: Opponent win rate over the last 10 matches.
-      - name: opp_ace_rate
+      - name: opponent_ace_rate
         description: Opponent ace rate in this match.
-      - name: opp_double_fault_rate
+      - name: opponent_double_fault_rate
         description: Opponent double fault rate in this match.
-      - name: opp_first_serve_pct
-        description: Opponent first serve percentage in this match.
-      - name: opp_break_points_converted_pct
+      - name: opponent_first_serve_pct
+        description: Opponent first serve pct in this match.
+      - name: opponent_break_points_converted_pct
         description: Opponent break point conversion in this match.
-      - name: opp_win_rate_5
+      - name: opponent_win_rate_5
         description: Opponent rolling win rate, last 5 matches.
-      - name: opp_win_rate_10
+      - name: opponent_win_rate_10
         description: Opponent rolling win rate, last 10 matches.
-      - name: opp_win_rate_20
+      - name: opponent_win_rate_20
         description: Opponent rolling win rate, last 20 matches.
-      - name: opp_ace_rate_5
+      - name: opponent_ace_rate_5
         description: Opponent rolling ace rate, last 5 matches.
-      - name: opp_ace_rate_10
+      - name: opponent_ace_rate_10
         description: Opponent rolling ace rate, last 10 matches.
-      - name: opp_first_serve_pct_5
+      - name: opponent_first_serve_pct_5
         description: Opponent rolling first serve pct, last 5 matches.
-      - name: opp_first_serve_pct_10
+      - name: opponent_first_serve_pct_10
         description: Opponent rolling first serve pct, last 10 matches.
-      - name: opp_break_pct_5
+      - name: opponent_break_pct_5
         description: Opponent rolling break pct, last 5 matches.
-      - name: opp_break_pct_10
+      - name: opponent_break_pct_10
         description: Opponent rolling break pct, last 10 matches.
-      - name: opp_avg_opp_rank_10
-        description: Opponent avg opponent rank, last 10 matches.
-      - name: opp_avg_opp_rank_20
-        description: Opponent avg opponent rank, last 20 matches.
-      - name: opp_rank_trend_10
+      - name: opponent_rank_trend_10
         description: Opponent rank trend over last 10 matches.
-      - name: opp_rank_trend_20
+      - name: opponent_rank_trend_20
         description: Opponent rank trend over last 20 matches.
-      - name: opp_win_streak
+      - name: opponent_win_streak
         description: Opponent current win streak.
-      - name: opp_days_since_last_match
+      - name: opponent_days_since_last_match
         description: Days since opponent's last match (365 if none).
-      - name: opp_matches_30d
+      - name: opponent_matches_30d
         description: Opponent matches in the 30 days before this match.
-      - name: opp_surface_win_rate_10
+      - name: opponent_surface_win_rate_10
         description: Opponent win rate on this surface, last 10 matches.
 
       # Comparison (differential) features: canonical player minus opponent
       - name: rank_diff
         description: player_ranking - opponent_ranking.
       - name: win_rate_diff
-        description: win_rate_10 - opp_win_rate_10.
+        description: player_win_rate_10 - opponent_win_rate_10.
       - name: ace_rate_diff
-        description: ace_rate_10 - opp_ace_rate_10.
-      - name: break_diff
-        description: break_pct_10 - opp_break_pct_10.
-      - name: streak_diff
-        description: win_streak - opp_win_streak.
+        description: player_ace_rate_10 - opponent_ace_rate_10.
+      - name: break_pct_diff
+        description: player_break_pct_10 - opponent_break_pct_10.
+      - name: win_streak_diff
+        description: player_win_streak - opponent_win_streak.
       - name: matches_30d_diff
-        description: matches_30d - opp_matches_30d.
-      - name: surface_win_diff
-        description: surface_win_rate_10 - opp_surface_win_rate_10.
+        description: player_matches_30d - opponent_matches_30d.
+      - name: surface_win_rate_diff
+        description: player_surface_win_rate_10 - opponent_surface_win_rate_10.
       - name: rank_trend_diff
-        description: rank_trend_10 - opp_rank_trend_10.
+        description: player_rank_trend_10 - opponent_rank_trend_10.
 
       # Context
       - name: is_clay

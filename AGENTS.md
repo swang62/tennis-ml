@@ -66,13 +66,15 @@ models.**
   else 0`). Same mapping as `dbt/models/gold/match_features.sql:222-233`.
 - Per-player rolling stats computed from each player's prior matches up to
   (not including) the current match: `win_rate_5/10/20`, `ace_rate_5/10`,
-  `first_serve_pct_5/10`, `break_pct_5/10`, `avg_opp_rank_10/20`,
-  `rank_trend_10/20`, `win_streak`, `days_since_last_match`, `matches_30d`,
-  `surface_win_rate_10` — for the player and, prefixed `opp_`, for the
-  opponent, plus `player_ranking` / `opponent_ranking`.
+  `first_serve_pct_5/10`, `break_pct_5/10`,
+  `rank_trend_10/20`, `win_streak`,
+  `days_since_last_match`, `matches_30d`, `surface_win_rate_10` — for the
+  player, prefixed `player_`, and for the opponent, prefixed `opponent_`,
+  plus `player_ranking` / `opponent_ranking`.
 - Differentials between the two sides: `rank_diff`, `win_rate_diff`,
-  `ace_rate_diff`, `break_diff`, `streak_diff`, `matches_30d_diff`,
-  `surface_win_diff`, `rank_trend_diff`.
+  `ace_rate_diff`, `break_pct_diff`, `win_streak_diff`,
+  `matches_30d_diff`, `surface_win_rate_diff`,
+  `rank_trend_diff`.
 
 ## Layer 2 — the finalized Bento payload
 
@@ -80,7 +82,7 @@ Send one row per match as a pandas DataFrame (the API is batchable,
 `batch_dim=0`) with exactly `FEATURE_COLS` plus the two ids:
 
 ```text
-FEATURE_COLS (49, in order) + "player_id" + "opponent_id"
+FEATURE_COLS (45, in order) + "player_id" + "opponent_id"
 ```
 
 `FEATURE_COLS = PLAYER_COLS + OPPONENT_COLS + DIFF_COLS + CONTEXT_COLS`,
@@ -93,7 +95,7 @@ Over HTTP this is split-orientation JSON:
 ```json
 {
   "columns": [
-    "player_ranking", "win_rate_5", "... all 49 FEATURE_COLS ...",
+    "player_ranking", "player_win_rate_5", "... all 45 FEATURE_COLS ...",
     "player_id", "opponent_id"
   ],
   "data": [[1900, 0.72, "...", "novak-djokovic", "carlos-alcaraz"]]
