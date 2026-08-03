@@ -145,8 +145,8 @@ def atp_rows_to_bronze(
     wins/matches_last_10 over the RECENT matches strictly before each match.
 
     `rows` is the full history (rolling form is computed over all of it); when
-    `selected_ids` is given, only those match_ids (tourney_id-match_num) are
-    emitted.
+    `selected_ids` is given, only those match_ids
+    (tourney_date-tourney_id-match_num) are emitted.
     """
     if not rows:
         return pd.DataFrame({col: [] for col in BRONZE_COLUMNS})
@@ -155,7 +155,10 @@ def atp_rows_to_bronze(
 
     out = []
     for m in rows:
-        match_id = f"{m['tourney_id']}-{int(m['match_num']):03d}"
+        # tourney_id is not unique across events (e.g. id 416 hosts both an
+        # atp_500 and a masters in the same year), so the event date is part
+        # of the match_id to keep every match distinct.
+        match_id = f"{int(m['tourney_date'])}-{m['tourney_id']}-{int(m['match_num']):03d}"
         if selected_ids is not None and match_id not in selected_ids:
             continue
         level = LEVEL_MAP.get(str(m["tourney_level"]))
@@ -207,21 +210,17 @@ def atp_rows_to_bronze(
 def load_raw_atp_rows(path: str | Path) -> list[dict[str, Any]]:
     """Read a raw ATP-format CSV into eligible raw rows (shared seed/ingest).
 
-    Rows with missing rankings or player ids (walkovers, Davis Cup ties) are
-    dropped, and empty stat cells become 0 — the same eligibility filter the
-    dev seed applies (infra/duckdb/seed.py).
+    Only rows with missing player ids (walkovers, Davis Cup ties) are dropped.
+    Rankings pass through raw: 0 stays 0 (the ATP missing marker) and empty
+    cells become 0, so silver can NULLIF them and gold imputes at train time.
+    Empty stat cells become 0.
     """
     df = pd.read_csv(path)
     missing = set(RAW_ATP_COLUMNS) - set(df.columns)
     if missing:
         raise ValueError(f"CSV missing raw ATP columns: {missing}")
     df = cast(pd.DataFrame, df[RAW_ATP_COLUMNS])
-    eligible = (
-        df["winner_rank"].notna()
-        & df["loser_rank"].notna()
-        & df["winner_id"].notna()
-        & df["loser_id"].notna()
-    )
+    eligible = df["winner_id"].notna() & df["loser_id"].notna()
     df = cast(pd.DataFrame, df.loc[eligible])
     return cast(list[dict[str, Any]], df.fillna(0).to_dict(orient="records"))
 
@@ -494,33 +493,29 @@ def enrich_player(name: str, player_id: str | None = None) -> bool:
     height_cm = round(float(height_m) * 100) if height_m else None
     turned_pro_raw = cast(str | None, infobox.get("turned_pro"))
     turned_pro = int(turned_pro_raw) if turned_pro_raw else None
-    height_value = str(height_cm) if height_cm is not None else "NULL"
-    turned_pro_value = str(turned_pro) if turned_pro is not None else "NULL"
 
-    # DuckDB escapes single quotes by doubling, not backslash.
+    # Prepared statement: None binds as NULL, apostrophes need no escaping.
     summary_text = page["summary"][:SUMMARY_MAX_CHARS]
-    safe_summary = summary_text.replace("'", "''")
-    safe_title = page["title"].replace("'", "''")
 
     conn = get_conn()
-    conn.sql(f"""
-        INSERT INTO {PROFILES_TABLE}
+    conn.execute(
+        f"""INSERT INTO {PROFILES_TABLE}
             (player_id, display_name, summary, handedness, backhand,
              height, turned_pro, enriched_at)
-        VALUES (
-            '{player_id}',
-            '{safe_title}',
-            '{safe_summary}',
-            '{infobox.get("plays", "").lower().replace(" ", "_")}',
-            '{infobox.get("backhand", "").lower().replace(" ", "_")}',
-            {height_value},
-            {turned_pro_value},
-            CURRENT_TIMESTAMP
-        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT (player_id) DO UPDATE SET
             summary = excluded.summary,
-            enriched_at = excluded.enriched_at
-    """)
+            enriched_at = excluded.enriched_at""",
+        [
+            pid,
+            page["title"],
+            summary_text,
+            infobox.get("plays", "").lower().replace(" ", "_"),
+            infobox.get("backhand", "").lower().replace(" ", "_"),
+            height_cm,
+            turned_pro,
+        ],
+    )
     print(f"  OK {pid}: wrote {len(summary_text)}-char summary from {page['title']}")
     return True
 

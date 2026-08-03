@@ -120,3 +120,6 @@ dev = [
   "basedpyright>=1.39",
   "pandas-stubs>=2.3",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -7,23 +7,17 @@ gold.match_features (canonical one-row-per-match training table). Also
 enriches player bios once the gold layer exists.
 """
 
-import subprocess
-
 from prefect import flow, task
 
-from src.constants import GOLD_TABLE, ROOT
+from src.constants import GOLD_TABLE
 from src.db.client import get_conn
 from src.flows.ingest import enrich_missing as _enrich_missing
-from src.utils import load_env
+from src.utils import load_env, run_dbt_build
 
 
 @task(retries=2, retry_delay_seconds=30)
 def bronze_to_gold() -> int:
-    subprocess.run(
-        ["uv", "run", "dbt", "build", "--project-dir", "dbt", "--profiles-dir", "dbt"],
-        cwd=ROOT,
-        check=True,
-    )
+    run_dbt_build()
     conn = get_conn()
     row = conn.sql(f"SELECT COUNT(*) FROM {GOLD_TABLE}").fetchone()
     row_count = int(row[0]) if row is not None else 0

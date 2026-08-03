@@ -37,12 +37,9 @@ models:
         tests:
           - not_null
       - name: round
-        description: Draw round (r128, r64, r32, r16, qf, sf, f).
+        description: Draw round (r128, r64, r32, r16, qf, sf, f); non-draw stages such as "rr" pass through and encode as round_encoded 0.
         tests:
           - not_null
-          - accepted_values:
-              arguments:
-                values: [r128, r64, r32, r16, qf, sf, f]
       - name: surface
         description: Court surface (clay, grass, hard).
         tests:

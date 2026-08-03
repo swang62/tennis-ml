@@ -29,7 +29,7 @@ models:
       - name: tournament
         description: Tournament name.
       - name: round
-        description: Draw round (r128, r64, r32, r16, qf, sf, f).
+        description: Draw round (r128, r64, r32, r16, qf, sf, f; non-draw stages like "rr" pass through).
       - name: surface
         description: Court surface (clay, grass, hard).
       - name: player_id
