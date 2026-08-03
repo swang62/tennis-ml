@@ -84,7 +84,7 @@ Two BentoML endpoints exposed by `src/serving/service.py`:
 
 | Endpoint            | Method | Purpose                                                      |
 | ------------------- | ------ | ------------------------------------------------------------ |
-| `/health`           | POST   | Liveness probe — `{"status": "ok"}`                          |
+| `/healthz`          | GET    | Liveness probe (alias `/livez`, `/readyz`)                   |
 | `/predict`          | POST   | Stacked-ensemble prediction for one match                    |
 | `/predict-from-ids` | POST   | On-demand prediction from minimal inputs (two ids + surface) |
 

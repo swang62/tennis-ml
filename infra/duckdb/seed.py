@@ -71,7 +71,7 @@ def main() -> None:
         key=lambda m: (int(m["tourney_date"]), m["tourney_id"], m["match_num"]),
     )
     selected = select_matches(matches)
-    selected_ids = {f'{m["tourney_id"]}-{int(m["match_num"]):03d}' for m in selected}
+    selected_ids = {f"{m['tourney_id']}-{int(m['match_num']):03d}" for m in selected}
 
     bronze = atp_rows_to_bronze(matches, selected_ids=selected_ids)
     distinct_players = len(set(bronze["player1_id"]) | set(bronze["player2_id"]))

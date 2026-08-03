@@ -32,13 +32,16 @@ Player ids and dates NEVER appear inside SQL strings: every one flows through
 
 from __future__ import annotations
 
+import builtins
 from datetime import date, datetime
 from numbers import Real
+from time import perf_counter
+from typing import cast
 
 import pandas as pd
 
 from src.db.client import execute_df
-from src.features.rolling import (
+from src.features.columns import (
     CONTEXT_COLS,
     DIFF_COLS,
     FEATURE_COLS,
@@ -182,6 +185,19 @@ SELECT
 FROM gold.player_profiles
 """
 
+_POOL_COUNTS_SQL = """
+SELECT
+    COUNT(*) AS snapshot_pool_rows,
+    COUNT(DISTINCT player_id) AS snapshot_pool_players
+FROM gold.player_rolling_features
+WHERE snapshot_date < ?::DATE
+"""
+
+_PROFILE_COUNTS_SQL = """
+SELECT COUNT(*) AS profile_rows
+FROM gold.player_profiles
+"""
+
 
 def _to_date(value: object) -> date:
     """Coerce a DuckDB DATE cell (Timestamp/date/datetime/str) to a plain date."""
@@ -303,7 +319,7 @@ def _profile_values(pid: str, as_of_date: date, agg: dict[str, float]) -> dict[s
     }
 
 
-def build_inference_features(
+def _build_inference_features_with_meta(
     player_id: str,
     opponent_id: str,
     surface: str,
@@ -313,7 +329,7 @@ def build_inference_features(
     round_encoded: int = 0,
     tournament: str | None = None,
     round: str | None = None,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, dict[str, object]]:
     """Build ONE finalized canonical inference row.
 
     Returns a 1-row DataFrame with columns exactly:
@@ -330,6 +346,8 @@ def build_inference_features(
     encodings; unknown strings map to 0 (the codebook's ELSE branch). Pass
     either the int or the string for each, never both.
     """
+    started_at = perf_counter()
+
     # ── Boundary validation ──
     if surface not in VALID_SURFACES:
         raise ValueError(f"surface must be one of {sorted(VALID_SURFACES)}, got {surface!r}")
@@ -377,6 +395,7 @@ def build_inference_features(
     # ── On-demand global imputation pool (one set of aggregates) ──
     as_of_iso = as_of_date.isoformat()
     agg = execute_df(_POOL_AGG_SQL, [as_of_iso]).iloc[0].to_dict()
+    pool_counts = execute_df(_POOL_COUNTS_SQL, [as_of_iso]).iloc[0].to_dict()
     median_days = _agg_or(
         execute_df(_MEDIAN_DAYS_SQL, [as_of_iso, as_of_iso]).iloc[0].to_dict(),
         "median_days_since",
@@ -388,6 +407,7 @@ def build_inference_features(
         _DEFAULT_MATCHES_30D,
     )
     profile_agg = execute_df(_PROFILE_POOL_AGG_SQL, [as_of_date.year]).iloc[0].to_dict()
+    profile_counts = execute_df(_PROFILE_COUNTS_SQL).iloc[0].to_dict()
 
     def _latest_snapshot(pid: str) -> dict[str, object] | None:
         df = execute_df(_LATEST_SNAPSHOT_SQL, [pid, as_of_iso])
@@ -395,11 +415,14 @@ def build_inference_features(
             return None
         return df.iloc[0].to_dict()
 
+    player_snapshot = _latest_snapshot(lower_id)
+    opponent_snapshot = _latest_snapshot(higher_id)
+
     player_side = _side_values(
-        _latest_snapshot(lower_id), as_of_date, surface, agg, median_days, median_matches
+        player_snapshot, as_of_date, surface, agg, median_days, median_matches
     )
     opponent_side = _side_values(
-        _latest_snapshot(higher_id), as_of_date, surface, agg, median_days, median_matches
+        opponent_snapshot, as_of_date, surface, agg, median_days, median_matches
     )
     player_side.update(_profile_values(lower_id, as_of_date, profile_agg))
     opponent_side.update(_profile_values(higher_id, as_of_date, profile_agg))
@@ -444,4 +467,66 @@ def build_inference_features(
     final_cols = [*FEATURE_COLS, "player_id", "opponent_id"]
     out = pd.DataFrame({col: [row[col]] for col in final_cols})
     assert not out.isnull().to_numpy().any(), "inference row contains NaN"
+
+    meta: dict[str, object] = {
+        "raw_player_id": player_id.strip(),
+        "raw_opponent_id": opponent_id.strip(),
+        "canonical_player_id": lower_id,
+        "canonical_opponent_id": higher_id,
+        "surface": surface,
+        "as_of_date": as_of_iso,
+        "tournament_level": tournament_level,
+        "round_encoded": round_encoded,
+        "feature_count": len(FEATURE_COLS),
+        "snapshot_pool_rows": int(float(pool_counts["snapshot_pool_rows"] or 0)),
+        "snapshot_pool_players": int(float(pool_counts["snapshot_pool_players"] or 0)),
+        "profile_rows": int(float(profile_counts["profile_rows"] or 0)),
+        "median_days_since": float(median_days),
+        "median_matches_30d": float(median_matches),
+        "player_snapshot_found": player_snapshot is not None,
+        "opponent_snapshot_found": opponent_snapshot is not None,
+        "player_snapshot_date": None
+        if player_snapshot is None
+        else _to_date(player_snapshot["snapshot_date"]).isoformat(),
+        "opponent_snapshot_date": None
+        if opponent_snapshot is None
+        else _to_date(opponent_snapshot["snapshot_date"]).isoformat(),
+        "player_rolling_match_number": None
+        if player_snapshot is None
+        else int(float(cast(Real, player_snapshot["player_match_number"]))),
+        "opponent_rolling_match_number": None
+        if opponent_snapshot is None
+        else int(float(cast(Real, opponent_snapshot["player_match_number"]))),
+        "player_matches_30d": int(player_side["matches_30d"]),
+        "opponent_matches_30d": int(opponent_side["matches_30d"]),
+        "player_days_since_last_match": int(player_side["days_since_last_match"]),
+        "opponent_days_since_last_match": int(opponent_side["days_since_last_match"]),
+        "player_profile_height": float(player_side["height"]),
+        "opponent_profile_height": float(opponent_side["height"]),
+        "build_ms": builtins.round((perf_counter() - started_at) * 1000, 3),
+    }
+    return out, meta
+
+
+def build_inference_features(
+    player_id: str,
+    opponent_id: str,
+    surface: str,
+    *,
+    as_of_date: date | None = None,
+    tournament_level: int = 0,
+    round_encoded: int = 0,
+    tournament: str | None = None,
+    round: str | None = None,
+) -> pd.DataFrame:
+    out, _meta = _build_inference_features_with_meta(
+        player_id,
+        opponent_id,
+        surface,
+        as_of_date=as_of_date,
+        tournament_level=tournament_level,
+        round_encoded=round_encoded,
+        tournament=tournament,
+        round=round,
+    )
     return out

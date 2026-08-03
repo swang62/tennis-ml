@@ -25,12 +25,16 @@ SERVICE_FILE = ROOT / "src" / "serving" / "service.py"
 PINNED_BENTOFILE = DATA_PROCESSED / "bentofile.pinned.yaml"
 BENTO_TAG_FILE = DATA_PROCESSED / "bento_tag.txt"
 STATE_FILE = DATA_PROCESSED / "bento_build_state.json"
-LOCAL_BENTO_REPOSITORY = "bento-serving"
+BENTO_REPO = os.getenv("BENTO_REPO", "bento-serving")
 
-K3D_CLUSTER = "tennis-ml"
-REGISTRY_NAME = "tennis-ml-registry"
-REGISTRY_PUSH_REPOSITORY = "localhost:5000/bento-serving"  # from host
-REGISTRY_PULL_REPOSITORY = "tennis-ml-registry:5000/bento-serving"  # inside k3d
+K3D_CLUSTER = os.getenv("K3D_CLUSTER", "tennis-ml")
+REGISTRY_NAME = os.getenv("K3D_REGISTRY_NAME", "tennis-ml-registry")
+
+# Registry URLs are composed from the registry host + the Bento repo name, so
+# the repo name (BENTO_REPO) is never duplicated. Push goes
+# host -> caddy (https) -> traefik -> registry.
+REGISTRY_PUSH_URL = os.getenv("REGISTRY_PUSH_URL", "registry.macsteve.lan")
+REGISTRY_PUSH_REPOSITORY = f"{REGISTRY_PUSH_URL}/{BENTO_REPO}"
 BENTO_MANIFEST = ROOT / "infra" / "manifests" / "deploy" / "bentoml.yaml"
 
 # The BentoML model name each pinned MLflow registered model maps to —
@@ -100,18 +104,28 @@ def _write_state(state: dict[str, Any]) -> None:
 
 
 def _resolve_pins(client: Any, production: Any) -> dict[str, dict[str, Any]]:
-    """Resolve the exact MLflow identities for all four models.
+    """Resolve the exact MLflow identities (name, alias, version) for all four models.
 
     Source of truth is the source run of `ensemble_lr_model`'s latest version
     — the promoted 04 candidate run that logged the three base pins. The
     recorded values are used as-is (no validation); a missing pin just means
-    there is nothing pinned to build from.
+    there is nothing pinned to build from. Each pin also carries the resolved
+    MLflow `version` (the int the alias currently points at) so downstream
+    reuse/cache checks can compare on version, not on the alias URI string —
+    `@best` / `@champion` stay constant when repointed, so the URI alone
+    cannot detect a stale local BentoML import.
     """
     run = client.get_run(production.run_id)
 
-    pins: dict[str, dict[str, Any]] = {
-        "production": {"registered_model_name": PRODUCTION_MODEL, "alias": "champion"}
-    }
+    def _pin(registered_name: str, alias: str) -> dict[str, Any]:
+        version = client.get_model_version_by_alias(registered_name, alias).version
+        return {
+            "registered_model_name": registered_name,
+            "alias": alias,
+            "version": int(version),
+        }
+
+    pins: dict[str, dict[str, Any]] = {"production": _pin(PRODUCTION_MODEL, "champion")}
     for cls in BASE_BENTO_NAMES:
         registered_name = run.data.params.get(f"base_{cls}_registered_name")
         alias = run.data.params.get(f"base_{cls}_alias")
@@ -121,7 +135,7 @@ def _resolve_pins(client: Any, production: Any) -> dict[str, dict[str, Any]]:
                 f"base_{cls}_registered_name / base_{cls}_alias params — "
                 "run the training pipeline first. Nothing to build."
             )
-        pins[cls] = {"registered_model_name": registered_name, "alias": alias}
+        pins[cls] = _pin(registered_name, alias)
     return pins
 
 
@@ -136,14 +150,43 @@ def _check_aux_files() -> None:
         )
 
 
+def _import_or_reuse(pin: dict[str, Any]) -> Any:
+    """Import the pinned MLflow version into the BentoML store, or reuse an
+    existing local import when it's the SAME MLflow version.
+
+    Reuse is keyed on the resolved MLflow `version` (stamped into the Bento store
+    metadata on import), NOT on the alias URI string: `@best`/`@champion` stay
+    constant when repointed to a new version, so a URI match would happily
+    reuse a stale local import. The version is the only identity that actually
+    moves.
+    """
+    import bentoml
+
+    registered_name = pin["registered_model_name"]
+    uri = f"models:/{registered_name}@{pin['alias']}"
+    version = pin["version"]
+    try:
+        stored = bentoml.models.get(registered_name)
+    except Exception:
+        stored = None
+    if stored is not None and stored.info.metadata.get("mlflow_version") == version:
+        print(f"Reusing {stored.tag} — already imported (MLflow v{version})")
+        return stored
+    stored = bentoml.mlflow.import_model(
+        registered_name, uri, metadata={"mlflow_uri": uri, "mlflow_version": version}
+    )
+    print(f"Imported {uri} (MLflow v{version}) -> {stored.tag}")
+    return stored
+
+
 def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
     """Materialize the pinned nn_best MLflow model to ONNX at deploy time.
 
     Training logs nn_best as a PyTorch TabularBioMLP to MLflow. Serving runs it
     through ONNX Runtime instead of torch (smaller image, faster build). Pulls
-    the pinned nn version from MLflow into the local BentoML store (idempotent
-    on the mlflow_uri), loads it, exports to ONNX with the three inputs the
-    service expects (tab, bio_p, bio_o).
+    the pinned nn version from MLflow into the local BentoML store (version-keyed
+    reuse via `_import_or_reuse`), loads it, exports to ONNX with the three
+    inputs the service expects (tab, bio_p, bio_o).
     """
     import logging
     import warnings
@@ -162,18 +205,10 @@ def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
     warnings.filterwarnings("ignore", category=UserWarning, module="torch.*")
     warnings.filterwarnings("ignore", category=FutureWarning, message=".*LeafSpec.*")
 
-    uri = f"models:/{nn_pin['registered_model_name']}@{nn_pin['alias']}"
-    print(f"Materializing ONNX from {uri}")
-
-    # Import (or reuse) the pinned MLflow model into the local BentoML store so
-    # bentoml.mlflow.load_model works against the local tag.
-    registered_name = nn_pin["registered_model_name"]
-    try:
-        stored = bentoml.models.get(registered_name)
-        if stored.info.metadata.get("mlflow_uri") != uri:
-            stored = bentoml.mlflow.import_model(registered_name, uri, metadata={"mlflow_uri": uri})
-    except Exception:
-        stored = bentoml.mlflow.import_model(registered_name, uri, metadata={"mlflow_uri": uri})
+    print(
+        f"Materializing ONNX from models:/{nn_pin['registered_model_name']}@{nn_pin['alias']} (v{nn_pin['version']})"
+    )
+    stored = _import_or_reuse(nn_pin)
 
     pyfunc = bentoml.mlflow.load_model(stored.tag)
     raw = pyfunc.get_raw_model()  # TabularBioMLP
@@ -222,36 +257,33 @@ def _file_hash(path: Path) -> str:
     return h.hexdigest()
 
 
-def _state_fingerprint(pins: dict[str, dict[str, Any]]) -> str:
-    """Hash the model pins plus the content of everything baked into the Bento."""
-    parts = [
-        f"{key}={pins[key]['registered_model_name']}@{pins[key]['alias']}"
-        for key in ["linear", "gbdt", "nn", "production"]
-    ]
+def _state_fingerprint(production_version: int) -> str:
+    """Fingerprint of what gets baked into the Bento.
+
+    Keys on the promoted `ensemble_lr_model@champion` VERSION NUMBER (not its
+    alias string — `@champion` is constant, so the alias alone would never
+    signal a change). When the champion version increments, the base models'
+    `@best` aliases now point at the matching new MLflow versions, so they are
+    pulled in fresh on the rebuild. The constant base-model alias strings are
+    deliberately NOT in the fingerprint: a `@best` repoint without a champion
+    promotion doesn't affect the deployed ensemble, so it must not trigger a
+    rebuild. File hashes of the baked-in artifacts (ONNX, scaler, DuckDB) cover
+    the rest.
+    """
+    parts = [f"ensemble_lr_model@champion=v{production_version}"]
     parts.extend(f"{path.relative_to(ROOT)}:{_file_hash(path)}" for path in FINGERPRINT_FILES)
     return "\n".join(parts)
 
 
 def _import_models(pins: dict[str, dict[str, Any]]) -> dict[str, str]:
-    """Import each pinned MLflow version into the BentoML store; return tags."""
-    import bentoml
+    """Import each pinned MLflow version into the BentoML store; return tags.
 
+    Reuse is version-keyed via `_import_or_reuse` — see its docstring for why
+    the alias URI string alone cannot gate reuse.
+    """
     tags: dict[str, str] = {}
     for key, pin in pins.items():
-        uri = f"models:/{pin['registered_model_name']}@{pin['alias']}"
-        try:
-            stored = bentoml.models.get(pin["registered_model_name"])
-        except Exception:
-            stored = None
-        if stored is not None and stored.info.metadata.get("mlflow_uri") == uri:
-            tag = stored.tag
-            print(f"Reusing {tag} — already imported from {uri}")
-        else:
-            tag = bentoml.mlflow.import_model(
-                pin["registered_model_name"], uri, metadata={"mlflow_uri": uri}
-            ).tag
-            print(f"Imported {uri} -> {tag}")
-        tags[key] = str(tag)
+        tags[key] = str(_import_or_reuse(pin).tag)
     return tags
 
 
@@ -348,7 +380,7 @@ def build_bento_image(force: bool = False) -> tuple[str, int]:
     pins = _resolve_pins(client, production)
     _materialize_nn_onnx(pins["nn"])
     _check_aux_files()
-    fingerprint = _state_fingerprint(pins)
+    fingerprint = _state_fingerprint(int(production.version))
 
     if force:
         print("Force: rebuilding Bento and image regardless of cache.")
@@ -366,7 +398,7 @@ def build_bento_image(force: bool = False) -> tuple[str, int]:
     else:
         print(f"No Bento rebuild needed — reusing {tag}.")
 
-    image = f"{LOCAL_BENTO_REPOSITORY}:{tag.split(':', 1)[1]}"
+    image = f"{BENTO_REPO}:{tag.split(':', 1)[1]}"
     if force:
         print(f"Force: containerizing {tag} -> {image} regardless of cache.")
         containerize = True
@@ -377,16 +409,17 @@ def build_bento_image(force: bool = False) -> tuple[str, int]:
         bentoml.container.build(tag, backend="docker", image_tag=(image,))
     else:
         print(f"Local image already exists — reusing {image}.")
-    subprocess.run(["docker", "tag", image, f"{LOCAL_BENTO_REPOSITORY}:latest"], check=True)
+    subprocess.run(["docker", "tag", image, f"{BENTO_REPO}:latest"], check=True)
     return image, int(production.version)
 
 
 def deploy_bento(force: bool = False) -> None:
     """Build locally, then push and roll out through the k3d registry.
 
-    A stopped or absent cluster does not prevent the local image build. A
-    running cluster must have the registry declared in infra/k3d/config.yaml.
-    force=True rebuilds the Bento and image even when cached.
+    A stopped or absent cluster does not prevent the local image build. If the
+    k3d registry is missing or the push fails, deployment is skipped (logged)
+    and the local image is left ready. force=True rebuilds the Bento and image
+    even when cached.
     """
     local_image, production_version = build_bento_image(force=force)
 
@@ -394,41 +427,41 @@ def deploy_bento(force: bool = False) -> None:
         print(f"k3d cluster {K3D_CLUSTER} is not running — local image is ready: {local_image}")
         return
     if not _registry_running():
-        raise RuntimeError(
-            f"k3d registry {REGISTRY_NAME} is not running — recreate the cluster with "
-            "infra/k3d/config.yaml"
+        print(
+            f"k3d registry {REGISTRY_NAME} is not running — skipping deployment; "
+            f"local image is ready: {local_image}"
         )
+        return
 
     if force:
         print("Force: re-pushing image and re-applying manifest in the cluster.")
-    image_version = local_image.split(":", 1)[1]
-    push_image = f"{REGISTRY_PUSH_REPOSITORY}:{image_version}"
     push_latest = f"{REGISTRY_PUSH_REPOSITORY}:latest"
-    for target in [push_image, push_latest]:
-        subprocess.run(["docker", "tag", local_image, target], cwd=ROOT, check=True)
-        subprocess.run(["docker", "push", target], cwd=ROOT, check=True)
-
-    # In-cluster pull reference resolves to the same registry/repo as the push.
-    # Render the manifest with the pinned tag and apply once: applying the
-    # manifest's :latest then `set image` to the pinned tag creates an extra
-    # ReplicaSet (and the 'old replicas pending termination' noise) every deploy.
-    pull_image = f"{REGISTRY_PULL_REPOSITORY}:{image_version}"
-    manifest = BENTO_MANIFEST.read_text()
-    rendered = manifest.replace(f"{REGISTRY_PULL_REPOSITORY}:latest", pull_image)
-    if rendered == manifest:
-        raise RuntimeError(
-            f"manifest {BENTO_MANIFEST} does not reference "
-            f"{REGISTRY_PULL_REPOSITORY}:latest — cannot pin the deploy image"
+    try:
+        subprocess.run(["docker", "tag", local_image, push_latest], cwd=ROOT, check=True)
+        subprocess.run(["docker", "push", push_latest], cwd=ROOT, check=True)
+    except subprocess.CalledProcessError as exc:
+        print(
+            f"Registry push failed ({exc}) — skipping deployment; local image is ready: {local_image}"
         )
-    subprocess.run(["kubectl", "apply", "-f", "-"], input=rendered, cwd=ROOT, check=True, text=True)
+        return
+
+    # The manifest pins :latest; rollout restart forces new pods to pull it
+    # (imagePullPolicy: Always), since an unchanged image ref alone would
+    # leave the old ReplicaSet untouched.
+    subprocess.run(["kubectl", "apply", "-f", BENTO_MANIFEST], cwd=ROOT, check=True)
+    subprocess.run(
+        ["kubectl", "rollout", "restart", "deployment/bento-serving"],
+        cwd=ROOT,
+        check=True,
+    )
     subprocess.run(
         ["kubectl", "rollout", "status", "deployment/bento-serving", "--timeout=180s"],
         cwd=ROOT,
         check=True,
     )
     state = _read_state()
-    _write_state({**state, "deployed_version": production_version, "deployed_image": pull_image})
-    print(f"Deployed production {pull_image} to {K3D_CLUSTER}")
+    _write_state({**state, "deployed_version": production_version, "deployed_image": push_latest})
+    print(f"Deployed production {push_latest} to {K3D_CLUSTER}")
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ import requests
 
 from src.constants import ROOT
 from src.db.client import get_conn, to_dataframe
+from src.features.columns import BRONZE_COLUMNS
 from src.features.validate import run_ingestion_checks
 from src.utils import load_env
 
@@ -78,56 +79,6 @@ RAW_ATP_COLUMNS = [
     "l_1stIn",
     "l_bpSaved",
     "l_bpFaced",
-]
-
-# Column order mirrors bronze.match_events in infra/duckdb/init.sql.
-BRONZE_COLUMNS = [
-    "match_id",
-    "match_date",
-    "player1_id",
-    "player2_id",
-    "tournament",
-    "round",
-    "surface",
-    "player1_ranking",
-    "player2_ranking",
-    "player1_wins_last_10",
-    "player1_matches_last_10",
-    "player1_aces",
-    "player1_double_faults",
-    "player1_first_serves_made",
-    "player1_total_serve_points",
-    "player1_break_points_won",
-    "player1_break_points_total",
-    "player2_wins_last_10",
-    "player2_matches_last_10",
-    "player2_aces",
-    "player2_double_faults",
-    "player2_first_serves_made",
-    "player2_total_serve_points",
-    "player2_break_points_won",
-    "player2_break_points_total",
-    "winner_id",
-]
-
-# Bronze stores serve/break counts and rolling form as UTINYINT.
-_TINY_COLUMNS = [
-    "player1_wins_last_10",
-    "player1_matches_last_10",
-    "player1_aces",
-    "player1_double_faults",
-    "player1_first_serves_made",
-    "player1_total_serve_points",
-    "player1_break_points_won",
-    "player1_break_points_total",
-    "player2_wins_last_10",
-    "player2_matches_last_10",
-    "player2_aces",
-    "player2_double_faults",
-    "player2_first_serves_made",
-    "player2_total_serve_points",
-    "player2_break_points_won",
-    "player2_break_points_total",
 ]
 
 # Raw ATP tourney_level -> canonical bronze.tournament.
@@ -195,8 +146,7 @@ def atp_rows_to_bronze(
 
     `rows` is the full history (rolling form is computed over all of it); when
     `selected_ids` is given, only those match_ids (tourney_id-match_num) are
-    emitted. Out-of-range values and duplicates raise instead of corrupting
-    bronze.
+    emitted.
     """
     if not rows:
         return pd.DataFrame({col: [] for col in BRONZE_COLUMNS})
@@ -205,7 +155,7 @@ def atp_rows_to_bronze(
 
     out = []
     for m in rows:
-        match_id = f'{m["tourney_id"]}-{int(m["match_num"]):03d}'
+        match_id = f"{m['tourney_id']}-{int(m['match_num']):03d}"
         if selected_ids is not None and match_id not in selected_ids:
             continue
         level = LEVEL_MAP.get(str(m["tourney_level"]))
@@ -248,22 +198,7 @@ def atp_rows_to_bronze(
             }
         )
 
-    df = pd.DataFrame({col: [r[col] for r in out] for col in BRONZE_COLUMNS})
-    _guard_bronze(df)
-    return df
-
-
-def _guard_bronze(df: pd.DataFrame) -> None:
-    """Fail loudly instead of inserting out-of-range rows into bronze."""
-    for col in _TINY_COLUMNS:
-        bad = df.index[(df[col] < 0) | (df[col] > 255)].tolist()
-        if bad:
-            raise ValueError(f"{col} outside UTINYINT 0..255: {bad}")
-    bad_rank = df.index[(df["player1_ranking"] <= 0) | (df["player2_ranking"] <= 0)].tolist()
-    if bad_rank:
-        raise ValueError(f"non-positive ranking: {bad_rank}")
-    if df["match_id"].duplicated().any():
-        raise ValueError("duplicate match_ids")
+    return pd.DataFrame({col: [r[col] for r in out] for col in BRONZE_COLUMNS})
 
 
 # ── CSV Loading ──────────────────────────────────────────────────
@@ -303,14 +238,29 @@ def insert_bronze_rows(df: pd.DataFrame) -> int:
     match_id is the PK, so re-ingesting the same file (or an updated version
     of it) refreshes rows in place instead of duplicating them.
     """
+    report = run_ingestion_checks(df)
+    valid_df = cast(pd.DataFrame, report["valid_df"])
+
+    for issue in cast(list[str], report["results"]):
+        print(f"  DROP: {issue}")
+    print(
+        "Ingestion report: "
+        f"input_rows={report['input_rows']} "
+        f"valid_rows={report['valid_rows']} "
+        f"dropped_rows={report['dropped_rows']}"
+    )
+
+    if valid_df.empty:
+        return 0
+
     conn = get_conn()
     updates = ", ".join(f"{col} = excluded.{col}" for col in BRONZE_COLUMNS if col != "match_id")
     conn.sql(
         f"INSERT INTO {BRONZE_TABLE} ({', '.join(BRONZE_COLUMNS)}) "
-        f"SELECT {', '.join(BRONZE_COLUMNS)} FROM df "
+        f"SELECT {', '.join(BRONZE_COLUMNS)} FROM valid_df "
         f"ON CONFLICT (match_id) DO UPDATE SET {updates}"
     )
-    return len(df)
+    return len(valid_df)
 
 
 def load_profiles_for(player_ids: list[str], label: str) -> int:
@@ -648,13 +598,8 @@ if __name__ == "__main__":
     df = load_atp_csv(str(csv_path))
     print(f"Loaded {len(df)} bronze rows from {csv_path.name}")
 
-    result = run_ingestion_checks(df)
-    if not result["passed"]:
-        print("Validation failed. Fix the data or adjust the checks.")
-        sys.exit(1)
-
-    insert_bronze_rows(df)
-    print(f"Inserted {len(df)} rows into {BRONZE_TABLE}")
+    inserted = insert_bronze_rows(df)
+    print(f"Inserted {inserted} rows into {BRONZE_TABLE}")
 
     player_ids = sorted(set(df["player1_id"]) | set(df["player2_id"]))
     load_profiles_for(player_ids, "ingested")

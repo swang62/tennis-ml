@@ -21,8 +21,8 @@ import pytest
 from src.constants import ROOT
 from src.db.client import execute_df
 from src.features import inference
+from src.features.columns import DIFF_COLS, FEATURE_COLS
 from src.features.inference import build_inference_features
-from src.features.rolling import DIFF_COLS, FEATURE_COLS
 
 DB_PATH = ROOT / "data" / "tennis.duckdb"
 
