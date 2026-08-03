@@ -57,13 +57,13 @@ spec:
                 name: registry
                 port:
                   number: 5000
-    # - host: dashboard.macsteve.lan
-    #   http:
-    #     paths:
-    #       - pathType: Prefix
-    #         path: "/"
-    #         backend:
-    #           service:
-    #             name: tennis-dashboard
-    #             port:
-    #               number: 8501
+    - host: dashboard.macsteve.lan
+      http:
+        paths:
+          - pathType: Prefix
+            path: "/"
+            backend:
+              service:
+                name: tennis-dashboard
+                port:
+                  number: 8501

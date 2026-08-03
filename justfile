@@ -28,6 +28,9 @@ db-reset:
 dashboard-local:
     panel serve src/dashboard/app.py
 
+dashboard-deploy:
+    uv run python src/dashboard/deploy.py
+
 dashboard-build:
     docker build -t tennis-dashboard:latest -f infra/manifests/deploy/Dockerfile .
     k3d image import tennis-dashboard:latest -c tennis-ml
