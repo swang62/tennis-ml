@@ -47,13 +47,14 @@ BRONZE_COLUMNS: tuple[str, ...] = (
     "winner_id",
 )
 
-# String bronze columns that must be non-blank at ingestion time.
+# String bronze columns that must be non-blank at ingestion time. `round` is
+# excluded: non-draw stages (Davis Cup, round robins, blank) are legitimate
+# and map to round 0 in silver.
 _REQUIRED_STRING_COLUMNS: tuple[str, ...] = (
     "match_id",
     "player1_id",
     "player2_id",
     "tournament",
-    "round",
     "surface",
     "winner_id",
 )

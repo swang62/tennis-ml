@@ -7,7 +7,9 @@ repo-local kernelspec registration used by the notebook pipeline runner.
 
 import json
 import os
+import subprocess
 import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -17,6 +19,22 @@ from src.constants import KERNEL_DIR, KERNEL_NAME, ROOT
 def load_env() -> None:
     """Load the env file (idempotent)."""
     load_dotenv(ROOT / ".env", override=True)
+
+
+DBT_BUILD_CMD = ["uv", "run", "dbt", "build", "--project-dir", "dbt", "--profiles-dir", "dbt"]
+
+
+def run_dbt_build(profiles_dir: str | Path = "dbt") -> subprocess.CompletedProcess:
+    """Run `dbt build` (gold layer) from the repo root; raise on failure.
+
+    `profiles_dir` overrides the profiles directory (the repo default `dbt/`).
+    Tests pass a temp dir containing a profiles.yml that points dbt at a
+    throwaway DuckDB.
+    """
+    cmd = DBT_BUILD_CMD
+    if str(profiles_dir) != "dbt":
+        cmd = [*DBT_BUILD_CMD[:-2], "--profiles-dir", str(profiles_dir)]
+    return subprocess.run(cmd, cwd=ROOT, check=True)
 
 
 def ensure_kernel() -> str:

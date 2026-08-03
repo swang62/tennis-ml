@@ -50,11 +50,6 @@ def validate_bronze_row(row: Mapping[str, Any]) -> list[str]:
         if value < 0 or value > 255:
             issues.append(f"{column} outside UTINYINT 0..255: {value}")
 
-    for column in ("player1_ranking", "player2_ranking"):
-        value = _as_number(row.get(column))
-        if value is not None and value <= 0:
-            issues.append(f"{column} must be > 0: {value}")
-
     if row.get("player1_id") == row.get("player2_id"):
         issues.append("player1_id equals player2_id")
     if row.get("winner_id") != row.get("player1_id"):

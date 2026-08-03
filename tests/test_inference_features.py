@@ -24,6 +24,7 @@ from src.db.client import execute_df
 from src.features import inference
 from src.features.columns import DIFF_COLS, FEATURE_COLS
 from src.features.inference import build_inference_features
+from src.utils import run_dbt_build
 
 DB_PATH = ROOT / "data" / "tennis.duckdb"
 
@@ -53,10 +54,10 @@ def seeded_gold_db():
     Runs the bootstrap steps behind `just db-reset` + `just db-seed` +
     `just db-dbt`: init the schemas, seed ~100 real matches via
     `infra/duckdb/seed.py` (raw ATP -> bronze + filtered ATP profiles), then
-    `dbt build` the gold models. The seed's best-effort Wikipedia enrichment
-    is skipped with `--offline` so tests never depend on live Wikipedia.
-    Subprocess output is captured so a bootstrap failure reports the exact
-    failing command.
+    `dbt build` the gold models via the shared `run_dbt_build()` helper. The
+    seed's best-effort Wikipedia enrichment is skipped with `--offline` so
+    tests never depend on live Wikipedia. Subprocess output is captured so a
+    bootstrap failure reports the exact failing command.
     """
     if _gold_rolling_ready():
         yield
@@ -65,7 +66,6 @@ def seeded_gold_db():
     commands = [
         ["uv", "run", "python", "infra/duckdb/initialize_schemas.py", "init"],
         ["uv", "run", "python", "infra/duckdb/seed.py", "--offline"],
-        ["uv", "run", "dbt", "build", "--project-dir", "dbt", "--profiles-dir", "dbt"],
     ]
     for command in commands:
         proc = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
@@ -74,6 +74,7 @@ def seeded_gold_db():
                 f"gold bootstrap command failed: {' '.join(command)}\n"
                 f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
             )
+    run_dbt_build()
 
     # The singleton connection may have opened the pre-rebuild DB file; drop
     # it so the next get_conn() reconnects to the freshly built one.

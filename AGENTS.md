@@ -4,7 +4,7 @@ Commands run via `just` (not make). `uv` is the package manager (not pip/poetry)
 
 ## Overall approach
 
-End-to-end MLOps pipeline for tennis match prediction. Data flows CSV → DuckDB bronze → dbt gold (player-centric rolling snapshots → canonical match training rows) → Papermill notebooks (Optuna tuning across 3 model classes) → MLflow registry (alias-based, no stages) → BentoML serving on a local k3d cluster.
+End-to-end MLOps pipeline for tennis match prediction. Data flows CSV → DuckDB bronze → dbt silver (player-perspective expansion; preprocessing: rank 0 → NULL, non-draw rounds → ordinal 0) → dbt gold (player-centric rolling snapshots → canonical match training rows) → Papermill notebooks (Optuna tuning across 3 model classes) → MLflow registry (alias-based, no stages) → BentoML serving on a local k3d cluster.
 
 **Model strategy:** three model classes (linear, GBDT, neural net) compete independently via Optuna, then a logistic-regression meta-model stacks their probability outputs. Architecturally designed for ~80k match samples.
 
@@ -25,16 +25,16 @@ src/
   serving/       — BentoML service (model-only — no feature derivation)
   dashboard/     — Panel dashboard
   db/            — DuckDB client
-dbt/             — bronze→gold SQL models + tests (the feature single source of truth)
+dbt/             — silver→gold SQL models + tests (bronze is the DuckDB source; the feature single source of truth)
 ```
 
 ## Big gotchas & unique aspects
 
-**DuckDB is the feature single source of truth.** Per-match player rolling snapshots (`gold.rolling_features`) drive both the canonical training rows (`gold.match_features`) and the on-demand inference feature builder. There is no materialized "latest player" or "defaults" table — inference queries the snapshots directly, as-of-dated. Rolling formulas live in dbt SQL only; Python never re-implements them.
+**DuckDB is the feature single source of truth.** Per-match player rolling snapshots (`gold.rolling_features`) drive both the canonical training rows (`gold.match_features`) and the on-demand inference feature builder. There is no materialized "latest" table — inference queries the snapshots directly, as-of-dated. Rolling data is always synced to match data with dbt and is always up-to-date.
 
-**Canonical orientation by lower ATP id.** Every match row (training and inference) puts the lexicographically-lower player id on the `player_*` side so `(A, B)` and `(B, A)` produce identical rows. Bento does NOT re-canonicalize — `p_win` is P(canonical player wins) exactly as the row is sent.
+**Canonical orientation by lower ATP id.** Every match row (training and inference) puts the lexicographically-lower player id on the `player_*` side so `(A, B)` and `(B, A)` produce identical rows. Predicted `p_win` is P(canonical player wins) exactly as the row is sent.
 
-**Bento has two endpoints — model-only and ids-only.** `/predict` takes a finalized 45-feature row + two ids (model-only, upstream-built). `/predict-from-ids` takes the minimal human inputs (two ids + surface + optional tournament/round) and calls `build_inference_features` internally against the DuckDB gold tables snapshotted into the image at deploy time. The ids-only endpoint couples the serving image to gold-table freshness — redeploy when gold changes; the model-only endpoint never depends on DuckDB.
+**Bento has two endpoints — model-only and ids-only.** `/predict` takes a finalized feature row + two ids (model-only, upstream-built). `/predict-from-ids` takes the minimal human inputs (two ids + surface + optional tournament/round/date) and calls `build_inference_features` internally against the DuckDB gold tables snapshotted into the image at deploy time.
 
 **MLflow aliases, not versions or stages.** Stages are deprecated; the registry uses `@best` (each base model) and `@champion` (the ensemble LR head). Promotion in `05_evaluate` sets `@champion` on the version it just registered; deploy resolves via `get_model_version_by_alias`. No `copy_model_version`, no staging registered model — single production environment.
 
@@ -49,9 +49,9 @@ dbt/             — bronze→gold SQL models + tests (the feature single source
 | `bento.macsteve.lan`        | `bento-serving`            | 3000 |
 | `mlflow.macsteve.lan`       | `mlflow`                   | 5000 |
 | `prefect.macsteve.lan`      | `prefect-server`           | 4200 |
-| `dashboard.macsteve.lan`    | `tennis-dashboard`         | 8501 |
 | `registry.macsteve.lan`     | `tennis-ml-registry`       | 5000 |
+| `dashboard.macsteve.lan`    | `tennis-dashboard`         | 8501 | (commented out in ingress.yaml) |
 
-DNS/TLS for `*.macsteve.lan` itself is served by the host Caddy (`~/Caddyfile`, symlinked from `~/dev/dotfiles/Caddyfile`, launchd service `homebrew.mxcl.caddy`), NOT by anything in this repo — the repo only declares the k8s Ingress hosts. The BentoML app exposes `/healthz`, `/livez`, `/readyz` (all return 200); the k8s deployment uses TCP liveness/readiness probes, not the HTTP health routes.
+DNS/TLS for `*.macsteve.lan` itself is served by the host
 
 **Local MLflow is the registry of record.** Training runs against the local store. Deploy resolves `@champion`/`@best` from whatever `MLFLOW_TRACKING_URI` points at.

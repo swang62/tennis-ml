@@ -2,7 +2,12 @@ from typing import cast
 
 import pandas as pd
 
-from src.features.validate import IngestionCheckReport, run_ingestion_checks, validate_bronze_row
+from src.features.validate import (
+    IngestionCheckReport,
+    _is_missing,
+    run_ingestion_checks,
+    validate_bronze_row,
+)
 
 
 def _valid_row() -> dict[str, object]:
@@ -86,3 +91,83 @@ def test_run_ingestion_checks_drops_invalid_rows_and_keeps_valid_rows():
         for issue in result["results"]
     )
     assert cast(pd.DataFrame, result["valid_df"]).to_dict(orient="records") == [valid]
+
+
+def test_run_ingestion_checks_does_not_mutate_input_df():
+    df = pd.DataFrame([_valid_row()])
+    df_copy = df.copy(deep=True)
+
+    run_ingestion_checks(df)
+
+    pd.testing.assert_frame_equal(df, df_copy)
+
+
+def test_validate_bronze_row_flags_blank_required_string_columns():
+    row = _valid_row()
+    row["surface"] = "  "
+
+    issues = validate_bronze_row(row)
+
+    assert "surface is blank" in issues
+
+
+def test_validate_bronze_row_accepts_non_draw_rounds():
+    # Davis Cup ties and round robins are legitimate: they are preserved and
+    # mapped to round ordinal 0 in silver, never dropped here. (Raw blank
+    # rounds arrive as the string "0" after fillna, so they never reach
+    # validation as NULL.)
+    for round_value in ("rr", "0"):
+        row = _valid_row()
+        row["round"] = round_value
+
+        issues = validate_bronze_row(row)
+
+        assert issues == []
+
+
+def test_validate_bronze_row_flags_equal_player_ids():
+    row = _valid_row()
+    row["player2_id"] = "A001"
+
+    issues = validate_bronze_row(row)
+
+    assert "player1_id equals player2_id" in issues
+
+
+def test_is_missing():
+    assert _is_missing(float("nan")) is True
+    assert _is_missing(None) is True
+    assert _is_missing(pd.NaT) is True
+    assert _is_missing(0) is False
+    assert _is_missing("") is False
+    assert _is_missing(3) is False
+    assert _is_missing("abc") is False
+
+
+def test_run_ingestion_checks_keeps_zero_rank_rows():
+    valid = _valid_row()
+    zero_rank = _valid_row() | {
+        "match_id": "2026-test-002",
+        "player1_ranking": 0,
+    }
+    excess_serves = _valid_row() | {
+        "match_id": "2026-test-003",
+        "player1_first_serves_made": 35,
+        "player1_total_serve_points": 30,
+    }
+
+    result: IngestionCheckReport = run_ingestion_checks(
+        pd.DataFrame([valid, zero_rank, excess_serves])
+    )
+
+    assert result["passed"] is False
+    assert result["input_rows"] == 3
+    assert result["valid_rows"] == 2  # rank 0 is "no rank" (imputed upstream), not invalid
+    assert result["dropped_rows"] == 1
+    assert any(
+        "player1_first_serves_made exceeds player1_total_serve_points" in issue
+        for issue in result["results"]
+    )
+    kept = cast(pd.DataFrame, result["valid_df"]).to_dict(orient="records")
+    assert kept[0] == valid
+    assert kept[1] == zero_rank
