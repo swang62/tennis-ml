@@ -29,6 +29,7 @@ mlartifacts/
 .pytest_cache/
 .ruff_cache/
 .ipynb_checkpoints/
+.testmondata
 *.egg-info
 *.egg
 
