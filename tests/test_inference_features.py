@@ -2,86 +2,30 @@
 
 Target: `src.features.inference.build_inference_features`.
 
-Tests run against the seeded DuckDB at `data/tennis.duckdb` (built from
-`infra/duckdb/init.sql` + `infra/duckdb/seed.py` + the dbt gold models). A
-session-scoped autouse fixture rebuilds the gold tables once if they are
-missing or empty; otherwise it skips so repeated runs stay fast. All
-date-dependent tests pass an explicit `as_of_date` for determinism, except the
-default-today test, which monkeypatches `date.today` to a fixed date.
+Tests run against the temporary seeded test DB built per session by the
+conftest pretest setup (`infra/duckdb/init.sql` + `infra/duckdb/seed.py
+--offline` + the dbt gold models, pointed at via TENNIS_DB_PATH), never the
+dev database at `data/tennis.duckdb`. All date-dependent
+tests pass an explicit `as_of_date` for determinism, except the default-today
+test, which monkeypatches `date.today` to a fixed date.
 """
 
 import math
-import subprocess
 from datetime import date
 from typing import override
 
-import duckdb
 import pandas as pd
 import pytest
 
-from src.constants import GOLD_ROLLING_FEATURES, PROFILES_TABLE, ROOT
+from src.constants import GOLD_ROLLING_FEATURES, PROFILES_TABLE
 from src.db.client import execute_df
 from src.features import inference
 from src.features.columns import DIFF_COLS, FEATURE_COLS
 from src.features.inference import build_inference_features
-from src.utils import run_dbt_build
-
-DB_PATH = ROOT / "data" / "tennis.duckdb"
 
 # All seeded matches are in 2026 (2026-03-15 .. 2026-07-15); a fixed as-of date
 # after the last match exercises the full snapshot history deterministically.
 AS_OF_AFTER_ALL_MATCHES = date(2026, 9, 1)
-
-
-def _gold_rolling_ready() -> bool:
-    """True when the seeded gold rolling table already has rows."""
-    if not DB_PATH.exists():
-        return False
-    conn = duckdb.connect(str(DB_PATH))
-    try:
-        row = conn.execute(f"SELECT COUNT(*) FROM {GOLD_ROLLING_FEATURES}").fetchone()
-    except Exception:
-        return False
-    finally:
-        conn.close()
-    return bool(row is not None and row[0] > 0)
-
-
-@pytest.fixture(scope="session", autouse=True)
-def seeded_gold_db():
-    """Rebuild the gold tables once if missing/empty; skip otherwise.
-
-    Runs the bootstrap steps behind `just db-reset` + `just db-seed` +
-    `just db-dbt`: init the schemas, seed ~100 real matches via
-    `infra/duckdb/seed.py` (raw ATP -> bronze + filtered ATP profiles), then
-    `dbt build` the gold models via the shared `run_dbt_build()` helper. The
-    seed's best-effort Wikipedia enrichment is skipped with `--offline` so
-    tests never depend on live Wikipedia. Subprocess output is captured so a
-    bootstrap failure reports the exact failing command.
-    """
-    if _gold_rolling_ready():
-        yield
-        return
-
-    commands = [
-        ["uv", "run", "python", "infra/duckdb/initialize_schemas.py", "init"],
-        ["uv", "run", "python", "infra/duckdb/seed.py", "--offline"],
-    ]
-    for command in commands:
-        proc = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"gold bootstrap command failed: {' '.join(command)}\n"
-                f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}"
-            )
-    run_dbt_build()
-
-    # The singleton connection may have opened the pre-rebuild DB file; drop
-    # it so the next get_conn() reconnects to the freshly built one.
-    import src.db.client as db_client
-
-    db_client._conn = None
-    yield
 
 
 def test_output_schema_contract():

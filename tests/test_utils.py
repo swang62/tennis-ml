@@ -2,7 +2,7 @@ import json
 import os
 import sys
 
-from src.constants import KERNEL_NAME
+from src.constants import REPO_NAME
 from src.utils import ensure_kernel, load_env
 
 
@@ -13,7 +13,7 @@ def test_ensure_kernel_registers_repo_local_kernelspec(monkeypatch, tmp_path):
 
     name = ensure_kernel()
 
-    assert name == KERNEL_NAME
+    assert name == REPO_NAME
     kernel_json = json.loads((kernel_dir / "kernel.json").read_text())
     assert kernel_json["argv"][0] == sys.executable
     assert "ipykernel_launcher" in kernel_json["argv"]

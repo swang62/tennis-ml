@@ -7,12 +7,31 @@ gold.match_features (canonical one-row-per-match training table). Also
 enriches player bios once the gold layer exists.
 """
 
+import subprocess
+from pathlib import Path
+
 from prefect import flow, task
 
-from src.constants import GOLD_TABLE
+from src.constants import GOLD_TABLE, ROOT
 from src.db.client import get_conn
 from src.flows.ingest import enrich_missing as _enrich_missing
-from src.utils import load_env, run_dbt_build
+from src.utils import load_env
+
+# --- ETL-specific dbt gold build (only used by this flow) ---
+DBT_BUILD_CMD = ["uv", "run", "dbt", "build", "--project-dir", "dbt", "--profiles-dir", "dbt"]
+
+
+def run_dbt_build(profiles_dir: str | Path = "dbt") -> subprocess.CompletedProcess:
+    """Run `dbt build` (gold layer) from the repo root; raise on failure.
+
+    `profiles_dir` overrides the profiles directory (the repo default `dbt/`).
+    Tests pass a temp dir containing a profiles.yml that points dbt at a
+    throwaway DuckDB.
+    """
+    cmd = DBT_BUILD_CMD
+    if str(profiles_dir) != "dbt":
+        cmd = [*DBT_BUILD_CMD[:-2], "--profiles-dir", str(profiles_dir)]
+    return subprocess.run(cmd, cwd=ROOT, check=True)
 
 
 @task(retries=2, retry_delay_seconds=30)

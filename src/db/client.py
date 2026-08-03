@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any
 
 import duckdb
@@ -15,11 +17,23 @@ DB_PATH = DATA_DIR / "tennis.duckdb"
 _conn: duckdb.DuckDBPyConnection | None = None
 
 
+def _resolve_db_path() -> Path:
+    """DB file to open: $TENNIS_DB_PATH when set (tests), else the repo default.
+
+    Tests set TENNIS_DB_PATH to a throwaway file so no test ever touches the
+    dev/staging/prod database at DB_PATH.
+    """
+    if os.environ.get("TENNIS_DB_PATH"):
+        return Path(os.environ["TENNIS_DB_PATH"])
+    return DB_PATH
+
+
 def get_conn() -> duckdb.DuckDBPyConnection:
     global _conn
     if _conn is None:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        _conn = duckdb.connect(str(DB_PATH))
+        db_path = _resolve_db_path()
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        _conn = duckdb.connect(str(db_path))
     return _conn
 
 

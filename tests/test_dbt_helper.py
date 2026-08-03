@@ -3,7 +3,7 @@ import subprocess
 import pytest
 
 from src.constants import ROOT
-from src.utils import DBT_BUILD_CMD, run_dbt_build
+from src.flows.etl import DBT_BUILD_CMD, run_dbt_build
 
 
 def test_run_dbt_build_invokes_dbt_build_with_exact_args(monkeypatch):
@@ -13,7 +13,7 @@ def test_run_dbt_build_invokes_dbt_build_with_exact_args(monkeypatch):
         calls.append((args, kwargs))
         return "fake-result"
 
-    monkeypatch.setattr("src.utils.subprocess.run", fake_run)
+    monkeypatch.setattr("src.flows.etl.subprocess.run", fake_run)
 
     result = run_dbt_build()
 
@@ -25,7 +25,7 @@ def test_run_dbt_build_propagates_called_process_error(monkeypatch):
     def fail_run(*_args, **_kwargs):
         raise subprocess.CalledProcessError(returncode=1, cmd=DBT_BUILD_CMD)
 
-    monkeypatch.setattr("src.utils.subprocess.run", fail_run)
+    monkeypatch.setattr("src.flows.etl.subprocess.run", fail_run)
 
     with pytest.raises(subprocess.CalledProcessError) as excinfo:
         run_dbt_build()

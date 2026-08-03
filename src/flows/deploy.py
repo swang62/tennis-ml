@@ -16,7 +16,7 @@ from typing import Any
 
 from prefect import flow
 
-from src.constants import DATA_PROCESSED, PRODUCTION_MODEL, ROOT
+from src.constants import BENTO_REPO, DATA_PROCESSED, PRODUCTION_MODEL, REPO_NAME, ROOT
 from src.utils import load_env
 
 # --- Deploy-only paths and names ---
@@ -25,15 +25,12 @@ SERVICE_FILE = ROOT / "src" / "serving" / "service.py"
 PINNED_BENTOFILE = DATA_PROCESSED / "bentofile.pinned.yaml"
 BENTO_TAG_FILE = DATA_PROCESSED / "bento_tag.txt"
 STATE_FILE = DATA_PROCESSED / "bento_build_state.json"
-BENTO_REPO = os.getenv("BENTO_REPO", "bento-serving")
-
-K3D_CLUSTER = os.getenv("K3D_CLUSTER", "tennis-ml")
-REGISTRY_NAME = os.getenv("K3D_REGISTRY_NAME", "tennis-ml-registry")
 
 # Registry URLs are composed from the registry host + the Bento repo name, so
 # the repo name (BENTO_REPO) is never duplicated. Push goes
 # host -> caddy (https) -> traefik -> registry.
-REGISTRY_PUSH_URL = os.getenv("REGISTRY_PUSH_URL", "registry.macsteve.lan")
+REGISTRY_NAME = REPO_NAME + "-registry"
+REGISTRY_PUSH_URL = os.getenv("REGISTRY_PUSH_URL")
 REGISTRY_PUSH_REPOSITORY = f"{REGISTRY_PUSH_URL}/{BENTO_REPO}"
 BENTO_MANIFEST = ROOT / "infra" / "manifests" / "deploy" / "bentoml.yaml"
 
@@ -325,9 +322,7 @@ def _cluster_running() -> bool:
             check=True,
         ).stdout
         clusters = json.loads(out)
-        return any(
-            c.get("name") == K3D_CLUSTER and c.get("serversRunning", 0) > 0 for c in clusters
-        )
+        return any(c.get("name") == REPO_NAME and c.get("serversRunning", 0) > 0 for c in clusters)
     except (subprocess.CalledProcessError, json.JSONDecodeError):
         return False
 
@@ -424,7 +419,7 @@ def deploy_bento(force: bool = False) -> None:
     local_image, production_version = build_bento_image(force=force)
 
     if not _cluster_running():
-        print(f"k3d cluster {K3D_CLUSTER} is not running — local image is ready: {local_image}")
+        print(f"k3d cluster {REPO_NAME} is not running — local image is ready: {local_image}")
         return
     if not _registry_running():
         print(
@@ -461,7 +456,7 @@ def deploy_bento(force: bool = False) -> None:
     )
     state = _read_state()
     _write_state({**state, "deployed_version": production_version, "deployed_image": push_latest})
-    print(f"Deployed production {push_latest} to {K3D_CLUSTER}")
+    print(f"Deployed production {push_latest} to {REPO_NAME}")
 
 
 if __name__ == "__main__":

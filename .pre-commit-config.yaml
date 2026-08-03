@@ -1,6 +1,6 @@
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.8.0
+    rev: v0.15.16
     hooks:
       - id: ruff
         args: [--fix]
@@ -19,8 +19,23 @@ repos:
 
       - id: basedpyright
         name: basedpyright
-        description: Static type checking (errors only; config in pyproject.toml)
+        description: Static type checking of staged files (errors only; config in pyproject.toml)
         language: system
         entry: uv run basedpyright
         types: [python]
+
+      - id: testmon
+        name: tests (testmon)
+        description: Run only pytest tests affected by the changed files (coverage-based)
+        language: system
+        entry: uv run pytest --testmon
         pass_filenames: false
+        files: ^(src|tests|infra/duckdb)/
+
+      - id: dbt-tests
+        name: tests (dbt models)
+        description: Run the gold-build e2e test when dbt models or DuckDB init SQL change
+        language: system
+        entry: uv run pytest tests/test_e2e_ingest_to_inference.py -q
+        pass_filenames: false
+        files: ^(dbt|infra/duckdb)/
