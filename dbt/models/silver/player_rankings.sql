@@ -1,7 +1,8 @@
--- Player ranking observations derived ONLY from bronze.match_events: each
--- raw match (one row holding both players) expands into two ranking rows,
--- one per player at that match's date. This is the ranking time series;
--- gold.match_features keeps ranking only as a per-match feature column.
+-- silver.player_rankings: player ranking observations derived ONLY from
+-- bronze.match_events: each raw match (one row holding both players) expands
+-- into two ranking rows, one per player at that match's date. This is the
+-- ranking time series; gold.match_features keeps ranking only as a per-match
+-- feature column.
 WITH expanded AS (
     SELECT
         match_id, match_date,

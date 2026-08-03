@@ -18,6 +18,7 @@ Decoupled aux artifacts (`linear_scaler.pkl`, `bio_embeddings.parquet`,
 and loaded from disk at init.
 """
 
+import builtins
 import json
 import pickle
 from datetime import date
@@ -30,6 +31,7 @@ import pandas as pd
 from bentoml.images import Image
 
 from src.constants import PRODUCTION_MODEL, ROOT
+from src.db.client import first_row_dict
 from src.features.columns import FEATURE_COLS
 from src.features.inference import _build_inference_features_with_meta
 from src.utils import load_env
@@ -209,11 +211,15 @@ class TennisPredictor:
         out_df = self._predict_proba(row)
         # One row in, one row out — return the first record as a flat dict for
         # ergonomic JSON over HTTP.
-        rec = out_df.iloc[0].to_dict()
-        rec["p_win"] = float(rec["p_win"])
-        rec["p_linear"] = float(rec["p_linear"])
-        rec["p_gbdt"] = float(rec["p_gbdt"])
-        rec["p_nn"] = float(rec["p_nn"])
+        rec = first_row_dict(out_df)
+        rec["p_win"] = builtins.round(float(rec["p_win"]), 4)
+        rec["p_linear"] = builtins.round(float(rec["p_linear"]), 4)
+        rec["p_gbdt"] = builtins.round(float(rec["p_gbdt"]), 4)
+        rec["p_nn"] = builtins.round(float(rec["p_nn"]), 4)
+        rec["predicted_winner"] = (
+            rec["player_id"] if float(rec["p_win"]) >= 0.5 else rec["opponent_id"]
+        )
+        rec["response_ms"] = (perf_counter() - started_at) * 1000
         print(
             "predict_from_ids_observability"
             f" raw_player_id={meta['raw_player_id']}"
@@ -241,7 +247,7 @@ class TennisPredictor:
             f" median_days_since={meta['median_days_since']}"
             f" median_matches_30d={meta['median_matches_30d']}"
             f" build_ms={meta['build_ms']}"
-            f" total_ms={(perf_counter() - started_at) * 1000:.3f}"
+            f" response_ms={(perf_counter() - started_at) * 1000:.3f}"
             f" p_win={rec['p_win']:.6f}"
         )
         return rec

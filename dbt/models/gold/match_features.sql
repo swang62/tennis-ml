@@ -2,9 +2,9 @@
 --
 -- ONE ROW PER MATCH (not per player). Each player-match row is paired with
 -- that player's IMMEDIATELY PRECEDING post-match snapshot
--- (player_match_number - 1) from gold.player_rolling_features, so all rolling
+-- (player_match_number - 1) from gold.rolling_features, so all rolling
 -- history values come strictly from completed matches BEFORE the current
--- event. The current event (gold.player_matches) supplies match context,
+-- event. The current event (silver.player_matches) supplies match context,
 -- CURRENT rankings, and the correct pre-match 30-day activity count.
 -- The two perspectives then collapse into one canonical row: the lower/stable
 -- ATP id is the `player_*` side, the other is `opponent_*`, so the table is
@@ -16,6 +16,11 @@
 -- Cold start: a player's first match has no prior snapshot, so all rolling
 -- features are NULL (no zero filling). The only documented fallback is
 -- days_since_last_match = 365; matches_30d is naturally 0 (it is a COUNT).
+--
+-- Rankings are never a row filter: unranked players (rank NULL after the
+-- 0 -> NULL mapping in silver.player_matches) are kept, so matches are never
+-- silently dropped for missing rankings. NULL rankings, rank_trend, and
+-- rank_diff are imputed at train time (median) alongside the other NULLs.
 
 WITH player_match_enriched AS (
     SELECT
@@ -77,13 +82,11 @@ WITH player_match_enriched AS (
         CAST(YEAR(pm.match_date) - prof.turned_pro AS INTEGER) AS years_pro
 
     FROM {{ ref('player_matches') }} pm
-    LEFT JOIN {{ ref('player_rolling_features') }} pr
+    LEFT JOIN {{ ref('rolling_features') }} pr
         ON pr.player_id = pm.player_id
        AND pr.player_match_number = pm.player_match_number - 1
     LEFT JOIN gold.player_profiles prof
         ON prof.player_id = pm.player_id
-    WHERE pm.player_ranking > 0
-      AND pm.opponent_ranking > 0
 )
 -- Collapse the two player-perspective rows of each match into one canonical
 -- row: the lower ATP id is the player_* side (p), the higher is the

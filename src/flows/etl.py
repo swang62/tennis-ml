@@ -1,9 +1,10 @@
 """Prefect flow: Bronze → Gold ETL.
 
-Runs `dbt build` which builds gold in dependency order: gold.player_matches
-(player-perspective rows) → gold.player_rolling_features (post-match
-snapshots) → gold.match_features (canonical one-row-per-match training
-table). Also enriches player bios once the gold layer exists.
+Runs `dbt build` which builds the medallion layers in dependency order:
+silver.player_matches (player-perspective rows) and silver.player_rankings
+(ranking series) -> gold.rolling_features (post-match snapshots) ->
+gold.match_features (canonical one-row-per-match training table). Also
+enriches player bios once the gold layer exists.
 """
 
 import subprocess

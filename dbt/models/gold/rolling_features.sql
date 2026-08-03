@@ -1,4 +1,4 @@
--- gold.player_rolling_features: post-match player snapshots.
+-- gold.rolling_features: post-match player snapshots.
 --
 -- ONE ROW PER (player_id, match_id): the post-match snapshot for that player's
 -- completed match. snapshot_date is the match date. Downstream match_features
@@ -42,7 +42,10 @@
 --
 -- rank_trend_10/20 are NOT computed here. avg_player_rank_10/20 store the
 -- player's rolling average ranking; match_features derives rank trend by
--- subtracting the next match's current ranking from these.
+-- subtracting the next match's current ranking from these. Unranked matches
+-- (ranking NULL after the 0 -> NULL mapping in player_matches) are skipped by
+-- the AVG window — a 10-match window containing 3 unranked matches averages
+-- the 7 known ranks, never a bogus 0.
 
 WITH player_surface_matches AS (
     -- One row per (player_id, match_id); the inclusive 10-match win rate on

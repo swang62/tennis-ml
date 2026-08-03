@@ -36,25 +36,30 @@ just setup
 ## Data Flow
 
 ```
-        CSV match data → ingest.py (validate + insert)
+ Raw match data → ingest.py (pre-validation)
                       ↓
             ┌──────────────────────┐
-            │ DuckDB bronze        │ ← persistent DuckDB file
+            │        BRONZE        │
             │ (match_events)       │
             └──────────┬───────────┘
-                       │ Prefect etl_flow (dbt build)
+                       │ Prefect etl (dbt build)
                        ↓
             ┌──────────────────────┐
-            │ DuckDB gold           │ ← derived features
-            │ (player_matches →     │
-            │  player_rolling_      │
-            │  features →           │
-            │  match_features)      │
+            │        SILVER        │
+            │ player_matches +     │
+            │ player_rankings      │
+            └──────────┬───────────┘
+                       │ dbt build
+                       ↓
+            ┌──────────────────────┐
+            │        GOLD          │
+            │  rolling_features + │
+            │  match_features      │
             └──────────┬───────────┘
                        ↓
          Jupyter notebooks (training, evaluation, promotion)
                        ↓
-         MLflow registry → BentoML serving
+                MLflow registry → BentoML serving
 ```
 
 ## Trigger Model
@@ -69,12 +74,12 @@ just setup
 ## Pipelines
 
 - `ingest` — CSV → bronze
-- `etl` — bronze → gold: player_matches → player_rolling_features → match_features, plus feature enrichment and sanitization
+- `etl` — bronze → silver → gold: player_matches/player_rankings → rolling_features → match_features, plus feature enrichment and sanitization
 - `pipeline.py` — standalone training runner: features → tune 3 models → pick best → train final → evaluate → promote
 
 ## Inspecting the data
 
-Inspect each stage directly in DuckDB: `bronze.match_events` (raw), `gold.player_matches` (per-player rows), `gold.player_rolling_features` (post-match snapshots), `gold.match_features` (final canonical training rows).
+Inspect each stage directly in DuckDB: `bronze.match_events` (raw), `silver.player_matches` (per-player rows), `silver.player_rankings` (ranking series), `gold.rolling_features` (post-match snapshots), `gold.match_features` (final canonical training rows).
 
 ## Serving & Inference
 
@@ -106,6 +111,7 @@ The `/predict-from-ids` endpoint accepts a JSON object with the following fields
 ## Extra Notes
 
 - **Canonicalization** — balanced symmetric features, the lower lexicographic player id becomes the `player_*` side, so `(A, B)` and `(B, A)` produce identical rows.
-- **Rolling form lookup** — each player's newest `gold.player_rolling_features` snapshot strictly before `as_of_date` and are computed on-demand from `gold.player_matches`.
+- **Rolling form lookup** — each player's newest `gold.rolling_features` snapshot strictly before `as_of_date` and are computed on-demand from `silver.player_matches`.
 - **Cold-start imputation** — missing players (no eligible snapshot) get on-demand global aggregates.
+- **Unranked players** — ATP rank 0 is the missing marker; it maps to NULL in `silver.player_matches`, so matches are never dropped for missing rankings and rolling rank averages skip unranked matches. Training imputes the NULL (median) along with every other missing cell.
 - **Bento image is fully self-contained** —Bento loads 4 artifacts from the MLflow registry by alias, ensemble model uses best/promoted `[p_linear, p_gbdt, p_nn]` → `p_win`.

@@ -1,4 +1,5 @@
 CREATE SCHEMA IF NOT EXISTS bronze;
+CREATE SCHEMA IF NOT EXISTS silver;
 CREATE SCHEMA IF NOT EXISTS gold;
 
 -- Raw match data: one row per match with both players' stats in the row.

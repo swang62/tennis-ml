@@ -10,10 +10,9 @@ import numpy as np
 import pandas as pd
 from fastembed import TextEmbedding
 
-from src.constants import ROOT
-from src.db.client import get_client, to_dataframe
+from src.constants import PROFILES_TABLE, ROOT
+from src.db.client import to_dataframe
 
-PROFILES_TABLE = "gold.player_profiles"
 MODEL_NAME = "BAAI/bge-small-en-v1.5"
 
 DEFAULT_INDEX = ROOT / "data" / "processed" / "player_similarity.index"
@@ -75,19 +74,21 @@ class PlayerSimilarity:
         encoded = pd.get_dummies(df[["backhand", "handedness"]]).astype(np.float32)
         # height/turned_pro are typed SMALLINT/INTEGER in gold.player_profiles;
         # only missing values (NULL) need filling.
-        height = df["height"].fillna(0).astype(np.float32)
-        years_pro = (pd.Timestamp.now().year - df["turned_pro"].fillna(0)).astype(np.float32)
+        height = pd.Series(df["height"]).fillna(0).astype(np.float32)
+        years_pro = (pd.Timestamp.now().year - pd.Series(df["turned_pro"]).fillna(0)).astype(
+            np.float32
+        )
 
         # Shared embedding path (also used by the NN static features in 02_tune_nn).
-        embeddings = embed_bio_summaries(df[["player_id", "summary"]])
+        embeddings = embed_bio_summaries(pd.DataFrame(df[["player_id", "summary"]]))
         bio_cols = [c for c in embeddings.columns if c != "player_id"]
 
         features = np.ascontiguousarray(
             pd.concat(
                 [
                     encoded,
-                    height.rename("height"),
-                    years_pro.rename("years_pro"),
+                    height.to_frame("height"),
+                    years_pro.to_frame("years_pro"),
                     embeddings[bio_cols],
                 ],
                 axis=1,

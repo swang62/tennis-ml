@@ -47,16 +47,6 @@ spec:
                 name: bento-serving
                 port:
                   number: 3000
-    - host: dashboard.macsteve.lan
-      http:
-        paths:
-          - pathType: Prefix
-            path: "/"
-            backend:
-              service:
-                name: tennis-dashboard
-                port:
-                  number: 8501
     - host: registry.macsteve.lan
       http:
         paths:
@@ -67,3 +57,13 @@ spec:
                 name: registry
                 port:
                   number: 5000
+    # - host: dashboard.macsteve.lan
+    #   http:
+    #     paths:
+    #       - pathType: Prefix
+    #         path: "/"
+    #         backend:
+    #           service:
+    #             name: tennis-dashboard
+    #             port:
+    #               number: 8501

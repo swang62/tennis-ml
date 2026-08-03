@@ -93,7 +93,8 @@ def run_ingestion_checks(df: pd.DataFrame) -> IngestionCheckReport:
     dropped_rows: list[str] = []
     invalid_row_count = 0
 
-    for row_index, row in enumerate(df.to_dict(orient="records")):
+    records = ({str(k): v for k, v in r.items()} for r in df.to_dict(orient="records"))
+    for row_index, row in enumerate(records):
         row_issues = validate_bronze_row(row)
         if row_issues:
             invalid_row_count += 1

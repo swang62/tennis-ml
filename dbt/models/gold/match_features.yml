@@ -5,7 +5,7 @@ models:
     description: >
       ONE ROW PER MATCH, lower-id player_* side, built by pairing each
       player_match row with that player's immediately preceding post-match
-      snapshot (player_match_number - 1) from gold.player_rolling_features,
+      snapshot (player_match_number - 1) from gold.rolling_features,
       then collapsing the two perspectives into one canonical row. The current
       event supplies match context and current rankings; the prior snapshot
       supplies all rolling history, so no value leaks from the current match
@@ -58,13 +58,13 @@ models:
               arguments:
                 values: [0, 1]
       - name: player_ranking
-        description: Canonical player ranking at match time.
-        tests:
-          - not_null
+        description: >
+          Canonical player ranking at match time; NULL when unranked (ATP
+          rank 0 maps to NULL in silver.player_matches). Imputed at train time.
       - name: opponent_ranking
-        description: Opponent ranking at match time.
-        tests:
-          - not_null
+        description: >
+          Opponent ranking at match time; NULL when unranked (ATP rank 0 maps
+          to NULL in silver.player_matches). Imputed at train time.
 
       # Canonical player-side rolling stats (player_ prefix), from the prior
       # snapshot — all refer to completed matches before this one; NULL on the

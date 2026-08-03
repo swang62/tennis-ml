@@ -57,6 +57,53 @@ ignore = ["F401", "TRY003", "E501"]
 [tool.ruff.lint.per-file-ignores]
 "notebooks/**/*" = ["I001", "E702", "E402", "E501"]
 
+[tool.basedpyright]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+venvPath = "."
+venv = ".venv"
+include = ["src", "tests", "notebooks"]
+exclude = [
+    ".venv",
+    "**/__pycache__",
+    "artifacts",
+    "data",
+    "dbt",
+    "infra",
+    "mlruns",
+    ".git",
+    "**/.ipynb_checkpoints/**",
+]
+# notebooks/: mlflow.sklearn, mlflow.pytorch and lightning.pytorch are real
+# public APIs whose packages ship no typing, so they're flagged as private or
+# unknown attributes. Everything else in notebooks is type-checked.
+executionEnvironments = [
+    # extraPaths is relative to this config file (repo root): "." = repo root,
+    # so notebooks/ can `import src.*`. Same pattern as ArcReel's pyproject.
+    { root = "notebooks", extraPaths = ["."], reportPrivateImportUsage = "none", reportAttributeAccessIssue = "none" },
+]
+# Data-science type noise: duckdb, faiss, fastembed, plotly, onnxruntime and
+# pytorch-lightning ship no stubs, so Any/Unknown propagates from their APIs.
+# reportUnnecessaryIsInstance/reportUnreachable also stay off: the isinstance
+# guards in build_inference_features are deliberate trust-boundary validation.
+reportAny = "none"
+reportExplicitAny = "none"
+reportUnknownMemberType = "none"
+reportUnknownArgumentType = "none"
+reportUnknownVariableType = "none"
+reportUnknownParameterType = "none"
+reportUnknownLambdaType = "none"
+reportMissingParameterType = "none"
+reportUnusedCallResult = "none"
+reportImplicitStringConcatenation = "none"
+reportUnnecessaryCast = "none"
+reportUnannotatedClassAttribute = "none"
+reportUnnecessaryIsInstance = "none"
+reportUnreachable = "none"
+reportPrivateUsage = "none"
+reportMissingTypeStubs = "none"
+reportUntypedFunctionDecorator = "none"
+
 [tool.uv.workspace]
 members = ["."]
 
@@ -65,9 +112,11 @@ tennis-ml = { workspace = true, editable = true }
 
 [dependency-groups]
 dev = [
-    "python-dotenv>=1.2.2",
-    "ruff>=0.7",
-    "pre-commit>=3.8",
-    "pytest>=8",  # test runner for tests/ (inference feature builder tests)
-    "tennis-ml",
+  "python-dotenv>=1.2.2",
+  "ruff>=0.7",
+  "pre-commit>=3.8",
+  "pytest>=8",
+  "tennis-ml",
+  "basedpyright>=1.39",
+  "pandas-stubs>=2.3",
 ]

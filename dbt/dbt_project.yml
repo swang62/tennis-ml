@@ -14,19 +14,17 @@ clean-targets:
 
 models:
   tennis_ml:
-    gold:
+    # Medallion layering: bronze.match_events (raw, ingest) -> silver
+    # (per-player expansion: player_matches, player_rankings) -> gold
+    # (features: rolling_features, match_features).
+    silver:
       +materialized: table
+      +schema: silver
 
-      # Gold tables are built via CREATE TABLE AS SELECT, so PKs and secondary
-      # indexes cannot live in init.sql (bronze/PK side). Post-hooks apply them
-      # after each model materializes. DuckDB table materialization replaces
-      # the table, so the DDL is re-applied on every build.
-      match_features:
-        +post-hook:
-          - "ALTER TABLE {{ this }} ADD CONSTRAINT pk_match_features PRIMARY KEY (match_id)"
-          - "CREATE INDEX IF NOT EXISTS idx_match_features_player_id ON {{ this }} (player_id)"
-          - "CREATE INDEX IF NOT EXISTS idx_match_features_opponent_id ON {{ this }} (opponent_id)"
-
+      # Silver tables are built via CREATE TABLE AS SELECT, so PKs and
+      # secondary indexes cannot live in init.sql (bronze/PK side). Post-hooks
+      # apply them after each model materializes. DuckDB table materialization
+      # replaces the table, so the DDL is re-applied on every build.
       player_matches:
         +post-hook:
           - "ALTER TABLE {{ this }} ADD CONSTRAINT pk_player_matches PRIMARY KEY (player_id, match_id)"
@@ -37,7 +35,19 @@ models:
           - "ALTER TABLE {{ this }} ADD CONSTRAINT pk_player_rankings PRIMARY KEY (player_id, match_id)"
           - "CREATE INDEX IF NOT EXISTS idx_player_rankings_pid_date ON {{ this }} (player_id, match_date)"
 
-      player_rolling_features:
+    gold:
+      +materialized: table
+      +schema: gold
+
+      # Same post-hook rationale as silver: PKs/indexes are re-applied on every
+      # build because DuckDB table materialization replaces the table.
+      match_features:
         +post-hook:
-          - "ALTER TABLE {{ this }} ADD CONSTRAINT pk_player_rolling_features PRIMARY KEY (player_id, match_id)"
-          - "CREATE INDEX IF NOT EXISTS idx_player_rolling_pid_date ON {{ this }} (player_id, snapshot_date)"
+          - "ALTER TABLE {{ this }} ADD CONSTRAINT pk_match_features PRIMARY KEY (match_id)"
+          - "CREATE INDEX IF NOT EXISTS idx_match_features_player_id ON {{ this }} (player_id)"
+          - "CREATE INDEX IF NOT EXISTS idx_match_features_opponent_id ON {{ this }} (opponent_id)"
+
+      rolling_features:
+        +post-hook:
+          - "ALTER TABLE {{ this }} ADD CONSTRAINT pk_rolling_features PRIMARY KEY (player_id, match_id)"
+          - "CREATE INDEX IF NOT EXISTS idx_rolling_pid_date ON {{ this }} (player_id, snapshot_date)"
