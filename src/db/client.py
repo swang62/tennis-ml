@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import duckdb
 import pandas as pd
 
@@ -25,7 +27,7 @@ def get_client():
     return get_conn()
 
 
-def query(sql: str) -> list[dict]:
+def query(sql: str) -> list[dict[str, object]]:
     conn = get_conn()
     rows = conn.sql(sql).fetchall()
     columns = [desc[0] for desc in conn.sql(sql).description]
@@ -46,3 +48,13 @@ def execute_df(sql: str, params: list[object] | None = None) -> pd.DataFrame:
     if params is None:
         return conn.sql(sql).fetchdf()
     return conn.execute(sql, params).fetchdf()
+
+
+def first_row_dict(df: pd.DataFrame) -> dict[str, Any]:
+    """First row of a result frame as a dict with string keys.
+
+    pandas-stubs types ``DataFrame.to_dict`` as ``dict[Hashable, Any]`` even
+    though the keys are the column names; normalize to str so the result fits
+    the typed ``dict[str, ...]`` parameters downstream.
+    """
+    return {str(k): v for k, v in df.iloc[0].to_dict().items()}

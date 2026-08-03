@@ -16,3 +16,11 @@ repos:
         language: system
         entry: kubeconform -ignore-missing-schemas -summary
         files: ^infra/manifests/.*\.yaml$
+
+      - id: basedpyright
+        name: basedpyright
+        description: Static type checking (errors only; config in pyproject.toml)
+        language: system
+        entry: uv run basedpyright
+        types: [python]
+        pass_filenames: false

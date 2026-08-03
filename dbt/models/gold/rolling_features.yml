@@ -1,7 +1,7 @@
 version: 2
 
 models:
-  - name: player_rolling_features
+  - name: rolling_features
     description: >
       Post-match player snapshots: one row per (player_id, match_id) recording
       the player's rolling form state immediately after that completed match.
@@ -42,7 +42,7 @@ models:
           - not_null
       - name: player_match_number
         description: >
-          1-based ordinal of the player's matches (from gold.player_matches);
+          1-based ordinal of the player's matches (from silver.player_matches);
           the snapshot's position in the player's history. Snapshot N is the
           post-match state of the player's Nth match.
         tests:

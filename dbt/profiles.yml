@@ -5,4 +5,4 @@ tennis_ml:
       type: duckdb
       path: data/tennis.duckdb
       schema: gold
-      threads: 4
+      threads: 1

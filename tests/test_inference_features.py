@@ -13,12 +13,13 @@ default-today test, which monkeypatches `date.today` to a fixed date.
 import math
 import subprocess
 from datetime import date
+from typing import override
 
 import duckdb
 import pandas as pd
 import pytest
 
-from src.constants import ROOT
+from src.constants import GOLD_ROLLING_FEATURES, PROFILES_TABLE, ROOT
 from src.db.client import execute_df
 from src.features import inference
 from src.features.columns import DIFF_COLS, FEATURE_COLS
@@ -37,7 +38,7 @@ def _gold_rolling_ready() -> bool:
         return False
     conn = duckdb.connect(str(DB_PATH))
     try:
-        row = conn.execute("SELECT COUNT(*) FROM gold.player_rolling_features").fetchone()
+        row = conn.execute(f"SELECT COUNT(*) FROM {GOLD_ROLLING_FEATURES}").fetchone()
     except Exception:
         return False
     finally:
@@ -170,7 +171,7 @@ def test_historical_as_of_excludes_later_snapshots():
     assert out.loc[0, "player_win_rate_10"] == 0.8
     # Cross-check the expected snapshot directly in the gold table.
     snapshot = execute_df(
-        "SELECT player_match_number, win_rate_10 FROM gold.player_rolling_features "
+        f"SELECT player_match_number, win_rate_10 FROM {GOLD_ROLLING_FEATURES} "
         "WHERE player_id = ? AND snapshot_date < ?::DATE "
         "ORDER BY player_match_number DESC LIMIT 1",
         ["S0AG", "2026-06-30"],
@@ -184,6 +185,7 @@ class _FixedTodayDate(date):
     """datetime.date subclass whose today() returns a fixed date."""
 
     @classmethod
+    @override
     def today(cls) -> date:
         return date(2026, 9, 1)
 
@@ -241,7 +243,7 @@ def test_one_missing_player_imputed_no_nans(args):
         "MEDIAN(win_streak) AS win_streak, "
         "AVG(win_rate_10) AS win_rate_10, "
         "AVG(hard_win_rate_10) AS hard_win_rate_10 "
-        "FROM gold.player_rolling_features WHERE snapshot_date < ?::DATE",
+        f"FROM {GOLD_ROLLING_FEATURES} WHERE snapshot_date < ?::DATE",
         ["2026-09-01"],
     ).iloc[0]
     assert row["opponent_ranking"] == round(float(pool["latest_player_ranking"]))
@@ -255,7 +257,7 @@ def test_one_missing_player_imputed_no_nans(args):
         "SELECT AVG(height) AS avg_height, "
         "AVG(CASE WHEN handedness = 'L' THEN 1 ELSE 0 END) AS left_handed_rate, "
         "AVG(2026 - turned_pro) AS avg_years_pro "
-        "FROM gold.player_profiles",
+        f"FROM {PROFILES_TABLE}",
     ).iloc[0]
     assert row["opponent_height"] == pytest.approx(profile_pool["avg_height"])
     assert row["opponent_is_left_handed"] == pytest.approx(profile_pool["left_handed_rate"])

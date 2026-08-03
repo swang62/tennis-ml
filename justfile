@@ -50,11 +50,10 @@ restart:
 train:
     uv run python src/flows/pipeline.py
 
+# Lint + format + typecheck (pre-commit covers ruff, kubeconform, basedpyright)
 test:
-    uv run ruff check --fix .
-    uv run ruff format .
+    uv run pre-commit run --all-files
     uv run pytest
-    just validate
 
 validate:
     kubeconform -ignore-missing-schemas -summary infra/manifests/

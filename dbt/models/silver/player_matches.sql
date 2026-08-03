@@ -1,4 +1,4 @@
--- gold.player_matches: normalized player-perspective match rows.
+-- silver.player_matches: normalized player-perspective match rows.
 --
 -- Each bronze.match_events row (one row per match holding both players' stats)
 -- expands into exactly two player-perspective rows: one with player1_id as the
@@ -20,6 +20,12 @@
 --     old match_features.sql compared each frame row against itself, counting
 --     every preceding row instead.
 --
+-- Ranking semantics: ATP rank 0 is the CSV missing marker for unranked
+-- players, so player_ranking/opponent_ranking are NULLIF'd to NULL. Rank 0
+-- would otherwise read as "better than rank 1" and corrupt rank_diff,
+-- rank_trend, and the rolling average-rank windows downstream. NULLs are
+-- imputed at train time (median) and by the inference pool (median).
+--
 -- No canonicalization: player/opponent orientation is the raw player1/player2
 -- assignment from bronze.
 
@@ -28,8 +34,8 @@ WITH expanded AS (
         match_id, match_date, tournament, round, surface,
         player1_id AS player_id,
         player2_id AS opponent_id,
-        player1_ranking AS player_ranking,
-        player2_ranking AS opponent_ranking,
+        NULLIF(player1_ranking, 0) AS player_ranking,
+        NULLIF(player2_ranking, 0) AS opponent_ranking,
         player1_wins_last_10 AS wins_last_10,
         player1_matches_last_10 AS matches_last_10,
         player1_aces AS aces,
@@ -48,8 +54,8 @@ WITH expanded AS (
         match_id, match_date, tournament, round, surface,
         player2_id AS player_id,
         player1_id AS opponent_id,
-        player2_ranking AS player_ranking,
-        player1_ranking AS opponent_ranking,
+        NULLIF(player2_ranking, 0) AS player_ranking,
+        NULLIF(player1_ranking, 0) AS opponent_ranking,
         player2_wins_last_10 AS wins_last_10,
         player2_matches_last_10 AS matches_last_10,
         player2_aces AS aces,

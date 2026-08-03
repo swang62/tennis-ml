@@ -10,11 +10,10 @@ import panel as pn
 import plotly.express as px
 import plotly.graph_objects as go
 
+from src.constants import GOLD_TABLE
 from src.db.client import to_dataframe
 
 pn.extension("plotly", "tabulator")
-
-GOLD_TABLE = "gold.match_features"
 
 
 def get_players() -> list[str]:
@@ -90,7 +89,7 @@ def compute_h2h_summary(df: pd.DataFrame, player_a: str, player_b: str):
 
 
 def draw_form_sequence(df: pd.DataFrame, player: str):
-    player_rows = df[df["player_id"] == player].sort_values("match_date")
+    player_rows = pd.DataFrame(df[df["player_id"] == player]).sort_values("match_date")
     results = player_rows["match_won"].tolist()
     opponents = player_rows["opponent_id"].tolist()
 
@@ -227,7 +226,7 @@ def matchup_content(a, b):
         "first_serve_pct",
     ]
     available_cols = [c for c in display_cols if c in h2h.columns]
-    match_table = h2h[available_cols].sort_values("match_date", ascending=False)
+    match_table = pd.DataFrame(h2h[available_cols]).sort_values("match_date", ascending=False)
 
     return pn.Column(
         pn.Row(

@@ -15,7 +15,7 @@ WITH ordered AS (
         LAG(clay_win_rate_10)  OVER (PARTITION BY player_id ORDER BY player_match_number) AS prev_clay,
         LAG(grass_win_rate_10) OVER (PARTITION BY player_id ORDER BY player_match_number) AS prev_grass,
         LAG(hard_win_rate_10)  OVER (PARTITION BY player_id ORDER BY player_match_number) AS prev_hard
-    FROM {{ ref('player_rolling_features') }}
+    FROM {{ ref('rolling_features') }}
 )
 SELECT player_id, player_match_number, surface
 FROM ordered

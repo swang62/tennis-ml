@@ -6,6 +6,8 @@ records the class by module path, and the BentoML service must be able to
 import `src.models.nn.TabularBioMLP` at load time.
 """
 
+from typing import override
+
 import lightning as L
 import torch
 import torch.nn as nn
@@ -43,18 +45,21 @@ class TabularBioMLP(L.LightningModule):
             nn.Linear(32, 1),
         )
 
+    @override
     def forward(self, tab, bio_p, bio_o):
         t = self.tab_mlp(tab)
         bp = self.bio_mlp(bio_p)
         bo = self.bio_mlp(bio_o)
         return self.head(torch.cat([t, bp, bo, bp - bo], dim=1)).squeeze(-1)
 
+    @override
     def training_step(self, batch, _batch_idx):
         tab, bio_p, bio_o, labels = batch
         loss = nn.functional.binary_cross_entropy_with_logits(self(tab, bio_p, bio_o), labels)
         self.log("train_loss", loss, prog_bar=True)
         return loss
 
+    @override
     def validation_step(self, batch, _batch_idx):
         tab, bio_p, bio_o, labels = batch
         logits = self(tab, bio_p, bio_o)
@@ -63,9 +68,11 @@ class TabularBioMLP(L.LightningModule):
         self.log("val_loss", loss, prog_bar=True, sync_dist=True)
         return {"probs": probs, "labels": labels}
 
+    @override
     def predict_step(self, batch, _batch_idx, _dataloader_idx=0):
         tab, bio_p, bio_o, _labels = batch
         return torch.sigmoid(self(tab, bio_p, bio_o))
 
+    @override
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.hparams["lr"])

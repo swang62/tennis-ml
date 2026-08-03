@@ -16,7 +16,7 @@ from typing import Any
 
 from prefect import flow
 
-from src.constants import ARTIFACTS, DATA_PROCESSED, PRODUCTION_MODEL, ROOT
+from src.constants import DATA_PROCESSED, PRODUCTION_MODEL, ROOT
 from src.utils import load_env
 
 # --- Deploy-only paths and names ---
@@ -195,7 +195,7 @@ def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
     import torch
 
     # Needed so torch.load can resolve the class — torch.save records the path.
-    from src.models.nn import TabularBioMLP
+    from src.models.nn import TabularBioMLP  # type: ignore[reportUnusedImport]
 
     # Silence torch's ONNX exporter noise: torchvision operator-skip warnings
     # (torchvision is not a serving dep), opset version hints, dynamic axes

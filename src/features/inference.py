@@ -7,10 +7,10 @@ players as of a given date, mirroring `gold.match_features` semantics:
   side and the higher is `opponent_*`, so `(X, Y)` and `(Y, X)` produce
   identical rows (same as `match_features.sql`'s `WHERE p.player_id < o.player_id`).
 * Rolling form comes from each player's newest
-  `gold.player_rolling_features` snapshot STRICTLY BEFORE the as-of date
+  `gold.rolling_features` snapshot STRICTLY BEFORE the as-of date
   (no dedicated latest table/view; the newest snapshot is immediately usable).
 * `days_since_last_match` (as-of date minus that snapshot's date) and
-  `matches_30d` (count of `gold.player_matches` rows in
+  `matches_30d` (count of `silver.player_matches` rows in
   `[as_of - 30 days, as_of)`) are computed at the as-of date.
 * Missing players (no eligible snapshot) and NULL snapshot cells are imputed
   from on-demand global aggregates over the eligible snapshot pool: MEDIAN
@@ -40,12 +40,14 @@ from typing import cast
 
 import pandas as pd
 
-from src.db.client import execute_df
+from src.constants import (
+    GOLD_ROLLING_FEATURES,
+    PROFILES_TABLE,
+    SILVER_PLAYER_MATCHES,
+)
+from src.db.client import execute_df, first_row_dict
 from src.features.columns import (
-    CONTEXT_COLS,
-    DIFF_COLS,
     FEATURE_COLS,
-    GOLD_ROLLING_COLS,
     OPPONENT_COLS,
     PLAYER_COLS,
 )
@@ -93,8 +95,8 @@ _SURFACE_TO_SNAPSHOT_COL = {
 }
 
 # Latest snapshot per player strictly before the as-of date.
-_LATEST_SNAPSHOT_SQL = """
-SELECT * FROM gold.player_rolling_features
+_LATEST_SNAPSHOT_SQL = f"""
+SELECT * FROM {GOLD_ROLLING_FEATURES}
 WHERE player_id = ?
   AND snapshot_date < ?::DATE
 ORDER BY player_match_number DESC
@@ -103,9 +105,9 @@ LIMIT 1
 
 # 30-day pre-match activity count, same window semantics as player_matches'
 # matches_30d_before ([as_of - 30 days, as_of), strictly).
-_MATCHES_30D_SQL = """
+_MATCHES_30D_SQL = f"""
 SELECT COUNT(*) AS n
-FROM gold.player_matches
+FROM {SILVER_PLAYER_MATCHES}
 WHERE player_id = ?
   AND match_date >= ?::DATE - INTERVAL '30 days'
   AND match_date < ?::DATE
@@ -113,7 +115,7 @@ WHERE player_id = ?
 
 # On-demand global imputation pool over all snapshots strictly before the
 # as-of date. One row; MEDIAN for ranking/streak-related, MEAN for others.
-_POOL_AGG_SQL = """
+_POOL_AGG_SQL = f"""
 SELECT
     MEDIAN(latest_player_ranking) AS latest_player_ranking,
     MEDIAN(win_streak)            AS win_streak,
@@ -131,17 +133,17 @@ SELECT
     AVG(clay_win_rate_10)         AS clay_win_rate_10,
     AVG(grass_win_rate_10)        AS grass_win_rate_10,
     AVG(hard_win_rate_10)         AS hard_win_rate_10
-FROM gold.player_rolling_features
+FROM {GOLD_ROLLING_FEATURES}
 WHERE snapshot_date < ?::DATE
 """
 
 # MEDIAN of per-player days_since_last_match at the as-of date, over players
 # that have an eligible snapshot. One row; NULL when the pool is empty.
-_MEDIAN_DAYS_SQL = """
+_MEDIAN_DAYS_SQL = f"""
 SELECT MEDIAN(days_since) AS median_days_since
 FROM (
     SELECT DATEDIFF('day', MAX(snapshot_date), ?::DATE) AS days_since
-    FROM gold.player_rolling_features
+    FROM {GOLD_ROLLING_FEATURES}
     WHERE snapshot_date < ?::DATE
     GROUP BY player_id
 )
@@ -149,16 +151,16 @@ FROM (
 
 # MEDIAN of per-player matches_30d at the as-of date, over players that have
 # an eligible snapshot (players with zero window matches contribute 0).
-_MEDIAN_MATCHES_30D_SQL = """
+_MEDIAN_MATCHES_30D_SQL = f"""
 SELECT MEDIAN(matches_30d) AS median_matches_30d
 FROM (
     SELECT pr.player_id, COUNT(pm.match_id) AS matches_30d
     FROM (
         SELECT DISTINCT player_id
-        FROM gold.player_rolling_features
+        FROM {GOLD_ROLLING_FEATURES}
         WHERE snapshot_date < ?::DATE
     ) pr
-    LEFT JOIN gold.player_matches pm
+    LEFT JOIN {SILVER_PLAYER_MATCHES} pm
         ON pm.player_id = pr.player_id
        AND pm.match_date >= ?::DATE - INTERVAL '30 days'
        AND pm.match_date < ?::DATE
@@ -167,9 +169,9 @@ FROM (
 """
 
 # Per-player static identity from gold.player_profiles (one row per player).
-_PROFILE_SQL = """
+_PROFILE_SQL = f"""
 SELECT player_id, height, handedness, turned_pro
-FROM gold.player_profiles
+FROM {PROFILES_TABLE}
 WHERE player_id = ?
 """
 
@@ -177,25 +179,25 @@ WHERE player_id = ?
 # no as-of window applies beyond the years_pro computation): mean height, mean
 # left-handed rate, and mean years-pro at the as-of date. One row; NULL when
 # no profiles exist.
-_PROFILE_POOL_AGG_SQL = """
+_PROFILE_POOL_AGG_SQL = f"""
 SELECT
     AVG(height) AS avg_height,
     AVG(CASE WHEN handedness = 'L' THEN 1 ELSE 0 END) AS left_handed_rate,
     AVG(?::INTEGER - turned_pro) AS avg_years_pro
-FROM gold.player_profiles
+FROM {PROFILES_TABLE}
 """
 
-_POOL_COUNTS_SQL = """
+_POOL_COUNTS_SQL = f"""
 SELECT
     COUNT(*) AS snapshot_pool_rows,
     COUNT(DISTINCT player_id) AS snapshot_pool_players
-FROM gold.player_rolling_features
+FROM {GOLD_ROLLING_FEATURES}
 WHERE snapshot_date < ?::DATE
 """
 
-_PROFILE_COUNTS_SQL = """
+_PROFILE_COUNTS_SQL = f"""
 SELECT COUNT(*) AS profile_rows
-FROM gold.player_profiles
+FROM {PROFILES_TABLE}
 """
 
 
@@ -394,26 +396,26 @@ def _build_inference_features_with_meta(
 
     # ── On-demand global imputation pool (one set of aggregates) ──
     as_of_iso = as_of_date.isoformat()
-    agg = execute_df(_POOL_AGG_SQL, [as_of_iso]).iloc[0].to_dict()
-    pool_counts = execute_df(_POOL_COUNTS_SQL, [as_of_iso]).iloc[0].to_dict()
+    agg = first_row_dict(execute_df(_POOL_AGG_SQL, [as_of_iso]))
+    pool_counts = first_row_dict(execute_df(_POOL_COUNTS_SQL, [as_of_iso]))
     median_days = _agg_or(
-        execute_df(_MEDIAN_DAYS_SQL, [as_of_iso, as_of_iso]).iloc[0].to_dict(),
+        first_row_dict(execute_df(_MEDIAN_DAYS_SQL, [as_of_iso, as_of_iso])),
         "median_days_since",
         _DEFAULT_DAYS_SINCE,
     )
     median_matches = _agg_or(
-        execute_df(_MEDIAN_MATCHES_30D_SQL, [as_of_iso, as_of_iso, as_of_iso]).iloc[0].to_dict(),
+        first_row_dict(execute_df(_MEDIAN_MATCHES_30D_SQL, [as_of_iso, as_of_iso, as_of_iso])),
         "median_matches_30d",
         _DEFAULT_MATCHES_30D,
     )
-    profile_agg = execute_df(_PROFILE_POOL_AGG_SQL, [as_of_date.year]).iloc[0].to_dict()
-    profile_counts = execute_df(_PROFILE_COUNTS_SQL).iloc[0].to_dict()
+    profile_agg = first_row_dict(execute_df(_PROFILE_POOL_AGG_SQL, [as_of_date.year]))
+    profile_counts = first_row_dict(execute_df(_PROFILE_COUNTS_SQL))
 
     def _latest_snapshot(pid: str) -> dict[str, object] | None:
         df = execute_df(_LATEST_SNAPSHOT_SQL, [pid, as_of_iso])
         if df.empty:
             return None
-        return df.iloc[0].to_dict()
+        return first_row_dict(df)
 
     player_snapshot = _latest_snapshot(lower_id)
     opponent_snapshot = _latest_snapshot(higher_id)

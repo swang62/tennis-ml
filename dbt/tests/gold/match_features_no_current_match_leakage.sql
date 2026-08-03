@@ -27,10 +27,10 @@ prior_snapshot AS (
         prp.win_rate_10 AS player_prior_val,
         pro.win_rate_10 AS opponent_prior_val
     FROM pm_canonical pmc
-    LEFT JOIN {{ ref('player_rolling_features') }} prp
+    LEFT JOIN {{ ref('rolling_features') }} prp
       ON prp.player_id = pmc.player_id
      AND prp.player_match_number = pmc.player_cur_num - 1
-    LEFT JOIN {{ ref('player_rolling_features') }} pro
+    LEFT JOIN {{ ref('rolling_features') }} pro
       ON pro.player_id = pmc.opponent_id
      AND pro.player_match_number = pmc.opponent_cur_num - 1
 )

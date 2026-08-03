@@ -19,8 +19,15 @@ DATA_PROCESSED = ROOT / "data" / "processed"
 CANDIDATE_MANIFEST = DATA_PROCESSED / "candidate_manifest.json"
 PRODUCTION_MODEL = "ensemble_lr_model"  # MLflow registered model 05 promotes to
 
-# --- Gold tables ---
-GOLD_TABLE = "gold.match_features"
+# --- Table names (single source of truth; no hardcoded names elsewhere) ---
+# Medallion layers: bronze (raw ingest) -> silver (per-player expansion) ->
+# gold (features). Consumer modules import these instead of re-declaring
+# schema-qualified table names in SQL or module constants.
+BRONZE_TABLE = "bronze.match_events"
+SILVER_PLAYER_MATCHES = "silver.player_matches"
+SILVER_PLAYER_RANKINGS = "silver.player_rankings"
+GOLD_ROLLING_FEATURES = "gold.rolling_features"
+GOLD_TABLE = "gold.match_features"  # canonical one-row-per-match training rows
 PROFILES_TABLE = "gold.player_profiles"
 
 # --- Repo-local kernelspec used by the pipeline runner ---
