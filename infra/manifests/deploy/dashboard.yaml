@@ -16,8 +16,8 @@ spec:
     spec:
       containers:
         - name: dashboard
-          image: tennis-dashboard:latest
-          imagePullPolicy: IfNotPresent
+          image: tennis-ml-registry:5000/tennis-dashboard:latest
+          imagePullPolicy: Always
           ports:
             - name: http
               containerPort: 8501

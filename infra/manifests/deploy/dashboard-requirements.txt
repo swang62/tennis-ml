@@ -1,0 +1,11 @@
+# Runtime deps for the Panel dashboard image only (src/dashboard/app.py).
+# The dashboard is a read-only DuckDB query + Plotly app: it imports panel,
+# plotly, duckdb, pandas, numpy and the copied src/ package (no editable
+# install of the full project — torch/lightning/prefect/mlflow/bentoml are
+# training/serving deps and stay out of this image).
+panel>=1.9
+plotly>=6.8
+duckdb>=1.5
+pandas>=2.3
+numpy>=2.4
+python-dotenv>=1.2.2
