@@ -1,38 +1,115 @@
-"""Lightweight DataFrame validation (replaces deepchecks)."""
+"""Lightweight bronze-row validation before insertion."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Any, TypedDict
+
 import pandas as pd
 
+from src.features.columns import _REQUIRED_STRING_COLUMNS, BRONZE_COLUMNS, BRONZE_COLUMNS_INT
 
-def run_ingestion_checks(df: pd.DataFrame) -> dict[str, bool | list[str]]:
-    """Validate bronze.match_events-shaped rows (player1_*/player2_* columns)."""
-    issues = []
 
-    nulls = df.isnull().sum()
-    null_cols = nulls[nulls > 0]
-    if not null_cols.empty:
-        issues.append(f"Nulls: {null_cols.to_dict()}")
+class IngestionCheckReport(TypedDict):
+    passed: bool
+    results: list[str]
+    valid_df: pd.DataFrame
+    input_rows: int
+    valid_rows: int
+    dropped_rows: int
 
-    dupes = df.duplicated(subset=["match_id"]).sum()
-    if dupes:
-        issues.append(f"{dupes} duplicate match_ids")
+
+def _is_missing(value: Any) -> bool:
+    return bool(pd.isna(value))
+
+
+def _as_number(value: Any) -> int | float | None:
+    if _is_missing(value):
+        return None
+    return value if isinstance(value, int | float) else None
+
+
+def validate_bronze_row(row: Mapping[str, Any]) -> list[str]:
+    """Return row-level bronze issues not already delegated to SQL constraints."""
+    issues: list[str] = []
+
+    for column in BRONZE_COLUMNS:
+        value = row.get(column)
+        if _is_missing(value):
+            issues.append(f"{column} is null")
+
+    for column in _REQUIRED_STRING_COLUMNS:
+        value = row.get(column)
+        if not isinstance(value, str) or not value.strip():
+            issues.append(f"{column} is blank")
+
+    for column in BRONZE_COLUMNS_INT:
+        value = _as_number(row.get(column))
+        if value is None:
+            continue
+        if value < 0 or value > 255:
+            issues.append(f"{column} outside UTINYINT 0..255: {value}")
+
+    for column in ("player1_ranking", "player2_ranking"):
+        value = _as_number(row.get(column))
+        if value is not None and value <= 0:
+            issues.append(f"{column} must be > 0: {value}")
+
+    if row.get("player1_id") == row.get("player2_id"):
+        issues.append("player1_id equals player2_id")
+    if row.get("winner_id") != row.get("player1_id"):
+        issues.append("winner_id must equal player1_id")
 
     for side in ("player1", "player2"):
-        if (df[f"{side}_ranking"] <= 0).any():
-            issues.append(f"{side}_ranking <= 0 found")
+        wins = _as_number(row.get(f"{side}_wins_last_10"))
+        matches = _as_number(row.get(f"{side}_matches_last_10"))
+        if wins is not None and matches is not None and wins > matches:
+            issues.append(f"{side}_wins_last_10 exceeds {side}_matches_last_10")
 
-    for col in df.select_dtypes("object"):
-        for _name, group in df.groupby(col):
-            types = group[col].apply(type).unique()
-            if len(types) > 1:
-                issues.append(f"Mixed types in {col}: {types}")
+        break_points_won = _as_number(row.get(f"{side}_break_points_won"))
+        break_points_total = _as_number(row.get(f"{side}_break_points_total"))
+        if (
+            break_points_won is not None
+            and break_points_total is not None
+            and break_points_won > break_points_total
+        ):
+            issues.append(f"{side}_break_points_won exceeds {side}_break_points_total")
 
-    if "match_won" in df.columns and df["match_won"].nunique() > 2:
-        issues.append(f"match_won has {df['match_won'].nunique()} values (expected 2)")
+        first_serves_made = _as_number(row.get(f"{side}_first_serves_made"))
+        total_serve_points = _as_number(row.get(f"{side}_total_serve_points"))
+        if (
+            first_serves_made is not None
+            and total_serve_points is not None
+            and first_serves_made > total_serve_points
+        ):
+            issues.append(f"{side}_first_serves_made exceeds {side}_total_serve_points")
 
-    passed = len(issues) == 0
-    for issue in issues:
-        print(f"  FAIL: {issue}")
-    print(f"Ingestion checks: {len(issues)} issues, passed={passed}")
-    return {"passed": passed, "results": issues}
+    return issues
+
+
+def run_ingestion_checks(df: pd.DataFrame) -> IngestionCheckReport:
+    """Validate bronze rows and return the valid subset plus a drop report."""
+    valid_rows: list[dict[str, Any]] = []
+    dropped_rows: list[str] = []
+    invalid_row_count = 0
+
+    for row_index, row in enumerate(df.to_dict(orient="records")):
+        row_issues = validate_bronze_row(row)
+        if row_issues:
+            invalid_row_count += 1
+            dropped_rows.extend(
+                f"row {row_index} ({row.get('match_id', '<missing>')}): {issue}"
+                for issue in row_issues
+            )
+            continue
+        valid_rows.append(row)
+
+    valid_df = pd.DataFrame(valid_rows, columns=df.columns)
+    return {
+        "passed": invalid_row_count == 0,
+        "results": dropped_rows,
+        "valid_df": valid_df,
+        "input_rows": len(df),
+        "valid_rows": len(valid_df),
+        "dropped_rows": invalid_row_count,
+    }

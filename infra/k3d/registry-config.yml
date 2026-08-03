@@ -1,0 +1,23 @@
+version: 0.1
+log:
+  fields:
+    service: registry
+storage:
+  cache:
+    blobdescriptor: inmemory
+  filesystem:
+    rootdirectory: /var/lib/registry
+http:
+  addr: :5000
+  headers:
+    X-Content-Type-Options: [nosniff]
+  # Docker registry behind a TLS-terminating reverse proxy (Caddy) returns
+  # absolute http:// upload URLs by default, which Docker follows to port 80
+  # and Caddy redirect-loops on. Relative URLs keep the client on the same
+  # HTTPS connection end to end.
+  relativeurls: true
+health:
+  storagedriver:
+    enabled: true
+    interval: 10s
+    threshold: 3

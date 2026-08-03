@@ -21,6 +21,7 @@ and loaded from disk at init.
 import json
 import pickle
 from datetime import date
+from time import perf_counter
 
 import bentoml
 import numpy as np
@@ -29,10 +30,13 @@ import pandas as pd
 from bentoml.images import Image
 
 from src.constants import PRODUCTION_MODEL, ROOT
-from src.features.inference import build_inference_features
-from src.features.rolling import FEATURE_COLS
+from src.features.columns import FEATURE_COLS
+from src.features.inference import _build_inference_features_with_meta
+from src.utils import load_env
 
 AUX_DIR = ROOT / "data" / "processed"
+
+load_env()
 
 # v2 image spec: deps declared here, NOT in bentofile.yaml. Keeps the install
 # list next to the service that consumes it. torch + lightning are dropped
@@ -94,16 +98,33 @@ class TennisPredictor:
         missing = [c for c in required if c not in input.columns]
         if missing:
             raise MissingColumnsError(missing)
+        return self._predict_proba(input)
 
+    def _predict_proba(self, input: pd.DataFrame) -> pd.DataFrame:
+        """Run the stacked ensemble on a finalized row. Shared by the
+        model-only `/predict` endpoint and `/predict-from-ids`.
+
+        Called DIRECTLY (not via `self.predict`) so `/predict-from-ids` doesn't
+        route a nested HTTP call back into the same single-worker service —
+        that would self-deadlock (the worker is busy handling the outer call
+        and can't service the inner one), surfacing as a timeout.
+        """
+        started_at = perf_counter()
         features = input[FEATURE_COLS]
 
         # Linear + NN paths share the persisted train-fit scaler
         # (StandardScaler().fit(X_train), same contract the NN was trained on).
+        scale_started_at = perf_counter()
         features_scaled = self.scaler.transform(features)
+        scale_ms = (perf_counter() - scale_started_at) * 1000
         # Linear path: finalized row -> persisted scaler -> classifier.
+        linear_started_at = perf_counter()
         p_linear = self.linear.predict_proba(features_scaled)[:, 1]
+        linear_ms = (perf_counter() - linear_started_at) * 1000
         # GBDT path: raw finalized row.
+        gbdt_started_at = perf_counter()
         p_gbdt = self.gbdt.predict_proba(features)[:, 1]
+        gbdt_ms = (perf_counter() - gbdt_started_at) * 1000
         # NN path: scaled row (as in training) + player/opponent bio lookup,
         # run through ONNX Runtime. The ONNX graph was exported with the three
         # inputs the training forward() takes: tab, bio_p, bio_o.
@@ -112,12 +133,34 @@ class TennisPredictor:
             "bio_p": self._row_bio_np(input["player_id"].to_numpy()),
             "bio_o": self._row_bio_np(input["opponent_id"].to_numpy()),
         }
+        nn_started_at = perf_counter()
         nn_logits = np.asarray(self.nn_session.run(None, nn_inputs)[0])
         p_nn = 1.0 / (1.0 + np.exp(-nn_logits.reshape(-1)))
+        nn_ms = (perf_counter() - nn_started_at) * 1000
 
         # LR head: stack of base-model probabilities.
         stack = np.column_stack([p_linear, p_gbdt, p_nn])
+        ensemble_started_at = perf_counter()
         p_win = self.production.predict_proba(stack)[:, 1]
+        ensemble_ms = (perf_counter() - ensemble_started_at) * 1000
+
+        print(
+            "predict_observability"
+            f" player_id={input.iloc[0]['player_id'] if not input.empty else None}"
+            f" opponent_id={input.iloc[0]['opponent_id'] if not input.empty else None}"
+            f" rows={len(input)}"
+            f" feature_count={len(FEATURE_COLS)}"
+            f" scale_ms={scale_ms:.3f}"
+            f" linear_ms={linear_ms:.3f}"
+            f" gbdt_ms={gbdt_ms:.3f}"
+            f" nn_ms={nn_ms:.3f}"
+            f" ensemble_ms={ensemble_ms:.3f}"
+            f" total_ms={(perf_counter() - started_at) * 1000:.3f}"
+            f" p_win={float(p_win[0]) if len(p_win) else float('nan'):.6f}"
+            f" p_linear={float(p_linear[0]) if len(p_linear) else float('nan'):.6f}"
+            f" p_gbdt={float(p_gbdt[0]) if len(p_gbdt) else float('nan'):.6f}"
+            f" p_nn={float(p_nn[0]) if len(p_nn) else float('nan'):.6f}"
+        )
 
         return pd.DataFrame(
             {
@@ -151,7 +194,8 @@ class TennisPredictor:
         round, e.g. "grand_slam" / "f") and as_of_date. Queries the bundled
         gold tables (snapshot from deploy time).
         """
-        row = build_inference_features(
+        started_at = perf_counter()
+        row, meta = _build_inference_features_with_meta(
             player_id,
             opponent_id,
             surface,
@@ -161,8 +205,8 @@ class TennisPredictor:
             round=round,
             as_of_date=as_of_date,
         )
-        # Reuse the existing predict path (returns a DataFrame).
-        out_df = self.predict(row)
+        # Reuse the shared prediction path (no nested HTTP — see _predict_proba).
+        out_df = self._predict_proba(row)
         # One row in, one row out — return the first record as a flat dict for
         # ergonomic JSON over HTTP.
         rec = out_df.iloc[0].to_dict()
@@ -170,6 +214,36 @@ class TennisPredictor:
         rec["p_linear"] = float(rec["p_linear"])
         rec["p_gbdt"] = float(rec["p_gbdt"])
         rec["p_nn"] = float(rec["p_nn"])
+        print(
+            "predict_from_ids_observability"
+            f" raw_player_id={meta['raw_player_id']}"
+            f" raw_opponent_id={meta['raw_opponent_id']}"
+            f" canonical_player_id={meta['canonical_player_id']}"
+            f" canonical_opponent_id={meta['canonical_opponent_id']}"
+            f" surface={meta['surface']}"
+            f" as_of_date={meta['as_of_date']}"
+            f" tournament_level={meta['tournament_level']}"
+            f" round_encoded={meta['round_encoded']}"
+            f" feature_count={meta['feature_count']}"
+            f" snapshot_pool_rows={meta['snapshot_pool_rows']}"
+            f" snapshot_pool_players={meta['snapshot_pool_players']}"
+            f" profile_rows={meta['profile_rows']}"
+            f" player_snapshot_found={meta['player_snapshot_found']}"
+            f" opponent_snapshot_found={meta['opponent_snapshot_found']}"
+            f" player_snapshot_date={meta['player_snapshot_date']}"
+            f" opponent_snapshot_date={meta['opponent_snapshot_date']}"
+            f" player_rolling_match_number={meta['player_rolling_match_number']}"
+            f" opponent_rolling_match_number={meta['opponent_rolling_match_number']}"
+            f" player_matches_30d={meta['player_matches_30d']}"
+            f" opponent_matches_30d={meta['opponent_matches_30d']}"
+            f" player_days_since_last_match={meta['player_days_since_last_match']}"
+            f" opponent_days_since_last_match={meta['opponent_days_since_last_match']}"
+            f" median_days_since={meta['median_days_since']}"
+            f" median_matches_30d={meta['median_matches_30d']}"
+            f" build_ms={meta['build_ms']}"
+            f" total_ms={(perf_counter() - started_at) * 1000:.3f}"
+            f" p_win={rec['p_win']:.6f}"
+        )
         return rec
 
     def _row_bio_np(self, ids: np.ndarray) -> np.ndarray:
@@ -180,10 +254,6 @@ class TennisPredictor:
             if j is not None:
                 out[i] = self.bio_array[j]
         return out
-
-    @bentoml.api
-    def health(self) -> dict[str, str]:
-        return {"status": "ok"}
 
 
 class MissingColumnsError(ValueError):
