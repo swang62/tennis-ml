@@ -11,7 +11,13 @@
 -- order-invariant (swapping player1/player2 in bronze changes nothing).
 --
 -- match_won = 1 iff the canonical player_* side won, else 0. It is the LABEL,
--- not a feature: no current-match serve/break/outcome values are exposed.
+-- not a feature. Current-match serve/break stats ARE exposed per side
+-- (player/opponent_first_serve_win_pct, ..._serve_win_pct,
+-- ..._aces_per_svc_game, ..._df_per_svc_game,
+-- ..._break_points_saved_pct) as enriched columns for dashboard/analysis
+-- only — they have no as-of-date inference source, so they are NOT model
+-- features. The rolling versions of those stats (from the prior snapshot)
+-- are the model features.
 --
 -- Cold start: a player's first match has no prior snapshot, so all rolling
 -- features are NULL (no zero filling). The only documented fallback is
@@ -35,7 +41,24 @@ WITH player_match_enriched AS (
         -- CURRENT event rankings, not the prior snapshot's
         pm.player_ranking,
         pm.opponent_ranking,
+        pm.player_rank_points,
+        pm.player_age,
         pm.player_match_number,
+
+        -- Current-match serve/break stats, exposed as enriched per-side
+        -- columns ONLY (no as-of-date inference source, so never model
+        -- features; the rolling versions below are the features).
+        pm.first_serve_points_won
+            / NULLIF(pm.first_serves_made, 0) AS first_serve_win_pct,
+        pm.second_serve_points_won
+            / NULLIF(pm.total_serve_points - pm.first_serves_made, 0)
+            AS second_serve_win_pct,
+        (pm.first_serve_points_won + pm.second_serve_points_won)
+            / NULLIF(pm.total_serve_points, 0) AS serve_win_pct,
+        pm.aces / NULLIF(pm.service_games, 0) AS aces_per_svc_game,
+        pm.double_faults / NULLIF(pm.service_games, 0) AS df_per_svc_game,
+        pm.break_points_saved / NULLIF(pm.break_points_faced, 0)
+            AS break_points_saved_pct,
 
         -- Correct pre-match activity count (0 on first match; it is a COUNT)
         CAST(pm.matches_30d_before AS INTEGER) AS matches_30d,
@@ -49,12 +72,21 @@ WITH player_match_enriched AS (
         pr.win_rate_5,
         pr.win_rate_10,
         pr.win_rate_20,
+        pr.weighted_form_10,
         pr.ace_rate_5,
         pr.ace_rate_10,
         pr.first_serve_pct_5,
         pr.first_serve_pct_10,
-        pr.break_pct_5,
-        pr.break_pct_10,
+        pr.break_points_saved_pct_5,
+        pr.break_points_saved_pct_10,
+        pr.first_serve_win_pct_5,
+        pr.first_serve_win_pct_10,
+        pr.second_serve_win_pct_5,
+        pr.second_serve_win_pct_10,
+        pr.serve_win_pct_5,
+        pr.serve_win_pct_10,
+        pr.aces_per_svc_game_5,
+        pr.aces_per_svc_game_10,
 
         -- Rank trend: prior rolling avg ranking minus CURRENT event ranking
         pr.avg_player_rank_10 - pm.player_ranking AS rank_trend_10,
@@ -102,17 +134,42 @@ SELECT
     p.surface,
     p.match_won,
 
+    -- Current-match per-side serve/break stats (enriched columns only; the
+    -- rolling versions are the model features, see header)
+    p.first_serve_win_pct     AS player_first_serve_win_pct,
+    p.second_serve_win_pct    AS player_second_serve_win_pct,
+    p.serve_win_pct           AS player_serve_win_pct,
+    p.aces_per_svc_game       AS player_aces_per_svc_game,
+    p.df_per_svc_game         AS player_df_per_svc_game,
+    p.break_points_saved_pct  AS player_break_points_saved_pct,
+    o.first_serve_win_pct     AS opponent_first_serve_win_pct,
+    o.second_serve_win_pct    AS opponent_second_serve_win_pct,
+    o.serve_win_pct           AS opponent_serve_win_pct,
+    o.aces_per_svc_game       AS opponent_aces_per_svc_game,
+    o.df_per_svc_game         AS opponent_df_per_svc_game,
+    o.break_points_saved_pct  AS opponent_break_points_saved_pct,
+
     -- Canonical player side (lower ATP id)
     p.player_ranking,
+    p.player_age,
     p.win_rate_5            AS player_win_rate_5,
     p.win_rate_10           AS player_win_rate_10,
     p.win_rate_20           AS player_win_rate_20,
+    p.weighted_form_10      AS player_weighted_form_10,
     p.ace_rate_5            AS player_ace_rate_5,
     p.ace_rate_10           AS player_ace_rate_10,
     p.first_serve_pct_5     AS player_first_serve_pct_5,
     p.first_serve_pct_10    AS player_first_serve_pct_10,
-    p.break_pct_5           AS player_break_pct_5,
-    p.break_pct_10          AS player_break_pct_10,
+    p.break_points_saved_pct_5  AS player_break_points_saved_pct_5,
+    p.break_points_saved_pct_10 AS player_break_points_saved_pct_10,
+    p.first_serve_win_pct_5 AS player_first_serve_win_pct_5,
+    p.first_serve_win_pct_10 AS player_first_serve_win_pct_10,
+    p.second_serve_win_pct_5 AS player_second_serve_win_pct_5,
+    p.second_serve_win_pct_10 AS player_second_serve_win_pct_10,
+    p.serve_win_pct_5       AS player_serve_win_pct_5,
+    p.serve_win_pct_10      AS player_serve_win_pct_10,
+    p.aces_per_svc_game_5   AS player_aces_per_svc_game_5,
+    p.aces_per_svc_game_10  AS player_aces_per_svc_game_10,
     p.rank_trend_10         AS player_rank_trend_10,
     p.rank_trend_20         AS player_rank_trend_20,
     p.win_streak            AS player_win_streak,
@@ -127,15 +184,25 @@ SELECT
 
     -- Opponent side (higher ATP id)
     o.player_ranking AS opponent_ranking,
+    o.player_age AS opponent_age,
     o.win_rate_5            AS opponent_win_rate_5,
     o.win_rate_10           AS opponent_win_rate_10,
     o.win_rate_20           AS opponent_win_rate_20,
+    o.weighted_form_10      AS opponent_weighted_form_10,
     o.ace_rate_5            AS opponent_ace_rate_5,
     o.ace_rate_10           AS opponent_ace_rate_10,
     o.first_serve_pct_5     AS opponent_first_serve_pct_5,
     o.first_serve_pct_10    AS opponent_first_serve_pct_10,
-    o.break_pct_5           AS opponent_break_pct_5,
-    o.break_pct_10          AS opponent_break_pct_10,
+    o.break_points_saved_pct_5  AS opponent_break_points_saved_pct_5,
+    o.break_points_saved_pct_10 AS opponent_break_points_saved_pct_10,
+    o.first_serve_win_pct_5 AS opponent_first_serve_win_pct_5,
+    o.first_serve_win_pct_10 AS opponent_first_serve_win_pct_10,
+    o.second_serve_win_pct_5 AS opponent_second_serve_win_pct_5,
+    o.second_serve_win_pct_10 AS opponent_second_serve_win_pct_10,
+    o.serve_win_pct_5       AS opponent_serve_win_pct_5,
+    o.serve_win_pct_10      AS opponent_serve_win_pct_10,
+    o.aces_per_svc_game_5   AS opponent_aces_per_svc_game_5,
+    o.aces_per_svc_game_10  AS opponent_aces_per_svc_game_10,
     o.rank_trend_10         AS opponent_rank_trend_10,
     o.rank_trend_20         AS opponent_rank_trend_20,
     o.win_streak            AS opponent_win_streak,
@@ -150,9 +217,18 @@ SELECT
 
     -- Comparison (differential) features: canonical side minus opponent side
     p.player_ranking - o.player_ranking AS rank_diff,
+    p.player_rank_points - o.player_rank_points AS rank_points_diff,
+    p.player_age - o.player_age AS age_diff,
     p.win_rate_10 - o.win_rate_10 AS win_rate_diff,
     p.ace_rate_10 - o.ace_rate_10 AS ace_rate_diff,
-    p.break_pct_10 - o.break_pct_10 AS break_pct_diff,
+    p.break_points_saved_pct_10 - o.break_points_saved_pct_10
+        AS break_points_saved_pct_diff,
+    p.first_serve_win_pct_10 - o.first_serve_win_pct_10
+        AS first_serve_win_pct_diff,
+    p.second_serve_win_pct_10 - o.second_serve_win_pct_10
+        AS second_serve_win_pct_diff,
+    p.serve_win_pct_10 - o.serve_win_pct_10 AS serve_win_pct_diff,
+    p.aces_per_svc_game_10 - o.aces_per_svc_game_10 AS aces_per_svc_game_diff,
     CAST(p.win_streak AS INTEGER) - CAST(o.win_streak AS INTEGER) AS win_streak_diff,
     p.matches_30d - o.matches_30d AS matches_30d_diff,
     p.surface_win_rate_10 - o.surface_win_rate_10 AS surface_win_rate_diff,

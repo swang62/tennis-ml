@@ -26,6 +26,9 @@ PINNED_BENTOFILE = DATA_PROCESSED / "bentofile.pinned.yaml"
 BENTO_TAG_FILE = DATA_PROCESSED / "bento_tag.txt"
 STATE_FILE = DATA_PROCESSED / "bento_build_state.json"
 
+# .env must be loaded before any os.getenv() below captures registry URLs.
+load_env()
+
 # Registry URLs are composed from the registry host + the Bento repo name, so
 # the repo name (BENTO_REPO) is never duplicated. Push goes
 # host -> caddy (https) -> traefik -> registry.
@@ -58,8 +61,6 @@ FINGERPRINT_FILES = [
     SERVICE_FILE,
     *AUX_FILES,
 ]
-
-load_env()
 
 
 @flow(log_prints=True)

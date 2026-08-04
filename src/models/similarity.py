@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from fastembed import TextEmbedding
 
-from src.constants import PROFILES_TABLE, ROOT
+from src.constants import GOLD_ROLLING_FEATURES, PROFILES_TABLE, ROOT
 from src.db.client import to_dataframe
 
 MODEL_NAME = "BAAI/bge-small-en-v1.5"
@@ -61,23 +61,38 @@ class PlayerSimilarity:
     # ── Build ───────────────────────────────────────
 
     def build(self) -> None:
-        """Query player profiles, build FAISS index, save to disk, and load in memory."""
-        df = to_dataframe(
-            f"SELECT player_id, display_name, backhand,"
-            f" handedness, height, turned_pro, summary FROM {PROFILES_TABLE}"
+        """Query player profiles + latest style snapshots, build FAISS index, save to disk, and load in memory."""
+        profiles = to_dataframe(
+            f"SELECT player_id, display_name, backhand, handedness, summary FROM {PROFILES_TABLE}"
         )
-        df = df[df["player_id"] != ""].reset_index(drop=True)
-        if df.empty:
+        profiles = profiles[profiles["player_id"] != ""].reset_index(drop=True)
+        if profiles.empty:
             return
 
-        # One-hot encode categoricals, numeric features, then stack with embeddings
-        encoded = pd.get_dummies(df[["backhand", "handedness"]]).astype(np.float32)
-        # height/turned_pro are typed SMALLINT/INTEGER in gold.player_profiles;
-        # only missing values (NULL) need filling.
-        height = pd.Series(df["height"]).fillna(0).astype(np.float32)
-        years_pro = (pd.Timestamp.now().year - pd.Series(df["turned_pro"]).fillna(0)).astype(
-            np.float32
+        # Latest post-match style snapshot per player from gold.rolling_features.
+        rolling = to_dataframe(
+            f"SELECT player_id, ace_rate_10, first_serve_pct_10, break_points_saved_pct_10,"
+            f" clay_win_rate_10, grass_win_rate_10, hard_win_rate_10"
+            f" FROM {GOLD_ROLLING_FEATURES}"
+            f" QUALIFY ROW_NUMBER() OVER (PARTITION BY player_id"
+            f" ORDER BY snapshot_date DESC, match_id DESC) = 1"
         )
+        style_cols = [
+            "ace_rate_10",
+            "first_serve_pct_10",
+            "break_points_saved_pct_10",
+            "clay_win_rate_10",
+            "grass_win_rate_10",
+            "hard_win_rate_10",
+        ]
+        df = profiles.merge(rolling, on="player_id", how="left")
+        # Style cells are NULL for players without an eligible snapshot, or
+        # without matches on a surface; impute 0.0 so every profiled player is
+        # still indexed.
+        df[style_cols] = df[style_cols].fillna(0.0).astype(np.float32)
+
+        # One-hot encode categoricals, then stack with style stats and embeddings
+        encoded = pd.get_dummies(df[["backhand", "handedness"]]).astype(np.float32)
 
         # Shared embedding path (also used by the NN static features in 02_tune_nn).
         embeddings = embed_bio_summaries(pd.DataFrame(df[["player_id", "summary"]]))
@@ -87,8 +102,7 @@ class PlayerSimilarity:
             pd.concat(
                 [
                     encoded,
-                    height.to_frame("height"),
-                    years_pro.to_frame("years_pro"),
+                    df[style_cols],
                     embeddings[bio_cols],
                 ],
                 axis=1,

@@ -27,7 +27,8 @@ spec:
     spec:
       containers:
         - name: mlflow
-          image: ghcr.io/mlflow/mlflow:v2.20.2
+          # Keep the server image aligned with the venv client (mlflow>=3.13).
+          image: ghcr.io/mlflow/mlflow:v3.13.0
           args:
             - mlflow
             - server
@@ -37,20 +38,29 @@ spec:
             - "5000"
             - --backend-store-uri
             - sqlite:///data/mlflow.db
-            - --default-artifact-root
+            # artifacts-destination + serve-artifacts proxy artifact IO over
+            # HTTP (mlflow-artifacts: URIs), so host clients never write
+            # file:///data directly (that only works on a shared filesystem).
+            - --artifacts-destination
             - /data/artifacts
             - --serve-artifacts
 
           resources:
             limits:
               cpu: 500m
-              memory: 1Gi
+              memory: 2Gi
             requests:
               cpu: 100m
               memory: 512Mi
           envFrom:
             - configMapRef:
                 name: tennis-default-config
+          env:
+            # v3.x security middleware validates the Host header (DNS
+            # rebinding protection). Allow the ingress hostname and the
+            # in-cluster service DNS name.
+            - name: MLFLOW_SERVER_ALLOWED_HOSTS
+              value: "mlflow.macsteve.lan,mlflow"
           ports:
             - name: http
               containerPort: 5000

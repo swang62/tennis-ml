@@ -25,15 +25,10 @@ db-reset:
     rm -f data/tennis.duckdb
     just db-init
 
+# Local dev server for the React dashboard (web/) with HMR. Requires the
+# Bento API running locally on :3000 (see `just deploy-local`).
 dashboard-local:
-    panel serve src/dashboard/app.py
-
-dashboard-deploy:
-    uv run python src/dashboard/deploy.py
-
-dashboard-build:
-    docker build -t tennis-dashboard:latest -f infra/manifests/deploy/Dockerfile .
-    k3d image import tennis-dashboard:latest -c tennis-ml
+    npm --prefix web run dev
 
 # Local dev server on :3000 — smoke-test /predict, /predict-from-ids, /health
 # without k3d. Requires trained artifacts in data/processed/ (run `just train`).

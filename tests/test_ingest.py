@@ -122,7 +122,11 @@ def _raw_row(match_num=1, tourney_date="20260105", level="G") -> dict[str, objec
         "winner_id": "W1",
         "loser_id": "L1",
         "winner_rank": 10,
+        "winner_rank_points": 9000,
+        "winner_age": "24.41",
         "loser_rank": 20,
+        "loser_rank_points": 3000,
+        "loser_age": "28.75",
         "tourney_level": level,
         "round": "QF",
         "surface": "Hard",
@@ -130,12 +134,18 @@ def _raw_row(match_num=1, tourney_date="20260105", level="G") -> dict[str, objec
         "w_df": 2,
         "w_svpt": 60,
         "w_1stIn": 40,
+        "w_1stWon": 32,
+        "w_2ndWon": 15,
+        "w_SvGms": 18,
         "w_bpSaved": 3,
         "w_bpFaced": 6,
         "l_ace": 4,
         "l_df": 1,
         "l_svpt": 55,
         "l_1stIn": 35,
+        "l_1stWon": 28,
+        "l_2ndWon": 12,
+        "l_SvGms": 16,
         "l_bpSaved": 2,
         "l_bpFaced": 5,
     }
@@ -152,10 +162,36 @@ def test_atp_rows_to_bronze_maps_raw_columns():
     assert row["round"] == "qf"
     assert row["surface"] == "hard"
     assert row["winner_id"] == row["player1_id"]
-    assert row["player1_break_points_won"] == 6 - 3
-    assert row["player1_break_points_total"] == 6
-    assert row["player2_break_points_won"] == 5 - 2
-    assert row["player2_break_points_total"] == 5
+    assert row["player1_break_points_saved"] == 3
+    assert row["player1_break_points_faced"] == 6
+    assert row["player2_break_points_saved"] == 2
+    assert row["player2_break_points_faced"] == 5
+    assert row["player1_first_serve_points_won"] == 32
+    assert row["player1_second_serve_points_won"] == 15
+    assert row["player1_service_games"] == 18
+    assert row["player2_first_serve_points_won"] == 28
+    assert row["player2_second_serve_points_won"] == 12
+    assert row["player2_service_games"] == 16
+    assert row["player1_rank_points"] == 9000
+    assert row["player2_rank_points"] == 3000
+    assert row["player1_age"] == 24.41  # fractional years preserved, not rounded
+    assert row["player2_age"] == 28.75
+
+
+def test_atp_rows_to_bronze_float_parses_age_and_defaults_missing_stats():
+    row = _raw_row()
+    row["winner_age"] = ""
+    row["loser_age"] = "abc"  # non-numeric ages default to 0.0 (pandas already
+    # normalized real NaN/empty CSV cells to 0 before this transform)
+    row["w_1stWon"] = None
+    row["winner_rank_points"] = None
+
+    bronze = ingest.atp_rows_to_bronze([row]).iloc[0]
+
+    assert bronze["player1_age"] == 0.0
+    assert bronze["player2_age"] == 0.0
+    assert bronze["player1_first_serve_points_won"] == 0
+    assert bronze["player1_rank_points"] == 0
 
 
 def test_atp_rows_to_bronze_filters_by_selected_ids():
@@ -187,7 +223,11 @@ def _raw_atp_df() -> pd.DataFrame:
                 "winner_id": "W1",
                 "loser_id": "L1",
                 "winner_rank": 10,
+                "winner_rank_points": 9000,
+                "winner_age": "24.41",
                 "loser_rank": 20,
+                "loser_rank_points": 3000,
+                "loser_age": "28.75",
                 "tourney_level": "G",
                 "round": "QF",
                 "surface": "Hard",
@@ -195,12 +235,18 @@ def _raw_atp_df() -> pd.DataFrame:
                 "w_df": 0,
                 "w_svpt": 30,
                 "w_1stIn": 20,
+                "w_1stWon": 16,
+                "w_2ndWon": 8,
+                "w_SvGms": 10,
                 "w_bpSaved": 1,
                 "w_bpFaced": 2,
                 "l_ace": 0,
                 "l_df": 1,
                 "l_svpt": 28,
                 "l_1stIn": 18,
+                "l_1stWon": 14,
+                "l_2ndWon": 7,
+                "l_SvGms": 9,
                 "l_bpSaved": 0,
                 "l_bpFaced": 1,
             },

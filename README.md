@@ -22,8 +22,8 @@ src/
   flows/         — ETL Prefect flow + standalone training pipeline (src/flows/pipeline.py)
   models/        — Player similarity index (FAISS)
   serving/       — BentoML service
-  dashboard/     — Panel dashboard
   db/            — DuckDB client
+web/             — React + TanStack dashboard (Vite, local dev, HMR)
 ```
 
 ## Quick Start
@@ -91,13 +91,13 @@ Two BentoML endpoints exposed by `src/serving/service.py`:
 | ------------------- | ------ | ------------------------------------------------------------ |
 | `/healthz`          | GET    | Liveness probe (alias `/livez`, `/readyz`)                   |
 | `/predict`          | POST   | Stacked-ensemble prediction for one match                    |
-| `/predict-from-ids` | POST   | On-demand prediction from minimal inputs (two ids + surface) |
+| `/predict_from_ids` | POST   | On-demand prediction from minimal inputs (two ids + surface) |
 
 The service runs on port 3000 inside the cluster.
 
 ### Input schema
 
-The `/predict-from-ids` endpoint accepts a JSON object with the following fields:
+The `/predict_from_ids` endpoint accepts a JSON object with the following fields:
 
 | Input         | Required | Default | Valid values                                                   |
 | ------------- | -------- | ------- | -------------------------------------------------------------- |

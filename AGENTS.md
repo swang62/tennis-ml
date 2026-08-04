@@ -23,8 +23,8 @@ src/
   flows/         — ETL (Prefect), standalone training runner, deploy flow
   models/        — Player similarity index (FAISS), NN architecture
   serving/       — BentoML service (model-only — no feature derivation)
-  dashboard/     — Panel dashboard
   db/            — DuckDB client
+web/             — React + TanStack dashboard (Vite, local dev, HMR)
 dbt/             — silver→gold SQL models + tests (bronze is the DuckDB source; the feature single source of truth)
 ```
 
@@ -34,7 +34,7 @@ dbt/             — silver→gold SQL models + tests (bronze is the DuckDB sour
 
 **Canonical orientation by lower ATP id.** Every match row (training and inference) puts the lexicographically-lower player id on the `player_*` side so `(A, B)` and `(B, A)` produce identical rows. Predicted `p_win` is P(canonical player wins) exactly as the row is sent.
 
-**Bento has two endpoints — model-only and ids-only.** `/predict` takes a finalized feature row + two ids (model-only, upstream-built). `/predict-from-ids` takes the minimal human inputs (two ids + surface + optional tournament/round/date) and calls `build_inference_features` internally against the DuckDB gold tables snapshotted into the image at deploy time.
+**Bento has two endpoints — model-only and ids-only.** `/predict` takes a finalized feature row + two ids (model-only, upstream-built). `/predict_from_ids` takes the minimal human inputs (two ids + surface + optional tournament/round/date) and calls `build_inference_features` internally against the DuckDB gold tables snapshotted into the image at deploy time.
 
 **MLflow aliases, not versions or stages.** Stages are deprecated; the registry uses `@best` (each base model) and `@champion` (the ensemble LR head). Promotion in `05_evaluate` sets `@champion` on the version it just registered; deploy resolves via `get_model_version_by_alias`. No `copy_model_version`, no staging registered model — single production environment.
 
@@ -50,7 +50,6 @@ dbt/             — silver→gold SQL models + tests (bronze is the DuckDB sour
 | `mlflow.macsteve.lan`       | `mlflow`                   | 5000 |
 | `prefect.macsteve.lan`      | `prefect-server`           | 4200 |
 | `registry.macsteve.lan`     | `tennis-ml-registry`       | 5000 |
-| `dashboard.macsteve.lan`    | `tennis-dashboard`         | 8501 | (commented out in ingress.yaml) |
 
 DNS/TLS for `*.macsteve.lan` itself is served by the host
 

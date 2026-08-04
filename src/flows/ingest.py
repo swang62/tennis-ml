@@ -4,7 +4,7 @@ Usage:
     uv run python -m src.flows.ingest data/matches.csv
 
 Takes a raw ATP-format CSV (winner/loser columns, see
-data/column_features_glossary.md) and maps it to bronze.match_events rows
+data/column_glossary.md) and maps it to bronze.match_events rows
 using the same transform as the dev seed flow (infra/duckdb/seed.py). It then
 loads ATP player profiles for the ingested players and runs best-effort
 Wikipedia enrichment.
@@ -55,7 +55,7 @@ ATP_PROFILE_COLUMNS = [
     "ioc",
 ]
 
-# Columns every raw ATP match row carries (see data/column_features_glossary.md).
+# Columns every raw ATP match row carries (see data/column_glossary.md).
 RAW_ATP_COLUMNS = [
     "tourney_id",
     "tourney_date",
@@ -63,7 +63,11 @@ RAW_ATP_COLUMNS = [
     "winner_id",
     "loser_id",
     "winner_rank",
+    "winner_rank_points",
+    "winner_age",
     "loser_rank",
+    "loser_rank_points",
+    "loser_age",
     "tourney_level",
     "round",
     "surface",
@@ -71,12 +75,18 @@ RAW_ATP_COLUMNS = [
     "w_df",
     "w_svpt",
     "w_1stIn",
+    "w_1stWon",
+    "w_2ndWon",
+    "w_SvGms",
     "w_bpSaved",
     "w_bpFaced",
     "l_ace",
     "l_df",
     "l_svpt",
     "l_1stIn",
+    "l_1stWon",
+    "l_2ndWon",
+    "l_SvGms",
     "l_bpSaved",
     "l_bpFaced",
 ]
@@ -117,6 +127,14 @@ def _stat(row: dict[str, Any], key: str) -> int:
         return 0
 
 
+def _float_stat(row: dict[str, Any], key: str) -> float:
+    """Float stat value; 0.0 for empty/NaN (raw ages like `24.41` preserved)."""
+    try:
+        return float(row[key])
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def player_history(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     """Each player's full match history, oldest -> newest."""
     history: dict[str, list[dict[str, Any]]] = {}
@@ -141,8 +159,9 @@ def atp_rows_to_bronze(
     Shared by the ingest CLI and the dev seed (infra/duckdb/seed.py) so both
     paths use identical semantics: winner on the player1 side, ISO match dates
     from tourney_date, canonical tournament names (LEVEL_MAP), lowercased
-    round/surface, break_points_won = faced - saved, and per-player
-    wins/matches_last_10 over the RECENT matches strictly before each match.
+    round/surface, raw break-point saved/faced values, raw serve/rank/age
+    stats, and per-player wins/matches_last_10 over the RECENT matches
+    strictly before each match.
 
     `rows` is the full history (rolling form is computed over all of it); when
     `selected_ids` is given, only those match_ids
@@ -187,16 +206,26 @@ def atp_rows_to_bronze(
                 "player1_double_faults": _stat(m, "w_df"),
                 "player1_first_serves_made": _stat(m, "w_1stIn"),
                 "player1_total_serve_points": _stat(m, "w_svpt"),
-                "player1_break_points_won": _stat(m, "w_bpFaced") - _stat(m, "w_bpSaved"),
-                "player1_break_points_total": _stat(m, "w_bpFaced"),
+                "player1_first_serve_points_won": _stat(m, "w_1stWon"),
+                "player1_second_serve_points_won": _stat(m, "w_2ndWon"),
+                "player1_service_games": _stat(m, "w_SvGms"),
+                "player1_break_points_saved": _stat(m, "w_bpSaved"),
+                "player1_break_points_faced": _stat(m, "w_bpFaced"),
                 "player2_wins_last_10": loser_wins,
                 "player2_matches_last_10": loser_matches,
                 "player2_aces": _stat(m, "l_ace"),
                 "player2_double_faults": _stat(m, "l_df"),
                 "player2_first_serves_made": _stat(m, "l_1stIn"),
                 "player2_total_serve_points": _stat(m, "l_svpt"),
-                "player2_break_points_won": _stat(m, "l_bpFaced") - _stat(m, "l_bpSaved"),
-                "player2_break_points_total": _stat(m, "l_bpFaced"),
+                "player2_first_serve_points_won": _stat(m, "l_1stWon"),
+                "player2_second_serve_points_won": _stat(m, "l_2ndWon"),
+                "player2_service_games": _stat(m, "l_SvGms"),
+                "player2_break_points_saved": _stat(m, "l_bpSaved"),
+                "player2_break_points_faced": _stat(m, "l_bpFaced"),
+                "player1_rank_points": _stat(m, "winner_rank_points"),
+                "player2_rank_points": _stat(m, "loser_rank_points"),
+                "player1_age": _float_stat(m, "winner_age"),
+                "player2_age": _float_stat(m, "loser_age"),
                 "winner_id": m["winner_id"],
             }
         )

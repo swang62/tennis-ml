@@ -23,8 +23,9 @@ players as of a given date, mirroring `gold.match_features` semantics:
   left-handed rate, mean years-pro at the as-of date), so the same neutral
   differentials hold for two profile-less players.
 * If the eligible pool is empty, constant fallbacks are used:
-  ranking=100, rates=0.0, streak=0, days_since_last_match=365, matches_30d=0,
-  height=183, left-handed rate=0.0, years_pro=8.
+  ranking=100, rank_points=500, age=26, rates=0.0, streak=0,
+  days_since_last_match=365, matches_30d=0, height=183, left-handed rate=0.0,
+  years_pro=8.
 
 Player ids and dates NEVER appear inside SQL strings: every one flows through
 `?` placeholders and a params list.
@@ -80,6 +81,8 @@ _ROUND_ENCODINGS = {
 # anywhere before the as-of date). Mirrors the documented cold-start fallback
 # days_since_last_match=365 from gold.match_features.
 _DEFAULT_RANKING = 100
+_DEFAULT_RANK_POINTS = 500.0
+_DEFAULT_AGE = 26.0
 _DEFAULT_RATE = 0.0
 _DEFAULT_STREAK = 0
 _DEFAULT_DAYS_SINCE = 365
@@ -117,22 +120,33 @@ WHERE player_id = ?
 # as-of date. One row; MEDIAN for ranking/streak-related, MEAN for others.
 _POOL_AGG_SQL = f"""
 SELECT
-    MEDIAN(latest_player_ranking) AS latest_player_ranking,
-    MEDIAN(win_streak)            AS win_streak,
-    AVG(win_rate_5)               AS win_rate_5,
-    AVG(win_rate_10)              AS win_rate_10,
-    AVG(win_rate_20)              AS win_rate_20,
-    AVG(ace_rate_5)               AS ace_rate_5,
-    AVG(ace_rate_10)              AS ace_rate_10,
-    AVG(first_serve_pct_5)        AS first_serve_pct_5,
-    AVG(first_serve_pct_10)       AS first_serve_pct_10,
-    AVG(break_pct_5)              AS break_pct_5,
-    AVG(break_pct_10)             AS break_pct_10,
-    AVG(avg_player_rank_10)       AS avg_player_rank_10,
-    AVG(avg_player_rank_20)       AS avg_player_rank_20,
-    AVG(clay_win_rate_10)         AS clay_win_rate_10,
-    AVG(grass_win_rate_10)        AS grass_win_rate_10,
-    AVG(hard_win_rate_10)         AS hard_win_rate_10
+    MEDIAN(latest_player_ranking)    AS latest_player_ranking,
+    MEDIAN(latest_player_rank_points) AS latest_player_rank_points,
+    AVG(latest_player_age)           AS latest_player_age,
+    MEDIAN(win_streak)               AS win_streak,
+    AVG(win_rate_5)                  AS win_rate_5,
+    AVG(win_rate_10)                 AS win_rate_10,
+    AVG(win_rate_20)                 AS win_rate_20,
+    AVG(weighted_form_10)            AS weighted_form_10,
+    AVG(ace_rate_5)                  AS ace_rate_5,
+    AVG(ace_rate_10)                 AS ace_rate_10,
+    AVG(first_serve_pct_5)           AS first_serve_pct_5,
+    AVG(first_serve_pct_10)          AS first_serve_pct_10,
+    AVG(break_points_saved_pct_5)    AS break_points_saved_pct_5,
+    AVG(break_points_saved_pct_10)   AS break_points_saved_pct_10,
+    AVG(first_serve_win_pct_5)       AS first_serve_win_pct_5,
+    AVG(first_serve_win_pct_10)      AS first_serve_win_pct_10,
+    AVG(second_serve_win_pct_5)      AS second_serve_win_pct_5,
+    AVG(second_serve_win_pct_10)     AS second_serve_win_pct_10,
+    AVG(serve_win_pct_5)             AS serve_win_pct_5,
+    AVG(serve_win_pct_10)            AS serve_win_pct_10,
+    AVG(aces_per_svc_game_5)         AS aces_per_svc_game_5,
+    AVG(aces_per_svc_game_10)        AS aces_per_svc_game_10,
+    AVG(avg_player_rank_10)          AS avg_player_rank_10,
+    AVG(avg_player_rank_20)          AS avg_player_rank_20,
+    AVG(clay_win_rate_10)            AS clay_win_rate_10,
+    AVG(grass_win_rate_10)           AS grass_win_rate_10,
+    AVG(hard_win_rate_10)            AS hard_win_rate_10
 FROM {GOLD_ROLLING_FEATURES}
 WHERE snapshot_date < ?::DATE
 """
@@ -230,10 +244,10 @@ def _side_values(
     median_days_since: float,
     median_matches_30d: float,
 ) -> dict[str, int | float]:
-    """Build one canonical side's 16 values, imputing NULLs and cold starts.
+    """Build one canonical side's values, imputing NULLs and cold starts.
 
-    Keys: "ranking" plus the GOLD_ROLLING_COLS names. `row` is the side's
-    latest eligible snapshot (None on cold start).
+    Keys: "ranking", "rank_points", "age" plus the GOLD_ROLLING_COLS names.
+    `row` is the side's latest eligible snapshot (None on cold start).
     """
 
     def cell(snapshot_col: str, default: float) -> float:
@@ -245,6 +259,8 @@ def _side_values(
         return _agg_or(agg, snapshot_col, default)
 
     ranking = round(cell("latest_player_ranking", _DEFAULT_RANKING))
+    rank_points = round(cell("latest_player_rank_points", _DEFAULT_RANK_POINTS))
+    age = cell("latest_player_age", _DEFAULT_AGE)
     avg_rank_10 = cell("avg_player_rank_10", _DEFAULT_RANKING)
     avg_rank_20 = cell("avg_player_rank_20", _DEFAULT_RANKING)
 
@@ -262,15 +278,26 @@ def _side_values(
 
     return {
         "ranking": ranking,
+        "rank_points": rank_points,
+        "age": age,
         "win_rate_5": cell("win_rate_5", _DEFAULT_RATE),
         "win_rate_10": cell("win_rate_10", _DEFAULT_RATE),
         "win_rate_20": cell("win_rate_20", _DEFAULT_RATE),
+        "weighted_form_10": cell("weighted_form_10", _DEFAULT_RATE),
         "ace_rate_5": cell("ace_rate_5", _DEFAULT_RATE),
         "ace_rate_10": cell("ace_rate_10", _DEFAULT_RATE),
         "first_serve_pct_5": cell("first_serve_pct_5", _DEFAULT_RATE),
         "first_serve_pct_10": cell("first_serve_pct_10", _DEFAULT_RATE),
-        "break_pct_5": cell("break_pct_5", _DEFAULT_RATE),
-        "break_pct_10": cell("break_pct_10", _DEFAULT_RATE),
+        "break_points_saved_pct_5": cell("break_points_saved_pct_5", _DEFAULT_RATE),
+        "break_points_saved_pct_10": cell("break_points_saved_pct_10", _DEFAULT_RATE),
+        "first_serve_win_pct_5": cell("first_serve_win_pct_5", _DEFAULT_RATE),
+        "first_serve_win_pct_10": cell("first_serve_win_pct_10", _DEFAULT_RATE),
+        "second_serve_win_pct_5": cell("second_serve_win_pct_5", _DEFAULT_RATE),
+        "second_serve_win_pct_10": cell("second_serve_win_pct_10", _DEFAULT_RATE),
+        "serve_win_pct_5": cell("serve_win_pct_5", _DEFAULT_RATE),
+        "serve_win_pct_10": cell("serve_win_pct_10", _DEFAULT_RATE),
+        "aces_per_svc_game_5": cell("aces_per_svc_game_5", _DEFAULT_RATE),
+        "aces_per_svc_game_10": cell("aces_per_svc_game_10", _DEFAULT_RATE),
         "rank_trend_10": avg_rank_10 - ranking,
         "rank_trend_20": avg_rank_20 - ranking,
         "win_streak": int(cell("win_streak", _DEFAULT_STREAK)),
@@ -442,9 +469,23 @@ def _build_inference_features_with_meta(
 
     # Differentials, computed after imputation (canonical side minus opponent)
     row["rank_diff"] = player_side["ranking"] - opponent_side["ranking"]
+    row["rank_points_diff"] = player_side["rank_points"] - opponent_side["rank_points"]
+    row["age_diff"] = player_side["age"] - opponent_side["age"]
     row["win_rate_diff"] = player_side["win_rate_10"] - opponent_side["win_rate_10"]
     row["ace_rate_diff"] = player_side["ace_rate_10"] - opponent_side["ace_rate_10"]
-    row["break_pct_diff"] = player_side["break_pct_10"] - opponent_side["break_pct_10"]
+    row["break_points_saved_pct_diff"] = (
+        player_side["break_points_saved_pct_10"] - opponent_side["break_points_saved_pct_10"]
+    )
+    row["first_serve_win_pct_diff"] = (
+        player_side["first_serve_win_pct_10"] - opponent_side["first_serve_win_pct_10"]
+    )
+    row["second_serve_win_pct_diff"] = (
+        player_side["second_serve_win_pct_10"] - opponent_side["second_serve_win_pct_10"]
+    )
+    row["serve_win_pct_diff"] = player_side["serve_win_pct_10"] - opponent_side["serve_win_pct_10"]
+    row["aces_per_svc_game_diff"] = (
+        player_side["aces_per_svc_game_10"] - opponent_side["aces_per_svc_game_10"]
+    )
     row["win_streak_diff"] = player_side["win_streak"] - opponent_side["win_streak"]
     row["matches_30d_diff"] = player_side["matches_30d"] - opponent_side["matches_30d"]
     row["surface_win_rate_diff"] = (

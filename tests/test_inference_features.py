@@ -32,7 +32,7 @@ def test_output_schema_contract():
     """Exact column order [*FEATURE_COLS, "player_id", "opponent_id"], one row."""
     out = build_inference_features("S0AG", "Z355", "clay", as_of_date=AS_OF_AFTER_ALL_MATCHES)
     assert out.columns.tolist() == [*FEATURE_COLS, "player_id", "opponent_id"]
-    assert len(out.columns) == 56  # 54 features + 2 ids
+    assert len(out.columns) == 82  # 80 features + 2 ids
     assert len(out) == 1
     assert out["player_id"].dtype == object
     assert out["opponent_id"].dtype == object
