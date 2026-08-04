@@ -140,12 +140,22 @@ models:
         description: Canonical player rolling aces per service game, last 5 matches before this one.
       - name: player_aces_per_svc_game_10
         description: Canonical player rolling aces per service game, last 10 matches before this one.
+      - name: player_df_rate_5
+        description: Canonical player rolling double-fault rate (double faults / total serve points), last 5 matches before this one; NULL when the window has no serve points.
+      - name: player_df_rate_10
+        description: Canonical player rolling double-fault rate, last 10 matches before this one; NULL when the window has no serve points.
       - name: player_rank_trend_10
         description: Prior rolling avg ranking (10) minus current event ranking.
       - name: player_rank_trend_20
         description: Prior rolling avg ranking (20) minus current event ranking.
+      - name: player_avg_rank_faced_5
+        description: Canonical player strength of schedule — rolling average opponent rank, last 5 matches before this one; NULL on first match (AVG skips unranked opponents).
+      - name: player_avg_rank_faced_10
+        description: Canonical player strength of schedule — rolling average opponent rank, last 10 matches before this one; NULL on first match.
       - name: player_win_streak
         description: Canonical player win streak entering this match (NULL on first match).
+      - name: player_loss_streak
+        description: Canonical player loss streak entering this match (NULL on first match). Never positive at the same time as player_win_streak.
       - name: player_days_since_last_match
         description: Days since canonical player's last match (365 if none).
       - name: player_matches_30d
@@ -201,12 +211,22 @@ models:
         description: Opponent rolling aces per service game, last 5 matches before this one.
       - name: opponent_aces_per_svc_game_10
         description: Opponent rolling aces per service game, last 10 matches before this one.
+      - name: opponent_df_rate_5
+        description: Opponent rolling double-fault rate (double faults / total serve points), last 5 matches before this one; NULL when the window has no serve points.
+      - name: opponent_df_rate_10
+        description: Opponent rolling double-fault rate, last 10 matches before this one; NULL when the window has no serve points.
       - name: opponent_rank_trend_10
         description: Prior rolling avg ranking (10) minus current event ranking.
       - name: opponent_rank_trend_20
         description: Prior rolling avg ranking (20) minus current event ranking.
+      - name: opponent_avg_rank_faced_5
+        description: Opponent strength of schedule — rolling average opponent rank, last 5 matches before this one; NULL on first match.
+      - name: opponent_avg_rank_faced_10
+        description: Opponent strength of schedule — rolling average opponent rank, last 10 matches before this one; NULL on first match.
       - name: opponent_win_streak
         description: Opponent win streak entering this match (NULL on first match).
+      - name: opponent_loss_streak
+        description: Opponent loss streak entering this match (NULL on first match). Never positive at the same time as opponent_win_streak.
       - name: opponent_days_since_last_match
         description: Days since opponent's last match (365 if none).
       - name: opponent_matches_30d
@@ -219,6 +239,23 @@ models:
         description: 1 if the opponent is left-handed (handedness = L), 0 if right-handed (R); NULL when handedness is missing.
       - name: opponent_years_pro
         description: Years the opponent has been pro as of the match date (match year - turned_pro).
+
+      # Head-to-head (pair-level, per side): prior meetings between the
+      # canonical pair, strictly before this match's date, deduped to distinct
+      # match_ids, most recent 5 only. Zero prior meetings -> counts 0, win
+      # rate 0.5 (neutral, locked). Wins sum to matches; rates sum to 1.
+      - name: player_h2h_matches
+        description: Prior meetings between the canonical player and opponent (most recent 5, strictly before this match); 0 when never met before.
+      - name: player_h2h_wins
+        description: Canonical player wins in those prior meetings; 0 when never met before.
+      - name: player_h2h_win_rate
+        description: Canonical player wins / prior meetings; 0.5 (neutral) when never met before.
+      - name: opponent_h2h_matches
+        description: Prior meetings between the canonical player and opponent — always equals player_h2h_matches.
+      - name: opponent_h2h_wins
+        description: Opponent wins in those prior meetings; player_h2h_wins + opponent_h2h_wins = player_h2h_matches.
+      - name: opponent_h2h_win_rate
+        description: Opponent wins / prior meetings (1 - player_h2h_win_rate); 0.5 (neutral) when never met before.
 
       # Comparison (differential) features: canonical player minus opponent
       - name: rank_diff
@@ -249,6 +286,8 @@ models:
         description: player_surface_win_rate_10 - opponent_surface_win_rate_10.
       - name: rank_trend_diff
         description: player_rank_trend_10 - opponent_rank_trend_10.
+      - name: avg_rank_faced_diff
+        description: player_avg_rank_faced_10 - opponent_avg_rank_faced_10.
       - name: height_diff
         description: player_height - opponent_height.
       - name: handedness_diff

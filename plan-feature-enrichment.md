@@ -1,107 +1,167 @@
-# Plan: Feature Enrichment + Dashboard
+# Plan: Feature Enrichment + Leakage-Safe Match-Day Features + Dashboard
 
-## Goal
+Merged single plan (was `plan-feature-enrichment.md`; merged with
+`plan-match-day-features.md` on 2026-08-04 and the old file deleted). Goal:
+close the raw-feature gaps (ATP CSVs carry features the pipeline ignored),
+derive high-signal serve/rank/age features, add leakage-safe match-day
+features (rolling form, strength of schedule, perspective-explicit H2H),
+retrain + redeploy, expose player data through Bento endpoints, and rebuild
+the dashboard as a local Vite + React app.
 
-Close the raw-feature gaps in the pipeline (features the ATP CSVs carry but the
-pipeline ignores), derive high-signal serve/rank/age features from them, retrain
-the models, expose player data through Bento endpoints, and rebuild the
-dashboard as a local Vite + React app.
+## Decisions (locked)
 
-## Audit summary (validated against data/column_glossary.md + raw CSV headers)
+| Topic | Choice |
+| --- | --- |
+| New rolling windows | `_5/_10` only — no `_20` variants for any new feature |
+| Rank points | `rank_points_diff` only; no per-side lookup, no rolling/trend (rank embeds the signal) |
+| `avg_rank_faced` | 5/10 windows: rename existing `avg_opponent_rank_10` -> `avg_rank_faced_10`, add a w5 variant, drop the `_20` |
+| df / loss diffs | Not needed — keep `df_rate_5/10` and `loss_streak` features, no `df_rate_diff` / `loss_streak_diff` |
+| Age | Keep as-of-date raw ATP age (landed in Task 2) as `player_age`/`opponent_age` + `age_diff`; NO birthdate-derived age |
+| Activity windows | `matches_30d` only — no 7d/90d windows |
+| H2H win rate | Last-5-meeting recency; neutral `0.5` when zero prior meetings |
+| Current-match serve stats | Gold-only enrichment columns in `gold.match_features`, never in FEATURE_COLS |
+| Dashboard | Local `web/` Vite + React app (no Docker, no deploy step) |
 
-Raw ATP columns NOT used anywhere today, and confirmed useful:
-- `w_1stWon` / `l_1stWon` — first-serve points won (1st-serve win % impossible)
-- `w_2ndWon` / `l_2ndWon` — second-serve points won (2nd-serve win % impossible)
-- `w_SvGms` / `l_SvGms` — service games (per-game ace/DF rates impossible)
-- `w_bpSaved` / `l_bpSaved` — stored as the WRONG derivation (`faced - saved`); the saved value is lost
-- `winner_rank_points` / `loser_rank_points` — Elo-like strength signal, ignored (0 files)
-- `winner_age` / `loser_age` — no age feature anywhere
-
-Explicitly excluded (decision): `indoor`, `seed`, `score`, `best_of`, and all
-descriptive tournament columns (`tourney_name`, `draw_size`, `entry`). Player
-identity columns (`name`, `hand`, `ht`, `ioc`) are already covered by
-`gold.player_profiles`.
-
-## Tasks
+## Completed
 
 ### [x] Task 1: Bronze — ingest unused raw features + fix break-point semantics
 
-First thing. New columns on `bronze.match_events` (winner/loser -> player1/player2):
-
-| Raw column | Bronze column | Type |
-| --- | --- | --- |
-| `w_1stWon` | `player1_first_serve_points_won` | UTINYINT |
-| `l_1stWon` | `player2_first_serve_points_won` | UTINYINT |
-| `w_2ndWon` | `player1_second_serve_points_won` | UTINYINT |
-| `l_2ndWon` | `player2_second_serve_points_won` | UTINYINT |
-| `w_SvGms` | `player1_service_games` | UTINYINT |
-| `l_SvGms` | `player2_service_games` | UTINYINT |
-| `winner_rank_points` | `player1_rank_points` | INTEGER |
-| `loser_rank_points` | `player2_rank_points` | INTEGER |
-| `winner_age` | `player1_age` | DOUBLE |
-| `loser_age` | `player2_age` | DOUBLE |
-
-Break-point semantic fix (user correction): bronze currently stores
-`break_points_won = bpFaced - bpSaved` (break points broken against the player).
-Rename and store the raw values instead:
-
-| Raw column | Bronze column (new name) | Old name |
-| --- | --- | --- |
-| `w_bpSaved` | `player1_break_points_saved` | `player1_break_points_won` |
-| `l_bpSaved` | `player2_break_points_saved` | `player2_break_points_won` |
-| `w_bpFaced` | `player1_break_points_faced` | `player1_break_points_total` |
-| `l_bpFaced` | `player2_break_points_faced` | `player2_break_points_total` |
-
-- **Files**:
-  - `src/features/columns.py` — `BRONZE_COLUMNS_INT` (UTINYINT 0..255): rename the 4 bp columns, add the 6 serve/stat columns (first_serve_points_won, second_serve_points_won, service_games x2). Add `BRONZE_COLUMNS_INT32` (rank_points x2) and `BRONZE_COLUMNS_FLOAT` (age x2).
-  - `src/flows/ingest.py` — extend `RAW_ATP_COLUMNS` with the 10 raw columns; map them in `atp_rows_to_bronze` (seed.py reuses this transform); add a float parser for `age` (raw values like `24.41`); drop the `faced - saved` derivation.
-  - `infra/duckdb/init.sql` — `bronze.match_events` DDL: rename 4 columns, add 10 (UTINYINT / INTEGER / DOUBLE).
-  - `src/features/validate.py` — rename bp checks to saved/faced; add range checks for rank_points (0..20000) and age (0..100).
-  - `dbt/models/sources.yml` — document renamed + new bronze source columns.
-  - `dbt/models/silver/player_matches.sql` + `.yml` — rename bp passthrough to `break_points_saved` / `break_points_faced`; pass through the 6 new per-player columns.
-  - `tests/test_rolling_contract.py` — update the hard-coded `len(BRONZE_COLUMNS_INT) == 16` count and add assertions for the new column sets.
-- **Guardrails**: do NOT ingest `indoor`, `seed`, `score`, `best_of`, `tourney_name`, `draw_size`, `entry`, or player identity columns (covered by profiles). Keep raw age as DOUBLE (fractional years), do not round.
-- **Rebuild**: `just db-reset && just db-seed && just db-dbt` — deletes and rebuilds `data/tennis.duckdb` from raw CSVs (destructive; approved).
-- **Acceptance criteria**:
-  - `pytest` green (updated contract tests).
-  - `bronze.match_events` has all 10 new columns + 4 renamed bp columns with correct types.
-  - Spot-check a sampled match: `break_points_saved` == raw `w_bpSaved`, `age` parsed as float, `rank_points` matches the CSV.
-  - `dbt build` clean; `silver.player_matches` carries the new columns.
+New `bronze.match_events` columns: `player{1,2}_first_serve_points_won`,
+`player{1,2}_second_serve_points_won`, `player{1,2}_service_games`
+(UTINYINT), `player{1,2}_rank_points` (INTEGER), `player{1,2}_age` (DOUBLE,
+fractional years preserved). Break points renamed to raw semantics:
+`player{1,2}_break_points_saved` / `player{1,2}_break_points_faced` (the
+`faced - saved` derivation is gone). `RAW_ATP_COLUMNS` extended, `columns.py`
+gains `BRONZE_COLUMNS_INT32`/`BRONZE_COLUMNS_FLOAT`, validate.py range
+checks, silver passthrough, DB rebuilt (`just db-reset && db-seed &&
+db-dbt`). Done + committed.
 
 ### [x] Task 2: Silver/Gold — derive high-signal features
 
-> **User overrides (locked, supersede plan text):** all new rolling features use
-> `_5/_10` windows only (no `_20` variants). Rank points is exposed ONLY as
-> `rank_points_diff` — no per-side `player/opponent_rank_points` features, no
-> rolling/trend rank-points machinery (rank already embeds that signal
-> implicitly). `latest_player_rank_points` remains in rolling_features as
-> internal backing for the inference-time diff. Final FEATURE_COLS: 80.
+Per-side as-of-date `player_age`/`opponent_age` + `age_diff`; rolling
+`first_serve_win_pct_5/10`, `second_serve_win_pct_5/10`, `serve_win_pct_5/10`,
+`aces_per_svc_game_5/10`, `break_points_saved_pct_5/10` (renamed from
+`break_pct_5/10`; `src/models/similarity.py` updated) + diffs; `rank_points_diff`
+only for rank points (per locked decision; `latest_player_rank_points` kept as
+internal rolling backing for the inference diff). Current-match serve stats
+(`*_first_serve_win_pct`, `*_serve_win_pct`, `*_df_per_svc_game`,
+`*_break_points_saved_pct`) are gold-only enrichment, not FEATURE_COLS.
+FEATURE_COLS = 80. Done + committed.
 
-- **Per-match (silver)**: pass through the new serve/rank/age columns.
-- **Per-match (gold, both players joined)**: `first_serve_win_pct` = 1stWon/1stIn, `second_serve_win_pct` = 2ndWon/(svpt-1stIn), `serve_win_pct` = (1stWon+2ndWon)/svpt, `aces_per_svc_game`, `df_per_svc_game`, `break_points_saved_pct` = saved/faced, `rank_points_diff`, `age`, `age_diff`.
-- **Rolling (gold.rolling_features, windows 5/10)**: rolling `first_serve_win_pct`, `second_serve_win_pct`, `serve_win_pct`, `break_points_saved_pct`, `aces_per_svc_game`, `rank_points` avg + trend.
-- **Contract**: every new feature added to `src/features/columns.py` FEATURE_COLS AND `src/features/inference.py` (as-of-date lookups); `tests/test_rolling_contract.py` keeps FEATURE_COLS <-> gold.match_features in sync.
+## New (merged from plan-match-day-features)
 
-### [ ] Task 3: Retrain + promote + redeploy
+### [x] Task 3: Leakage-safe rolling form + strength of schedule
 
-Feature set changed, so old models are invalid: `just pipeline` (3 base models + ensemble), promotion sets `@champion`, `just deploy-bento`.
+- **Files**: `dbt/models/gold/rolling_features.sql` + `.yml`,
+  `dbt/models/gold/match_features.sql` + `.yml`, `src/features/columns.py`,
+  `src/features/inference.py`, `tests/test_rolling_contract.py`,
+  `tests/test_inference_features.py`, `tests/test_inference_units.py`
+  (if present).
+- `df_rate_5/10` = rolling `SUM(double_faults) / NULLIF(SUM(total_serve_points), 0)`
+  over w5/w10, consistent with existing serve rates.
+- `loss_streak` = consecutive losses ending at the snapshot match (mirror of
+  existing `win_streak`; a win resets to 0). No diff column.
+- `avg_rank_faced`: rename existing `avg_opponent_rank_10/20` in
+  `rolling_features.sql` -> `avg_rank_faced_10` and add `avg_rank_faced_5`
+  (both `AVG(opponent_ranking)` over w5/w10); drop the `_20`. Expose
+  `player/opponent_avg_rank_faced_5/10` + `avg_rank_faced_diff` (10-window) in
+  `gold.match_features` and FEATURE_COLS.
+- Mirror everything in `src/features/inference.py` (pool aggregates, side
+  values, diffs, fallbacks) — SQL remains the feature source of truth.
+- **No** `df_rate_diff`, **no** `loss_streak_diff`, **no** `_20` windows.
+- **Acceptance**: every training row gets these only from snapshot N-1;
+  first-match rows NULL where no history; inference outputs the new FEATURE_COLS
+  contract without NaNs after fallback; `df_rate_5/10` NULL when historical
+  serve points are 0; `win_streak`/`loss_streak` never both positive.
 
-### [ ] Task 4: Bento data endpoints
+### [x] Task 4: Perspective-explicit H2H features (last-5 recency)
 
-`/players`, `/player_profile` (bio + recent + career stats incl. 1st/2nd-serve win %, save rate, rank-points trend), `/rank_history`, `/match_history`, `/head_to_head` — parameterized SQL in `src/serving/service.py`.
+- **Files**: `dbt/models/gold/match_features.sql` + `.yml`,
+  `src/features/columns.py`, `src/features/inference.py`,
+  `dbt/tests/gold/match_features_h2h_no_current_match.sql`,
+  `tests/test_inference_features.py`, `tests/test_e2e_ingest_to_inference.py`.
+- Prior-meeting aggregates for the canonical pair, only matches with
+  `match_date` strictly before the target date, restricted to the **most
+  recent 5 meetings** (recency window — per locked decision).
+- Expose `player_h2h_matches`, `player_h2h_wins`, `player_h2h_win_rate`,
+  `opponent_h2h_matches`, `opponent_h2h_wins`, `opponent_h2h_win_rate`.
+  `player_h2h_*` always describes the canonical `player_id` perspective.
+- Zero meetings -> `0.5` win rate (neutral, locked), zero counts stay zero so
+  models can distinguish uncertainty.
+- One parameterized inference query for the canonical pair; reverse
+  perspective derived from the same prior meetings (no duplicate queries).
+  Prepared parameters only — never interpolate ids/dates.
+- No surface-specific or recent-five *extra* H2H variants (recency IS the
+  last-5 window).
+- **Acceptance**: first meeting has zero priors + neutral rate; second meeting
+  sees exactly one prior; same-date meetings excluded; `player_h2h_matches ==
+  opponent_h2h_matches`; with priors, wins sum to matches and win rates sum to
+  1 (float tolerance); reversed raw ids -> identical canonical row.
 
-### [ ] Task 5: Dashboard
+### [x] Task 5: Strengthen leakage + feature-contract tests
 
-`web/` Vite + React 19 + TS, TanStack Router/Query/Table, echarts-for-react, Tailwind v4. Pure local dev + HMR; `/api` proxy -> local `bentoml serve` (:3000). No wrangler/Cloudflare, no Dockerfile, no deploy step. Pages: Player Profile (bio, career-vs-recent stat bars, rank chart, form strip, matches table), Head-to-Head (scoreboard, surface split, rank lines, model overlay).
+- **Files**: `dbt/tests/gold/match_features_no_current_match_leakage.sql`
+  (extend), `tests/test_rolling_contract.py`,
+  `tests/test_inference_features.py`, `tests/test_e2e_ingest_to_inference.py`.
+- Extend the existing N-1 leakage dbt test beyond `win_rate_10` to cover all
+  snapshot-backed fields from Tasks 2-3.
+- Assert no current-match aces / double faults / first-serve totals /
+  break-point totals / outcome values enter FEATURE_COLS (current-match serve
+  stats live in gold only).
+- Add a train/inference parity fixture: one historical gold row's features vs
+  an inference row built at that match date from only earlier history.
+- Keep per-side ordering, differential ordering, no-NaN inference, canonical id
+  symmetry, cold start, missing profiles, missing ranks assertions.
+
+## Then
+
+### [x] Task 6: Retrain + promote + redeploy
+
+Feature contract changed -> old models invalid. `just train` (3 base models +
+ensemble via `src/flows/pipeline.py`; promotion sets `@champion`), then
+`just deploy-bento` (`src/flows/deploy.py` — rebuilds ONNX + snapshots DuckDB
+gold into the image). Smoke: live `/predict_from_ids` for known players,
+cold-start players, no-H2H pairs, previously-met pairs. Do not reuse/deploy a
+model trained against the old contract.
+
+### [x] Task 7: Bento data endpoints
+
+`/players`, `/player_profile` (bio + recent + career stats incl. 1st/2nd-serve
+win %, save rate, rank-points trend), `/rank_history`, `/match_history`,
+`/head_to_head` — parameterized SQL in `src/serving/service.py`. Curl each
+against local `bentoml serve`; JSON shape matches the web dashboard types.
+
+### [ ] Task 8: Dashboard (web/ Vite + React)
+
+`web/` Vite + React 19 + TS, TanStack Router/Query/Table, echarts-for-react,
+Tailwind v4. Pure local dev + HMR; `/api` proxy -> local `bentoml serve`
+(:3000). No Dockerfile, no deploy step. Pages:
+- **Player Profile** — bio, career-vs-recent stat bars (incl. 1st/2nd-serve
+  win %, break save %), rank chart, form strip, matches table, and
+  **all-time clay/grass/hard win rates** (from all completed matches in
+  DuckDB; unplayed surface shows `n/a (n=0)`, not 0% — per locked decision;
+  the old `src/dashboard/app.py` Panel implementation is deleted).
+- **Head-to-Head** — scoreboard, surface split, rank lines, model overlay.
+Verify `npm run build` clean; profile + H2H flows against the local Bento.
 
 ## Dependencies
 
-1 -> 2 -> 3 -> 4 -> 5. Task 1 must land and the DB rebuild must verify before any downstream feature work.
+1. Tasks 3-4 modify the shared feature contract; run sequentially (same files:
+   `columns.py`, `inference.py`, `match_features.sql`). 2. Task 5 depends on
+   the final SQL/Python names from Tasks 3-4. 3. Task 6 depends on all feature
+   work + tests. 4. Task 7 depends on the rebuilt gold layer. 5. Task 8
+   depends on Task 7's endpoint shapes + Task 6's model overlay.
 
 ## QA/Testing Scenarios
 
-- Task 1: sampled match spot-check vs raw CSV; pytest; dbt build; `just validate` (kubeconform untouched).
-- Task 2: FEATURE_COLS contract test; feature distribution sanity (no div-by-zero -> NULL imputed at train).
-- Task 3: pipeline runs end-to-end; deployment smoke via live `/predict_from_ids`.
-- Task 4: curl each endpoint against local `bentoml serve`; JSON shape matches frontend types.
-- Task 5: `npm run build` clean; profile + H2H flows against the local Bento.
+- Player with no match history: honest activity/H2H counts, valid inference
+  fallbacks, no NaNs.
+- First and second meeting between a pair; split and one-sided H2H records.
+- Missing opponent ranks inside rolling windows: `avg_rank_faced` skips NULL
+  ranks consistently.
+- Zero historical serve points: `df_rate_5/10` NULL in gold, imputed at train.
+- Win-to-loss and loss-to-win transitions: only one streak direction positive.
+- Raw player input order reversed: canonical feature row unchanged.
+- `just etl` green with all dbt tests; full `pytest` green; `just train`
+  completes and logs the expanded feature contract; `/predict_from_ids` smoke
+  green; dashboard `npm run build` clean.

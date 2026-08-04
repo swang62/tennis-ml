@@ -14,8 +14,8 @@
 -- the window (the first snapshot's win_rate_5 is that match's own match_won).
 -- There is NO zero-filling anywhere — ratio rates (ace_rate_*,
 -- first_serve_pct_*, break_points_saved_pct_*, first_serve_win_pct_*,
--- second_serve_win_pct_*, serve_win_pct_*, aces_per_svc_game_*) are NULL when
--- the window's denominator sum is 0, and surface rates are NULL until the
+-- second_serve_win_pct_*, serve_win_pct_*, df_rate_*, aces_per_svc_game_*) are
+-- NULL when the window's denominator sum is 0, and surface rates are NULL until the
 -- player has played on that surface. Honest averages over partial windows are
 -- not zero-fills, so the plan's "no silent zero filling in the training
 -- source" holds.
@@ -37,6 +37,11 @@
 -- (`rn - max(streak_start where lost)`) but with the window INCLUDING the
 -- current match. A loss resets it to 0 (never negative); the first match is
 -- 1 if won, 0 if lost.
+--
+-- loss_streak is the exact mirror: consecutive losses ending at and including
+-- this snapshot's match (player_match_number minus the most recent win's
+-- number); a win resets it to 0. The two streaks are mutually exclusive by
+-- construction — never both positive on one snapshot.
 --
 -- last_match_date = snapshot_date: the most recent completed match date in the
 -- rolling history IS this match (windows are inclusive), so the plan's "last
@@ -92,6 +97,7 @@ snapshots AS (
         pm.player_age,
         pm.match_won,
         pm.aces,
+        pm.double_faults,
         pm.first_serves_made,
         pm.total_serve_points,
         pm.first_serve_points_won,
@@ -172,6 +178,14 @@ SELECT
     SUM(first_serve_points_won + second_serve_points_won) OVER w10
         / NULLIF(SUM(total_serve_points) OVER w10, 0) AS serve_win_pct_10,
 
+    -- Double-fault rate: double faults / total serve points, 5/10 (same
+    -- NULLIF convention as the other serve rates — NULL when the window has
+    -- no serve points)
+    SUM(double_faults) OVER w5
+        / NULLIF(SUM(total_serve_points) OVER w5,  0) AS df_rate_5,
+    SUM(double_faults) OVER w10
+        / NULLIF(SUM(total_serve_points) OVER w10, 0) AS df_rate_10,
+
     -- Aces per service game, 5/10
     SUM(aces) OVER w5
         / NULLIF(SUM(service_games) OVER w5,  0) AS aces_per_svc_game_5,
@@ -183,9 +197,11 @@ SELECT
     AVG(player_ranking) OVER w10 AS avg_player_rank_10,
     AVG(player_ranking) OVER w20 AS avg_player_rank_20,
 
-    -- Rolling average opponent rank over the last 10/20
-    AVG(opponent_ranking) OVER w10 AS avg_opponent_rank_10,
-    AVG(opponent_ranking) OVER w20 AS avg_opponent_rank_20,
+    -- Rolling average opponent rank (strength of schedule) over the last 5/10;
+    -- AVG skips NULL opponent rankings, so unranked opponents inside the
+    -- window never pollute the average
+    AVG(opponent_ranking) OVER w5  AS avg_rank_faced_5,
+    AVG(opponent_ranking) OVER w10 AS avg_rank_faced_10,
 
     -- Current consecutive-wins run including this match; 0 on a loss
     player_match_number - (
@@ -194,6 +210,16 @@ SELECT
             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
         )
     ) AS win_streak,
+
+    -- Current consecutive-losses run including this match; 0 on a win. Exact
+    -- mirror of win_streak (most recent win resets it): the two can never be
+    -- positive on the same snapshot.
+    player_match_number - (
+        MAX(CASE WHEN match_won = 1 THEN player_match_number ELSE 0 END) OVER (
+            PARTITION BY player_id ORDER BY snapshot_date, match_id
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        )
+    ) AS loss_streak,
 
     -- Last completed match date = this snapshot's date (windows are inclusive)
     snapshot_date AS last_match_date,

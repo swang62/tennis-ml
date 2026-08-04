@@ -21,8 +21,8 @@ models:
       in the window (the first snapshot's win_rate_5 is that match's own
       match_won); there is no zero-filling. Ratio rates (ace_rate_*,
       first_serve_pct_*, break_points_saved_pct_*, first_serve_win_pct_*,
-      second_serve_win_pct_*, serve_win_pct_*, aces_per_svc_game_*) are NULL
-      when the window's denominator sums to 0; clay/grass/hard_win_rate_10 are
+      second_serve_win_pct_*, serve_win_pct_*, df_rate_*, aces_per_svc_game_*)
+      are NULL when the window's denominator sums to 0; clay/grass/hard_win_rate_10 are
       NULL until the player has played on that surface. Every rate is either
       NULL or in [0, 1] except aces_per_svc_game_* (per-game count, no upper
       bound).
@@ -109,6 +109,10 @@ models:
         description: Sum(aces) / sum(service_games) over the last 5 matches including this one; NULL when the window has no service games.
       - name: aces_per_svc_game_10
         description: Sum(aces) / sum(service_games) over the last 10 matches including this one; NULL when the window has no service games.
+      - name: df_rate_5
+        description: Sum(double_faults) / sum(total_serve_points) over the last 5 matches including this one; NULL when the window has no serve points.
+      - name: df_rate_10
+        description: Sum(double_faults) / sum(total_serve_points) over the last 10 matches including this one; NULL when the window has no serve points.
       - name: avg_player_rank_10
         description: >
           Average of the player's own ranking over the last 10 matches including
@@ -118,15 +122,28 @@ models:
         description: >
           Average of the player's own ranking over the last 20 matches including
           this one. match_features derives rank_trend_20 from this stored average.
-      - name: avg_opponent_rank_10
-        description: Average of opponent_ranking over the last 10 matches including this one.
-      - name: avg_opponent_rank_20
-        description: Average of opponent_ranking over the last 20 matches including this one.
+      - name: avg_rank_faced_5
+        description: >
+          Average of opponent_ranking over the last 5 matches including this
+          one — the strength of schedule the player faced. AVG skips NULL
+          opponent rankings, so unranked opponents inside the window never
+          pollute the average.
+      - name: avg_rank_faced_10
+        description: >
+          Average of opponent_ranking over the last 10 matches including this
+          one — the strength of schedule the player faced. AVG skips NULL
+          opponent rankings.
       - name: win_streak
         description: >
           Consecutive wins ending at and including this snapshot's match. 0 when
           the current match is a loss (the run is over); never negative. The
           first match is 1 if won, 0 if lost.
+      - name: loss_streak
+        description: >
+          Consecutive losses ending at and including this snapshot's match —
+          the exact mirror of win_streak. 0 when the current match is a win
+          (the run is over); never negative. win_streak and loss_streak are
+          never both positive on one snapshot.
       - name: last_match_date
         description: >
           Most recent completed match date in the rolling history. Equal to

@@ -19,6 +19,12 @@
 -- features. The rolling versions of those stats (from the prior snapshot)
 -- are the model features.
 --
+-- Head-to-head (player/opponent_h2h_matches/wins/win_rate): pair-level
+-- aggregates over prior meetings between the canonical pair (strictly before
+-- this match's date, deduped to distinct match_ids, most recent 5 only).
+-- Zero prior meetings -> counts 0, win rates 0.5 (neutral). Both sides of a
+-- match agree on matches; wins sum to matches; rates sum to 1.
+--
 -- Cold start: a player's first match has no prior snapshot, so all rolling
 -- features are NULL (no zero filling). The only documented fallback is
 -- days_since_last_match = 365; matches_30d is naturally 0 (it is a COUNT).
@@ -85,6 +91,8 @@ WITH player_match_enriched AS (
         pr.second_serve_win_pct_10,
         pr.serve_win_pct_5,
         pr.serve_win_pct_10,
+        pr.df_rate_5,
+        pr.df_rate_10,
         pr.aces_per_svc_game_5,
         pr.aces_per_svc_game_10,
 
@@ -92,7 +100,12 @@ WITH player_match_enriched AS (
         pr.avg_player_rank_10 - pm.player_ranking AS rank_trend_10,
         pr.avg_player_rank_20 - pm.player_ranking AS rank_trend_20,
 
+        -- Strength of schedule: prior snapshot's rolling average opponent rank
+        pr.avg_rank_faced_5,
+        pr.avg_rank_faced_10,
+
         CAST(pr.win_streak AS UTINYINT) AS win_streak,
+        CAST(pr.loss_streak AS UTINYINT) AS loss_streak,
 
         -- Surface-specific form: prior snapshot's rate on the current surface
         CASE pm.surface
@@ -119,6 +132,56 @@ WITH player_match_enriched AS (
        AND pr.player_match_number = pm.player_match_number - 1
     LEFT JOIN gold.player_profiles prof
         ON prof.player_id = pm.player_id
+),
+-- One row per distinct match between a canonical pair. silver.player_matches
+-- has TWO rows per match (one per player perspective); this dedupes to match
+-- level. a/b are the canonical ids (lower id is `a`), and a_won is 1 iff the
+-- canonical a-side won that meeting — both perspective rows of a match agree
+-- on it (the loser's row reports match_won = 1 - the winner's), so MAX is
+-- safe. H2H aggregates read from here, never from raw silver rows.
+pair_meetings AS (
+    SELECT
+        CASE WHEN player_id < opponent_id THEN player_id ELSE opponent_id END AS a,
+        CASE WHEN player_id < opponent_id THEN opponent_id ELSE player_id END AS b,
+        match_id,
+        match_date,
+        MAX(CASE WHEN player_id < opponent_id THEN match_won
+                 ELSE 1 - match_won END) AS a_won
+    FROM {{ ref('player_matches') }}
+    GROUP BY 1, 2, 3, 4
+),
+-- Prior-meeting aggregates for the canonical pair (p.player_id vs
+-- p.opponent_id): matches with match_date STRICTLY BEFORE the current row's
+-- match_date (same-date meetings excluded), deduped to distinct match_ids,
+-- restricted to the MOST RECENT 5 meetings (ORDER BY match_date DESC,
+-- match_id DESC LIMIT 5 — the locked last-5 recency window). All three H2H
+-- fields come from that 5-window. The INNER JOIN already keeps only the
+-- canonical p-side perspective of each current match (the o-side row's
+-- player_id is the higher id, so no meeting matches it), so the window
+-- partitions cleanly per current match. Matches with no prior meeting produce
+-- no row here; the final select COALESCEs to 0 matches / 0 wins / 0.5 rate.
+prior_meeting_rows AS (
+    SELECT
+        current_match.match_id,
+        meeting.a_won,
+        ROW_NUMBER() OVER (
+            PARTITION BY current_match.match_id
+            ORDER BY meeting.match_date DESC, meeting.match_id DESC
+        ) AS rn
+    FROM player_match_enriched current_match
+    JOIN pair_meetings meeting
+        ON meeting.a = current_match.player_id
+       AND meeting.b = current_match.opponent_id
+       AND meeting.match_date < current_match.match_date
+),
+prior_h2h AS (
+    SELECT
+        match_id,
+        COUNT(*) AS player_h2h_matches,
+        COALESCE(SUM(a_won), 0) AS player_h2h_wins
+    FROM prior_meeting_rows
+    WHERE rn <= 5
+    GROUP BY match_id
 )
 -- Collapse the two player-perspective rows of each match into one canonical
 -- row: the lower ATP id is the player_* side (p), the higher is the
@@ -168,11 +231,16 @@ SELECT
     p.second_serve_win_pct_10 AS player_second_serve_win_pct_10,
     p.serve_win_pct_5       AS player_serve_win_pct_5,
     p.serve_win_pct_10      AS player_serve_win_pct_10,
+    p.df_rate_5             AS player_df_rate_5,
+    p.df_rate_10            AS player_df_rate_10,
     p.aces_per_svc_game_5   AS player_aces_per_svc_game_5,
     p.aces_per_svc_game_10  AS player_aces_per_svc_game_10,
     p.rank_trend_10         AS player_rank_trend_10,
     p.rank_trend_20         AS player_rank_trend_20,
+    p.avg_rank_faced_5      AS player_avg_rank_faced_5,
+    p.avg_rank_faced_10     AS player_avg_rank_faced_10,
     p.win_streak            AS player_win_streak,
+    p.loss_streak           AS player_loss_streak,
     p.days_since_last_match AS player_days_since_last_match,
     p.matches_30d           AS player_matches_30d,
     p.surface_win_rate_10   AS player_surface_win_rate_10,
@@ -181,6 +249,15 @@ SELECT
     p.height            AS player_height,
     p.is_left_handed    AS player_is_left_handed,
     p.years_pro         AS player_years_pro,
+
+    -- Head-to-head vs the opponent: prior meetings strictly before this
+    -- match, deduped, most recent 5. 0/0/0.5 when never met before.
+    COALESCE(h.player_h2h_matches, 0) AS player_h2h_matches,
+    COALESCE(h.player_h2h_wins, 0)    AS player_h2h_wins,
+    CASE WHEN COALESCE(h.player_h2h_matches, 0) > 0
+         THEN COALESCE(h.player_h2h_wins, 0)
+              / COALESCE(h.player_h2h_matches, 0)
+         ELSE 0.5 END AS player_h2h_win_rate,
 
     -- Opponent side (higher ATP id)
     o.player_ranking AS opponent_ranking,
@@ -201,11 +278,16 @@ SELECT
     o.second_serve_win_pct_10 AS opponent_second_serve_win_pct_10,
     o.serve_win_pct_5       AS opponent_serve_win_pct_5,
     o.serve_win_pct_10      AS opponent_serve_win_pct_10,
+    o.df_rate_5             AS opponent_df_rate_5,
+    o.df_rate_10            AS opponent_df_rate_10,
     o.aces_per_svc_game_5   AS opponent_aces_per_svc_game_5,
     o.aces_per_svc_game_10  AS opponent_aces_per_svc_game_10,
     o.rank_trend_10         AS opponent_rank_trend_10,
     o.rank_trend_20         AS opponent_rank_trend_20,
+    o.avg_rank_faced_5      AS opponent_avg_rank_faced_5,
+    o.avg_rank_faced_10     AS opponent_avg_rank_faced_10,
     o.win_streak            AS opponent_win_streak,
+    o.loss_streak           AS opponent_loss_streak,
     o.days_since_last_match AS opponent_days_since_last_match,
     o.matches_30d           AS opponent_matches_30d,
     o.surface_win_rate_10   AS opponent_surface_win_rate_10,
@@ -214,6 +296,17 @@ SELECT
     o.height            AS opponent_height,
     o.is_left_handed    AS opponent_is_left_handed,
     o.years_pro         AS opponent_years_pro,
+
+    -- Opponent's H2H perspective, derived from the SAME prior meetings:
+    -- matches always agree with the player side; wins are the complement
+    -- (wins sum to matches); win rate is 1 - player rate (0.5 neutral).
+    COALESCE(h.player_h2h_matches, 0) AS opponent_h2h_matches,
+    COALESCE(h.player_h2h_matches, 0) - COALESCE(h.player_h2h_wins, 0)
+        AS opponent_h2h_wins,
+    CASE WHEN COALESCE(h.player_h2h_matches, 0) > 0
+         THEN 1 - COALESCE(h.player_h2h_wins, 0)
+                  / COALESCE(h.player_h2h_matches, 0)
+         ELSE 0.5 END AS opponent_h2h_win_rate,
 
     -- Comparison (differential) features: canonical side minus opponent side
     p.player_ranking - o.player_ranking AS rank_diff,
@@ -233,6 +326,7 @@ SELECT
     p.matches_30d - o.matches_30d AS matches_30d_diff,
     p.surface_win_rate_10 - o.surface_win_rate_10 AS surface_win_rate_diff,
     p.rank_trend_10 - o.rank_trend_10 AS rank_trend_diff,
+    p.avg_rank_faced_10 - o.avg_rank_faced_10 AS avg_rank_faced_diff,
     p.height - o.height AS height_diff,
     CAST(p.is_left_handed AS INTEGER) - CAST(o.is_left_handed AS INTEGER)
         AS handedness_diff,
@@ -254,5 +348,7 @@ FROM player_match_enriched p
 JOIN player_match_enriched o
     ON o.match_id = p.match_id
    AND o.player_id = p.opponent_id
+LEFT JOIN prior_h2h h
+    ON h.match_id = p.match_id
 WHERE p.player_id < o.player_id
 ORDER BY p.match_date, p.match_id

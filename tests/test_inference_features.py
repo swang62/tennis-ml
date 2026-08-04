@@ -18,7 +18,7 @@ import pandas as pd
 import pytest
 
 from src.constants import GOLD_ROLLING_FEATURES, PROFILES_TABLE
-from src.db.client import execute_df
+from src.db.client import execute_df, get_conn
 from src.features import inference
 from src.features.columns import DIFF_COLS, FEATURE_COLS
 from src.features.inference import build_inference_features
@@ -32,7 +32,7 @@ def test_output_schema_contract():
     """Exact column order [*FEATURE_COLS, "player_id", "opponent_id"], one row."""
     out = build_inference_features("S0AG", "Z355", "clay", as_of_date=AS_OF_AFTER_ALL_MATCHES)
     assert out.columns.tolist() == [*FEATURE_COLS, "player_id", "opponent_id"]
-    assert len(out.columns) == 82  # 80 features + 2 ids
+    assert len(out.columns) == 99  # 97 features + 2 ids
     assert len(out) == 1
     assert out["player_id"].dtype == object
     assert out["opponent_id"].dtype == object
@@ -483,3 +483,245 @@ def test_null_handedness_falls_back_to_pool_rate(monkeypatch):
     # Non-NULL cells are still read directly.
     assert values["height"] == 191.0
     assert values["years_pro"] == 8.0  # 2026 - 2018
+
+
+# ── Head-to-head (perspective-explicit, last-5 recency) ──
+#
+# The seeded miniset has no pair that meets twice, so prior-meeting behavior
+# is exercised with synthetic silver.player_matches rows for dedicated pairs
+# (one row per player perspective per match, exactly like the real table).
+# Each test uses its own pair so no test depends on another's inserts, and the
+# ids never collide with any other test's players.
+
+
+def _insert_prior_meetings(pair_a: str, pair_b: str, meetings: list[tuple[str, str, int]]) -> None:
+    """Insert prior meetings between a canonical pair into silver.player_matches.
+
+    Each meeting is two rows (A's perspective, B's perspective) with
+    complementary match_won, mirroring the real table. `a_won` is 1 iff
+    `pair_a` (the canonical lower id) won. Dates are ISO strings.
+    """
+    rows = []
+    for match_id, date_iso, a_won in meetings:
+        rows.append((match_id, date_iso, pair_a, pair_b, a_won))
+        rows.append((match_id, date_iso, pair_b, pair_a, 1 - a_won))
+    get_conn().executemany(
+        "INSERT INTO silver.player_matches "
+        "(match_id, match_date, player_id, opponent_id, match_won) "
+        "VALUES (?, CAST(? AS DATE), ?, ?, ?)",
+        rows,
+    )
+
+
+def test_h2h_zero_prior_meetings_neutral():
+    """A pair that never met (UNKNOWN_ID has no silver rows at all) gets the
+    locked neutral fallback: 0 counts, 0.5 win rate on both sides."""
+    out = build_inference_features("S0AG", "UNKNOWN_ID", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
+    row = out.iloc[0]
+    assert row["player_id"] == "S0AG"
+    assert row["opponent_id"] == "UNKNOWN_ID"
+    assert row["player_h2h_matches"] == 0
+    assert row["player_h2h_wins"] == 0
+    assert row["player_h2h_win_rate"] == 0.5
+    assert row["opponent_h2h_matches"] == 0
+    assert row["opponent_h2h_wins"] == 0
+    assert row["opponent_h2h_win_rate"] == 0.5
+
+
+def test_h2h_real_seeded_meeting():
+    """A real seeded meeting: S0AG beat Z355 once (Hamburg, 2026-07-12), so
+    after that date the pair has exactly 1 prior, won by the canonical S0AG
+    side. Reverse the raw ids and the H2H values must not change."""
+    out = build_inference_features("S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
+    row = out.iloc[0]
+    assert row["player_id"] == "S0AG"  # 'S0AG' < 'Z355'
+    assert row["player_h2h_matches"] == 1
+    assert row["player_h2h_wins"] == 1
+    assert row["player_h2h_win_rate"] == pytest.approx(1.0)
+    assert row["opponent_h2h_matches"] == 1
+    assert row["opponent_h2h_wins"] == 0
+    assert row["opponent_h2h_win_rate"] == pytest.approx(0.0)
+    # Before that meeting (strictly-before): zero priors, neutral.
+    out_before = build_inference_features("S0AG", "Z355", "hard", as_of_date=date(2026, 7, 12))
+    row_before = out_before.iloc[0]
+    assert row_before["player_h2h_matches"] == 0
+    assert row_before["player_h2h_win_rate"] == 0.5
+    # Reversed raw ids: identical canonical row (H2H included).
+    row_ba = build_inference_features("Z355", "S0AG", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
+    pd.testing.assert_frame_equal(out, row_ba, check_exact=True)
+
+
+def test_h2h_first_and_second_meeting_boundaries():
+    """First meeting (as-of on the meeting date) -> zero priors + neutral;
+    second meeting -> exactly one prior, with correct wins on both sides."""
+    a, b = "H2H_F", "H2H_G"
+    _insert_prior_meetings(a, b, [("h2h-f1", "2026-05-20", 1)])
+    # On the first meeting's own date: strictly-before excludes it.
+    out1 = build_inference_features(a, b, "clay", as_of_date=date(2026, 5, 20))
+    row1 = out1.iloc[0]
+    assert row1["player_h2h_matches"] == 0
+    assert row1["player_h2h_wins"] == 0
+    assert row1["player_h2h_win_rate"] == 0.5
+    assert row1["opponent_h2h_win_rate"] == 0.5
+    # A second meeting: exactly one prior, A won it.
+    _insert_prior_meetings(a, b, [("h2h-f2", "2026-06-20", 0)])
+    out2 = build_inference_features(a, b, "clay", as_of_date=date(2026, 6, 20))
+    row2 = out2.iloc[0]
+    assert row2["player_h2h_matches"] == 1
+    assert row2["player_h2h_wins"] == 1
+    assert row2["player_h2h_win_rate"] == pytest.approx(1.0)
+    assert row2["opponent_h2h_matches"] == 1
+    assert row2["opponent_h2h_wins"] == 0
+    assert row2["opponent_h2h_win_rate"] == pytest.approx(0.0)
+    # After the second meeting: both priors, 1 win each side.
+    out3 = build_inference_features(a, b, "clay", as_of_date=date(2026, 6, 21))
+    row3 = out3.iloc[0]
+    assert row3["player_h2h_matches"] == 2
+    assert row3["player_h2h_wins"] == 1
+    assert row3["player_h2h_win_rate"] == pytest.approx(0.5)
+    assert row3["opponent_h2h_wins"] == 1
+    assert row3["opponent_h2h_win_rate"] == pytest.approx(0.5)
+
+
+def test_h2h_last5_recency_drops_oldest():
+    """A 6th prior meeting drops the oldest from the window: only the 5 most
+    recent meetings count. The dropped meeting is the pair's only A win."""
+    a, b = "H2H_C", "H2H_D"
+    _insert_prior_meetings(
+        a,
+        b,
+        [
+            ("h2h-r1", "2026-01-05", 1),  # oldest; A's only win -> must be dropped
+            ("h2h-r2", "2026-02-05", 0),
+            ("h2h-r3", "2026-03-05", 0),
+            ("h2h-r4", "2026-04-05", 0),
+            ("h2h-r5", "2026-05-05", 0),
+            ("h2h-r6", "2026-06-05", 0),
+        ],
+    )
+    out = build_inference_features(a, b, "hard", as_of_date=date(2026, 7, 1))
+    row = out.iloc[0]
+    assert row["player_h2h_matches"] == 5
+    assert row["player_h2h_wins"] == 0  # the sole A win is the dropped oldest
+    assert row["player_h2h_win_rate"] == pytest.approx(0.0)
+    assert row["opponent_h2h_matches"] == 5
+    assert row["opponent_h2h_wins"] == 5
+    assert row["opponent_h2h_win_rate"] == pytest.approx(1.0)
+
+
+def test_h2h_same_date_meetings_excluded():
+    """Meetings on the as-of date itself are excluded (strictly-before rule);
+    the next day both count."""
+    a, b = "H2H_E", "H2H_I"
+    _insert_prior_meetings(a, b, [("h2h-s1", "2026-03-10", 1), ("h2h-s2", "2026-03-10", 0)])
+    out_same = build_inference_features(a, b, "hard", as_of_date=date(2026, 3, 10))
+    row_same = out_same.iloc[0]
+    assert row_same["player_h2h_matches"] == 0
+    assert row_same["player_h2h_win_rate"] == 0.5
+    out_next = build_inference_features(a, b, "hard", as_of_date=date(2026, 3, 11))
+    row_next = out_next.iloc[0]
+    assert row_next["player_h2h_matches"] == 2
+    assert row_next["player_h2h_wins"] == 1
+    assert row_next["opponent_h2h_wins"] == 1
+    assert row_next["player_h2h_win_rate"] == pytest.approx(0.5)
+
+
+def test_h2h_reversed_raw_ids_identical():
+    """Reversing the raw input ids must produce the identical canonical row
+    (H2H is computed after canonicalization from the same prior meetings)."""
+    a, b = "H2H_J", "H2H_K"
+    _insert_prior_meetings(a, b, [("h2h-rv1", "2026-04-10", 1), ("h2h-rv2", "2026-05-10", 0)])
+    row_ab = build_inference_features(a, b, "hard", as_of_date=date(2026, 6, 1))
+    row_ba = build_inference_features(b, a, "hard", as_of_date=date(2026, 6, 1))
+    pd.testing.assert_frame_equal(row_ab, row_ba, check_exact=True)
+    assert row_ab.iloc[0]["player_h2h_matches"] == 2
+    assert row_ab.iloc[0]["player_h2h_wins"] == 1
+    assert row_ab.iloc[0]["player_h2h_win_rate"] == pytest.approx(0.5)
+
+
+# ── Train/inference parity (strongest train/serve agreement check) ──
+#
+# A gold.match_features row pairs each player with their N-1 post-match
+# snapshot; build_inference_features at the same match date can only see
+# snapshots strictly before it (which is also N-1). The two must agree on
+# every feature that has an as-of-date source.
+#
+# Known intentional asymmetries (documented; both sides are pre-match
+# information, so neither leaks the current match's outcome or raw stats):
+#   * Match-day values: gold records the CURRENT match's ranking / rank
+#     points / age (from silver.player_matches); the inference builder can
+#     only know the newest snapshot's values (last observed strictly before
+#     the as-of date). They differ whenever a ranking changed or age advanced
+#     between the N-1 match and the current one. rank_trend_* and the
+#     ranking/age differentials inherit the same gap.
+#   * Gold NULLs: gold keeps NULLs (no zero-fill; the train pipeline imputes
+#     them); inference imputes on-demand pool aggregates, so a NULL gold cell
+#     has no inference counterpart to compare against.
+ASYM_MATCH_DAY_COLS = {
+    "player_ranking",
+    "opponent_ranking",
+    "rank_diff",
+    "player_rank_trend_10",
+    "player_rank_trend_20",
+    "opponent_rank_trend_10",
+    "opponent_rank_trend_20",
+    "rank_trend_diff",
+    "rank_points_diff",
+    "player_age",
+    "opponent_age",
+    "age_diff",
+}
+
+# A match where both players have at least one strictly-prior snapshot (no
+# cold-start imputation on either side) and no same-date prior snapshot, so
+# the inference lookup at the match date resolves to exactly the same N-1
+# snapshots the gold row used.
+_PARITY_MATCH_SQL = """
+SELECT mf.*
+FROM gold.match_features mf
+JOIN silver.player_matches p
+  ON p.match_id = mf.match_id AND p.player_id = mf.player_id
+JOIN silver.player_matches o
+  ON o.match_id = mf.match_id AND o.player_id = mf.opponent_id
+WHERE p.player_match_number > 1
+  AND o.player_match_number > 1
+  AND p.previous_match_date < mf.match_date
+  AND o.previous_match_date < mf.match_date
+ORDER BY mf.match_date, mf.match_id
+LIMIT 1
+"""
+
+
+def test_train_inference_parity_on_historical_match():
+    """The gold row built from snapshot N-1 and an inference row built at that
+    match's date (from only strictly-earlier data) must agree on every
+    non-NULL, non-asymmetric feature: floats within 1e-6, ints exactly."""
+    gold_row = execute_df(_PARITY_MATCH_SQL).iloc[0]
+    out = build_inference_features(
+        str(gold_row["player_id"]),
+        str(gold_row["opponent_id"]),
+        str(gold_row["surface"]),
+        as_of_date=gold_row["match_date"],
+        tournament_level=int(gold_row["tournament_level"]),
+        round_encoded=int(gold_row["round_encoded"]),
+    )
+    infer_row = out.iloc[0]
+    assert out.columns.tolist() == [*FEATURE_COLS, "player_id", "opponent_id"]
+    compared = 0
+    for col in FEATURE_COLS:
+        gold_val = gold_row[col]
+        if pd.isna(gold_val):
+            # Gold keeps NULLs (no zero-fill); inference imputes pool means.
+            continue
+        if col in ASYM_MATCH_DAY_COLS:
+            # Documented match-day vs last-observed asymmetry.
+            continue
+        infer_val = infer_row[col]
+        if isinstance(gold_val, float):
+            assert infer_val == pytest.approx(float(gold_val), abs=1e-6), col
+        else:
+            assert int(infer_val) == int(gold_val), col
+        compared += 1
+    # The fixture must actually compare most of the contract, so it cannot
+    # silently degenerate to a handful of columns.
+    assert compared >= 70
