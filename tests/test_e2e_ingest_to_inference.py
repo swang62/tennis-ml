@@ -27,7 +27,7 @@ RAW_CSV = ROOT / "data" / "raw" / "2026.csv"
 AS_OF = date(2026, 9, 1)  # after every seeded match, like test_inference_features
 
 # match_features carries these 8 metadata columns before the per-side
-# current-match stats and the 80 feature columns.
+# current-match stats and the 97 feature columns.
 META_COLS = [
     "match_id",
     "match_date",
@@ -95,6 +95,23 @@ def test_gold_match_features_schema_matches_python_contract():
     ]
 
 
+def test_gold_only_enrichment_columns_in_gold_but_not_in_contract():
+    """The 12 per-side current-match serve/break enrichment columns exist in
+    gold.match_features (dashboard/analysis value) but are excluded from the
+    97-feature model contract — they have no as-of-date inference source."""
+    cols = set(
+        execute_df(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'match_features' AND table_schema = 'gold'"
+        )["column_name"]
+    )
+    for prefix in ("player", "opponent"):
+        for c in MATCH_STATS_COLS:
+            name = f"{prefix}_{c}"
+            assert name in cols, f"{name} missing from gold.match_features"
+            assert name not in FEATURE_COLS, f"{name} leaked into FEATURE_COLS"
+
+
 def _known_pair() -> tuple[str, str]:
     row = execute_df(
         "SELECT player1_id, player2_id FROM bronze.match_events "
@@ -104,7 +121,7 @@ def _known_pair() -> tuple[str, str]:
 
 
 def test_e2e_inference_contract():
-    """build_inference_features against the shared gold: exact 82-col schema,
+    """build_inference_features against the shared gold: exact 99-col schema,
     one row, canonical ids, finite features."""
     player_id, opponent_id = _known_pair()
     out = build_inference_features(player_id, opponent_id, "hard", as_of_date=AS_OF)

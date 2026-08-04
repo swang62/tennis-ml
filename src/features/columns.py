@@ -99,11 +99,16 @@ GOLD_ROLLING_COLS: list[str] = [
     "second_serve_win_pct_10",
     "serve_win_pct_5",
     "serve_win_pct_10",
+    "df_rate_5",
+    "df_rate_10",
     "aces_per_svc_game_5",
     "aces_per_svc_game_10",
     "rank_trend_10",
     "rank_trend_20",
+    "avg_rank_faced_5",
+    "avg_rank_faced_10",
     "win_streak",
+    "loss_streak",
     "days_since_last_match",
     "matches_30d",
     "surface_win_rate_10",
@@ -134,12 +139,26 @@ PROFILE_COLS: list[str] = [
     "years_pro",
 ]
 
+# Pair-level head-to-head history, exposed per side. NOT a rolling snapshot
+# feature: it aggregates prior meetings between the canonical pair (strictly
+# before the current match date, deduped to distinct match_ids, restricted to
+# the most recent 5) straight from silver.player_matches. player_h2h_* always
+# describes the canonical player_id side; opponent_h2h_* the opponent side.
+# With zero prior meetings the counts are 0 and both win rates are 0.5
+# (neutral, per locked decision). Wins sum to matches; rates sum to 1.
+H2H_COLS: list[str] = [
+    "h2h_matches",
+    "h2h_wins",
+    "h2h_win_rate",
+]
+
 
 PLAYER_COLS: list[str] = [
     "player_ranking",
     "player_age",
     *[f"player_{c}" for c in GOLD_ROLLING_COLS],
     *[f"player_{c}" for c in PROFILE_COLS],
+    *[f"player_{c}" for c in H2H_COLS],
 ]
 
 OPPONENT_COLS: list[str] = [
@@ -147,6 +166,7 @@ OPPONENT_COLS: list[str] = [
     "opponent_age",
     *[f"opponent_{c}" for c in GOLD_ROLLING_COLS],
     *[f"opponent_{c}" for c in PROFILE_COLS],
+    *[f"opponent_{c}" for c in H2H_COLS],
 ]
 
 DIFF_COLS: list[str] = [
@@ -164,6 +184,7 @@ DIFF_COLS: list[str] = [
     "matches_30d_diff",
     "surface_win_rate_diff",
     "rank_trend_diff",
+    "avg_rank_faced_diff",
     "height_diff",
     "handedness_diff",
     "years_pro_diff",

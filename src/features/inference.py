@@ -12,6 +12,12 @@ players as of a given date, mirroring `gold.match_features` semantics:
 * `days_since_last_match` (as-of date minus that snapshot's date) and
   `matches_30d` (count of `silver.player_matches` rows in
   `[as_of - 30 days, as_of)`) are computed at the as-of date.
+* Head-to-head: the most recent 5 prior meetings between the canonical pair
+  (match_date STRICTLY BEFORE the as-of date, deduped to distinct match_ids)
+  come from ONE parameterized query. `player_h2h_*` is the canonical
+  player side's perspective; `opponent_h2h_*` is the complement from the same
+  result set (wins sum to matches, win rates sum to 1). Zero prior meetings ->
+  counts 0, win rate 0.5 (neutral, locked).
 * Missing players (no eligible snapshot) and NULL snapshot cells are imputed
   from on-demand global aggregates over the eligible snapshot pool: MEDIAN
   for ranking/streak-related values, MEAN for other numerics. When BOTH
@@ -116,6 +122,35 @@ WHERE player_id = ?
   AND match_date < ?::DATE
 """
 
+# Most recent 5 prior meetings between the canonical pair, deduped to distinct
+# match_ids (silver.player_matches has TWO rows per match — one per player
+# perspective; the GROUP BY collapses them). a_won = 1 iff the canonical
+# a-side (the lower id, always the player_* side) won the meeting — both
+# perspective rows of a meeting agree on it, so MAX is safe. Same
+# date-granularity rule as match_features.sql: match_date strictly before the
+# as-of date; same-date meetings excluded. Both H2H perspectives derive from
+# this ONE result set. Params: lower_id, higher_id, lower_id, higher_id,
+# as_of_iso (prepared only — ids/dates never appear in the SQL text).
+_H2H_PRIOR_SQL = f"""
+SELECT match_id, a_won
+FROM (
+    SELECT
+        CASE WHEN player_id < opponent_id THEN player_id ELSE opponent_id END AS a,
+        CASE WHEN player_id < opponent_id THEN opponent_id ELSE player_id END AS b,
+        match_id,
+        match_date,
+        MAX(CASE WHEN player_id < opponent_id THEN match_won
+                 ELSE 1 - match_won END) AS a_won
+    FROM {SILVER_PLAYER_MATCHES}
+    WHERE ((? = player_id AND ? = opponent_id)
+        OR (? = opponent_id AND ? = player_id))
+      AND match_date < ?::DATE
+    GROUP BY 1, 2, 3, 4
+)
+ORDER BY match_date DESC, match_id DESC
+LIMIT 5
+"""
+
 # On-demand global imputation pool over all snapshots strictly before the
 # as-of date. One row; MEDIAN for ranking/streak-related, MEAN for others.
 _POOL_AGG_SQL = f"""
@@ -140,10 +175,15 @@ SELECT
     AVG(second_serve_win_pct_10)     AS second_serve_win_pct_10,
     AVG(serve_win_pct_5)             AS serve_win_pct_5,
     AVG(serve_win_pct_10)            AS serve_win_pct_10,
+    AVG(df_rate_5)                   AS df_rate_5,
+    AVG(df_rate_10)                  AS df_rate_10,
     AVG(aces_per_svc_game_5)         AS aces_per_svc_game_5,
     AVG(aces_per_svc_game_10)        AS aces_per_svc_game_10,
     AVG(avg_player_rank_10)          AS avg_player_rank_10,
     AVG(avg_player_rank_20)          AS avg_player_rank_20,
+    AVG(avg_rank_faced_5)            AS avg_rank_faced_5,
+    AVG(avg_rank_faced_10)           AS avg_rank_faced_10,
+    MEDIAN(loss_streak)              AS loss_streak,
     AVG(clay_win_rate_10)            AS clay_win_rate_10,
     AVG(grass_win_rate_10)           AS grass_win_rate_10,
     AVG(hard_win_rate_10)            AS hard_win_rate_10
@@ -296,11 +336,16 @@ def _side_values(
         "second_serve_win_pct_10": cell("second_serve_win_pct_10", _DEFAULT_RATE),
         "serve_win_pct_5": cell("serve_win_pct_5", _DEFAULT_RATE),
         "serve_win_pct_10": cell("serve_win_pct_10", _DEFAULT_RATE),
+        "df_rate_5": cell("df_rate_5", _DEFAULT_RATE),
+        "df_rate_10": cell("df_rate_10", _DEFAULT_RATE),
         "aces_per_svc_game_5": cell("aces_per_svc_game_5", _DEFAULT_RATE),
         "aces_per_svc_game_10": cell("aces_per_svc_game_10", _DEFAULT_RATE),
         "rank_trend_10": avg_rank_10 - ranking,
         "rank_trend_20": avg_rank_20 - ranking,
+        "avg_rank_faced_5": cell("avg_rank_faced_5", _DEFAULT_RANKING),
+        "avg_rank_faced_10": cell("avg_rank_faced_10", _DEFAULT_RANKING),
         "win_streak": int(cell("win_streak", _DEFAULT_STREAK)),
+        "loss_streak": int(cell("loss_streak", _DEFAULT_STREAK)),
         "days_since_last_match": days_since,
         "matches_30d": matches_30d,
         "surface_win_rate_10": cell(_SURFACE_TO_SNAPSHOT_COL[surface], _DEFAULT_RATE),
@@ -456,6 +501,22 @@ def _build_inference_features_with_meta(
     player_side.update(_profile_values(lower_id, as_of_date, profile_agg))
     opponent_side.update(_profile_values(higher_id, as_of_date, profile_agg))
 
+    # ── Head-to-head: one query for the canonical pair, both perspectives ──
+    # The SQL returns the most recent 5 prior meetings (deduped to distinct
+    # match_ids, strictly before the as-of date) with a_won = 1 iff the
+    # canonical player side won. The opponent perspective is the complement of
+    # the SAME result set: wins sum to matches, win rates sum to 1.
+    h2h_df = execute_df(_H2H_PRIOR_SQL, [lower_id, higher_id, lower_id, higher_id, as_of_iso])
+    h2h_matches = len(h2h_df)
+    h2h_player_wins = int(h2h_df["a_won"].sum()) if h2h_matches else 0
+    h2h_player_rate = h2h_player_wins / h2h_matches if h2h_matches else 0.5
+    player_side["h2h_matches"] = h2h_matches
+    player_side["h2h_wins"] = h2h_player_wins
+    player_side["h2h_win_rate"] = h2h_player_rate
+    opponent_side["h2h_matches"] = h2h_matches
+    opponent_side["h2h_wins"] = h2h_matches - h2h_player_wins
+    opponent_side["h2h_win_rate"] = 1.0 - h2h_player_rate
+
     # ── Assemble the canonical row in FEATURE_COLS order ──
     row: dict[str, int | float | str] = {}
     for col in PLAYER_COLS:
@@ -492,6 +553,9 @@ def _build_inference_features_with_meta(
         player_side["surface_win_rate_10"] - opponent_side["surface_win_rate_10"]
     )
     row["rank_trend_diff"] = player_side["rank_trend_10"] - opponent_side["rank_trend_10"]
+    row["avg_rank_faced_diff"] = (
+        player_side["avg_rank_faced_10"] - opponent_side["avg_rank_faced_10"]
+    )
     row["height_diff"] = player_side["height"] - opponent_side["height"]
     row["handedness_diff"] = player_side["is_left_handed"] - opponent_side["is_left_handed"]
     row["years_pro_diff"] = player_side["years_pro"] - opponent_side["years_pro"]
@@ -544,6 +608,7 @@ def _build_inference_features_with_meta(
         "opponent_matches_30d": int(opponent_side["matches_30d"]),
         "player_days_since_last_match": int(player_side["days_since_last_match"]),
         "opponent_days_since_last_match": int(opponent_side["days_since_last_match"]),
+        "h2h_prior_meetings": h2h_matches,
         "player_profile_height": float(player_side["height"]),
         "opponent_profile_height": float(opponent_side["height"]),
         "build_ms": builtins.round((perf_counter() - started_at) * 1000, 3),
