@@ -7,7 +7,13 @@ from typing import Any, TypedDict
 
 import pandas as pd
 
-from src.features.columns import _REQUIRED_STRING_COLUMNS, BRONZE_COLUMNS, BRONZE_COLUMNS_INT
+from src.features.columns import (
+    _REQUIRED_STRING_COLUMNS,
+    BRONZE_COLUMNS,
+    BRONZE_COLUMNS_FLOAT,
+    BRONZE_COLUMNS_INT,
+    BRONZE_COLUMNS_INT32,
+)
 
 
 class IngestionCheckReport(TypedDict):
@@ -50,6 +56,20 @@ def validate_bronze_row(row: Mapping[str, Any]) -> list[str]:
         if value < 0 or value > 255:
             issues.append(f"{column} outside UTINYINT 0..255: {value}")
 
+    for column in BRONZE_COLUMNS_INT32:
+        value = _as_number(row.get(column))
+        if value is None:
+            continue
+        if value < 0 or value > 20000:
+            issues.append(f"{column} outside INTEGER 0..20000: {value}")
+
+    for column in BRONZE_COLUMNS_FLOAT:
+        value = _as_number(row.get(column))
+        if value is None:
+            continue
+        if value < 0 or value > 100:
+            issues.append(f"{column} outside 0..100: {value}")
+
     if row.get("player1_id") == row.get("player2_id"):
         issues.append("player1_id equals player2_id")
     if row.get("winner_id") != row.get("player1_id"):
@@ -61,14 +81,14 @@ def validate_bronze_row(row: Mapping[str, Any]) -> list[str]:
         if wins is not None and matches is not None and wins > matches:
             issues.append(f"{side}_wins_last_10 exceeds {side}_matches_last_10")
 
-        break_points_won = _as_number(row.get(f"{side}_break_points_won"))
-        break_points_total = _as_number(row.get(f"{side}_break_points_total"))
+        break_points_saved = _as_number(row.get(f"{side}_break_points_saved"))
+        break_points_faced = _as_number(row.get(f"{side}_break_points_faced"))
         if (
-            break_points_won is not None
-            and break_points_total is not None
-            and break_points_won > break_points_total
+            break_points_saved is not None
+            and break_points_faced is not None
+            and break_points_saved > break_points_faced
         ):
-            issues.append(f"{side}_break_points_won exceeds {side}_break_points_total")
+            issues.append(f"{side}_break_points_saved exceeds {side}_break_points_faced")
 
         first_serves_made = _as_number(row.get(f"{side}_first_serves_made"))
         total_serve_points = _as_number(row.get(f"{side}_total_serve_points"))

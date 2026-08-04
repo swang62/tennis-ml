@@ -5,9 +5,9 @@ models:
     description: >
       Normalized player-perspective match rows: each bronze.match_events row
       expands into exactly two rows, one per player. Each row carries that
-      player's current match context (tournament, round, surface), ranking and
-      opponent ranking, raw serve/break stats, outcome, and event-relative
-      activity fields (player_match_number, previous_match_date,
+      player's current match context (tournament, round, surface), ranking,
+      rank points, age, opponent ranking, raw serve/break stats, outcome, and
+      event-relative activity fields (player_match_number, previous_match_date,
       matches_30d_before). No canonical player/opponent orientation and no
       rolling or differential features — downstream models build those from
       this expansion. Composite grain (match_id, player_id) is unique; the
@@ -44,6 +44,14 @@ models:
         description: This player's ATP ranking at match time.
       - name: opponent_ranking
         description: Opponent's ATP ranking at match time.
+      - name: player_rank_points
+        description: This player's ATP rank points at match time; NULL when missing (0 maps to NULL, the same 0 -> NULL convention as player_ranking).
+      - name: opponent_rank_points
+        description: Opponent's ATP rank points at match time; NULL when missing.
+      - name: player_age
+        description: This player's age in fractional years at match time; NULL when missing (0 maps to NULL).
+      - name: opponent_age
+        description: Opponent's age in fractional years at match time; NULL when missing.
       - name: winner_id
         description: Player who won the match (player_id or opponent_id).
       - name: match_won
@@ -56,10 +64,16 @@ models:
         description: This player's first serves made in this match.
       - name: total_serve_points
         description: This player's total serve points in this match.
-      - name: break_points_won
-        description: This player's break points won in this match.
-      - name: break_points_total
-        description: This player's break points faced in this match.
+      - name: first_serve_points_won
+        description: This player's first-serve points won in this match.
+      - name: second_serve_points_won
+        description: This player's second-serve points won in this match.
+      - name: service_games
+        description: This player's service games played in this match.
+      - name: break_points_saved
+        description: This player's break points saved in this match (raw w/l_bpSaved).
+      - name: break_points_faced
+        description: This player's break points faced in this match (raw w/l_bpFaced).
       - name: wins_last_10
         description: This player's wins in the 10 matches before this one.
       - name: matches_last_10

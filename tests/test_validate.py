@@ -27,16 +27,26 @@ def _valid_row() -> dict[str, object]:
         "player1_double_faults": 1,
         "player1_first_serves_made": 20,
         "player1_total_serve_points": 30,
-        "player1_break_points_won": 3,
-        "player1_break_points_total": 4,
+        "player1_first_serve_points_won": 18,
+        "player1_second_serve_points_won": 8,
+        "player1_service_games": 12,
+        "player1_break_points_saved": 3,
+        "player1_break_points_faced": 4,
         "player2_wins_last_10": 6,
         "player2_matches_last_10": 10,
         "player2_aces": 3,
         "player2_double_faults": 2,
         "player2_first_serves_made": 18,
         "player2_total_serve_points": 30,
-        "player2_break_points_won": 1,
-        "player2_break_points_total": 2,
+        "player2_first_serve_points_won": 16,
+        "player2_second_serve_points_won": 7,
+        "player2_service_games": 11,
+        "player2_break_points_saved": 1,
+        "player2_break_points_faced": 2,
+        "player1_rank_points": 9000,
+        "player2_rank_points": 3000,
+        "player1_age": 24.41,
+        "player2_age": 28.75,
         "winner_id": "A001",
     }
 
@@ -47,14 +57,18 @@ def test_validate_bronze_row_accepts_valid_row():
 
 def test_validate_bronze_row_flags_row_level_semantic_errors():
     row = _valid_row()
-    row["player1_break_points_won"] = -9
+    row["player1_break_points_saved"] = -9
     row["player2_first_serves_made"] = 31
+    row["player1_rank_points"] = 20001
+    row["player2_age"] = 100.5
     row["winner_id"] = "B001"
 
     issues = validate_bronze_row(row)
 
-    assert "player1_break_points_won outside UTINYINT 0..255: -9" in issues
+    assert "player1_break_points_saved outside UTINYINT 0..255: -9" in issues
     assert "player2_first_serves_made exceeds player2_total_serve_points" in issues
+    assert "player1_rank_points outside INTEGER 0..20000: 20001" in issues
+    assert "player2_age outside 0..100: 100.5" in issues
     assert "winner_id must equal player1_id" in issues
 
 
@@ -77,7 +91,7 @@ def test_run_ingestion_checks_drops_invalid_rows_and_keeps_valid_rows():
     valid = _valid_row()
     invalid = _valid_row() | {
         "match_id": "2026-test-002",
-        "player1_break_points_won": -9,
+        "player1_break_points_saved": -9,
     }
 
     result: IngestionCheckReport = run_ingestion_checks(pd.DataFrame([valid, invalid]))
@@ -87,7 +101,7 @@ def test_run_ingestion_checks_drops_invalid_rows_and_keeps_valid_rows():
     assert result["valid_rows"] == 1
     assert result["dropped_rows"] == 1
     assert any(
-        "player1_break_points_won outside UTINYINT 0..255: -9" in issue
+        "player1_break_points_saved outside UTINYINT 0..255: -9" in issue
         for issue in result["results"]
     )
     assert cast(pd.DataFrame, result["valid_df"]).to_dict(orient="records") == [valid]

@@ -42,10 +42,20 @@ sources:
             description: Player1 first serves made in this match.
           - name: player1_total_serve_points
             description: Player1 total serve points in this match.
-          - name: player1_break_points_won
-            description: Player1 break points won in this match.
-          - name: player1_break_points_total
-            description: Player1 break points faced in this match.
+          - name: player1_first_serve_points_won
+            description: Player1 first-serve points won in this match.
+          - name: player1_second_serve_points_won
+            description: Player1 second-serve points won in this match.
+          - name: player1_service_games
+            description: Player1 service games played in this match.
+          - name: player1_break_points_saved
+            description: Player1 break points saved in this match (raw w_bpSaved).
+          - name: player1_break_points_faced
+            description: Player1 break points faced in this match (raw w_bpFaced).
+          - name: player1_rank_points
+            description: Player1 ATP ranking points at match time (raw winner_rank_points).
+          - name: player1_age
+            description: Player1 age in fractional years at match time (raw winner_age).
           - name: player2_wins_last_10
             description: Player2 wins in the 10 matches before this one.
           - name: player2_matches_last_10
@@ -58,9 +68,19 @@ sources:
             description: Player2 first serves made in this match.
           - name: player2_total_serve_points
             description: Player2 total serve points in this match.
-          - name: player2_break_points_won
-            description: Player2 break points won in this match.
-          - name: player2_break_points_total
-            description: Player2 break points faced in this match.
+          - name: player2_first_serve_points_won
+            description: Player2 first-serve points won in this match.
+          - name: player2_second_serve_points_won
+            description: Player2 second-serve points won in this match.
+          - name: player2_service_games
+            description: Player2 service games played in this match.
+          - name: player2_break_points_saved
+            description: Player2 break points saved in this match (raw l_bpSaved).
+          - name: player2_break_points_faced
+            description: Player2 break points faced in this match (raw l_bpFaced).
+          - name: player2_rank_points
+            description: Player2 ATP ranking points at match time (raw loser_rank_points).
+          - name: player2_age
+            description: Player2 age in fractional years at match time (raw loser_age).
           - name: winner_id
             description: Player who won the match (player1_id or player2_id).

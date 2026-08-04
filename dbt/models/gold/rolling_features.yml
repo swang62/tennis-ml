@@ -20,9 +20,12 @@ models:
       Cold start: rates are computed over however many completed matches fall
       in the window (the first snapshot's win_rate_5 is that match's own
       match_won); there is no zero-filling. Ratio rates (ace_rate_*,
-      first_serve_pct_*, break_pct_*) are NULL when the window's denominator
-      sums to 0; clay/grass/hard_win_rate_10 are NULL until the player has
-      played on that surface. Every rate is either NULL or in [0, 1].
+      first_serve_pct_*, break_points_saved_pct_*, first_serve_win_pct_*,
+      second_serve_win_pct_*, serve_win_pct_*, aces_per_svc_game_*) are NULL
+      when the window's denominator sums to 0; clay/grass/hard_win_rate_10 are
+      NULL until the player has played on that surface. Every rate is either
+      NULL or in [0, 1] except aces_per_svc_game_* (per-game count, no upper
+      bound).
     tests:
       - unique:
           arguments:
@@ -55,12 +58,29 @@ models:
           ranking in the player's history at this point.
       - name: latest_opponent_ranking
         description: The opponent's ATP ranking at the snapshot match.
+      - name: latest_player_rank_points
+        description: >
+          The player's ATP rank points at the snapshot match; NULL when
+          missing (0 -> NULL in silver.player_matches). Internal backing for
+          the inference-time rank_points_diff (as-of-date per-side lookup);
+          not itself a model feature.
+      - name: latest_player_age
+        description: >
+          The player's age in fractional years at the snapshot match; NULL
+          when missing (0 -> NULL in silver.player_matches).
       - name: win_rate_5
         description: Average of match_won over the last 5 completed matches including this one; NULL only when the window is empty.
       - name: win_rate_10
         description: Average of match_won over the last 10 completed matches including this one.
       - name: win_rate_20
         description: Average of match_won over the last 20 completed matches including this one.
+      - name: weighted_form_10
+        description: >
+          Exponentially-decayed win rate over the last 10 matches including
+          this one: match_won weighted by POW(0.9, rn), where rn counts
+          backwards from the newest match (newest = 0, weight 1) and each
+          older match decays by 0.9 per step. NULL only when the window is
+          empty; otherwise in [0, 1].
       - name: ace_rate_5
         description: Sum(aces) / sum(first_serves_made) over the last 5 matches including this one; NULL when no first serves were made in the window.
       - name: ace_rate_10
@@ -69,10 +89,26 @@ models:
         description: Sum(first_serves_made) / sum(total_serve_points) over the last 5 matches including this one; NULL when the window has no serve points.
       - name: first_serve_pct_10
         description: Sum(first_serves_made) / sum(total_serve_points) over the last 10 matches including this one; NULL when the window has no serve points.
-      - name: break_pct_5
-        description: Sum(break_points_won) / sum(break_points_total) over the last 5 matches including this one; NULL when the window has no break points.
-      - name: break_pct_10
-        description: Sum(break_points_won) / sum(break_points_total) over the last 10 matches including this one; NULL when the window has no break points.
+      - name: break_points_saved_pct_5
+        description: Sum(break_points_saved) / sum(break_points_faced) over the last 5 matches including this one; NULL when the window has no break points faced.
+      - name: break_points_saved_pct_10
+        description: Sum(break_points_saved) / sum(break_points_faced) over the last 10 matches including this one; NULL when the window has no break points faced.
+      - name: first_serve_win_pct_5
+        description: Sum(first_serve_points_won) / sum(first_serves_made) over the last 5 matches including this one; NULL when the window has no first serves made.
+      - name: first_serve_win_pct_10
+        description: Sum(first_serve_points_won) / sum(first_serves_made) over the last 10 matches including this one; NULL when the window has no first serves made.
+      - name: second_serve_win_pct_5
+        description: Sum(second_serve_points_won) / sum(total_serve_points - first_serves_made) over the last 5 matches including this one; NULL when the window has no second serves.
+      - name: second_serve_win_pct_10
+        description: Sum(second_serve_points_won) / sum(total_serve_points - first_serves_made) over the last 10 matches including this one; NULL when the window has no second serves.
+      - name: serve_win_pct_5
+        description: Sum(first_serve_points_won + second_serve_points_won) / sum(total_serve_points) over the last 5 matches including this one; NULL when the window has no serve points.
+      - name: serve_win_pct_10
+        description: Sum(first_serve_points_won + second_serve_points_won) / sum(total_serve_points) over the last 10 matches including this one; NULL when the window has no serve points.
+      - name: aces_per_svc_game_5
+        description: Sum(aces) / sum(service_games) over the last 5 matches including this one; NULL when the window has no service games.
+      - name: aces_per_svc_game_10
+        description: Sum(aces) / sum(service_games) over the last 10 matches including this one; NULL when the window has no service games.
       - name: avg_player_rank_10
         description: >
           Average of the player's own ranking over the last 10 matches including

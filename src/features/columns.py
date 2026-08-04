@@ -21,16 +21,34 @@ BRONZE_COLUMNS_INT: tuple[str, ...] = (
     "player1_double_faults",
     "player1_first_serves_made",
     "player1_total_serve_points",
-    "player1_break_points_won",
-    "player1_break_points_total",
+    "player1_first_serve_points_won",
+    "player1_second_serve_points_won",
+    "player1_service_games",
+    "player1_break_points_saved",
+    "player1_break_points_faced",
     "player2_wins_last_10",
     "player2_matches_last_10",
     "player2_aces",
     "player2_double_faults",
     "player2_first_serves_made",
     "player2_total_serve_points",
-    "player2_break_points_won",
-    "player2_break_points_total",
+    "player2_first_serve_points_won",
+    "player2_second_serve_points_won",
+    "player2_service_games",
+    "player2_break_points_saved",
+    "player2_break_points_faced",
+)
+
+# Raw rank points at match time (ATP ranking points; 0 is the missing marker).
+BRONZE_COLUMNS_INT32: tuple[str, ...] = (
+    "player1_rank_points",
+    "player2_rank_points",
+)
+
+# Raw age in fractional years at match time (0 is the missing marker).
+BRONZE_COLUMNS_FLOAT: tuple[str, ...] = (
+    "player1_age",
+    "player2_age",
 )
 
 BRONZE_COLUMNS: tuple[str, ...] = (
@@ -44,6 +62,8 @@ BRONZE_COLUMNS: tuple[str, ...] = (
     "player1_ranking",
     "player2_ranking",
     *BRONZE_COLUMNS_INT,
+    *BRONZE_COLUMNS_INT32,
+    *BRONZE_COLUMNS_FLOAT,
     "winner_id",
 )
 
@@ -66,12 +86,21 @@ GOLD_ROLLING_COLS: list[str] = [
     "win_rate_5",
     "win_rate_10",
     "win_rate_20",
+    "weighted_form_10",
     "ace_rate_5",
     "ace_rate_10",
     "first_serve_pct_5",
     "first_serve_pct_10",
-    "break_pct_5",
-    "break_pct_10",
+    "break_points_saved_pct_5",
+    "break_points_saved_pct_10",
+    "first_serve_win_pct_5",
+    "first_serve_win_pct_10",
+    "second_serve_win_pct_5",
+    "second_serve_win_pct_10",
+    "serve_win_pct_5",
+    "serve_win_pct_10",
+    "aces_per_svc_game_5",
+    "aces_per_svc_game_10",
     "rank_trend_10",
     "rank_trend_20",
     "win_streak",
@@ -82,6 +111,19 @@ GOLD_ROLLING_COLS: list[str] = [
 
 
 # ── Per-side feature columns of the canonical match-level table ──
+
+# Current-match per-side serve/break stats exposed ONLY in gold.match_features
+# (dashboard/analysis value). The rolling versions in GOLD_ROLLING_COLS are the
+# model features — a current match's own stats have no as-of-date inference
+# source, so they are never in FEATURE_COLS.
+MATCH_STATS_COLS: list[str] = [
+    "first_serve_win_pct",
+    "second_serve_win_pct",
+    "serve_win_pct",
+    "aces_per_svc_game",
+    "df_per_svc_game",
+    "break_points_saved_pct",
+]
 
 # Profile-derived identity features (from gold.player_profiles), exposed
 # per side in the canonical row. years_pro is time-aware: years pro as of the
@@ -95,21 +137,29 @@ PROFILE_COLS: list[str] = [
 
 PLAYER_COLS: list[str] = [
     "player_ranking",
+    "player_age",
     *[f"player_{c}" for c in GOLD_ROLLING_COLS],
     *[f"player_{c}" for c in PROFILE_COLS],
 ]
 
 OPPONENT_COLS: list[str] = [
     "opponent_ranking",
+    "opponent_age",
     *[f"opponent_{c}" for c in GOLD_ROLLING_COLS],
     *[f"opponent_{c}" for c in PROFILE_COLS],
 ]
 
 DIFF_COLS: list[str] = [
     "rank_diff",
+    "rank_points_diff",
+    "age_diff",
     "win_rate_diff",
     "ace_rate_diff",
-    "break_pct_diff",
+    "break_points_saved_pct_diff",
+    "first_serve_win_pct_diff",
+    "second_serve_win_pct_diff",
+    "serve_win_pct_diff",
+    "aces_per_svc_game_diff",
     "win_streak_diff",
     "matches_30d_diff",
     "surface_win_rate_diff",

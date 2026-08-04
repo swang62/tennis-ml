@@ -19,14 +19,15 @@ import pandas as pd
 
 from src.constants import BRONZE_TABLE, GOLD_ROLLING_FEATURES, GOLD_TABLE, ROOT
 from src.db.client import execute_df
-from src.features.columns import FEATURE_COLS
+from src.features.columns import FEATURE_COLS, MATCH_STATS_COLS
 from src.features.inference import build_inference_features
 from src.flows import ingest
 
 RAW_CSV = ROOT / "data" / "raw" / "2026.csv"
 AS_OF = date(2026, 9, 1)  # after every seeded match, like test_inference_features
 
-# match_features carries these 8 metadata columns before the 54 feature columns.
+# match_features carries these 8 metadata columns before the per-side
+# current-match stats and the 80 feature columns.
 META_COLS = [
     "match_id",
     "match_date",
@@ -78,14 +79,20 @@ def test_reinsert_is_idempotent_upsert():
 
 
 def test_gold_match_features_schema_matches_python_contract():
-    """The dbt-built training table's live schema == metadata cols + FEATURE_COLS
-    - the parity check that SQL-text tests and inference-builder tests can't see."""
+    """The dbt-built training table's live schema == metadata cols +
+    per-side current-match stats + FEATURE_COLS — the parity check that
+    SQL-text tests and inference-builder tests can't see."""
     cols = execute_df(
         "SELECT column_name FROM information_schema.columns "
         "WHERE table_name = 'match_features' AND table_schema = 'gold' "
         "ORDER BY ordinal_position"
     )["column_name"].tolist()
-    assert cols == [*META_COLS, *FEATURE_COLS]
+    assert cols == [
+        *META_COLS,
+        *[f"player_{c}" for c in MATCH_STATS_COLS],
+        *[f"opponent_{c}" for c in MATCH_STATS_COLS],
+        *FEATURE_COLS,
+    ]
 
 
 def _known_pair() -> tuple[str, str]:
@@ -97,7 +104,7 @@ def _known_pair() -> tuple[str, str]:
 
 
 def test_e2e_inference_contract():
-    """build_inference_features against the shared gold: exact 56-col schema,
+    """build_inference_features against the shared gold: exact 82-col schema,
     one row, canonical ids, finite features."""
     player_id, opponent_id = _known_pair()
     out = build_inference_features(player_id, opponent_id, "hard", as_of_date=AS_OF)

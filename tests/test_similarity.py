@@ -1,8 +1,9 @@
 """Hermetic tests for src/models/similarity.py (no network, no DuckDB).
 
 fastembed.TextEmbedding is stubbed with a fake that yields fixed 4-dim ones
-vectors, and src.db.client.to_dataframe is stubbed with a small in-memory
-profile frame. Tests mirror the real implementation: bio_* embedding frames,
+vectors, and src.db.client.to_dataframe is stubbed with small in-memory frames
+dispatched by table name (player profiles vs. latest rolling-features
+snapshots). Tests mirror the real implementation: bio_* embedding frames,
 case-insensitive name lookup, FAISS self-exclusion and score formatting, and
 the build()/load() disk round-trip via patched DEFAULT_INDEX/DEFAULT_METADATA.
 """
@@ -39,15 +40,47 @@ def _patch_embedding(monkeypatch: pytest.MonkeyPatch) -> FakeTextEmbedding:
 def _profiles_df() -> pd.DataFrame:
     return pd.DataFrame(
         {
-            "player_id": ["P1", "P2", ""],
-            "display_name": ["Alice", "Bob", "Ghost"],
-            "backhand": ["one", "two", "one"],
-            "handedness": ["right", "left", "right"],
-            "height": [180.0, 175.0, None],
-            "turned_pro": [2005, 2010, None],
-            "summary": ["Great server", "", None],
+            "player_id": ["P1", "P2", "P3", ""],
+            "display_name": ["Alice", "Bob", "Carol", "Ghost"],
+            "backhand": ["one", "two", "one", "one"],
+            "handedness": ["right", "left", "right", "right"],
+            "summary": ["Great server", "", "Solid returner", None],
         }
     )
+
+
+# Same column order as the style_cols list in PlayerSimilarity.build.
+STYLE_COLS = [
+    "ace_rate_10",
+    "first_serve_pct_10",
+    "break_points_saved_pct_10",
+    "clay_win_rate_10",
+    "grass_win_rate_10",
+    "hard_win_rate_10",
+]
+
+
+def _rolling_df() -> pd.DataFrame:
+    """Latest snapshot per player. P2 never played clay (NULL surface rate);
+    P3 has no snapshot at all, so its style stats must impute to 0.0."""
+    return pd.DataFrame(
+        {
+            "player_id": ["P1", "P2"],
+            "ace_rate_10": [0.15, 0.05],
+            "first_serve_pct_10": [0.62, 0.58],
+            "break_points_saved_pct_10": [0.41, 0.38],
+            "clay_win_rate_10": [0.55, None],
+            "grass_win_rate_10": [0.60, 0.70],
+            "hard_win_rate_10": [0.50, 0.52],
+        }
+    )
+
+
+def _stub_to_dataframe(sql: str) -> pd.DataFrame:
+    """Stand-in for src.db.client.to_dataframe: dispatch by table in the SQL."""
+    if "gold.rolling_features" in sql:
+        return _rolling_df()
+    return _profiles_df()
 
 
 def _hand_built_finder() -> PlayerSimilarity:
@@ -156,7 +189,7 @@ def test_search_empty_players_returns_empty():
 
 def test_build_load_round_trip(tmp_path: Path, monkeypatch):
     _patch_embedding(monkeypatch)
-    monkeypatch.setattr(similarity, "to_dataframe", lambda _sql: _profiles_df())
+    monkeypatch.setattr(similarity, "to_dataframe", _stub_to_dataframe)
     index_path = tmp_path / "idx"
     meta_path = tmp_path / "meta.json"
     monkeypatch.setattr(similarity, "DEFAULT_INDEX", index_path)
@@ -171,12 +204,62 @@ def test_build_load_round_trip(tmp_path: Path, monkeypatch):
     loaded = PlayerSimilarity()
     loaded.load()
 
-    # build() drops the empty-player_id row, so only P1/P2 are indexed.
-    assert loaded.player_ids == finder.player_ids == ["P1", "P2"]
+    # build() drops the empty-player_id row, so only P1/P2/P3 are indexed.
+    assert loaded.player_ids == finder.player_ids == ["P1", "P2", "P3"]
     assert loaded.players == finder.players
     assert loaded.index is not None and finder.index is not None
     assert loaded.index.d == finder.index.d
     assert loaded.index.ntotal == finder.index.ntotal
+
+
+def _build_with_fakes(tmp_path: Path, monkeypatch) -> PlayerSimilarity:
+    """Build a PlayerSimilarity against the stubbed to_dataframe."""
+    _patch_embedding(monkeypatch)
+    monkeypatch.setattr(similarity, "to_dataframe", _stub_to_dataframe)
+    monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
+    monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
+    finder = PlayerSimilarity()
+    finder.build()
+    return finder
+
+
+def test_build_vector_contains_style_stats_and_bio(tmp_path: Path, monkeypatch):
+    finder = _build_with_fakes(tmp_path, monkeypatch)
+    index = finder.index
+    assert index is not None
+
+    # 4 one-hot (backhand x2, handedness x2) + 6 style stats + 4 bio dims.
+    assert index.d == 4 + len(STYLE_COLS) + 4
+    p1 = index.reconstruct(0)
+    # Style stats and bio embeddings land in the vector after the one-hot block.
+    assert np.all(p1[4 : 4 + len(STYLE_COLS)] > 0.0)
+    assert np.all(p1[4 + len(STYLE_COLS) :] > 0.0)
+
+
+def test_build_null_style_cells_filled_zero(tmp_path: Path, monkeypatch):
+    finder = _build_with_fakes(tmp_path, monkeypatch)
+    index = finder.index
+    assert index is not None
+
+    # P2 has no clay matches -> clay_win_rate_10 is NULL and must impute to 0.0.
+    p2 = index.reconstruct(1)
+    clay_idx = 4 + STYLE_COLS.index("clay_win_rate_10")
+    ace_idx = 4 + STYLE_COLS.index("ace_rate_10")
+    assert p2[clay_idx] == 0.0
+    assert p2[ace_idx] > 0.0
+
+
+def test_build_player_without_snapshot_still_indexed(tmp_path: Path, monkeypatch):
+    finder = _build_with_fakes(tmp_path, monkeypatch)
+    index = finder.index
+    assert index is not None
+
+    # P3 is in profiles but absent from rolling_features: still indexed, all
+    # style stats zero-filled.
+    assert finder.player_ids == ["P1", "P2", "P3"]
+    p3 = index.reconstruct(2)
+    assert np.all(p3[4 : 4 + len(STYLE_COLS)] == 0.0)
+    assert np.all(p3[4 + len(STYLE_COLS) :] > 0.0)
 
 
 def test_load_missing_index_raises(tmp_path: Path, monkeypatch):

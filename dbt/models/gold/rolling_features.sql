@@ -12,11 +12,13 @@
 --
 -- Cold start: rates are computed over however many completed matches fall in
 -- the window (the first snapshot's win_rate_5 is that match's own match_won).
--- There is NO zero-filling anywhere — ratio rates (ace_rate_*, first_serve_pct_*,
--- break_pct_*) are NULL when the window's denominator sum is 0, and surface
--- rates are NULL until the player has played on that surface. Honest averages
--- over partial windows are not zero-fills, so the plan's "no silent zero
--- filling in the training source" holds.
+-- There is NO zero-filling anywhere — ratio rates (ace_rate_*,
+-- first_serve_pct_*, break_points_saved_pct_*, first_serve_win_pct_*,
+-- second_serve_win_pct_*, serve_win_pct_*, aces_per_svc_game_*) are NULL when
+-- the window's denominator sum is 0, and surface rates are NULL until the
+-- player has played on that surface. Honest averages over partial windows are
+-- not zero-fills, so the plan's "no silent zero filling in the training
+-- source" holds.
 --
 -- Surface-specific rates: clay_win_rate_10 / grass_win_rate_10 /
 -- hard_win_rate_10 are computed independently over the last 10 matches ON that
@@ -39,6 +41,14 @@
 -- last_match_date = snapshot_date: the most recent completed match date in the
 -- rolling history IS this match (windows are inclusive), so the plan's "last
 -- completed match date" is simply the snapshot date itself.
+--
+-- weighted_form_10 is the same last-10-match window with exponential decay:
+-- match_won weighted by POW(0.9, rn) where rn counts backwards from the newest
+-- match (newest = 0, weight 1; each older match decays by 0.9 per step). The
+-- reverse row number is computed once per player in the snapshots CTE (a
+-- window cannot reference another window's row number) and reweighted per
+-- window. Cold-start partial windows use whatever weights fall inside the
+-- window; the ratio's NULLIF guards the (impossible) empty window.
 --
 -- rank_trend_10/20 are NOT computed here. avg_player_rank_10/20 store the
 -- player's rolling average ranking; match_features derives rank trend by
@@ -67,15 +77,28 @@ snapshots AS (
         pm.match_id,
         pm.match_date AS snapshot_date,
         pm.player_match_number,
+        -- Reverse match ordinal per player (newest = 0) for weighted_form_10's
+        -- exponential decay. Computed here in the CTE, not inside the window:
+        -- a window can reference CTE columns but never another window's row
+        -- number.
+        ROW_NUMBER() OVER (
+            PARTITION BY pm.player_id
+            ORDER BY pm.match_date DESC, pm.match_id DESC
+        ) - 1 AS match_rn_rev,
         pm.surface,
         pm.player_ranking,
         pm.opponent_ranking,
+        pm.player_rank_points,
+        pm.player_age,
         pm.match_won,
         pm.aces,
         pm.first_serves_made,
         pm.total_serve_points,
-        pm.break_points_won,
-        pm.break_points_total,
+        pm.first_serve_points_won,
+        pm.second_serve_points_won,
+        pm.service_games,
+        pm.break_points_saved,
+        pm.break_points_faced,
         ps.surface AS rate_surface,
         ps.surface_win_rate_10
     FROM {{ ref('player_matches') }} pm
@@ -90,14 +113,25 @@ SELECT
     player_match_number,
     surface,
 
-    -- Latest observed ranking and opponent ranking (this match's values)
+    -- Latest observed ranking, opponent ranking, rank points, and age (this
+    -- match's values)
     player_ranking AS latest_player_ranking,
     opponent_ranking AS latest_opponent_ranking,
+    player_rank_points AS latest_player_rank_points,
+    player_age AS latest_player_age,
 
     -- Rolling win rates over the last 5/10/20 matches, including this one
     AVG(match_won) OVER w5  AS win_rate_5,
     AVG(match_won) OVER w10 AS win_rate_10,
     AVG(match_won) OVER w20 AS win_rate_20,
+
+    -- Exponentially-decayed win rate over the last 10 matches: match_won
+    -- weighted by POW(0.9, rn) where rn is the per-player reverse match
+    -- ordinal (newest = 0, weight 1; each older match 0.9x the previous).
+    -- The rn comes from the snapshots CTE; NULLIF guards the (impossible)
+    -- empty window.
+    SUM(match_won * POW(0.9, match_rn_rev)) OVER w10
+        / NULLIF(SUM(POW(0.9, match_rn_rev)) OVER w10, 0) AS weighted_form_10,
 
     -- Ace rate: aces / first serves made, last 5/10 including this one
     SUM(aces) OVER w5  / NULLIF(SUM(first_serves_made) OVER w5,  0) AS ace_rate_5,
@@ -109,11 +143,40 @@ SELECT
     SUM(first_serves_made) OVER w10
         / NULLIF(SUM(total_serve_points) OVER w10, 0) AS first_serve_pct_10,
 
-    -- Break-point conversion: break points won / total, last 5/10 incl. this one
-    SUM(break_points_won) OVER w5
-        / NULLIF(SUM(break_points_total) OVER w5,  0) AS break_pct_5,
-    SUM(break_points_won) OVER w10
-        / NULLIF(SUM(break_points_total) OVER w10, 0) AS break_pct_10,
+    -- Break-point save rate: break points saved / faced, last 5/10 incl. this one
+    SUM(break_points_saved) OVER w5
+        / NULLIF(SUM(break_points_faced) OVER w5,  0) AS break_points_saved_pct_5,
+    SUM(break_points_saved) OVER w10
+        / NULLIF(SUM(break_points_faced) OVER w10, 0) AS break_points_saved_pct_10,
+
+    -- First-serve win rate: first-serve points won / first serves made, 5/10
+    SUM(first_serve_points_won) OVER w5
+        / NULLIF(SUM(first_serves_made) OVER w5,  0) AS first_serve_win_pct_5,
+    SUM(first_serve_points_won) OVER w10
+        / NULLIF(SUM(first_serves_made) OVER w10, 0) AS first_serve_win_pct_10,
+
+    -- Second-serve win rate: second-serve points won / second serves made
+    -- (total serve points minus first serves made), 5/10
+    SUM(second_serve_points_won) OVER w5
+        / NULLIF(
+            SUM(total_serve_points - first_serves_made) OVER w5,  0
+        ) AS second_serve_win_pct_5,
+    SUM(second_serve_points_won) OVER w10
+        / NULLIF(
+            SUM(total_serve_points - first_serves_made) OVER w10, 0
+        ) AS second_serve_win_pct_10,
+
+    -- Serve win rate: (first + second serve points won) / total serve points, 5/10
+    SUM(first_serve_points_won + second_serve_points_won) OVER w5
+        / NULLIF(SUM(total_serve_points) OVER w5,  0) AS serve_win_pct_5,
+    SUM(first_serve_points_won + second_serve_points_won) OVER w10
+        / NULLIF(SUM(total_serve_points) OVER w10, 0) AS serve_win_pct_10,
+
+    -- Aces per service game, 5/10
+    SUM(aces) OVER w5
+        / NULLIF(SUM(service_games) OVER w5,  0) AS aces_per_svc_game_5,
+    SUM(aces) OVER w10
+        / NULLIF(SUM(service_games) OVER w10, 0) AS aces_per_svc_game_10,
 
     -- Rolling average player rank over the last 10/20 (rank_trend derived
     -- downstream in match_features, not here)

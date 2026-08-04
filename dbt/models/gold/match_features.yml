@@ -62,6 +62,44 @@ models:
         description: >
           Opponent ranking at match time; NULL when unranked (ATP rank 0 maps
           to NULL in silver.player_matches). Imputed at train time.
+      - name: player_age
+        description: >
+          Canonical player age in fractional years at match time; NULL when
+          missing (0 maps to NULL in silver.player_matches). Imputed at train
+          time.
+      - name: opponent_age
+        description: >
+          Opponent age in fractional years at match time; NULL when missing.
+          Imputed at train time.
+
+      # Current-match per-side serve/break stats (enriched columns only — no
+      # as-of-date inference source, so never model features; the rolling
+      # versions below are the features). All NULLIF-guarded: NULL when the
+      # match had a zero denominator.
+      - name: player_first_serve_win_pct
+        description: Current-match first-serve win pct (first serve points won / first serves made); NULL when no first serves.
+      - name: player_second_serve_win_pct
+        description: Current-match second-serve win pct (second serve points won / (total serve points - first serves made)); NULL when no second serves.
+      - name: player_serve_win_pct
+        description: Current-match serve win pct ((first + second serve points won) / total serve points); NULL when no serve points.
+      - name: player_aces_per_svc_game
+        description: Current-match aces per service game; NULL when no service games.
+      - name: player_df_per_svc_game
+        description: Current-match double faults per service game; NULL when no service games.
+      - name: player_break_points_saved_pct
+        description: Current-match break points saved / faced; NULL when no break points faced.
+      - name: opponent_first_serve_win_pct
+        description: Opponent current-match first-serve win pct; NULL when no first serves.
+      - name: opponent_second_serve_win_pct
+        description: Opponent current-match second-serve win pct; NULL when no second serves.
+      - name: opponent_serve_win_pct
+        description: Opponent current-match serve win pct; NULL when no serve points.
+      - name: opponent_aces_per_svc_game
+        description: Opponent current-match aces per service game; NULL when no service games.
+      - name: opponent_df_per_svc_game
+        description: Opponent current-match double faults per service game; NULL when no service games.
+      - name: opponent_break_points_saved_pct
+        description: Opponent current-match break points saved / faced; NULL when no break points faced.
 
       # Canonical player-side rolling stats (player_ prefix), from the prior
       # snapshot — all refer to completed matches before this one; NULL on the
@@ -72,6 +110,8 @@ models:
         description: Canonical player rolling win rate, last 10 matches before this one.
       - name: player_win_rate_20
         description: Canonical player rolling win rate, last 20 matches before this one.
+      - name: player_weighted_form_10
+        description: Canonical player exponentially-decayed win form (0.9 decay per match), last 10 matches before this one.
       - name: player_ace_rate_5
         description: Canonical player rolling ace rate, last 5 matches before this one.
       - name: player_ace_rate_10
@@ -80,10 +120,26 @@ models:
         description: Canonical player rolling first serve pct, last 5 matches before this one.
       - name: player_first_serve_pct_10
         description: Canonical player rolling first serve pct, last 10 matches before this one.
-      - name: player_break_pct_5
-        description: Canonical player rolling break pct, last 5 matches before this one.
-      - name: player_break_pct_10
-        description: Canonical player rolling break pct, last 10 matches before this one.
+      - name: player_break_points_saved_pct_5
+        description: Canonical player rolling break-point save rate, last 5 matches before this one.
+      - name: player_break_points_saved_pct_10
+        description: Canonical player rolling break-point save rate, last 10 matches before this one.
+      - name: player_first_serve_win_pct_5
+        description: Canonical player rolling first-serve win pct, last 5 matches before this one.
+      - name: player_first_serve_win_pct_10
+        description: Canonical player rolling first-serve win pct, last 10 matches before this one.
+      - name: player_second_serve_win_pct_5
+        description: Canonical player rolling second-serve win pct, last 5 matches before this one.
+      - name: player_second_serve_win_pct_10
+        description: Canonical player rolling second-serve win pct, last 10 matches before this one.
+      - name: player_serve_win_pct_5
+        description: Canonical player rolling serve win pct, last 5 matches before this one.
+      - name: player_serve_win_pct_10
+        description: Canonical player rolling serve win pct, last 10 matches before this one.
+      - name: player_aces_per_svc_game_5
+        description: Canonical player rolling aces per service game, last 5 matches before this one.
+      - name: player_aces_per_svc_game_10
+        description: Canonical player rolling aces per service game, last 10 matches before this one.
       - name: player_rank_trend_10
         description: Prior rolling avg ranking (10) minus current event ranking.
       - name: player_rank_trend_20
@@ -115,6 +171,8 @@ models:
         description: Opponent rolling win rate, last 10 matches before this one.
       - name: opponent_win_rate_20
         description: Opponent rolling win rate, last 20 matches before this one.
+      - name: opponent_weighted_form_10
+        description: Opponent exponentially-decayed win form (0.9 decay per match), last 10 matches before this one.
       - name: opponent_ace_rate_5
         description: Opponent rolling ace rate, last 5 matches before this one.
       - name: opponent_ace_rate_10
@@ -123,10 +181,26 @@ models:
         description: Opponent rolling first serve pct, last 5 matches before this one.
       - name: opponent_first_serve_pct_10
         description: Opponent rolling first serve pct, last 10 matches before this one.
-      - name: opponent_break_pct_5
-        description: Opponent rolling break pct, last 5 matches before this one.
-      - name: opponent_break_pct_10
-        description: Opponent rolling break pct, last 10 matches before this one.
+      - name: opponent_break_points_saved_pct_5
+        description: Opponent rolling break-point save rate, last 5 matches before this one.
+      - name: opponent_break_points_saved_pct_10
+        description: Opponent rolling break-point save rate, last 10 matches before this one.
+      - name: opponent_first_serve_win_pct_5
+        description: Opponent rolling first-serve win pct, last 5 matches before this one.
+      - name: opponent_first_serve_win_pct_10
+        description: Opponent rolling first-serve win pct, last 10 matches before this one.
+      - name: opponent_second_serve_win_pct_5
+        description: Opponent rolling second-serve win pct, last 5 matches before this one.
+      - name: opponent_second_serve_win_pct_10
+        description: Opponent rolling second-serve win pct, last 10 matches before this one.
+      - name: opponent_serve_win_pct_5
+        description: Opponent rolling serve win pct, last 5 matches before this one.
+      - name: opponent_serve_win_pct_10
+        description: Opponent rolling serve win pct, last 10 matches before this one.
+      - name: opponent_aces_per_svc_game_5
+        description: Opponent rolling aces per service game, last 5 matches before this one.
+      - name: opponent_aces_per_svc_game_10
+        description: Opponent rolling aces per service game, last 10 matches before this one.
       - name: opponent_rank_trend_10
         description: Prior rolling avg ranking (10) minus current event ranking.
       - name: opponent_rank_trend_20
@@ -149,12 +223,24 @@ models:
       # Comparison (differential) features: canonical player minus opponent
       - name: rank_diff
         description: player_ranking - opponent_ranking.
+      - name: rank_points_diff
+        description: player_rank_points - opponent_rank_points.
+      - name: age_diff
+        description: player_age - opponent_age.
       - name: win_rate_diff
         description: player_win_rate_10 - opponent_win_rate_10.
       - name: ace_rate_diff
         description: player_ace_rate_10 - opponent_ace_rate_10.
-      - name: break_pct_diff
-        description: player_break_pct_10 - opponent_break_pct_10.
+      - name: break_points_saved_pct_diff
+        description: player_break_points_saved_pct_10 - opponent_break_points_saved_pct_10.
+      - name: first_serve_win_pct_diff
+        description: player_first_serve_win_pct_10 - opponent_first_serve_win_pct_10.
+      - name: second_serve_win_pct_diff
+        description: player_second_serve_win_pct_10 - opponent_second_serve_win_pct_10.
+      - name: serve_win_pct_diff
+        description: player_serve_win_pct_10 - opponent_serve_win_pct_10.
+      - name: aces_per_svc_game_diff
+        description: player_aces_per_svc_game_10 - opponent_aces_per_svc_game_10.
       - name: win_streak_diff
         description: player_win_streak - opponent_win_streak.
       - name: matches_30d_diff

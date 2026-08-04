@@ -25,6 +25,9 @@
 -- would otherwise read as "better than rank 1" and corrupt rank_diff,
 -- rank_trend, and the rolling average-rank windows downstream. NULLs are
 -- imputed at train time (median) and by the inference pool (median).
+-- The same 0 -> NULL mapping applies to rank_points (0 rank points is the CSV
+-- missing marker) and age (0 is the missing marker): a 0 would otherwise
+-- corrupt rank_points_diff downstream.
 --
 -- No canonicalization: player/opponent orientation is the raw player1/player2
 -- assignment from bronze.
@@ -36,14 +39,21 @@ WITH expanded AS (
         player2_id AS opponent_id,
         NULLIF(player1_ranking, 0) AS player_ranking,
         NULLIF(player2_ranking, 0) AS opponent_ranking,
+        NULLIF(player1_rank_points, 0) AS player_rank_points,
+        NULLIF(player2_rank_points, 0) AS opponent_rank_points,
+        NULLIF(player1_age, 0) AS player_age,
+        NULLIF(player2_age, 0) AS opponent_age,
         player1_wins_last_10 AS wins_last_10,
         player1_matches_last_10 AS matches_last_10,
         player1_aces AS aces,
         player1_double_faults AS double_faults,
         player1_first_serves_made AS first_serves_made,
         player1_total_serve_points AS total_serve_points,
-        player1_break_points_won AS break_points_won,
-        player1_break_points_total AS break_points_total,
+        player1_first_serve_points_won AS first_serve_points_won,
+        player1_second_serve_points_won AS second_serve_points_won,
+        player1_service_games AS service_games,
+        player1_break_points_saved AS break_points_saved,
+        player1_break_points_faced AS break_points_faced,
         winner_id,
         CASE WHEN winner_id = player1_id THEN 1 ELSE 0 END AS match_won
     FROM {{ source('bronze', 'match_events') }}
@@ -56,14 +66,21 @@ WITH expanded AS (
         player1_id AS opponent_id,
         NULLIF(player2_ranking, 0) AS player_ranking,
         NULLIF(player1_ranking, 0) AS opponent_ranking,
+        NULLIF(player2_rank_points, 0) AS player_rank_points,
+        NULLIF(player1_rank_points, 0) AS opponent_rank_points,
+        NULLIF(player2_age, 0) AS player_age,
+        NULLIF(player1_age, 0) AS opponent_age,
         player2_wins_last_10 AS wins_last_10,
         player2_matches_last_10 AS matches_last_10,
         player2_aces AS aces,
         player2_double_faults AS double_faults,
         player2_first_serves_made AS first_serves_made,
         player2_total_serve_points AS total_serve_points,
-        player2_break_points_won AS break_points_won,
-        player2_break_points_total AS break_points_total,
+        player2_first_serve_points_won AS first_serve_points_won,
+        player2_second_serve_points_won AS second_serve_points_won,
+        player2_service_games AS service_games,
+        player2_break_points_saved AS break_points_saved,
+        player2_break_points_faced AS break_points_faced,
         winner_id,
         CASE WHEN winner_id = player2_id THEN 1 ELSE 0 END AS match_won
     FROM {{ source('bronze', 'match_events') }}
@@ -78,14 +95,21 @@ SELECT
     opponent_id,
     player_ranking,
     opponent_ranking,
+    player_rank_points,
+    opponent_rank_points,
+    player_age,
+    opponent_age,
     winner_id,
     match_won,
     aces,
     double_faults,
     first_serves_made,
     total_serve_points,
-    break_points_won,
-    break_points_total,
+    first_serve_points_won,
+    second_serve_points_won,
+    service_games,
+    break_points_saved,
+    break_points_faced,
     wins_last_10,
     matches_last_10,
     ROW_NUMBER() OVER (
