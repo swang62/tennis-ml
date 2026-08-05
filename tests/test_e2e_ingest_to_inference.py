@@ -68,14 +68,34 @@ def test_seeded_db_round_trip():
     assert cast(int, execute_df(f"SELECT COUNT(*) FROM {GOLD_TABLE}").iloc[0, 0]) > 0
 
 
-def test_reinsert_is_idempotent_upsert():
-    """Re-ingesting the seed's own rows upserts in place (match_id PK), no doubling."""
+def test_reinsert_is_idempotent():
+    """Re-ingesting the seed's own rows skips duplicates (match_id PK), no doubling."""
     df = _seed_bronze_df()
     first = ingest.insert_bronze_rows(df)
     again = ingest.insert_bronze_rows(df)
     assert first == again == len(df)
     count = cast(int, execute_df(f"SELECT COUNT(*) FROM {BRONZE_TABLE}").iloc[0, 0])
     assert count == len(df)
+
+
+def test_reinsert_skips_duplicates_keeps_original_row():
+    """DO NOTHING: re-ingesting an existing match_id must not overwrite it."""
+    df = _seed_bronze_df()
+    ingest.insert_bronze_rows(df)
+    match_id = str(df["match_id"].iloc[0])
+    original_ranking = int(df["player1_ranking"].iloc[0])
+
+    changed = df.copy()
+    changed.loc[0, "player1_ranking"] = 99999  # would refresh the row under DO UPDATE
+    ingest.insert_bronze_rows(changed)
+
+    stored = cast(
+        int,
+        execute_df(
+            f"SELECT player1_ranking FROM {BRONZE_TABLE} WHERE match_id = '{match_id}'"
+        ).iloc[0, 0],
+    )
+    assert stored == original_ranking
 
 
 def test_gold_match_features_schema_matches_python_contract():

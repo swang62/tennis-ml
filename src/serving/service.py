@@ -165,6 +165,20 @@ FROM {SILVER_PLAYER_MATCHES}
 WHERE player_id = ?
 """
 
+# All-time per-surface win rates from the player's oriented history. One row
+# per surface actually played; unplayed surfaces have no row at all. The
+# handler fills those in with matches=0 and a NULL win_rate — the dashboard
+# renders them as "n/a (n=0)", never 0%.
+_PROFILE_SURFACE_SQL = f"""
+SELECT
+    surface,
+    COUNT(*) AS matches,
+    AVG(match_won) AS win_rate
+FROM {SILVER_PLAYER_MATCHES}
+WHERE player_id = ?
+GROUP BY surface
+"""
+
 # Newest as-of rolling snapshot per player (recent form).
 _PROFILE_FORM_SQL = f"""
 SELECT snapshot_date, win_rate_10
@@ -245,6 +259,7 @@ def _player_profile(request: Request) -> JSONResponse:
         if bio_df.empty:
             return _err(404, f"unknown player_id: {player_id}")
         career_df = execute_df(_PROFILE_CAREER_SQL, [player_id])
+        surf_df = execute_df(_PROFILE_SURFACE_SQL, [player_id])
         form_df = execute_df(_PROFILE_FORM_SQL, [player_id])
         rp_df = execute_df(_PROFILE_RANK_POINTS_SQL, [player_id])
     except Exception as exc:
@@ -260,6 +275,18 @@ def _player_profile(request: Request) -> JSONResponse:
         "serve_win_pct": career["serve_win_pct"],
         "break_points_saved_pct": career["break_points_saved_pct"],
     }
+
+    # All-time per-surface win rates; locked to clay/grass/hard (the model's
+    # surface set). Unplayed surfaces: matches 0, NULL win_rate (n/a, not 0%).
+    surf_rates = {r["surface"]: r for r in surf_df.to_dict("records")}
+    surface_rates = [
+        {
+            "surface": s,
+            "matches": int(surf_rates[s]["matches"]) if s in surf_rates else 0,
+            "win_rate": surf_rates[s]["win_rate"] if s in surf_rates else None,
+        }
+        for s in ("clay", "grass", "hard")
+    ]
 
     # Recent form: last-10 win rate from the newest rolling snapshot (if any).
     recent_form: dict[str, object] | None = None
@@ -296,6 +323,7 @@ def _player_profile(request: Request) -> JSONResponse:
             "birthplace": bio["birthplace"],
             "summary": bio["summary"],
             "career": career_out,
+            "surface_rates": surface_rates,
             "recent_form": recent_form,
             "rank_points_trend": rank_points_trend,
         }
