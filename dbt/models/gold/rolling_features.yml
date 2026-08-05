@@ -51,7 +51,7 @@ models:
         tests:
           - not_null
       - name: surface
-        description: Surface of the snapshot match (clay, grass, hard).
+        description: Surface of the snapshot match (clay, grass, hard, carpet); "0" when the raw CSV left it blank.
       - name: latest_player_ranking
         description: >
           The player's ATP ranking at the snapshot match — the latest observed

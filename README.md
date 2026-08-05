@@ -29,10 +29,13 @@ web/             — React + TanStack dashboard (Vite, local dev, HMR)
 ## Quick Start
 
 ```bash
-# 1. Full local dev setup (deps + k3d cluster for Prefect/MLflow + DuckDB init + Seed data)
+# 1. Full local dev setup (deps + k3d cluster for Prefect/MLflow + DuckDB init)
 just setup
 
-# 2. Start the Prefect worker (must run on the host, see below)
+# 2. Seed raw ATP data into DuckDB bronze
+just db-seed
+
+# 3. Start the Prefect worker (must run on the host, see below)
 just worker
 ```
 
@@ -42,18 +45,18 @@ Start the local worker from the repo root:
 
 ```bash
 just worker
-``0
+```
 
 ## Data Flow
 
 ```
- Raw match data → ingest.py (pre-validation)
+ Raw match data → seed.py (validate + load direct to DuckDB)
                       ↓
             ┌──────────────────────┐
             │        BRONZE        │
             │ (match_events)       │
             └──────────┬───────────┘
-                       │ Prefect etl (dbt build)
+                       │ dbt build
                        ↓
             ┌──────────────────────┐
             │        SILVER        │
@@ -68,23 +71,31 @@ just worker
             │  match_features      │
             └──────────┬───────────┘
                        ↓
-         Jupyter notebooks (training, evaluation, promotion)
+         Standalone training pipeline.py (features, tuning, evaluation, promotion)
                        ↓
                 MLflow registry → BentoML serving
 ```
+
+The raw ATP CSVs under `data/raw` are the authoritative match source. They are
+loaded directly into DuckDB bronze after validation; no external ingestion
+service is required for ETL or training. k3d only runs Prefect and MLflow for
+local orchestration and model tracking. Production BentoML serving runs
+host-local via Docker Compose (`just deploy-bento`), pulling the `latest
+image from Docker Hub.
 
 ## Trigger Model
 
 | Event          | Action                                 | Method                                                  |
 | -------------- | -------------------------------------- | ------------------------------------------------------- |
-| Manual ingest  | Load CSV → bronze                      | `uv run python -m src.flows.ingest data/matches.csv`    |
-| Manual trigger | Training pipeline                      | `just pipeline`                                         |
-| Model promoted | BentoML rebuild + deploy               | `uv run python src/flows/deploy.py` (reads `@champion`) |
-| Force redeploy | Rebuild + redeploy regardless of cache | `uv run python src/flows/deploy.py --force`             |
+| Manual ingest  | Load CSV → bronze                      | `just db-seed` (deterministic seed subset)              |
+| Manual trigger | Training pipeline                      | `just train`                                            |
+| Model promoted | BentoML rebuild + deploy               | `just deploy-bento` (reads `@champion`)                 |
+| Force redeploy | Rebuild + redeploy regardless of cache | `just deploy-bento --force`                          |
 
 ## Pipelines
 
-- `ingest` — CSV → bronze
+- `ingest` — validate raw ATP CSV → bronze
+- `seed.py --all` — discover all raw ATP CSVs under `data/raw`, load chronologically → bronze (idempotent by `match_id`); `--enrich` opts in to best-effort Wikipedia enrichment
 - `etl` — bronze → silver → gold: player_matches/player_rankings → rolling_features → match_features, plus feature enrichment and sanitization
 - `pipeline.py` — standalone training runner: features → tune 3 models → pick best → train final → evaluate → promote
 
@@ -104,7 +115,7 @@ Two BentoML endpoints exposed by `src/serving/service.py`:
 | `/predict`          | POST   | Stacked-ensemble prediction for one match                    |
 | `/predict_from_ids` | POST   | On-demand prediction from minimal inputs (two ids + surface) |
 
-The service runs on port 3000 via Docker Compose (`just deploy-bento`), pulling an immutable image from Docker Hub.
+The service runs on port 3000 via Docker Compose (`just deploy-bento`), pulling the `latest` image from Docker Hub.
 
 ### Input schema
 

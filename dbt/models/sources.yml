@@ -2,7 +2,7 @@ version: 2
 
 sources:
   - name: bronze
-    description: Raw match data ingested from CSV by the Prefect ingest flow.
+    description: Raw match data ingested from the raw ATP CSVs under data/raw by seed.py (host-local, validated, idempotent by match_id).
     schema: bronze
     tables:
       - name: match_events
@@ -25,7 +25,7 @@ sources:
           - name: round
             description: Draw round (r128, r64, r32, r16, qf, sf, f).
           - name: surface
-            description: Court surface (clay, grass, hard).
+            description: Court surface (clay, grass, hard, carpet); "0" when the raw CSV left it blank.
           - name: is_indoor
             description: 1 if indoor, 0 if outdoor, NULL when unknown.
           - name: player1_ranking

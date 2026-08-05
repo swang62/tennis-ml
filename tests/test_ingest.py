@@ -289,6 +289,39 @@ def test_load_raw_atp_rows_passes_ranks_through_raw(tmp_path):
     assert by_id["W3"]["loser_rank"] == 20
 
 
+def test_load_raw_atp_rows_missing_indoor_column_fails(tmp_path):
+    """The indoor column is required: a CSV without it is a schema error and
+    fails before any rows are loaded."""
+    csv = tmp_path / "no_indoor.csv"
+    _raw_atp_df().drop(columns=["indoor"]).to_csv(csv, index=False)
+
+    with pytest.raises(ValueError, match="missing raw ATP columns"):
+        ingest.load_raw_atp_rows(csv)
+    with pytest.raises(ValueError, match="missing raw ATP columns"):
+        ingest.load_atp_csv(csv)
+
+
+def test_load_raw_atp_rows_other_required_columns_still_fail(tmp_path):
+    """Any other required column continues to fail before any rows are
+    written."""
+    csv = tmp_path / "missing_other.csv"
+    _raw_atp_df().drop(columns=["w_ace"]).to_csv(csv, index=False)
+
+    with pytest.raises(ValueError, match="missing raw ATP columns"):
+        ingest.load_raw_atp_rows(csv)
+
+
+def test_load_raw_atp_rows_preserves_present_indoor_values(tmp_path):
+    """Files that do carry indoor keep their I/O values normalized after the
+    full load+transform path."""
+    csv = tmp_path / "with_indoor.csv"
+    _raw_atp_df().to_csv(csv, index=False)
+
+    rows = ingest.load_raw_atp_rows(csv)
+    assert rows[0]["indoor"] == "O"
+    assert ingest.atp_rows_to_bronze(rows).iloc[0]["is_indoor"] == 0
+
+
 # ── search_wikipedia / fetch_summary ──────────────────────────────
 
 

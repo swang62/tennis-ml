@@ -1,6 +1,6 @@
 # Production BentoML serving via Docker Hub + Docker Compose — no Kubernetes.
-# deploy.py sets DOCKER_IMAGE (Docker Hub repo) and DOCKER_TAG (immutable Bento
-# version tag); the image is pulled, never built locally. Bento runs at
+# deploy.py sets DOCKER_IMAGE (Docker Hub repo) and DOCKER_TAG (always `latest`);
+# the image is pulled, never built locally. Bento runs at
 # http://127.0.0.1:3000.
 services:
   bento:

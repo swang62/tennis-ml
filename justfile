@@ -38,8 +38,9 @@ deploy-local:
     uv run bentoml serve src/serving/service.py:TennisPredictor --host 0.0.0.0 --port 3000
 
 # Build docker image locally, push to Docker Hub and boot via Docker Compose
-deploy-bento:
-    uv run python src/flows/deploy.py
+# Pass args (e.g. --force) directly: just deploy-bento --force
+deploy-bento *args:
+    uv run python src/flows/deploy.py {{args}}
 
 restart:
     kubectl rollout restart deployment

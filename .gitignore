@@ -17,6 +17,7 @@ mlartifacts/
 *.db
 tests/___db/
 *.log
+*.duckdb
 
 # Environment
 .env

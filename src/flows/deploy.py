@@ -1,7 +1,7 @@
 """Build and deploy the production Bento serving image.
 
 Deploy is host-executed and independent of k3d: build_bento_image() builds in
-the local Docker engine, then deploy_bento() pushes the immutable image to
+the local Docker engine, then deploy_bento() pushes the latest image to
 Docker Hub and boots it via Docker Compose.
 
 Usage:
@@ -38,8 +38,8 @@ STATE_FILE = DATA_PROCESSED / "bento_build_state.json"
 load_env()
 
 assert IMAGE_NAME is not None, "IMAGE_NAME not set in env; load_env() must be called first"
-# Docker Hub repo: DOCKER_REPO/IMAGE_NAME. DOCKER_TAG is the immutable Bento
-# version tag; the moving latest tag is pushed alongside it.
+# Docker Hub repo: DOCKER_REPO/IMAGE_NAME. Only the moving `latest` tag is
+# pushed; Compose pulls `${DOCKER_IMAGE}:latest`.
 DOCKER_REPO = os.getenv("DOCKER_REPO", "swang62")
 COMPOSE_FILE = ROOT / "compose.production.yaml"
 
@@ -319,6 +319,32 @@ def _cached_tag(state: dict[str, Any], fingerprint: str) -> str | None:
     return tag
 
 
+def _docker_login() -> None:
+    """Authenticate `docker push` to Docker Hub before pushing.
+
+    Reads DOCKER_TOKEN from the environment and logs in via
+    `docker login --username <user> --password-stdin` so the token is passed
+    through stdin and never appears in argv, logs, or raised exceptions. The
+    username comes from DOCKER_USERNAME, else the DOCKER_REPO owner (default
+    `swang62`). When DOCKER_TOKEN is unset, skip login and rely on an
+    already-authenticated Docker CLI (the prior convention).
+    """
+    token = os.getenv("DOCKER_TOKEN")
+    if not token:
+        print("DOCKER_TOKEN unset — relying on an already-authenticated Docker CLI.")
+        return
+    username = os.getenv("DOCKER_USERNAME") or DOCKER_REPO or "swang62"
+    print(f"Authenticating Docker Hub as {username} (token read via stdin).")
+    proc = subprocess.run(
+        ["docker", "login", "--username", username, "--password-stdin"],
+        input=token + "\n",
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"docker login failed (exit {proc.returncode})")
+
+
 def _image_exists(image: str) -> bool:
     return (
         subprocess.run(
@@ -404,29 +430,29 @@ def build_bento_image(force: bool = False) -> tuple[str, int]:
 def deploy_bento(force: bool = False) -> None:
     """Build locally, then push to Docker Hub and boot via Docker Compose.
 
-    Builds the Bento into the local Docker engine, tags it as the immutable
-    Docker Hub image and as `latest`, pushes both, then runs
+    Builds the Bento into the local Docker engine, tags it as the Docker Hub
+    `latest` image, pushes it, then runs
     `docker compose -f compose.production.yaml up -d --pull always` so the
-    service pulls the immutable image down. Docker Hub credentials must be
-    configured in the operator environment. force=True rebuilds the Bento and
-    image even when cached.
+    service pulls the `latest` image down. Docker Hub authentication: if
+    DOCKER_TOKEN is set, log in via `docker login --password-stdin` (token
+    never touches argv/logs) using DOCKER_USERNAME or the DOCKER_REPO owner;
+    otherwise rely on an already-authenticated Docker CLI. force=True rebuilds
+    the Bento and image even when cached.
     """
     local_image, production_version = build_bento_image(force=force)
 
-    immutable = f"{DOCKER_REPO}/{IMAGE_NAME}:{local_image.split(':', 1)[1]}"
     latest = f"{DOCKER_REPO}/{IMAGE_NAME}:latest"
+    _docker_login()
     LOGS.mkdir(parents=True, exist_ok=True)
     deploy_log = LOGS / f"deploy_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     try:
         with deploy_log.open("w") as log:
-            subprocess.run(["docker", "tag", local_image, immutable], cwd=ROOT, check=True)
             subprocess.run(["docker", "tag", local_image, latest], cwd=ROOT, check=True)
-            _run_teed(["docker", "push", immutable], log)
             _run_teed(["docker", "push", latest], log)
             compose_env = {
                 **os.environ,
                 "DOCKER_IMAGE": f"{DOCKER_REPO}/{IMAGE_NAME}",
-                "DOCKER_TAG": local_image.split(":", 1)[1],
+                "DOCKER_TAG": "latest",
             }
             _run_teed(
                 ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", "--pull", "always"],
@@ -441,8 +467,8 @@ def deploy_bento(force: bool = False) -> None:
         return
 
     state = _read_state()
-    _write_state({**state, "deployed_version": production_version, "deployed_image": immutable})
-    print(f"Deployed {immutable} via Docker Compose")
+    _write_state({**state, "deployed_version": production_version, "deployed_image": latest})
+    print(f"Deployed {latest} via Docker Compose")
 
 
 if __name__ == "__main__":

@@ -265,6 +265,9 @@ def load_raw_atp_rows(path: str | Path) -> list[dict[str, Any]]:
     Rankings pass through raw: 0 stays 0 (the ATP missing marker) and empty
     cells become 0, so silver can NULLIF them and gold imputes at train time.
     Empty stat cells become 0.
+
+    Every raw ATP CSV is required to carry the `indoor` column (I/O); a file
+    missing it is a schema error, not a silently-unknown value.
     """
     df = pd.read_csv(path)
     missing = set(RAW_ATP_COLUMNS) - set(df.columns)

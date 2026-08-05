@@ -16,6 +16,9 @@ _spec.loader.exec_module(seed)
 TOP_PLAYERS = seed.TOP_PLAYERS
 RECENT = seed.RECENT
 select_matches = seed.select_matches
+discover_atp_csvs = seed.discover_atp_csvs
+load_all_raw_atp_rows = seed.load_all_raw_atp_rows
+parse_args = seed.parse_args
 
 
 def _match(winner_id, loser_id, winner_rank, loser_rank, tourney_id, tourney_date, match_num):
@@ -106,3 +109,128 @@ def test_select_matches_trims_to_most_recent_recent():
 
 def test_select_matches_empty_input():
     assert select_matches([]) == []
+
+
+def test_discover_atp_csvs_includes_regular_and_challenger_excludes_non_csv(tmp_path):
+    import csv
+
+    def write(name):
+        with open(tmp_path / name, "w") as f:
+            csv.writer(f).writerow(["header"])
+
+    write("2025.csv")
+    write("2025_challenger.csv")
+    write("2026.csv")
+    write("2026_challenger.csv")
+    write(".DS_Store")
+    write("notes.txt")
+
+    found = discover_atp_csvs(tmp_path)
+
+    assert found == [
+        tmp_path / "2025.csv",
+        tmp_path / "2025_challenger.csv",
+        tmp_path / "2026.csv",
+        tmp_path / "2026_challenger.csv",
+    ]
+
+
+def test_discover_atp_csvs_empty_dir(tmp_path):
+    assert discover_atp_csvs(tmp_path) == []
+
+
+def test_load_all_raw_atp_rows_sorts_chronologically(tmp_path):
+    import csv
+
+    columns = [
+        "tourney_id",
+        "tourney_date",
+        "match_num",
+        "winner_id",
+        "loser_id",
+        "winner_rank",
+        "winner_rank_points",
+        "winner_age",
+        "loser_rank",
+        "loser_rank_points",
+        "loser_age",
+        "tourney_level",
+        "round",
+        "surface",
+        "indoor",
+        "w_ace",
+        "w_df",
+        "w_svpt",
+        "w_1stIn",
+        "w_1stWon",
+        "w_2ndWon",
+        "w_SvGms",
+        "w_bpSaved",
+        "w_bpFaced",
+        "l_ace",
+        "l_df",
+        "l_svpt",
+        "l_1stIn",
+        "l_1stWon",
+        "l_2ndWon",
+        "l_SvGms",
+        "l_bpSaved",
+        "l_bpFaced",
+    ]
+
+    def write(name, rows):
+        with open(tmp_path / name, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=columns)
+            w.writeheader()
+            for r in rows:
+                w.writerow({c: r.get(c, 0) for c in columns})
+
+    # Deliberately out of order across files: later date in the first file,
+    # earlier date in the second. The merged result must be chronological.
+    write(
+        "2026.csv",
+        [
+            {
+                "tourney_id": "T2",
+                "tourney_date": "20260102",
+                "match_num": 1,
+                "winner_id": "b",
+                "loser_id": "zzz",
+                "winner_rank": 1,
+                "loser_rank": 2,
+            },
+        ],
+    )
+    write(
+        "2025_challenger.csv",
+        [
+            {
+                "tourney_id": "T1",
+                "tourney_date": "20260101",
+                "match_num": 1,
+                "winner_id": "a",
+                "loser_id": "zzz",
+                "winner_rank": 1,
+                "loser_rank": 2,
+            },
+        ],
+    )
+
+    rows = load_all_raw_atp_rows([tmp_path / "2026.csv", tmp_path / "2025_challenger.csv"])
+
+    assert [m["tourney_id"] for m in rows] == ["T1", "T2"]
+
+
+def test_parse_args_all_offline_by_default():
+    args = parse_args(["--all"])
+    assert args.all and args.enrich is False
+
+
+def test_parse_args_offline():
+    args = parse_args(["--offline"])
+    assert args.offline and args.all is False and args.enrich is False
+
+
+def test_parse_args_enrich_opt_in():
+    args = parse_args(["--all", "--enrich"])
+    assert args.all and args.enrich is True

@@ -41,12 +41,12 @@ models:
         tests:
           - not_null
       - name: surface
-        description: Court surface (clay, grass, hard).
+        description: Court surface (clay, grass, hard, carpet); "0" when the raw CSV left it blank (Davis Cup/Challenger), which encodes to all-zero surface flags like round_encoded 0.
         tests:
           - not_null
           - accepted_values:
               arguments:
-                values: [clay, grass, hard]
+                values: [clay, grass, hard, carpet, "0"]
       - name: match_won
         description: 1 if the canonical player_* side won, else 0 (the label).
         tests:
