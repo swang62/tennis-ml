@@ -260,11 +260,11 @@ def load_atp_csv(path: str | Path) -> pd.DataFrame:
 
 
 def insert_bronze_rows(df: pd.DataFrame) -> int:
-    """Insert or upsert bronze.match_events rows from a DataFrame; returns row count.
+    """Insert bronze.match_events rows from a DataFrame; returns row count.
 
     Shared by the ingest CLI and the dev seed so both paths use one INSERT.
-    match_id is the PK, so re-ingesting the same file (or an updated version
-    of it) refreshes rows in place instead of duplicating them.
+    match_id is the PK, so re-ingesting an existing match_id skips the row
+    (duplicates are never overwritten).
     """
     report = run_ingestion_checks(df)
     valid_df = cast(pd.DataFrame, report["valid_df"])
@@ -282,11 +282,10 @@ def insert_bronze_rows(df: pd.DataFrame) -> int:
         return 0
 
     conn = get_conn()
-    updates = ", ".join(f"{col} = excluded.{col}" for col in BRONZE_COLUMNS if col != "match_id")
     conn.sql(
         f"INSERT INTO {BRONZE_TABLE} ({', '.join(BRONZE_COLUMNS)}) "
         f"SELECT {', '.join(BRONZE_COLUMNS)} FROM valid_df "
-        f"ON CONFLICT (match_id) DO UPDATE SET {updates}"
+        f"ON CONFLICT (match_id) DO NOTHING"
     )
     return len(valid_df)
 

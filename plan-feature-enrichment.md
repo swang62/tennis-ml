@@ -131,7 +131,7 @@ win %, save rate, rank-points trend), `/rank_history`, `/match_history`,
 `/head_to_head` — parameterized SQL in `src/serving/service.py`. Curl each
 against local `bentoml serve`; JSON shape matches the web dashboard types.
 
-### [ ] Task 8: Dashboard (web/ Vite + React)
+### [x] Task 8: Dashboard (web/ Vite + React)
 
 `web/` Vite + React 19 + TS, TanStack Router/Query/Table, echarts-for-react,
 Tailwind v4. Pure local dev + HMR; `/api` proxy -> local `bentoml serve`
