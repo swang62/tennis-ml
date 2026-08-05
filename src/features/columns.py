@@ -59,6 +59,7 @@ BRONZE_COLUMNS: tuple[str, ...] = (
     "tournament",
     "round",
     "surface",
+    "is_indoor",
     "player1_ranking",
     "player2_ranking",
     *BRONZE_COLUMNS_INT,
@@ -194,6 +195,8 @@ CONTEXT_COLS: list[str] = [
     "is_clay",
     "is_grass",
     "is_hard",
+    "is_carpet",
+    "is_indoor",
     "tournament_level",
     "round_encoded",
 ]

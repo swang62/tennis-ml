@@ -9,15 +9,20 @@ Usage:
 """
 
 import json
-import os
 import subprocess
 from pathlib import Path
 from typing import Any
 
 from prefect import flow
 
-from src.constants import BENTO_REPO, DATA_PROCESSED, PRODUCTION_MODEL, REPO_NAME, ROOT
-from src.utils import load_env
+from src.constants import (
+    DATA_PROCESSED,
+    PRODUCTION_MODEL,
+    ROOT,
+    image_name,
+    load_env,
+    registry_push_url,
+)
 
 # --- Deploy-only paths and names ---
 TEMPLATE_BENTOFILE = ROOT / "bentofile.yaml"
@@ -26,15 +31,17 @@ PINNED_BENTOFILE = DATA_PROCESSED / "bentofile.pinned.yaml"
 BENTO_TAG_FILE = DATA_PROCESSED / "bento_tag.txt"
 STATE_FILE = DATA_PROCESSED / "bento_build_state.json"
 
-# .env must be loaded before any os.getenv() below captures registry URLs.
+# .env must be loaded before any env-backed accessors capture registry URLs.
 load_env()
 
 # Registry URLs are composed from the registry host + the Bento repo name, so
 # the repo name (BENTO_REPO) is never duplicated. Push goes
 # host -> caddy (https) -> traefik -> registry.
-REGISTRY_NAME = REPO_NAME + "-registry"
-REGISTRY_PUSH_URL = os.getenv("REGISTRY_PUSH_URL")
-REGISTRY_PUSH_REPOSITORY = f"{REGISTRY_PUSH_URL}/{BENTO_REPO}"
+IMAGE_NAME = image_name()
+assert IMAGE_NAME is not None, "IMAGE_NAME not set in env; load_env() must be called first"
+REGISTRY_NAME = IMAGE_NAME + "-registry"
+REGISTRY_PUSH_URL = registry_push_url()
+REGISTRY_PUSH_REPOSITORY = f"{REGISTRY_PUSH_URL}/{IMAGE_NAME}"
 BENTO_MANIFEST = ROOT / "infra" / "manifests" / "deploy" / "bentoml.yaml"
 
 # The BentoML model name each pinned MLflow registered model maps to —
@@ -323,7 +330,7 @@ def _cluster_running() -> bool:
             check=True,
         ).stdout
         clusters = json.loads(out)
-        return any(c.get("name") == REPO_NAME and c.get("serversRunning", 0) > 0 for c in clusters)
+        return any(c.get("name") == IMAGE_NAME and c.get("serversRunning", 0) > 0 for c in clusters)
     except (subprocess.CalledProcessError, json.JSONDecodeError):
         return False
 
@@ -394,7 +401,7 @@ def build_bento_image(force: bool = False) -> tuple[str, int]:
     else:
         print(f"No Bento rebuild needed — reusing {tag}.")
 
-    image = f"{BENTO_REPO}:{tag.split(':', 1)[1]}"
+    image = f"{IMAGE_NAME}:{tag.split(':', 1)[1]}"
     if force:
         print(f"Force: containerizing {tag} -> {image} regardless of cache.")
         containerize = True
@@ -405,7 +412,7 @@ def build_bento_image(force: bool = False) -> tuple[str, int]:
         bentoml.container.build(tag, backend="docker", image_tag=(image,))
     else:
         print(f"Local image already exists — reusing {image}.")
-    subprocess.run(["docker", "tag", image, f"{BENTO_REPO}:latest"], check=True)
+    subprocess.run(["docker", "tag", image, f"{IMAGE_NAME}:latest"], check=True)
     return image, int(production.version)
 
 
@@ -420,7 +427,7 @@ def deploy_bento(force: bool = False) -> None:
     local_image, production_version = build_bento_image(force=force)
 
     if not _cluster_running():
-        print(f"k3d cluster {REPO_NAME} is not running — local image is ready: {local_image}")
+        print(f"k3d cluster {IMAGE_NAME} is not running — local image is ready: {local_image}")
         return
     if not _registry_running():
         print(
@@ -457,7 +464,7 @@ def deploy_bento(force: bool = False) -> None:
     )
     state = _read_state()
     _write_state({**state, "deployed_version": production_version, "deployed_image": push_latest})
-    print(f"Deployed production {push_latest} to {REPO_NAME}")
+    print(f"Deployed production {push_latest} to {IMAGE_NAME}")
 
 
 if __name__ == "__main__":

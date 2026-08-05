@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS bronze.match_events (
     tournament                 VARCHAR,
     round                      VARCHAR,
     surface                    VARCHAR,
+    is_indoor                  INTEGER,
     player1_ranking            INTEGER,
     player2_ranking            INTEGER,
     player1_wins_last_10       UTINYINT,

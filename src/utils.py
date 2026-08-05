@@ -10,14 +10,10 @@ import os
 import sys
 from pathlib import Path
 
-from dotenv import load_dotenv
+from src.constants import ROOT, image_name, load_env
 
-from src.constants import KERNEL_DIR, REPO_NAME, ROOT
-
-
-def load_env() -> None:
-    """Load the env file (idempotent)."""
-    load_dotenv(ROOT / ".env", override=True)
+# Sentinel kept for monkeypatch in tests; actual path computed in ensure_kernel().
+KERNEL_DIR: Path | None = None
 
 
 def ensure_kernel() -> str:
@@ -28,12 +24,18 @@ def ensure_kernel() -> str:
     removed venv. A repo-local spec for sys.executable (the interpreter actually
     running this pipeline) executes deterministically on any machine.
     """
+    global KERNEL_DIR
+    name = image_name()
+    if not name:
+        raise RuntimeError("IMAGE_NAME not set in env; call load_env() first")
+    if KERNEL_DIR is None:
+        KERNEL_DIR = ROOT / ".jupyter" / "kernels" / name
     KERNEL_DIR.mkdir(parents=True, exist_ok=True)
     (KERNEL_DIR / "kernel.json").write_text(
         json.dumps(
             {
                 "argv": [sys.executable, "-m", "ipykernel_launcher", "-f", "{connection_file}"],
-                "display_name": REPO_NAME,
+                "display_name": name,
                 "language": "python",
             },
             indent=2,
@@ -44,4 +46,4 @@ def ensure_kernel() -> str:
     repo_path = str(KERNEL_DIR.parents[1])
     existing = os.environ.get("JUPYTER_PATH", "")
     os.environ["JUPYTER_PATH"] = repo_path if not existing else f"{repo_path}{os.pathsep}{existing}"
-    return REPO_NAME
+    return name

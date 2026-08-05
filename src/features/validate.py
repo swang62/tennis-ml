@@ -15,6 +15,10 @@ from src.features.columns import (
     BRONZE_COLUMNS_INT32,
 )
 
+# Columns where NULL is a legitimate value (unknown/unavailable at ingest time).
+# These are not checked for null by validate_bronze_row.
+BRONZE_COLUMNS_NULLABLE: tuple[str, ...] = ("is_indoor",)
+
 
 class IngestionCheckReport(TypedDict):
     passed: bool
@@ -40,6 +44,8 @@ def validate_bronze_row(row: Mapping[str, Any]) -> list[str]:
     issues: list[str] = []
 
     for column in BRONZE_COLUMNS:
+        if column in BRONZE_COLUMNS_NULLABLE:
+            continue
         value = row.get(column)
         if _is_missing(value):
             issues.append(f"{column} is null")

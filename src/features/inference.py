@@ -59,19 +59,24 @@ from src.features.columns import (
     PLAYER_COLS,
 )
 
-VALID_SURFACES = {"clay", "grass", "hard"}
+VALID_SURFACES = {"clay", "grass", "hard", "carpet"}
 VALID_TOURNAMENT_LEVELS = {0, 1, 2, 3, 4}
 VALID_ROUND_ENCODINGS = {0, 1, 2, 3, 4, 5, 6, 7}
 
 # Optional convenience layer: human-readable tournament/round strings mapped to
 # the SAME integer encodings as the CASE expressions in
 # dbt/models/gold/match_features.sql. Unknown strings map to 0 (that codebook's
-# ELSE branch), so stored encodings are unchanged (finals stays 7, unknown 0).
+# ELSE branch), so stored encodings are unchanged.
 _TOURNAMENT_LEVELS = {
     "grand_slam": 4,
     "masters": 3,
     "atp_500": 2,
     "atp_250": 1,
+    "challenger": 0,
+    "davis_cup": 0,
+    "atp_finals": 0,
+    "olympics": 0,
+    "professional": 0,
 }
 _ROUND_ENCODINGS = {
     "r128": 1,
@@ -316,6 +321,11 @@ def _side_values(
         days_since = round(median_days_since)
         matches_30d = round(median_matches_30d)
 
+    surface_win_rate = (
+        cell(_SURFACE_TO_SNAPSHOT_COL[surface], _DEFAULT_RATE)
+        if surface in _SURFACE_TO_SNAPSHOT_COL
+        else _DEFAULT_RATE
+    )
     return {
         "ranking": ranking,
         "rank_points": rank_points,
@@ -348,7 +358,7 @@ def _side_values(
         "loss_streak": int(cell("loss_streak", _DEFAULT_STREAK)),
         "days_since_last_match": days_since,
         "matches_30d": matches_30d,
-        "surface_win_rate_10": cell(_SURFACE_TO_SNAPSHOT_COL[surface], _DEFAULT_RATE),
+        "surface_win_rate_10": surface_win_rate,
     }
 
 
@@ -403,6 +413,7 @@ def _build_inference_features_with_meta(
     round_encoded: int = 0,
     tournament: str | None = None,
     round: str | None = None,
+    is_indoor: int | None = None,
 ) -> tuple[pd.DataFrame, dict[str, object]]:
     """Build ONE finalized canonical inference row.
 
@@ -414,6 +425,9 @@ def _build_inference_features_with_meta(
     `tournament_level` and `round_encoded` are the integer context features
     (default 0), validated to the same value sets as the CASE expressions in
     dbt/models/gold/match_features.sql.
+
+    `is_indoor` is 1 (indoor), 0 (outdoor), or None (unknown, defaults to 0
+    in the feature row).
 
     Optional `tournament`/`round` string aliases are a convenience layer that
     maps through `_TOURNAMENT_LEVELS`/`_ROUND_ENCODINGS` to those SAME integer
@@ -564,6 +578,8 @@ def _build_inference_features_with_meta(
     row["is_clay"] = int(surface == "clay")
     row["is_grass"] = int(surface == "grass")
     row["is_hard"] = int(surface == "hard")
+    row["is_carpet"] = int(surface == "carpet")
+    row["is_indoor"] = is_indoor if is_indoor is not None else 0
     row["tournament_level"] = tournament_level
     row["round_encoded"] = round_encoded
 
@@ -626,6 +642,7 @@ def build_inference_features(
     round_encoded: int = 0,
     tournament: str | None = None,
     round: str | None = None,
+    is_indoor: int | None = None,
 ) -> pd.DataFrame:
     out, _meta = _build_inference_features_with_meta(
         player_id,
@@ -636,5 +653,6 @@ def build_inference_features(
         round_encoded=round_encoded,
         tournament=tournament,
         round=round,
+        is_indoor=is_indoor,
     )
     return out

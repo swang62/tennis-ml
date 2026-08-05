@@ -31,7 +31,9 @@ export interface RankPointsTrend {
   delta: number
 }
 
-export type Surface = 'clay' | 'grass' | 'hard'
+export type Surface = 'clay' | 'grass' | 'hard' | 'carpet'
+export type TournamentTier = 'grand_slam' | 'masters' | 'atp_500' | 'atp_250' | 'challenger' | 'davis_cup' | 'atp_finals' | 'olympics' | 'professional'
+export type MatchRound = 'r128' | 'r64' | 'r32' | 'r16' | 'qf' | 'sf' | 'f'
 
 export interface SurfaceRate {
   surface: Surface
@@ -175,9 +177,10 @@ export interface PredictInput {
   player_id: string
   opponent_id: string
   surface: Surface
-  tournament?: string
-  round?: string
+  tournament?: TournamentTier
+  round?: MatchRound
   as_of_date?: string
+  indoor?: 0 | 1
 }
 
 // Raw (unwrapped) response — the backend returns the flat dict directly.

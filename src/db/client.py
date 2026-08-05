@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
 import duckdb
 import pandas as pd
 
-from src.constants import ROOT
+from src.constants import ROOT, tennis_db_path
 
 DATA_DIR = ROOT / "data"
 DB_PATH = DATA_DIR / "tennis.duckdb"
@@ -23,8 +22,9 @@ def _resolve_db_path() -> Path:
     Tests set TENNIS_DB_PATH to a throwaway file so no test ever touches the
     dev/staging/prod database at DB_PATH.
     """
-    if os.environ.get("TENNIS_DB_PATH"):
-        return Path(os.environ["TENNIS_DB_PATH"])
+    env_path = tennis_db_path()
+    if env_path:
+        return Path(env_path)
     return DB_PATH
 
 

@@ -577,13 +577,15 @@ class TennisPredictor:
         tournament: str | None = None,
         round: str | None = None,
         as_of_date: date | None = None,
+        indoor: int | None = None,
     ) -> dict[str, object]:
         """Build the feature row on demand from the baked-in DuckDB and predict.
 
         Minimal human inputs: two player ids + surface, optional integer
         tournament_level/round_encoded (or their string aliases tournament/
-        round, e.g. "grand_slam" / "f") and as_of_date. Queries the bundled
-        gold tables (snapshot from deploy time).
+        round, e.g. "grand_slam" / "f"), as_of_date, and indoor status
+        (1=indoor, 0=outdoor, None/omitted=unknown which defaults to 0).
+        Queries the bundled gold tables (snapshot from deploy time).
         """
         started_at = perf_counter()
         row, meta = _build_inference_features_with_meta(
@@ -595,6 +597,7 @@ class TennisPredictor:
             tournament=tournament,
             round=round,
             as_of_date=as_of_date,
+            is_indoor=indoor,
         )
         # Reuse the shared prediction path (no nested HTTP — see _predict_proba).
         out_df = self._predict_proba(row)

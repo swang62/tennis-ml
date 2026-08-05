@@ -96,7 +96,7 @@ def test_non_str_opponent_id_raises():
 
 def test_invalid_surface_raises():
     with pytest.raises(ValueError):
-        build_inference_features("A", "B", "carpet")
+        build_inference_features("A", "B", "sponge")
 
 
 def test_int_as_of_date_raises():

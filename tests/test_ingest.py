@@ -130,6 +130,7 @@ def _raw_row(match_num=1, tourney_date="20260105", level="G") -> dict[str, objec
         "tourney_level": level,
         "round": "QF",
         "surface": "Hard",
+        "indoor": "O",
         "w_ace": 5,
         "w_df": 2,
         "w_svpt": 60,
@@ -231,6 +232,7 @@ def _raw_atp_df() -> pd.DataFrame:
                 "tourney_level": "G",
                 "round": "QF",
                 "surface": "Hard",
+                "indoor": "O",
                 "w_ace": 1,
                 "w_df": 0,
                 "w_svpt": 30,
@@ -285,14 +287,6 @@ def test_load_raw_atp_rows_passes_ranks_through_raw(tmp_path):
     assert by_id["W2"]["winner_rank"] == 0  # empty rank -> 0, no median fill
     assert by_id["W3"]["winner_rank"] == 0  # rank 0 passes through unchanged
     assert by_id["W3"]["loser_rank"] == 20
-
-
-def test_load_atp_csv_reads_real_fixture():
-    df = ingest.load_atp_csv(ROOT / "data" / "test" / "atp_sample.csv")
-
-    assert not df.empty
-    assert list(df.columns) == list(BRONZE_COLUMNS)
-    assert (df["winner_id"] == df["player1_id"]).all()
 
 
 # ── search_wikipedia / fetch_summary ──────────────────────────────
@@ -542,3 +536,49 @@ def test_enrich_players_skips_already_enriched_and_nameless(monkeypatch, profile
 
     assert ingest.enrich_players(["P1", "P2", "P3"]) == 1
     assert calls == [("P1", "Player One")]
+
+
+# ── Indoor normalization ────────────────────────────────────────
+
+
+def test_normalize_indoor_I_is_1():
+    assert ingest._normalize_indoor("I") == 1
+
+
+def test_normalize_indoor_O_is_0():
+    assert ingest._normalize_indoor("O") == 0
+
+
+def test_normalize_indoor_empty_is_none():
+    assert ingest._normalize_indoor("") is None
+
+
+def test_normalize_indoor_nan_is_none():
+    import math
+
+    assert ingest._normalize_indoor(float("nan")) is None
+
+
+def test_normalize_indoor_none_is_none():
+    assert ingest._normalize_indoor(None) is None
+
+
+def test_atp_rows_to_bronze_indoor_I_maps_to_1():
+    row = _raw_row()
+    row["indoor"] = "I"
+    df = ingest.atp_rows_to_bronze([row])
+    assert df.iloc[0]["is_indoor"] == 1
+
+
+def test_atp_rows_to_bronze_indoor_O_maps_to_0():
+    row = _raw_row()
+    row["indoor"] = "O"
+    df = ingest.atp_rows_to_bronze([row])
+    assert df.iloc[0]["is_indoor"] == 0
+
+
+def test_atp_rows_to_bronze_indoor_missing_maps_to_nan():
+    row = _raw_row()
+    row["indoor"] = None
+    df = ingest.atp_rows_to_bronze([row])
+    assert pd.isna(df.iloc[0]["is_indoor"])

@@ -103,7 +103,7 @@ The `/predict_from_ids` endpoint accepts a JSON object with the following fields
 | ------------- | -------- | ------- | -------------------------------------------------------------- |
 | `player_id`   | yes      | —       | non-empty str                                                  |
 | `opponent_id` | yes      | —       | non-empty str                                                  |
-| `surface`     | yes      | —       | `clay` / `grass` / `hard`                                      |
+| `surface`     | yes      | —       | `clay` / `grass` / `hard` / `carpet`                           |
 | `tournament`  | no       | 0       | `grand_slam` / `masters` / `atp_500` / `atp_250` / `davis_cup` |
 | `round`       | no       | 0       | `r128` / `r64` / `r32` / `r16` / `qf` / `sf` / `f`             |
 | `as_of_date`  | no       | today   | `datetime.date`                                                |

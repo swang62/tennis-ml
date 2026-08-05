@@ -7,16 +7,42 @@ import {
   getPlayers,
   getRankHistory,
   predictFromIds,
+  type MatchRound,
   type Surface,
+  type TournamentTier,
 } from '../api'
 import { Card, Empty, ErrorBox, Loading, PlayerPicker, StatBar, pct } from '../components'
 
-const SURFACES: Surface[] = ['clay', 'grass', 'hard']
+const SURFACES: Surface[] = ['clay', 'grass', 'hard', 'carpet']
+const TOURNAMENT_TIERS: { value: TournamentTier; label: string }[] = [
+  { value: 'grand_slam', label: 'Grand Slam' },
+  { value: 'masters', label: 'Masters' },
+  { value: 'atp_500', label: 'ATP 500' },
+  { value: 'atp_250', label: 'ATP 250' },
+  { value: 'challenger', label: 'Challenger' },
+  { value: 'davis_cup', label: 'Davis Cup' },
+  { value: 'atp_finals', label: 'ATP Finals' },
+  { value: 'olympics', label: 'Olympics' },
+  { value: 'professional', label: 'Professional' },
+]
+const ROUNDS: { value: MatchRound; label: string }[] = [
+  { value: 'r128', label: 'R128' },
+  { value: 'r64', label: 'R64' },
+  { value: 'r32', label: 'R32' },
+  { value: 'r16', label: 'R16' },
+  { value: 'qf', label: 'Quarterfinal' },
+  { value: 'sf', label: 'Semifinal' },
+  { value: 'f', label: 'Final' },
+]
 
 export default function H2H() {
   const [playerA, setPlayerA] = useState<string | null>(null)
   const [playerB, setPlayerB] = useState<string | null>(null)
   const [surface, setSurface] = useState<Surface>('hard')
+  const [tournament, setTournament] = useState<TournamentTier | ''>('')
+  const [round, setRound] = useState<MatchRound | ''>('')
+  const [asOfDate, setAsOfDate] = useState('')
+  const [indoor, setIndoor] = useState<'' | 0 | 1>('')
 
   const playersQ = useQuery({ queryKey: ['players'], queryFn: getPlayers })
 
@@ -219,9 +245,80 @@ export default function H2H() {
                   ))}
                 </select>
               </label>
+              <label className="text-sm">
+                <span className="mb-1 block text-xs uppercase tracking-wide text-slate-400">
+                  Venue
+                </span>
+                <select
+                  value={indoor}
+                  onChange={(e) =>
+                    setIndoor(e.target.value === '' ? '' : (Number(e.target.value) as 0 | 1))
+                  }
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm outline-none focus:border-emerald-500"
+                >
+                  <option value="">-</option>
+                  <option value="0">Outdoor</option>
+                  <option value="1">Indoor</option>
+                </select>
+              </label>
+              <label className="text-sm">
+                <span className="mb-1 block text-xs uppercase tracking-wide text-slate-400">
+                  Tournament tier
+                </span>
+                <select
+                  value={tournament}
+                  onChange={(e) => setTournament(e.target.value as TournamentTier | '')}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm outline-none focus:border-emerald-500"
+                >
+                  <option value="">-</option>
+                  {TOURNAMENT_TIERS.map((tier) => (
+                    <option key={tier.value} value={tier.value}>
+                      {tier.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-sm">
+                <span className="mb-1 block text-xs uppercase tracking-wide text-slate-400">
+                  Round
+                </span>
+                <select
+                  value={round}
+                  onChange={(e) => setRound(e.target.value as MatchRound | '')}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm outline-none focus:border-emerald-500"
+                >
+                  <option value="">-</option>
+                  {ROUNDS.map((matchRound) => (
+                    <option key={matchRound.value} value={matchRound.value}>
+                      {matchRound.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-sm">
+                <span className="mb-1 block text-xs uppercase tracking-wide text-slate-400">
+                  As of date
+                </span>
+                <input
+                  type="date"
+                  value={asOfDate}
+                  onChange={(e) => setAsOfDate(e.target.value)}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm outline-none focus:border-emerald-500"
+                />
+              </label>
               <button
                 type="button"
-                onClick={() => predict.mutate({ player_id: playerA!, opponent_id: playerB!, surface })}
+                onClick={() =>
+                  predict.mutate({
+                    player_id: playerA!,
+                    opponent_id: playerB!,
+                    surface,
+                    ...(tournament ? { tournament } : {}),
+                    ...(round ? { round } : {}),
+                    ...(asOfDate ? { as_of_date: asOfDate } : {}),
+                    ...(indoor !== '' ? { indoor } : {}),
+                  })
+                }
                 disabled={predict.isPending}
                 className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
               >

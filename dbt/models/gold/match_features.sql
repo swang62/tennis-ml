@@ -41,6 +41,7 @@ WITH player_match_enriched AS (
         pm.tournament,
         pm.round,
         pm.surface,
+        pm.is_indoor,
         pm.player_id,
         pm.opponent_id,
         pm.match_won,
@@ -336,6 +337,8 @@ SELECT
     CAST(CASE WHEN p.surface = 'clay'  THEN 1 ELSE 0 END AS UTINYINT) AS is_clay,
     CAST(CASE WHEN p.surface = 'grass' THEN 1 ELSE 0 END AS UTINYINT) AS is_grass,
     CAST(CASE WHEN p.surface = 'hard'  THEN 1 ELSE 0 END AS UTINYINT) AS is_hard,
+    CAST(CASE WHEN p.surface = 'carpet' THEN 1 ELSE 0 END AS UTINYINT) AS is_carpet,
+    p.is_indoor,
     CAST(CASE p.tournament
         WHEN 'grand_slam' THEN 4 WHEN 'masters' THEN 3
         WHEN 'atp_500' THEN 2 WHEN 'atp_250' THEN 1 ELSE 0

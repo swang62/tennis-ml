@@ -1,7 +1,7 @@
 """Contract tests for src/features/columns.py (no DB access).
 
 columns.py is the single source of truth for the feature contract:
-97 features -> 99-column rows when the two ids are prepended.
+99 features -> 101-column rows when the two ids are prepended.
 """
 
 import json
@@ -31,11 +31,11 @@ def test_feature_cols_is_the_ordered_concatenation():
 
 
 def test_feature_col_counts():
-    assert len(FEATURE_COLS) == 97
+    assert len(FEATURE_COLS) == 99
     assert len(PLAYER_COLS) == 37
     assert len(OPPONENT_COLS) == 37
     assert len(DIFF_COLS) == 18
-    assert len(CONTEXT_COLS) == 5
+    assert len(CONTEXT_COLS) == 7
 
 
 def test_side_cols_are_ranking_plus_rolling_plus_profile_plus_h2h():
@@ -218,8 +218,8 @@ def test_new_rolling_and_current_match_names():
     assert "opponent_avg_rank_faced_20" not in OPPONENT_COLS
 
 
-def test_no_duplicate_names_across_the_99_column_row():
-    assert len({*FEATURE_COLS, "player_id", "opponent_id"}) == 99
+def test_no_duplicate_names_across_the_101_column_row():
+    assert len({*FEATURE_COLS, "player_id", "opponent_id"}) == 101
 
 
 def test_naming_conventions():
@@ -242,6 +242,7 @@ def test_bronze_column_order_and_uniqueness():
         "tournament",
         "round",
         "surface",
+        "is_indoor",
         "player1_ranking",
         "player2_ranking",
         *BRONZE_COLUMNS_INT,

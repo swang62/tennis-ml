@@ -317,6 +317,15 @@ models:
           - accepted_values:
               arguments:
                 values: [0, 1]
+      - name: is_carpet
+        description: 1 if surface = carpet, else 0.
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+      - name: is_indoor
+        description: 1 if indoor, 0 if outdoor, NULL when unknown.
       - name: tournament_level
         description: Tournament tier ordinal (grand_slam=4, masters=3, atp_500=2, atp_250=1, else 0).
         tests:

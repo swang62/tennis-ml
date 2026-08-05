@@ -185,3 +185,20 @@ def test_run_ingestion_checks_keeps_zero_rank_rows():
     kept = cast(pd.DataFrame, result["valid_df"]).to_dict(orient="records")
     assert kept[0] == valid
     assert kept[1] == zero_rank
+
+
+def test_validate_bronze_row_accepts_null_is_indoor():
+    """is_indoor is nullable: unknown indoor status is not an error."""
+    row = _valid_row()
+    row["is_indoor"] = None
+
+    issues = validate_bronze_row(row)
+
+    assert not any("is_indoor" in issue for issue in issues)
+
+
+def test_validate_bronze_row_accepts_valid_is_indoor_values():
+    for val in (0, 1):
+        row = _valid_row()
+        row["is_indoor"] = val
+        assert validate_bronze_row(row) == [], f"is_indoor={val} should be valid"

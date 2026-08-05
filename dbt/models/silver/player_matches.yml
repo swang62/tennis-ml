@@ -32,6 +32,8 @@ models:
         description: Draw round (r128, r64, r32, r16, qf, sf, f; non-draw stages like "rr" pass through).
       - name: surface
         description: Court surface (clay, grass, hard).
+      - name: is_indoor
+        description: 1 if indoor, 0 if outdoor, NULL when unknown.
       - name: player_id
         description: The player this row represents (raw player1_id or player2_id from bronze).
         tests:

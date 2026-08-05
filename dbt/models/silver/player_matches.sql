@@ -34,7 +34,7 @@
 
 WITH expanded AS (
     SELECT
-        match_id, match_date, tournament, round, surface,
+        match_id, match_date, tournament, round, surface, is_indoor,
         player1_id AS player_id,
         player2_id AS opponent_id,
         NULLIF(player1_ranking, 0) AS player_ranking,
@@ -61,7 +61,7 @@ WITH expanded AS (
     UNION ALL
 
     SELECT
-        match_id, match_date, tournament, round, surface,
+        match_id, match_date, tournament, round, surface, is_indoor,
         player2_id AS player_id,
         player1_id AS opponent_id,
         NULLIF(player2_ranking, 0) AS player_ranking,
@@ -91,6 +91,7 @@ SELECT
     tournament,
     round,
     surface,
+    is_indoor,
     player_id,
     opponent_id,
     player_ranking,

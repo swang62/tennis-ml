@@ -118,7 +118,7 @@ def test_gold_match_features_schema_matches_python_contract():
 def test_gold_only_enrichment_columns_in_gold_but_not_in_contract():
     """The 12 per-side current-match serve/break enrichment columns exist in
     gold.match_features (dashboard/analysis value) but are excluded from the
-    97-feature model contract — they have no as-of-date inference source."""
+    99-feature model contract — they have no as-of-date inference source."""
     cols = set(
         execute_df(
             "SELECT column_name FROM information_schema.columns "
@@ -141,7 +141,7 @@ def _known_pair() -> tuple[str, str]:
 
 
 def test_e2e_inference_contract():
-    """build_inference_features against the shared gold: exact 99-col schema,
+    """build_inference_features against the shared gold: exact schema,
     one row, canonical ids, finite features."""
     player_id, opponent_id = _known_pair()
     out = build_inference_features(player_id, opponent_id, "hard", as_of_date=AS_OF)

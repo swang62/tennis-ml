@@ -32,24 +32,25 @@ def test_output_schema_contract():
     """Exact column order [*FEATURE_COLS, "player_id", "opponent_id"], one row."""
     out = build_inference_features("S0AG", "Z355", "clay", as_of_date=AS_OF_AFTER_ALL_MATCHES)
     assert out.columns.tolist() == [*FEATURE_COLS, "player_id", "opponent_id"]
-    assert len(out.columns) == 99  # 97 features + 2 ids
+    assert len(out.columns) == 101  # 99 features + 2 ids
     assert len(out) == 1
     assert out["player_id"].dtype == object
     assert out["opponent_id"].dtype == object
 
 
-@pytest.mark.parametrize("surface", ["clay", "grass", "hard"])
+@pytest.mark.parametrize("surface", ["clay", "grass", "hard", "carpet"])
 def test_two_known_players_each_surface(surface):
     """Known-vs-known row: valid one-hot, canonical ids, finite features."""
     out = build_inference_features("S0AG", "Z355", surface, as_of_date=AS_OF_AFTER_ALL_MATCHES)
     row = out.iloc[0]
     assert row["player_id"] == "S0AG"  # 'S0AG' < 'Z355'
     assert row["opponent_id"] == "Z355"
-    expected_one_hots = {"is_clay": 0, "is_grass": 0, "is_hard": 0}
+    expected_one_hots = {"is_clay": 0, "is_grass": 0, "is_hard": 0, "is_carpet": 0}
     expected_one_hots[f"is_{surface}"] = 1
     assert row["is_clay"] == expected_one_hots["is_clay"]
     assert row["is_grass"] == expected_one_hots["is_grass"]
     assert row["is_hard"] == expected_one_hots["is_hard"]
+    assert row["is_carpet"] == expected_one_hots["is_carpet"]
     assert sum(expected_one_hots.values()) == 1
     for col in FEATURE_COLS:
         assert math.isfinite(row[col]), f"{col} is not finite: {row[col]!r}"
@@ -240,7 +241,7 @@ def test_both_unknowns_neutral_diffs():
     assert [row["is_clay"], row["is_grass"], row["is_hard"]] == [0, 0, 1]
 
 
-@pytest.mark.parametrize("surface", ["Clay", "CLAY", "carpet", "", None])
+@pytest.mark.parametrize("surface", ["Clay", "CLAY", "", None])
 def test_invalid_surface_raises(surface):
     with pytest.raises((ValueError, TypeError)):
         build_inference_features("S0AG", "Z355", surface, as_of_date=AS_OF_AFTER_ALL_MATCHES)
@@ -322,6 +323,11 @@ def test_valid_round_encodings_accepted(round_encoded, expected):
         ("masters", 3),
         ("atp_500", 2),
         ("atp_250", 1),
+        ("challenger", 0),
+        ("davis_cup", 0),
+        ("atp_finals", 0),
+        ("olympics", 0),
+        ("professional", 0),
     ],
 )
 def test_tournament_string_convenience_maps_to_codebook(tournament, expected):
@@ -725,3 +731,49 @@ def test_train_inference_parity_on_historical_match():
     # The fixture must actually compare most of the contract, so it cannot
     # silently degenerate to a handful of columns.
     assert compared >= 70
+
+
+# ── is_indoor context feature ────────────────────────────────────
+
+
+def test_is_indoor_defaults_to_0_when_not_supplied():
+    """Missing indoor => is_indoor = 0 (safe outdoor default)."""
+    out = build_inference_features("S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
+    assert out["is_indoor"].iloc[0] == 0
+
+
+def test_is_indoor_1_when_indoor():
+    out = build_inference_features(
+        "S0AG", "Z355", "hard", is_indoor=1, as_of_date=AS_OF_AFTER_ALL_MATCHES
+    )
+    assert out["is_indoor"].iloc[0] == 1
+
+
+def test_is_indoor_0_when_outdoor():
+    out = build_inference_features(
+        "S0AG", "Z355", "hard", is_indoor=0, as_of_date=AS_OF_AFTER_ALL_MATCHES
+    )
+    assert out["is_indoor"].iloc[0] == 0
+
+
+def test_inference_row_has_no_nan_with_indoor():
+    """Full inference row with indoor is NaN-free."""
+    out = build_inference_features(
+        "S0AG",
+        "Z355",
+        "hard",
+        is_indoor=1,
+        tournament="grand_slam",
+        as_of_date=AS_OF_AFTER_ALL_MATCHES,
+    )
+    assert not out[FEATURE_COLS].isnull().to_numpy().any()
+    assert "is_indoor" in out.columns
+
+
+def test_cold_start_row_has_no_nan_with_indoor():
+    """Unknown players + indoor => no NaN in the feature row."""
+    out = build_inference_features(
+        "ZZZZ", "YYYY", "clay", is_indoor=1, as_of_date=AS_OF_AFTER_ALL_MATCHES
+    )
+    assert not out[FEATURE_COLS].isnull().to_numpy().any()
+    assert out["is_indoor"].iloc[0] == 1

@@ -1,20 +1,21 @@
-import { defineConfig } from 'vite'
+import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
-// Local dev only. The `/api` proxy points at the locally-running Bento
-// service (just deploy-local, :3000) so the browser never talks to it
-// directly. No Dockerfile / deploy step — see the locked plan decision.
-export default defineConfig({
-  plugins: [react(), tailwindcss()],
-  server: {
-    proxy: {
-      // Strip the /api prefix: Bento mounts its routes at the root
-      // (/players, /player_profile, /predict_from_ids, ...), not under /api.
-      '/api': {
-        target: 'http://localhost:3000',
-        rewrite: (path) => path.replace(/^\/api/, ''),
+// Local dev only. The `/api` proxy forwards browser requests to the Bento
+// service so the frontend never hard-codes a backend origin.
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '')
+  return {
+    plugins: [react(), tailwindcss()],
+    server: {
+      proxy: {
+        // Strip /api — Bento mounts routes at the root, not under /api.
+        '/api': {
+          target: env.VITE_BENTO_URL || 'http://localhost:3000',
+          rewrite: (path) => path.replace(/^\/api/, ''),
+        },
       },
     },
-  },
+  }
 })

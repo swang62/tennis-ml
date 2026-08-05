@@ -71,6 +71,7 @@ RAW_ATP_COLUMNS = [
     "tourney_level",
     "round",
     "surface",
+    "indoor",
     "w_ace",
     "w_df",
     "w_svpt",
@@ -92,17 +93,20 @@ RAW_ATP_COLUMNS = [
 ]
 
 # Raw ATP tourney_level -> canonical bronze.tournament.
-# D (Davis Cup) and F (Masters/ATP Finals) appear in full-year raw files but
-# never in the dev seed selection; they map to level 0 downstream (see
-# dbt/models/gold/match_features.sql).
+# Tiered: grand_slam(4), masters(3), atp_500(2), atp_250(1).
+# Non-tier: challenger, davis_cup, atp_finals, olympics, professional → map to
+# numeric 0 at final feature-encoding time.
 LEVEL_MAP = {
     "G": "grand_slam",
     "M": "masters",
     "A": "atp_500",
     "500": "atp_500",
     "250": "atp_250",
+    "C": "challenger",
     "D": "davis_cup",
-    "F": "finals",
+    "F": "atp_finals",
+    "O": "olympics",
+    "P": "professional",
 }
 
 # Rolling-form window for wins_last_10 / matches_last_10.
@@ -133,6 +137,23 @@ def _float_stat(row: dict[str, Any], key: str) -> float:
         return float(row[key])
     except (TypeError, ValueError):
         return 0.0
+
+
+def _normalize_indoor(value: Any) -> int | None:
+    """Normalize raw ATP indoor field to 1 (indoor), 0 (outdoor), or None (unknown).
+
+    Raw CSVs use 'I' for indoor, 'O' for outdoor; empty/NaN/other = unknown.
+    """
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    if isinstance(value, int):
+        return value
+    s = str(value).strip().upper()
+    if s == "I":
+        return 1
+    if s == "O":
+        return 0
+    return None
 
 
 def player_history(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -198,6 +219,7 @@ def atp_rows_to_bronze(
                 "tournament": level,
                 "round": str(m["round"]).lower(),
                 "surface": str(m["surface"]).lower(),
+                "is_indoor": _normalize_indoor(m.get("indoor")),
                 "player1_ranking": m["winner_rank"],
                 "player2_ranking": m["loser_rank"],
                 "player1_wins_last_10": winner_wins,
