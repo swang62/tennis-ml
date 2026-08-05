@@ -8,30 +8,19 @@ from typing import Any
 import duckdb
 import pandas as pd
 
-from src.constants import ROOT, tennis_db_path
-
-DATA_DIR = ROOT / "data"
-DB_PATH = DATA_DIR / "tennis.duckdb"
+from src import constants
 
 _conn: duckdb.DuckDBPyConnection | None = None
-
-
-def _resolve_db_path() -> Path:
-    """DB file to open: $TENNIS_DB_PATH when set (tests), else the repo default.
-
-    Tests set TENNIS_DB_PATH to a throwaway file so no test ever touches the
-    dev/staging/prod database at DB_PATH.
-    """
-    env_path = tennis_db_path()
-    if env_path:
-        return Path(env_path)
-    return DB_PATH
 
 
 def get_conn() -> duckdb.DuckDBPyConnection:
     global _conn
     if _conn is None:
-        db_path = _resolve_db_path()
+        db_path = (
+            Path(constants.TENNIS_DB_PATH)
+            if constants.TENNIS_DB_PATH
+            else constants.ROOT / "data" / "tennis.duckdb"
+        )
         db_path.parent.mkdir(parents=True, exist_ok=True)
         _conn = duckdb.connect(str(db_path))
     return _conn
@@ -47,10 +36,9 @@ def execute_df(sql: str, params: list[object] | None = None) -> pd.DataFrame:
     When `params` is provided, the SQL uses positional `?` placeholders and
     the query is executed as a prepared statement (no string interpolation).
     """
-    conn = get_conn()
     if params is None:
-        return conn.sql(sql).fetchdf()
-    return conn.execute(sql, params).fetchdf()
+        return to_dataframe(sql)
+    return get_conn().execute(sql, params).fetchdf()
 
 
 def first_row_dict(df: pd.DataFrame) -> dict[str, Any]:

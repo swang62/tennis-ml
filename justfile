@@ -9,6 +9,12 @@ create:
 setup-base: validate
     kubectl apply -f infra/manifests/default/
 
+# Start the host-local Prefect worker attached to the tennis-pool work pool.
+# The Prefect server runs in the cluster; the worker must run on the host so it
+# can reach local artifacts (DuckDB, models). Loads .env (PREFECT_API_URL).
+worker:
+    uv run python infra/prefect/worker.py
+
 db-init:
     uv run python infra/duckdb/initialize_schemas.py init
 
@@ -35,8 +41,7 @@ dashboard-local:
 deploy-local:
     uv run bentoml serve src/serving/service.py:TennisPredictor --host 0.0.0.0 --port 3000
 
-# Build docker image locally, push to the k3d-managed registry and deploy on k3d 
-# if the cluster is running AND the latest trained model has been promoted
+# Build docker image locally, push to Docker Hub and boot via Docker Compose
 deploy-bento:
     uv run python src/flows/deploy.py
 

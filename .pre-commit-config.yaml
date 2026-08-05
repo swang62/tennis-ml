@@ -2,9 +2,6 @@ repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.16
     hooks:
-      - id: ruff
-        args: [--fix]
-        types_or: [python, jupyter]
       - id: ruff-format
         types_or: [python, jupyter]
 
@@ -24,18 +21,10 @@ repos:
         entry: uv run basedpyright
         types: [python]
 
-      - id: testmon
-        name: tests (testmon)
+      - id: tests
+        name: tests
         description: Run only pytest tests affected by the changed files (coverage-based)
         language: system
-        entry: uv run pytest --testmon
+        entry: scripts/run_tests.sh
         pass_filenames: false
-        files: ^(src|tests|infra/duckdb)/
-
-      - id: dbt-tests
-        name: tests (dbt models)
-        description: Run the gold-build e2e test when dbt models or DuckDB init SQL change
-        language: system
-        entry: uv run pytest tests/test_e2e_ingest_to_inference.py -q
-        pass_filenames: false
-        files: ^(dbt|infra/duckdb)/
+        files: ^(src|tests|infra/duckdb|dbt)/

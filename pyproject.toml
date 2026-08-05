@@ -121,11 +121,17 @@ dev = [
   "ruff>=0.15",
   "pre-commit>=4.6",
   "pytest>=9.1",
+  "pytest-env>=1.7",
   "pytest-testmon>=2.2",
   "tennis-ml",
   "basedpyright>=1.39",
   "pandas-stubs>=3.0",
+  "pytest-env>=1.7.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.pytest_env]
+KMP_DUPLICATE_LIB_OK = "TRUE"
+TENNIS_DB_PATH = "tests/___db/tennis.duckdb"

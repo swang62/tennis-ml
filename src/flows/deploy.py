@@ -1,27 +1,30 @@
 """Build and deploy the production Bento serving image.
 
-Deploy-only: deploy_bento() just invokes `build_bento_image()` which builds in the local Docker engine first
-and never depends on k3d. If the cluster is up, it should push that image to the k3d-managed local
-registry and force rollout.
+Deploy is host-executed and independent of k3d: build_bento_image() builds in
+the local Docker engine, then deploy_bento() pushes the immutable image to
+Docker Hub and boots it via Docker Compose.
 
 Usage:
     uv run python src/flows/deploy.py
 """
 
 import json
+import os
 import subprocess
+import sys
+from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from prefect import flow
 
 from src.constants import (
     DATA_PROCESSED,
+    IMAGE_NAME,
+    LOGS,
     PRODUCTION_MODEL,
     ROOT,
-    image_name,
     load_env,
-    registry_push_url,
 )
 
 # --- Deploy-only paths and names ---
@@ -31,18 +34,14 @@ PINNED_BENTOFILE = DATA_PROCESSED / "bentofile.pinned.yaml"
 BENTO_TAG_FILE = DATA_PROCESSED / "bento_tag.txt"
 STATE_FILE = DATA_PROCESSED / "bento_build_state.json"
 
-# .env must be loaded before any env-backed accessors capture registry URLs.
+# .env is loaded by src.constants before the inline settings are read.
 load_env()
 
-# Registry URLs are composed from the registry host + the Bento repo name, so
-# the repo name (BENTO_REPO) is never duplicated. Push goes
-# host -> caddy (https) -> traefik -> registry.
-IMAGE_NAME = image_name()
 assert IMAGE_NAME is not None, "IMAGE_NAME not set in env; load_env() must be called first"
-REGISTRY_NAME = IMAGE_NAME + "-registry"
-REGISTRY_PUSH_URL = registry_push_url()
-REGISTRY_PUSH_REPOSITORY = f"{REGISTRY_PUSH_URL}/{IMAGE_NAME}"
-BENTO_MANIFEST = ROOT / "infra" / "manifests" / "deploy" / "bentoml.yaml"
+# Docker Hub repo: DOCKER_REPO/IMAGE_NAME. DOCKER_TAG is the immutable Bento
+# version tag; the moving latest tag is pushed alongside it.
+DOCKER_REPO = os.getenv("DOCKER_REPO", "swang62")
+COMPOSE_FILE = ROOT / "compose.production.yaml"
 
 # The BentoML model name each pinned MLflow registered model maps to —
 # exactly the names the service references via `bentoml.models.BentoModel`.
@@ -320,40 +319,6 @@ def _cached_tag(state: dict[str, Any], fingerprint: str) -> str | None:
     return tag
 
 
-def _cluster_running() -> bool:
-    try:
-        out = subprocess.run(
-            ["k3d", "cluster", "list", "-o", "json"],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout
-        clusters = json.loads(out)
-        return any(c.get("name") == IMAGE_NAME and c.get("serversRunning", 0) > 0 for c in clusters)
-    except (subprocess.CalledProcessError, json.JSONDecodeError):
-        return False
-
-
-def _registry_running() -> bool:
-    try:
-        registries = json.loads(
-            subprocess.run(
-                ["k3d", "registry", "list", "-o", "json"],
-                cwd=ROOT,
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout
-        )
-        return any(
-            registry.get("name") == REGISTRY_NAME and registry.get("State", {}).get("Running")
-            for registry in registries
-        )
-    except (subprocess.CalledProcessError, json.JSONDecodeError):
-        return False
-
-
 def _image_exists(image: str) -> bool:
     return (
         subprocess.run(
@@ -363,6 +328,26 @@ def _image_exists(image: str) -> bool:
         ).returncode
         == 0
     )
+
+
+def _run_teed(
+    cmd: list[str], log: TextIO, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess:
+    """Run a deploy subprocess, streaming its output to the console AND a log file."""
+    proc = subprocess.Popen(
+        cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        text = line.decode(errors="replace")
+        sys.stdout.write(text)
+        sys.stdout.flush()
+        log.write(text)
+        log.flush()
+    returncode = proc.wait()
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, cmd)
+    return subprocess.CompletedProcess(cmd, returncode)
 
 
 def build_bento_image(force: bool = False) -> tuple[str, int]:
@@ -417,54 +402,47 @@ def build_bento_image(force: bool = False) -> tuple[str, int]:
 
 
 def deploy_bento(force: bool = False) -> None:
-    """Build locally, then push and roll out through the k3d registry.
+    """Build locally, then push to Docker Hub and boot via Docker Compose.
 
-    A stopped or absent cluster does not prevent the local image build. If the
-    k3d registry is missing or the push fails, deployment is skipped (logged)
-    and the local image is left ready. force=True rebuilds the Bento and image
-    even when cached.
+    Builds the Bento into the local Docker engine, tags it as the immutable
+    Docker Hub image and as `latest`, pushes both, then runs
+    `docker compose -f compose.production.yaml up -d --pull always` so the
+    service pulls the immutable image down. Docker Hub credentials must be
+    configured in the operator environment. force=True rebuilds the Bento and
+    image even when cached.
     """
     local_image, production_version = build_bento_image(force=force)
 
-    if not _cluster_running():
-        print(f"k3d cluster {IMAGE_NAME} is not running — local image is ready: {local_image}")
-        return
-    if not _registry_running():
+    immutable = f"{DOCKER_REPO}/{IMAGE_NAME}:{local_image.split(':', 1)[1]}"
+    latest = f"{DOCKER_REPO}/{IMAGE_NAME}:latest"
+    LOGS.mkdir(parents=True, exist_ok=True)
+    deploy_log = LOGS / f"deploy_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    try:
+        with deploy_log.open("w") as log:
+            subprocess.run(["docker", "tag", local_image, immutable], cwd=ROOT, check=True)
+            subprocess.run(["docker", "tag", local_image, latest], cwd=ROOT, check=True)
+            _run_teed(["docker", "push", immutable], log)
+            _run_teed(["docker", "push", latest], log)
+            compose_env = {
+                **os.environ,
+                "DOCKER_IMAGE": f"{DOCKER_REPO}/{IMAGE_NAME}",
+                "DOCKER_TAG": local_image.split(":", 1)[1],
+            }
+            _run_teed(
+                ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", "--pull", "always"],
+                log,
+                env=compose_env,
+            )
+    except subprocess.CalledProcessError as exc:
         print(
-            f"k3d registry {REGISTRY_NAME} is not running — skipping deployment; "
+            f"Deploy step failed ({exc}) — skipping remaining deployment; "
             f"local image is ready: {local_image}"
         )
         return
 
-    if force:
-        print("Force: re-pushing image and re-applying manifest in the cluster.")
-    push_latest = f"{REGISTRY_PUSH_REPOSITORY}:latest"
-    try:
-        subprocess.run(["docker", "tag", local_image, push_latest], cwd=ROOT, check=True)
-        subprocess.run(["docker", "push", push_latest], cwd=ROOT, check=True)
-    except subprocess.CalledProcessError as exc:
-        print(
-            f"Registry push failed ({exc}) — skipping deployment; local image is ready: {local_image}"
-        )
-        return
-
-    # The manifest pins :latest; rollout restart forces new pods to pull it
-    # (imagePullPolicy: Always), since an unchanged image ref alone would
-    # leave the old ReplicaSet untouched.
-    subprocess.run(["kubectl", "apply", "-f", BENTO_MANIFEST], cwd=ROOT, check=True)
-    subprocess.run(
-        ["kubectl", "rollout", "restart", "deployment/bento-serving"],
-        cwd=ROOT,
-        check=True,
-    )
-    subprocess.run(
-        ["kubectl", "rollout", "status", "deployment/bento-serving", "--timeout=180s"],
-        cwd=ROOT,
-        check=True,
-    )
     state = _read_state()
-    _write_state({**state, "deployed_version": production_version, "deployed_image": push_latest})
-    print(f"Deployed production {push_latest} to {IMAGE_NAME}")
+    _write_state({**state, "deployed_version": production_version, "deployed_image": immutable})
+    print(f"Deployed {immutable} via Docker Compose")
 
 
 if __name__ == "__main__":

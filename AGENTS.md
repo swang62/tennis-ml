@@ -4,7 +4,7 @@ Commands run via `just` (not make). `uv` is the package manager (not pip/poetry)
 
 ## Overall approach
 
-End-to-end MLOps pipeline for tennis match prediction. Data flows CSV → DuckDB bronze → dbt silver (player-perspective expansion; preprocessing: rank 0 → NULL, non-draw rounds → ordinal 0) → dbt gold (player-centric rolling snapshots → canonical match training rows) → Papermill notebooks (Optuna tuning across 3 model classes) → MLflow registry (alias-based, no stages) → BentoML serving on a local k3d cluster.
+End-to-end MLOps pipeline for tennis match prediction. Data flows CSV → DuckDB bronze → dbt silver (player-perspective expansion; preprocessing: rank 0 → NULL, non-draw rounds → ordinal 0) → dbt gold (player-centric rolling snapshots → canonical match training rows) → Papermill notebooks (Optuna tuning across 3 model classes) → MLflow registry (alias-based, no stages) → BentoML serving via Docker Hub + Docker Compose.
 
 **Model strategy:** three model classes (linear, GBDT, neural net) compete independently via Optuna, then a logistic-regression meta-model stacks their probability outputs. Architecturally designed for ~80k match samples.
 
@@ -40,17 +40,15 @@ dbt/             — silver→gold SQL models + tests (bronze is the DuckDB sour
 
 **NN is served via ONNX Runtime, not torch.** The deploy flow exports the pinned `nn_best` PyTorch model to a single-file ONNX at deploy time and packages that into the Bento image. torch is not a serving dependency. The GBDT path may pick CatBoost / XGBoost / LightGBM at Optuna time — the serving image pins all three so whichever wins loads cleanly.
 
-**Ingress is single-entrypoint only.** Host access to cluster services goes through `*.macsteve.lan` only. Caddy routes `*.macsteve.lan` to the k3d load balancer on `localhost:8080`, so do not add host port-forwards or ad hoc tunnels. The local Caddy TLS cert is self-signed. All services work over `https://*.macsteve.lan` — Bento out of the box, and MLflow/Prefect clients when told to skip TLS verification (`MLFLOW_TRACKING_INSECURE_TLS=true`, `PREFECT_API_TLS_INSECURE_SKIP_VERIFY=True`). Plain `http://*.macsteve.lan:8080` (no TLS) also works for any HTTP client. Inside the cluster, services still use Kubernetes DNS names (`mlflow`, `prefect-server`, `bento-serving`, `tennis-ml-registry`, etc.).
+**Ingress is single-entrypoint only.** Host access to cluster services goes through `*.macsteve.lan` only. Caddy routes `*.macsteve.lan` to the k3d load balancer on `localhost:8080`, so do not add host port-forwards or ad hoc tunnels. The local Caddy TLS cert is self-signed. All services work over `https://*.macsteve.lan` — MLflow/Prefect clients when told to skip TLS verification (`MLFLOW_TRACKING_INSECURE_TLS=true`, `PREFECT_API_TLS_INSECURE_SKIP_VERIFY=True`). Plain `http://*.macsteve.lan:8080` (no TLS) also works for any HTTP client. Inside the cluster, services still use Kubernetes DNS names (`mlflow`, `prefect-server`, etc.). BentoML serving is host-local via Docker Compose at `http://127.0.0.1:3000` — it is not a cluster service.
 
 **Canonical service DNS names.** The `*.macsteve.lan` hostnames (recorded in `infra/manifests/default/ingress.yaml`) map to cluster services:
 
 | Hostname                    | Service                    | Port |
 | --------------------------- | -------------------------- | ---- |
-| `bento.macsteve.lan`        | `bento-serving`            | 3000 |
 | `mlflow.macsteve.lan`       | `mlflow`                   | 5000 |
 | `prefect.macsteve.lan`      | `prefect-server`           | 4200 |
-| `registry.macsteve.lan`     | `tennis-ml-registry`       | 5000 |
 
 DNS/TLS for `*.macsteve.lan` itself is served by the host
 
-**Local MLflow is the registry of record.** Training runs against the local store. Deploy resolves `@champion`/`@best` from whatever `MLFLOW_TRACKING_URI` points at.
+**MLflow is the registry of record.** Training runs against the local store or k8s service. Deploy resolves `@champion`/`@best` from whatever `MLFLOW_TRACKING_URI` points at.

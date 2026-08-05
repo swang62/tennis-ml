@@ -29,9 +29,20 @@ web/             — React + TanStack dashboard (Vite, local dev, HMR)
 ## Quick Start
 
 ```bash
-# 1. Full local dev setup (deps + k3d cluster + DuckDB init + Seed data)
+# 1. Full local dev setup (deps + k3d cluster for Prefect/MLflow + DuckDB init + Seed data)
 just setup
+
+# 2. Start the Prefect worker (must run on the host, see below)
+just worker
 ```
+
+## Prefect worker
+
+Start the local worker from the repo root:
+
+```bash
+just worker
+``0
 
 ## Data Flow
 
@@ -93,7 +104,7 @@ Two BentoML endpoints exposed by `src/serving/service.py`:
 | `/predict`          | POST   | Stacked-ensemble prediction for one match                    |
 | `/predict_from_ids` | POST   | On-demand prediction from minimal inputs (two ids + surface) |
 
-The service runs on port 3000 inside the cluster.
+The service runs on port 3000 via Docker Compose (`just deploy-bento`), pulling an immutable image from Docker Hub.
 
 ### Input schema
 

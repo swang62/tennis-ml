@@ -5,6 +5,7 @@ __pycache__/
 .idea/
 .vscode/
 .codegraph/
+.jupyter/
 
 # Data
 **/data/processed/*
@@ -14,6 +15,7 @@ artifacts/*
 mlruns/
 mlartifacts/
 *.db
+tests/___db/
 *.log
 
 # Environment

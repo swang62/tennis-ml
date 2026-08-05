@@ -9,7 +9,7 @@ def test_ensure_kernel_registers_repo_local_kernelspec(monkeypatch, tmp_path):
     kernel_dir = tmp_path / "kernels"
     monkeypatch.setattr("src.utils.KERNEL_DIR", kernel_dir)
     monkeypatch.setenv("JUPYTER_PATH", "/existing/path")
-    monkeypatch.setenv("IMAGE_NAME", "test-image")
+    monkeypatch.setattr("src.utils.IMAGE_NAME", "test-image")
 
     name = ensure_kernel()
 
@@ -25,7 +25,7 @@ def test_ensure_kernel_sets_jupyter_path_when_unset(monkeypatch, tmp_path):
     kernel_dir = tmp_path / "kernels"
     monkeypatch.setattr("src.utils.KERNEL_DIR", kernel_dir)
     monkeypatch.delenv("JUPYTER_PATH", raising=False)
-    monkeypatch.setenv("IMAGE_NAME", "test-image")
+    monkeypatch.setattr("src.utils.IMAGE_NAME", "test-image")
 
     ensure_kernel()
 

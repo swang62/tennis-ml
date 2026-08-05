@@ -8,14 +8,6 @@ agents: 0
 
 network: tennis-ml-net
 
-registries:
-  create:
-    name: tennis-ml-registry
-    host: "0.0.0.0"
-    hostPort: "5000"
-    volumes:
-      - ./infra/k3d/registry-config.yml:/etc/docker/registry/config.yml
-
 ports:
   - port: 8080:80
     nodeFilters:

@@ -10,7 +10,7 @@ import os
 import sys
 from pathlib import Path
 
-from src.constants import ROOT, image_name, load_env
+from src.constants import IMAGE_NAME, ROOT, load_env
 
 # Sentinel kept for monkeypatch in tests; actual path computed in ensure_kernel().
 KERNEL_DIR: Path | None = None
@@ -25,7 +25,7 @@ def ensure_kernel() -> str:
     running this pipeline) executes deterministically on any machine.
     """
     global KERNEL_DIR
-    name = image_name()
+    name = IMAGE_NAME
     if not name:
         raise RuntimeError("IMAGE_NAME not set in env; call load_env() first")
     if KERNEL_DIR is None:
