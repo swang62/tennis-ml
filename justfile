@@ -9,9 +9,7 @@ create:
 setup-base: validate
     kubectl apply -f infra/manifests/default/
 
-# Start the host-local Prefect worker attached to the tennis-pool work pool.
-# The Prefect server runs in the cluster; the worker must run on the host so it
-# can reach local artifacts (DuckDB, models). Loads .env (PREFECT_API_URL).
+# The Prefect server runs in the cluster; the worker must run on the host
 worker:
     uv run python infra/prefect/worker.py
 
@@ -31,13 +29,11 @@ db-reset:
     rm -f data/tennis.duckdb
     just db-init
 
-# Local dev server for the React dashboard (web/) with HMR. Requires the
-# Bento API running locally on :3000 (see `just deploy-local`).
+# Local frontend dev server for the React dashboard
 dashboard-local:
     npm --prefix web run dev
 
-# Local dev server on :3000 — smoke-test /predict, /predict-from-ids, /health
-# without k3d. Requires trained artifacts in data/processed/ (run `just train`).
+# Local backend API server on :3000
 deploy-local:
     uv run bentoml serve src/serving/service.py:TennisPredictor --host 0.0.0.0 --port 3000
 
@@ -53,9 +49,10 @@ restart:
 train:
     uv run python src/flows/pipeline.py
 
-# Lint + format + typecheck (pre-commit covers ruff, kubeconform, basedpyright)
-test:
+lint:
     uv run pre-commit run --all-files
+
+test:
     uv run pytest
 
 validate:
