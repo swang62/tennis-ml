@@ -1,158 +1,227 @@
-from pathlib import Path
+"""Focused tests for the PostgreSQL operational client.
 
-import duckdb
+No live PostgreSQL server is required: `db_client._conn` is swapped for a
+fake connection that mimics the minimal psycopg surface the client uses
+(`cursor()`, `transaction()`, `execute`, `description`, `fetchall`). The fake
+records every statement it receives so tests can assert that `%s` placeholders
+are used, bound values travel as parameters (never interpolated), and
+pg_duckdb is forced only inside the explicit analytical path.
+"""
+
+from types import SimpleNamespace
+
+import pandas as pd
 import pytest
 
 import src.db.client as db_client
 
-CREATE_TABLE_SQL = "CREATE TABLE t (id INTEGER, name VARCHAR)"
-INSERT_SQL = "INSERT INTO t VALUES (1, 'Alice'), (2, 'O''Brien')"
+
+class FakeCursor:
+    def __init__(self, conn):
+        self.conn = conn
+        self.description = None
+        self._rows: list[tuple[object, ...]] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        return False
+
+    def execute(self, sql: str, params: object | None = None):
+        # Record (sql, params, in-transaction) so tests can assert placeholder
+        # use, parameter binding, and the transaction scope of SET LOCAL.
+        self.conn.statements.append((sql, params, self.conn.in_tx))
+        columns, rows = self.conn.results.get(sql, ([], []))
+        self.description = [SimpleNamespace(name=name) for name in columns]
+        self._rows = rows
+        return self
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return self._rows
 
 
-@pytest.fixture(scope="module")
-def _in_memory_db():
-    """Swap client._conn for an in-memory DuckDB; never touch the real DB file."""
-    conn = duckdb.connect(":memory:")
-    conn.execute(CREATE_TABLE_SQL)
-    conn.execute(INSERT_SQL)
-    db_client._conn = conn
-    yield
-    conn.close()
-    db_client._conn = None
+class FakeTransaction:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def __enter__(self):
+        self.conn.tx_entered += 1
+        self.conn.in_tx = True
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb):
+        self.conn.in_tx = False
+        return False
 
 
-def test_to_dataframe_returns_expected_columns_and_rows(_in_memory_db):
+class FakeConn:
+    def __init__(self):
+        self.results: dict[str, tuple[list[str], list[tuple[object, ...]]]] = {}
+        self.statements: list[tuple[str, object | None, bool]] = []
+        self.tx_entered = 0
+        self.in_tx = False
+        self.closed = False
+
+    def cursor(self, row_factory=None):
+        del row_factory  # fake accepts the psycopg signature but ignores it
+        return FakeCursor(self)
+
+    def transaction(self):
+        return FakeTransaction(self)
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def fake_conn(monkeypatch):
+    conn = FakeConn()
+    conn.results["SELECT id, name FROM t ORDER BY id"] = (
+        ["id", "name"],
+        [(1, "Alice"), (2, "O'Brien")],
+    )
+    monkeypatch.setattr(db_client, "_conn", conn)
+    return conn
+
+
+# --- DataFrame conversion shapes ---
+
+
+def test_to_dataframe_returns_expected_columns_and_rows(fake_conn):
     df = db_client.to_dataframe("SELECT id, name FROM t ORDER BY id")
 
     assert list(df.columns) == ["id", "name"]
     assert len(df) == 2
     assert df.iloc[0].to_dict() == {"id": 1, "name": "Alice"}
     assert df.iloc[1].to_dict() == {"id": 2, "name": "O'Brien"}
+    assert fake_conn.statements[0][0] == "SELECT id, name FROM t ORDER BY id"
 
 
-def test_execute_df_with_placeholder_params(_in_memory_db):
-    df = db_client.execute_df("SELECT name FROM t WHERE id = ?", [1])
-
-    assert list(df.columns) == ["name"]
-    assert df.to_dict(orient="records") == [{"name": "Alice"}]
-
-
-def test_execute_df_param_binding_handles_literal_quote(_in_memory_db):
-    # If params were interpolated into the SQL, the quote in O'Brien would break it.
-    df = db_client.execute_df("SELECT id FROM t WHERE name = ?", ["O'Brien"])
-
-    assert df.to_dict(orient="records") == [{"id": 2}]
-
-
-def test_execute_df_without_params(_in_memory_db):
+def test_execute_df_without_params(fake_conn):
     df = db_client.execute_df("SELECT id, name FROM t ORDER BY id")
 
     assert list(df.columns) == ["id", "name"]
     assert len(df) == 2
+    assert fake_conn.statements[0][1] is None
 
 
-def test_first_row_dict_returns_string_keys(_in_memory_db):
+def test_first_row_dict_returns_string_keys(fake_conn):
     df = db_client.execute_df("SELECT id, name FROM t ORDER BY id")
 
     row = db_client.first_row_dict(df)
 
     assert row == {"id": 1, "name": "Alice"}
     assert all(isinstance(key, str) for key in row)
+    assert fake_conn.statements[0][1] is None
 
 
-# --- Mode selection & production guardrails (no Docker/Quack needed) ---
+# --- %s placeholder binding (values never interpolated) ---
 
 
-def test_dev_mode_opens_local_embedded_db(monkeypatch, tmp_path):
-    """dev mode must open a local file-backed DuckDB, never contact Quack."""
-    monkeypatch.setattr(db_client.constants, "ENVIRONMENT", "dev")
-    db = tmp_path / "dev.duckdb"
-    monkeypatch.setattr(db_client.constants, "TENNIS_DB_PATH", str(db))
+def test_execute_df_uses_placeholder_and_binds_params(fake_conn):
+    sql = "SELECT id FROM t WHERE name = %s"
+    db_client.execute_df(sql, ["O'Brien"])
+
+    statement, params, _in_tx = fake_conn.statements[0]
+    assert statement == sql  # SQL text untouched: the quote never enters it
+    assert params == ["O'Brien"]  # value travels as a bound parameter
+
+
+def test_execute_df_with_tuple_params(fake_conn):
+    sql = "SELECT id FROM t WHERE name = %s AND id = %s"
+    db_client.execute_df(sql, ("O'Brien", 2))
+
+    statement, params, _in_tx = fake_conn.statements[0]
+    assert statement == sql
+    assert params == ("O'Brien", 2)
+
+
+# --- Connection lifecycle & configuration guardrails ---
+
+
+def test_get_conn_uses_shared_contract(monkeypatch):
+    monkeypatch.setattr(db_client.constants, "DATABASE_URL", None)
+    monkeypatch.setattr(db_client.constants, "POSTGRES_PASSWORD", "secret")
+    monkeypatch.setattr(db_client.constants, "POSTGRES_USER", "postgres")
+    monkeypatch.setattr(db_client.constants, "POSTGRES_DB", "tennis")
+    monkeypatch.setattr(db_client.constants, "POSTGRES_HOST", "127.0.0.1")
+    monkeypatch.setattr(db_client.constants, "POSTGRES_PORT", "6543")
     monkeypatch.setattr(db_client, "_conn", None)
 
-    conn = db_client._connect_dev()
+    fake = FakeConn()
+    monkeypatch.setattr(db_client.psycopg, "connect", lambda _url, **_kwargs: fake)
+    conn = db_client.get_conn()
 
-    assert Path(db).exists()
-    conn.close()
+    assert conn is fake
 
 
-def test_invalid_environment_fails_fast(monkeypatch):
-    """An unknown ENVIRONMENT (or a None connection) must raise, never fall back."""
-    monkeypatch.setattr(db_client.constants, "ENVIRONMENT", "staging")
+def test_missing_config_fails_before_any_fallback(monkeypatch):
+    monkeypatch.setattr(db_client.constants, "DATABASE_URL", None)
+    monkeypatch.setattr(db_client.constants, "POSTGRES_PASSWORD", None)
     monkeypatch.setattr(db_client, "_conn", None)
 
-    import pytest
-
-    with pytest.raises(RuntimeError, match="invalid ENVIRONMENT"):
+    with pytest.raises(RuntimeError, match="missing PostgreSQL configuration"):
         db_client.get_conn()
 
 
-def test_production_missing_config_fails_fast(monkeypatch):
-    """ENVIRONMENT=production without QUACK_URI/QUACK_TOKEN must raise."""
-    monkeypatch.setattr(db_client.constants, "ENVIRONMENT", "production")
-    monkeypatch.setattr(db_client.constants, "QUACK_URI", None)
-    monkeypatch.setattr(db_client.constants, "QUACK_TOKEN", None)
-    monkeypatch.setattr(db_client, "_conn", None)
+def test_close_resets_connection(monkeypatch):
+    conn = FakeConn()
+    monkeypatch.setattr(db_client, "_conn", conn)
 
-    import pytest
+    db_client.close()
 
-    with pytest.raises(RuntimeError, match="QUACK_URI and QUACK_TOKEN"):
-        db_client._connect_production()
+    assert conn.closed
+    assert db_client._conn is None
 
 
-def test_production_configures_attach_and_default_catalog(monkeypatch):
-    """Production must ATTACH the remote with the token and USE it as default."""
-    monkeypatch.setattr(db_client.constants, "ENVIRONMENT", "production")
-    monkeypatch.setattr(db_client.constants, "QUACK_URI", "quack:quack-db:9494")
-    monkeypatch.setattr(db_client.constants, "QUACK_TOKEN", "secret-token")
-    monkeypatch.setattr(db_client.constants, "QUACK_CATALOG", "tennis")
-    monkeypatch.setattr(db_client, "_conn", None)
-
-    calls = []
-
-    class FakeConn:
-        def execute(self, sql, params=None):
-            calls.append((sql, params))
-            return self
-
-        def sql(self, _sql):
-            return self
-
-        def fetchdf(self):
-            import pandas as pd
-
-            return pd.DataFrame()
-
-    monkeypatch.setattr(duckdb, "connect", lambda _path: FakeConn())
-
-    conn = db_client._connect_production()
-
-    attach_sql = next(s for s, _ in calls if s.startswith("ATTACH"))
-    assert "quack:quack-db:9494" in attach_sql
-    # The token must travel as a bound parameter, never interpolated into SQL.
-    assert "secret-token" not in attach_sql
-    attach_params = next(p for s, p in calls if s.startswith("ATTACH"))
-    assert attach_params == ["secret-token"]
-    assert any(s == "USE tennis" for s, _ in calls)
-    assert isinstance(conn, FakeConn)
+# --- Analytical path: pg_duckdb forced only inside a transaction ---
 
 
-# --- No-package production DB boundary ---
+def test_analytical_df_forces_pg_duckdb_inside_transaction(monkeypatch):
+    conn = FakeConn()
+    conn.results["SELECT count(*) FROM gold.match_features"] = (["cnt"], [(42,)])
+    monkeypatch.setattr(db_client, "_conn", conn)
+
+    df = db_client.analytical_df("SELECT count(*) FROM gold.match_features")
+
+    assert df.iloc[0, 0] == 42
+    assert conn.tx_entered == 1
+    set_local, _params, in_tx = conn.statements[0]
+    assert set_local == "SET LOCAL duckdb.force_execution = true"
+    assert in_tx is True  # SET LOCAL is transaction-scoped
+    numeric_set_local, _params, in_tx = conn.statements[1]
+    assert numeric_set_local == "SET LOCAL duckdb.convert_unsupported_numeric_to_double = true"
+    assert in_tx is True
+    query, _params, _in_tx = conn.statements[2]
+    assert query == "SELECT count(*) FROM gold.match_features"
 
 
-def test_bentofile_does_not_package_production_db():
-    """The DB must not be baked into the Bento image."""
-    import yaml
+def test_analytical_df_binds_params_inside_transaction(monkeypatch):
+    conn = FakeConn()
+    conn.results["SELECT surface FROM gold.match_features WHERE match_date > %s"] = (
+        ["surface"],
+        [("clay",)],
+    )
+    monkeypatch.setattr(db_client, "_conn", conn)
 
-    from src.constants import ROOT
+    df = db_client.analytical_df(
+        "SELECT surface FROM gold.match_features WHERE match_date > %s",
+        ["2026-01-01"],
+    )
 
-    config = yaml.safe_load((ROOT / "bentofile.yaml").read_text())
-    assert "data/tennis.duckdb" not in config["include"]
+    assert df.iloc[0, 0] == "clay"
+    _set_local, _params, _in_tx = conn.statements[0]
+    _numeric_set_local, _params, _in_tx = conn.statements[1]
+    query, params, in_tx = conn.statements[2]
+    assert query == "SELECT surface FROM gold.match_features WHERE match_date > %s"
+    assert params == ["2026-01-01"]
+    assert in_tx is True
 
 
-def test_deploy_aux_files_do_not_include_production_db():
-    """deploy.py must not fingerprint/package the production DB."""
-    from src.flows import deploy
+def test_normal_reads_never_force_pg_duckdb(fake_conn):
+    db_client.execute_df("SELECT id, name FROM t ORDER BY id")
+    db_client.to_dataframe("SELECT id, name FROM t ORDER BY id")
 
-    assert not any("tennis.duckdb" in str(p) for p in deploy.AUX_FILES)
-    assert not any("tennis.duckdb" in str(p) for p in deploy.FINGERPRINT_FILES)
+    assert fake_conn.tx_entered == 0
+    assert not any("force_execution" in sql for sql, _p, _t in fake_conn.statements)

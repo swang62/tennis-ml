@@ -1,20 +1,18 @@
-# dbt connects to the same DuckDB the pipeline uses. The active target is
-# selected by the same explicit ENVIRONMENT switch as src.db.client:
-#   dev  -> local embedded data/tennis.duckdb (default)
-#   production -> the production DuckDB path
-# dbt-duckdb offers no native Quack transport, so in production mode dbt still
-# targets the embedded file (an offline ETL concern); runtime serving reads the
-# same database through the Quack companion container instead.
+# dbt runs against the same PostgreSQL the pipeline uses (the pinned
+# pgduckdb Compose service on 127.0.0.1:6543). Credentials come from the
+# shared POSTGRES_* contract in .env; POSTGRES_PASSWORD is a required runtime
+# secret (never defaulted, never committed). The profile itself contains no
+# secrets. dbt does not load .env itself, so export it first (`just db-dbt`
+# sources .env before invoking dbt; `just db-etl` inherits it via load_env).
 tennis_ml:
-  target: "{{ env_var('ENVIRONMENT', 'dev') }}"
+  target: dev
   outputs:
     dev:
-      type: duckdb
-      path: data/tennis.duckdb
-      schema: gold
-      threads: 1
-    production:
-      type: duckdb
-      path: data/tennis.duckdb
+      type: postgres
+      host: "{{ env_var('POSTGRES_HOST', '127.0.0.1') }}"
+      port: "{{ env_var('POSTGRES_PORT', '6543') | as_number }}"
+      user: "{{ env_var('POSTGRES_USER', 'postgres') }}"
+      password: "{{ env_var('POSTGRES_PASSWORD') }}"
+      dbname: "{{ env_var('POSTGRES_DB', 'tennis') }}"
       schema: gold
       threads: 1

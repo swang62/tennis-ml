@@ -143,10 +143,16 @@ def empty_pool(monkeypatch):
     Patching only `execute_df` is not enough: `first_row_dict` indexes
     `df.iloc[0]` (raises on an empty frame) and the *_COUNTS_SQL result dicts
     are subscripted directly. Patch both so every aggregate falls back to its
-    constant and the counts read as 0.
+    constant and the counts read as 0. The pool aggregates run through
+    `analytical_df` (pg_duckdb analytical path), so that import must be
+    patched too.
     """
     monkeypatch.setattr(
         "src.features.inference.execute_df",
+        lambda _sql, _params=None: pd.DataFrame(),
+    )
+    monkeypatch.setattr(
+        "src.features.inference.analytical_df",
         lambda _sql, _params=None: pd.DataFrame(),
     )
     monkeypatch.setattr(

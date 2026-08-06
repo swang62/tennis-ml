@@ -76,7 +76,7 @@ _REQUIRED_STRING_COLUMNS: tuple[str, ...] = (
     "winner_id",
 )
 
-# ── Rolling features computed in SQL (gold.rolling_features, post-match) ──
+# ── Rolling features computed in SQL (silver.rolling_features, post-match) ──
 #
 # Task 6 reductions: only the retained `_10`-window values the final match
 # contract and inference need. Every `_5`/`_20` output, the separate win/loss
@@ -85,7 +85,7 @@ _REQUIRED_STRING_COLUMNS: tuple[str, ...] = (
 # Raw serve/break counts stay in silver.player_matches because the retained
 # rolling rates are computed from them.
 
-GOLD_ROLLING_COLS: list[str] = [
+SILVER_ROLLING_COLS: list[str] = [
     "weighted_form_10",
     "win_rate_10",
     "ace_rate_10",
@@ -106,7 +106,7 @@ GOLD_ROLLING_COLS: list[str] = [
 # Current-match per-side serve/break analysis rates are REMOVED from the gold
 # contract (Task 6). Where the dashboard/analysis needs them, they derive on
 # demand from bronze raw counts with the existing NULLIF zero-denominator
-# behavior. The rolling versions in GOLD_ROLLING_COLS are the model features —
+# behavior. The rolling versions in SILVER_ROLLING_COLS are the model features —
 # a current match's own stats have no as-of-date inference source, so they are
 # never in FEATURE_COLS.
 MATCH_STATS_COLS: list[str] = []

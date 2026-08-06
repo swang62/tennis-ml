@@ -16,20 +16,39 @@ load_env()
 
 # --- Environment Variables -----
 IMAGE_NAME = os.getenv("IMAGE_NAME")
-TENNIS_DB_PATH = os.getenv("TENNIS_DB_PATH")
 
-# --- Serving mode: dev (embedded DuckDB) vs production (Quack remote) -----
-# `dev` (default) opens the local embedded DB at TENNIS_DB_PATH (or
-# data/tennis.duckdb). `production` attaches a remote Quack server as the
-# default catalog so existing schema-qualified SQL reaches the served DB.
-# Any other value is treated as a configuration error (`src.db.client` fails
-# fast rather than silently falling back).
-ENVIRONMENT = os.getenv("ENVIRONMENT", "dev")
+# --- PostgreSQL connection contract (single shared credential source) ---
+# PostgreSQL runs as the pinned pgduckdb Compose service (host port 6543).
+# Host commands and containers derive the same DATABASE_URL from these
+# components; only POSTGRES_HOST/POSTGRES_PORT differ between endpoints — host
+# commands use 127.0.0.1:6543 while the Bento container on the Compose network
+# uses the service DNS postgres:5432. POSTGRES_PASSWORD is a required runtime
+# secret (never defaulted, never printed); DATABASE_URL, when provided,
+# overrides the components entirely.
+POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres")
+POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
+POSTGRES_DB = os.getenv("POSTGRES_DB", "tennis")
+POSTGRES_HOST = os.getenv("POSTGRES_HOST", "127.0.0.1")
+POSTGRES_PORT = os.getenv("POSTGRES_PORT", "6543")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Quack remote config, only read when ENVIRONMENT == "production".
-QUACK_URI = os.getenv("QUACK_URI")
-QUACK_TOKEN = os.getenv("QUACK_TOKEN")
-QUACK_CATALOG = os.getenv("QUACK_CATALOG", "tennis")
+
+def build_database_url(host: str | None = None) -> str:
+    """Return the PostgreSQL connection URL for the shared component contract.
+
+    An explicit DATABASE_URL wins over the components. Otherwise the effective
+    host is the explicit ``host`` argument (used by the Bento container's
+    postgres:5432), else POSTGRES_HOST; user, password, database, and port are
+    identical for every endpoint, so only the host/port varies.
+    """
+    if DATABASE_URL:
+        return DATABASE_URL
+    effective_host = host or POSTGRES_HOST or "127.0.0.1"
+    return (
+        f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}"
+        f"@{effective_host}:{POSTGRES_PORT}/{POSTGRES_DB}"
+    )
+
 
 # --- Core directories ---
 NOTEBOOKS = ROOT / "notebooks"
@@ -46,6 +65,6 @@ PRODUCTION_MODEL = "ensemble_lr_model"
 # --- Table names ---
 BRONZE_TABLE = "bronze.match_events"
 SILVER_PLAYER_MATCHES = "silver.player_matches"
-GOLD_ROLLING_FEATURES = "gold.rolling_features"
+SILVER_ROLLING_FEATURES = "silver.rolling_features"
 GOLD_TABLE = "gold.match_features"
 PROFILES_TABLE = "gold.player_profiles"

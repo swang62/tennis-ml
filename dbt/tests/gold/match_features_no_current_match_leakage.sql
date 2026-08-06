@@ -128,12 +128,12 @@ comparisons AS (
     UNION ALL
     SELECT match_id, 'player_days_since_last_match' AS feature,
            player_days_since_last_match AS mf_val,
-           CAST(COALESCE(DATEDIFF('day', player_prior_snapshot_date, match_date), 365) AS INTEGER) AS prior_val
+           CAST(COALESCE(match_date - player_prior_snapshot_date, 365) AS INTEGER) AS prior_val
     FROM prior_snapshot
     UNION ALL
     SELECT match_id, 'opponent_days_since_last_match' AS feature,
            opponent_days_since_last_match AS mf_val,
-           CAST(COALESCE(DATEDIFF('day', opponent_prior_snapshot_date, match_date), 365) AS INTEGER) AS prior_val
+           CAST(COALESCE(match_date - opponent_prior_snapshot_date, 365) AS INTEGER) AS prior_val
     FROM prior_snapshot
     UNION ALL
     SELECT match_id, 'player_matches_30d' AS feature,

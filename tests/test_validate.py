@@ -65,7 +65,7 @@ def test_validate_bronze_row_flags_row_level_semantic_errors():
 
     issues = validate_bronze_row(row)
 
-    assert "player1_break_points_saved outside UTINYINT 0..255: -9" in issues
+    assert "player1_break_points_saved outside SMALLINT 0..255: -9" in issues
     assert "player2_first_serves_made exceeds player2_total_serve_points" in issues
     assert "player1_rank_points outside INTEGER 0..20000: 20001" in issues
     assert "player2_age outside 0..100: 100.5" in issues
@@ -101,7 +101,7 @@ def test_run_ingestion_checks_drops_invalid_rows_and_keeps_valid_rows():
     assert result["valid_rows"] == 1
     assert result["dropped_rows"] == 1
     assert any(
-        "player1_break_points_saved outside UTINYINT 0..255: -9" in issue
+        "player1_break_points_saved outside SMALLINT 0..255: -9" in issue
         for issue in result["results"]
     )
     assert cast(pd.DataFrame, result["valid_df"]).to_dict(orient="records") == [valid]

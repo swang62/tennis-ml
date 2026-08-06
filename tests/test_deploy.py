@@ -113,7 +113,7 @@ def test_deploy_bento_pushes_only_latest_and_composes_up(monkeypatch, tmp_path):
     monkeypatch.setattr(d, "_docker_login", lambda: None)
     monkeypatch.setattr(d, "_read_state", lambda: {})
     monkeypatch.setattr(d, "_write_state", lambda _s: None)
-    monkeypatch.setenv("QUACK_TOKEN", "super-secret-deploy-token")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "super-secret-deploy-pass")
     _stub_subprocess(monkeypatch)
 
     calls = []
@@ -153,7 +153,7 @@ def test_deploy_bento_force_builds_web_no_cache(monkeypatch, tmp_path):
     monkeypatch.setattr(d, "_docker_login", lambda: None)
     monkeypatch.setattr(d, "_read_state", lambda: {})
     monkeypatch.setattr(d, "_write_state", lambda _s: None)
-    monkeypatch.setenv("QUACK_TOKEN", "super-secret-deploy-token")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "super-secret-deploy-pass")
     _stub_subprocess(monkeypatch)
 
     calls = []
@@ -173,9 +173,9 @@ def test_deploy_bento_force_builds_web_no_cache(monkeypatch, tmp_path):
     assert build_cmd[build_cmd.index("build") + 1] == "--no-cache"
 
 
-def test_deploy_bento_requires_quack_token(monkeypatch, tmp_path):
-    """Production deploy must fail fast when QUACK_TOKEN is unset — never
-    boot Compose without the Quack secret."""
+def test_deploy_bento_requires_postgres_password(monkeypatch, tmp_path):
+    """Production deploy must fail fast when POSTGRES_PASSWORD is unset — never
+    boot Compose without the PostgreSQL secret."""
     import pytest
 
     d = _deploy()
@@ -186,10 +186,10 @@ def test_deploy_bento_requires_quack_token(monkeypatch, tmp_path):
     monkeypatch.setattr(d, "_docker_login", lambda: None)
     monkeypatch.setattr(d, "_read_state", lambda: {})
     monkeypatch.setattr(d, "_write_state", lambda _s: None)
-    monkeypatch.delenv("QUACK_TOKEN", raising=False)
+    monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
     _stub_subprocess(monkeypatch)
 
-    with pytest.raises(RuntimeError, match="QUACK_TOKEN is required"):
+    with pytest.raises(RuntimeError, match="POSTGRES_PASSWORD is required"):
         d.deploy_bento(force=False)
 
 
@@ -286,3 +286,173 @@ def test_deploy_flow_forwards_force(monkeypatch):
     assert seen["force"] is True
     d.deploy_flow(force=False)
     assert seen["force"] is False
+
+
+# --- Task 1: host-managed PostgreSQL + shared connection contract ---
+
+
+def _compose():
+    import yaml
+
+    return yaml.safe_load(_deploy().COMPOSE_FILE.read_text())
+
+
+def test_compose_image_has_safe_default_when_docker_image_unset():
+    """Manual `docker compose config` with DOCKER_IMAGE unset must not render the
+    invalid `:latest` image. The interpolation falls back to DOCKER_REPO/IMAGE_NAME
+    — the same derivation deploy.py uses — and an explicit DOCKER_IMAGE still wins
+    (deploy.py's override)."""
+    import os
+    import subprocess
+
+    import pytest
+
+    image = _compose()["services"]["bento"]["image"]
+    # Offline: the interpolation must carry a DOCKER_IMAGE fallback that derives
+    # from DOCKER_REPO/IMAGE_NAME, not a bare ${DOCKER_IMAGE}.
+    assert "${DOCKER_IMAGE:-" in image
+    assert "${DOCKER_REPO" in image
+    assert "${IMAGE_NAME" in image
+
+    # Real check through the compose CLI when available (config needs no daemon).
+    if subprocess.run(["docker", "compose", "version"], capture_output=True).returncode != 0:
+        pytest.skip("docker compose CLI not available")
+
+    d = _deploy()
+    base_env = {
+        **os.environ,
+        "DOCKER_REPO": "acme",
+        "IMAGE_NAME": "tennis-ml",
+        "POSTGRES_PASSWORD": "test-only",
+    }
+    base_env.pop("DOCKER_IMAGE", None)
+
+    def rendered_image(env):
+        proc = subprocess.run(
+            ["docker", "compose", "-f", str(d.COMPOSE_FILE), "config"],
+            cwd=d.ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        for line in proc.stdout.splitlines():
+            if line.strip().startswith("image:"):
+                return line.strip().split("image:", 1)[1].strip()
+        raise AssertionError("no image line in compose config output")
+
+    assert rendered_image(base_env) == "acme/tennis-ml:latest"
+    assert rendered_image({**base_env, "DOCKER_IMAGE": "acme/other"}) == "acme/other:latest"
+
+
+def test_compose_has_pinned_postgres_service():
+    """PostgreSQL runs as a Compose service on the pinned pgduckdb image:
+    host port 6543 -> container 5432, named volume, init.sql under
+    /docker-entrypoint-initdb.d/, and a real healthcheck."""
+    cfg = _compose()
+    assert "postgres" in cfg["services"]
+    svc = cfg["services"]["postgres"]
+    assert svc["image"] == "pgduckdb/pgduckdb:17-v1.1.1"
+    assert "6543:5432" in svc["ports"]
+    assert "healthcheck" in svc
+    assert "postgres-data" in cfg.get("volumes", {})
+    assert any("/var/lib/postgresql/data" in v for v in svc["volumes"])
+    assert any(
+        "infra/postgres/init.sql" in v and "docker-entrypoint-initdb.d/init.sql" in v
+        for v in svc["volumes"]
+    )
+
+
+def test_compose_postgres_requires_shared_secret():
+    """The postgres service authenticates with the same operator credential the
+    host commands use; the secret is never defaulted."""
+    env = _compose()["services"]["postgres"]["environment"]
+    assert env["POSTGRES_USER"] == "${POSTGRES_USER:-postgres}"
+    assert env["POSTGRES_DB"] == "${POSTGRES_DB:-tennis}"
+    assert env["POSTGRES_PASSWORD"] == "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
+
+
+def test_compose_bento_reaches_postgres_via_compose_dns():
+    """The Bento reaches the pgduckdb Compose service over DNS (postgres:5432),
+    not a host gateway, and shares the operator credential."""
+    bento_env = _compose()["services"]["bento"]["environment"]
+    assert bento_env["POSTGRES_HOST"] == "postgres"
+    assert bento_env["POSTGRES_PORT"] == "5432"
+    assert bento_env["POSTGRES_USER"] == "${POSTGRES_USER:-postgres}"
+    assert bento_env["POSTGRES_DB"] == "${POSTGRES_DB:-tennis}"
+    assert bento_env["POSTGRES_PASSWORD"] == "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
+
+
+def test_compose_bento_depends_on_postgres_healthy():
+    """Bento starts only after the pgduckdb service is healthy."""
+    deps = _compose()["services"]["bento"]["depends_on"]
+    assert deps["postgres"]["condition"] == "service_healthy"
+
+
+def test_compose_bento_readiness_runs_authenticated_postgres_query():
+    """Bento readiness must execute a REAL authenticated PostgreSQL query, not a
+    process-liveness HTTP probe: it connects over Compose DNS (postgres:5432),
+    authenticates with the shared POSTGRES_PASSWORD, and runs SELECT 1."""
+    cfg = _compose()
+    assert "healthcheck" in cfg["services"]["bento"]
+    test = cfg["services"]["bento"]["healthcheck"]["test"]
+    assert test[0] == "CMD-SHELL"
+    cmd = test[-1]
+    assert "psycopg" in cmd  # the driver is in the serving image
+    assert "connect(" in cmd
+    assert "postgres" in cmd  # Compose service DNS, not a host gateway
+    assert "5432" in cmd  # the container-side PostgreSQL port
+    assert "POSTGRES_PASSWORD" in cmd  # real credential, never a liveness-only probe
+    assert "SELECT 1" in cmd  # executes an actual query, not a bare URL read
+
+
+def test_web_image_uses_exactly_one_nginx_worker():
+    """The web image must pin nginx to one worker in the MAIN config, not in the
+    server-only conf.d file: nginx:alpine's `worker_processes auto` would start
+    one worker per visible CPU (10 on this host) for a static SPA that needs
+    one. worker_processes is main-context, so it can never live in
+    web/nginx.conf (conf.d/default.conf, http context) — this test locks both
+    the pin and the placement."""
+    root = _deploy().ROOT
+    dockerfile = (root / "web" / "Dockerfile").read_text()
+    nginx_conf = (root / "web" / "nginx.conf").read_text()
+
+    # The Dockerfile patches the distro main config to exactly one worker and
+    # fails the build loudly if the upstream line changes shape.
+    assert "worker_processes" in dockerfile
+    assert "worker_processes  1;" in dockerfile
+    assert "sed -i" in dockerfile
+    assert "/etc/nginx/nginx.conf" in dockerfile
+    # The server-only conf.d file must stay free of main-context directives.
+    assert "worker_processes" not in nginx_conf
+
+
+def test_build_database_url_host_and_container_share_credential(monkeypatch):
+    """Host (127.0.0.1:6543) and Bento-network (postgres:5432) endpoints
+    authenticate with the same secret; only host/port differ."""
+    import src.constants as c
+
+    monkeypatch.setattr(c, "DATABASE_URL", None)
+    monkeypatch.setattr(c, "POSTGRES_USER", "tennis")
+    monkeypatch.setattr(c, "POSTGRES_PASSWORD", "s3cret")
+    monkeypatch.setattr(c, "POSTGRES_DB", "tennis")
+    monkeypatch.setattr(c, "POSTGRES_HOST", "127.0.0.1")
+    monkeypatch.setattr(c, "POSTGRES_PORT", "6543")
+
+    assert c.build_database_url() == "postgresql://tennis:s3cret@127.0.0.1:6543/tennis"
+    # Inside the Bento container we override POSTGRES_HOST/POSTGRES_PORT.
+    monkeypatch.setattr(c, "POSTGRES_PORT", "5432")
+    assert c.build_database_url(host="postgres") == (
+        "postgresql://tennis:s3cret@postgres:5432/tennis"
+    )
+
+
+def test_build_database_url_explicit_url_overrides_components(monkeypatch):
+    import src.constants as c
+
+    monkeypatch.setattr(c, "DATABASE_URL", "postgresql://u:p@db:5432/tennis?sslmode=disable")
+    monkeypatch.setattr(c, "POSTGRES_HOST", "127.0.0.1")
+    assert c.build_database_url() == "postgresql://u:p@db:5432/tennis?sslmode=disable"
+    assert (
+        c.build_database_url(host="anything") == "postgresql://u:p@db:5432/tennis?sslmode=disable"
+    )

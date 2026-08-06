@@ -1,7 +1,7 @@
 """Prefect flow: Bronze → Gold ETL.
 
 Runs `dbt build` which builds the medallion layers in dependency order:
-silver.player_matches (player-perspective rows) -> gold.rolling_features
+silver.player_matches (player-perspective rows) -> silver.rolling_features
 (post-match snapshots) -> gold.match_features (canonical one-row-per-match
 training table). Also enriches player bios (first `Playing style` paragraph,
 lead fallback) once the gold layer exists.
@@ -31,7 +31,7 @@ def run_dbt_build(
 
     `profiles_dir` overrides the profiles directory (the repo default `dbt/`).
     Tests pass a temp dir containing a profiles.yml that points dbt at a
-    throwaway DuckDB. When `log_file` is given, dbt's output is teed to it
+    throwaway PostgreSQL. When `log_file` is given, dbt's output is teed to it
     while still streaming to the console.
     """
     cmd = DBT_BUILD_CMD
@@ -69,9 +69,10 @@ def _etl_log_file() -> Path:
 @task(retries=2, retry_delay_seconds=30)
 def bronze_to_gold() -> int:
     run_dbt_build(log_file=_etl_log_file())
-    conn = get_conn()
-    row = conn.sql(f"SELECT COUNT(*) FROM {GOLD_TABLE}").fetchone()
-    row_count = int(row[0]) if row is not None else 0
+    with get_conn().cursor() as cur:
+        cur.execute(f"SELECT COUNT(*) FROM {GOLD_TABLE}")
+        count_row = cur.fetchone()
+        row_count = int(count_row[0]) if count_row is not None else 0
     print(f"Gold: {row_count} rows")
     return row_count
 

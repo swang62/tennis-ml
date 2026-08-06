@@ -39,7 +39,7 @@ load_env()
 
 assert IMAGE_NAME is not None, "IMAGE_NAME not set in env; load_env() must be called first"
 # Docker Hub repo: DOCKER_REPO/IMAGE_NAME. Only the moving `latest` tag is
-# pushed; Compose pulls `${DOCKER_IMAGE}:latest`.
+# pushed; Compose pulls `${DOCKER_IMAGE:-${DOCKER_REPO}/${IMAGE_NAME}}:latest`.
 DOCKER_REPO = os.getenv("DOCKER_REPO", "swang62")
 COMPOSE_FILE = ROOT / "compose.yaml"
 
@@ -51,9 +51,9 @@ COMPOSE_FILE = ROOT / "compose.yaml"
 BASE_BENTO_NAMES = {"linear": "linear_best", "gbdt": "gbdt_best", "nn": "nn_best"}
 
 # Serving artifacts packaged into the Bento (written by pipeline notebooks or
-# materialized by this flow); content changes trigger a rebuild. The production
-# DuckDB is NOT packaged here — it is served by the Quack companion container
-# and mounted at /data in Compose, independent of the Bento.
+# materialized by this flow); content changes trigger a rebuild. The database
+# is NOT packaged here — production serving reads PostgreSQL live through
+# psycopg; training data never enters the image.
 NN_ONNX_FILE = DATA_PROCESSED / "nn_best.onnx"
 AUX_FILES = [
     DATA_PROCESSED / "linear_scaler.pkl",
@@ -272,8 +272,8 @@ def _state_fingerprint(production_version: int) -> str:
     pulled in fresh on the rebuild. The constant base-model alias strings are
     deliberately NOT in the fingerprint: a `@best` repoint without a champion
     promotion doesn't affect the deployed ensemble, so it must not trigger a
-    rebuild. File hashes of the baked-in artifacts (ONNX, scaler, DuckDB) cover
-    the rest.
+    rebuild. File hashes of the baked-in artifacts (ONNX, scaler, embeddings)
+    cover the rest.
     """
     parts = [f"ensemble_lr_model@champion=v{production_version}"]
     parts.extend(f"{path.relative_to(ROOT)}:{_file_hash(path)}" for path in FINGERPRINT_FILES)
@@ -432,22 +432,23 @@ def deploy_bento(force: bool = False) -> None:
     """Build locally, then push to Docker Hub and boot via Docker Compose.
 
     Builds the Bento into the local Docker engine, tags it as the Docker Hub
-    `latest` image, pushes it, then runs
-    `docker compose -f compose.production.yaml up -d --pull always` so the
-    service pulls the `latest` image down. Docker Hub authentication: if
-    DOCKER_TOKEN is set, log in via `docker login --password-stdin` (token
-    never touches argv/logs) using DOCKER_USERNAME or the DOCKER_REPO owner;
-    otherwise rely on an already-authenticated Docker CLI. force=True rebuilds
-    the Bento and image even when cached.
+    `latest` image, pushes it, builds the webapp image, then runs
+    `docker compose -f compose.yaml up -d --pull always` so the stack boots
+    with the freshly pushed image. Docker Hub authentication: if DOCKER_TOKEN
+    is set, log in via `docker login --password-stdin` (token never touches
+    argv/logs) using DOCKER_USERNAME or the DOCKER_REPO owner; otherwise rely
+    on an already-authenticated Docker CLI. force=True rebuilds the Bento and
+    image and the webapp image (no build cache) even when cached.
     """
     local_image, production_version = build_bento_image(force=force)
 
-    # The Quack token flows through to Compose (quack-db + bento) so the served
-    # DB and the Bento share the same runtime secret. Fail fast before any
-    # Docker work; the token travels via environment, never in logs or argv.
-    if not os.getenv("QUACK_TOKEN"):
+    # The shared PostgreSQL credential flows through to Compose (postgres +
+    # bento) so the served DB and the Bento authenticate with the same
+    # operator secret. Fail fast before any Docker work; the password travels
+    # via the environment only, never in logs or argv.
+    if not os.getenv("POSTGRES_PASSWORD"):
         raise RuntimeError(
-            "QUACK_TOKEN is required for production deploy; "
+            "POSTGRES_PASSWORD is required for production deploy; "
             "set it in the environment before running deploy"
         )
 
@@ -492,12 +493,12 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Build and deploy the production Bento serving image."
+        description="Build and push the production Bento serving image."
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Force rebuild + redeploy of the latest ensemble_lr_model, bypassing the Bento/image cache.",
+        help="Force rebuild + redeploy of the latest ensemble_lr_model, bypassing the Bento pinned cache.",
     )
     args = parser.parse_args()
     deploy_flow(force=args.force)

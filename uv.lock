@@ -736,27 +736,28 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/54/bc/d37f24f564cb32b3c13e470e5dfd8555b71c202580f701580ebd7e9cd10d/dbt_core_experimental_parser-2.0.0a5.tar.gz", hash = "sha256:1bba1807c697113a6a63a92bec3a89568c65d7168c7d17413591cbfa7d5c5375", size = 4474, upload-time = "2026-07-20T10:04:24.495Z" }
 
 [[package]]
-name = "dbt-duckdb"
-version = "1.10.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "dbt-adapters" },
-    { name = "dbt-common" },
-    { name = "dbt-core" },
-    { name = "duckdb" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/c5/d3/0f9f6a4de94e0f95dcfabbba5e8ef7670de695483345edd9e5b36e93d024/dbt_duckdb-1.10.1.tar.gz", hash = "sha256:5d6df1589d4ba21fe20ac08454a32763d3263798c9f5914280eabd1dc285cbc0", size = 145907, upload-time = "2026-02-17T17:29:04.283Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/c5/26/0ce2b1aeecdd1a18a9fac6f02d08f60c95944f036866f3fe37146298d4e4/dbt_duckdb-1.10.1-py3-none-any.whl", hash = "sha256:90658ecb367082786c5ea2ffbf9e35bb4116fa5ad1bc2f287c4dc1f3984bafa1", size = 85089, upload-time = "2026-02-17T17:29:03.117Z" },
-]
-
-[[package]]
 name = "dbt-extractor"
 version = "0.6.0"
 source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f1/06/1f7b5d277af4bd7c3ab5065f79407c46a73950f0879fac69e51067c87649/dbt_extractor-0.6.0.tar.gz", hash = "sha256:d6cf08ec793b8bc2bd6e260ef818230ae68a4f71436fa489f08d7db1a52e2ffe", size = 270461, upload-time = "2025-04-07T16:46:30.532Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9f/dd/ec8f9e48e7dd5a52a69cca7907681d1779cf1cc8b02f2aa2acb6a2bf8bb4/dbt_extractor-0.6.0-cp39-abi3-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl", hash = "sha256:4b6b1e70dde78cb904ca7a8958c2c803e77779b6ce108f4ea7ac479f5700db89", size = 790206, upload-time = "2025-04-07T16:46:05.352Z" },
+]
+
+[[package]]
+name = "dbt-postgres"
+version = "1.11.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "agate" },
+    { name = "dbt-adapters" },
+    { name = "dbt-common" },
+    { name = "dbt-core" },
+    { name = "psycopg2-binary" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2f/54/0af71f917d47a03f244aad15510e5df7853676e88c82be5c6afcef5464be/dbt_postgres-1.11.0.tar.gz", hash = "sha256:0a8558e03776231969a9614075eb31eb7daca03bcee1db7bc36f85f027826965", size = 162279, upload-time = "2026-07-16T15:52:36.762Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ba/61/e92738b7bdc6e36de7f2450ded77b221fd2768f85a345e93ff412ac95c7c/dbt_postgres-1.11.0-py3-none-any.whl", hash = "sha256:b88f994dc2f00150579d62f8ff91af715428a3cfe064e067945359ca4509872c", size = 36790, upload-time = "2026-07-16T15:52:35.34Z" },
 ]
 
 [[package]]
@@ -2850,6 +2851,40 @@ wheels = [
 ]
 
 [[package]]
+name = "psycopg"
+version = "3.3.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/db/2f/cb91e5502ec9de1de6f1b76cfbf69531932725361168bb06963620c77e2e/psycopg-3.3.4.tar.gz", hash = "sha256:e21207764952cff81b6b8bdacad9a3939f2793367fdac2987b3aac36a651b5bc", size = 165799, upload-time = "2026-05-01T23:31:55.179Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5c/e0/7b3dee031daae7743609ce3c746565d4a3ed7c2c186479eb48e34e838c64/psycopg-3.3.4-py3-none-any.whl", hash = "sha256:b6bbc25ccf05c8fad3b061d9db2ef0909a555171b84b07f29458a447253d679a", size = 213001, upload-time = "2026-05-01T23:20:50.816Z" },
+]
+
+[package.optional-dependencies]
+binary = [
+    { name = "psycopg-binary", marker = "implementation_name != 'pypy'" },
+]
+
+[[package]]
+name = "psycopg-binary"
+version = "3.3.4"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a5/b9/11b341edf8d54e2694726b273fe9652b254d989f4f63e3ac6816ad6b55f4/psycopg_binary-3.3.4-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:6402a9d8146cf4b3974ded3fd28a971e83dc6a0333eb7822524a3aa20b546578", size = 4669943, upload-time = "2026-05-01T23:28:04.522Z" },
+]
+
+[[package]]
+name = "psycopg2-binary"
+version = "2.9.12"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/2a/60/a3624f79acea344c16fbef3a94d28b89a8042ddfb8f3e4ca83f538671409/psycopg2_binary-2.9.12.tar.gz", hash = "sha256:5ac9444edc768c02a6b6a591f070b8aae28ff3a99be57560ac996001580f294c", size = 379686, upload-time = "2026-04-21T09:40:34.304Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b5/01/3dd14e46ba48c1e1a6ec58ee599fa1b5efa00c246d5046cd903d0eeb1af1/psycopg2_binary-2.9.12-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:d3227a3bc228c10d21011a99245edca923e4e8bf461857e869a507d9a41fe9f6", size = 3822936, upload-time = "2026-04-20T23:34:32.77Z" },
+]
+
+[[package]]
 name = "ptyprocess"
 version = "0.7.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3674,7 +3709,7 @@ source = { editable = "." }
 dependencies = [
     { name = "bentoml" },
     { name = "catboost" },
-    { name = "dbt-duckdb" },
+    { name = "dbt-postgres" },
     { name = "duckdb" },
     { name = "faiss-cpu" },
     { name = "fastembed" },
@@ -3694,6 +3729,7 @@ dependencies = [
     { name = "pandas" },
     { name = "papermill" },
     { name = "prefect" },
+    { name = "psycopg", extra = ["binary"] },
     { name = "requests" },
     { name = "rich" },
     { name = "scikit-learn" },
@@ -3721,7 +3757,7 @@ dev = [
 requires-dist = [
     { name = "bentoml", specifier = ">=1.4" },
     { name = "catboost", specifier = ">=1.2" },
-    { name = "dbt-duckdb", specifier = ">=1.10" },
+    { name = "dbt-postgres", specifier = ">=1.10" },
     { name = "duckdb", specifier = ">=1.5" },
     { name = "faiss-cpu", specifier = ">=1.14.3" },
     { name = "fastembed", specifier = ">=0.8" },
@@ -3741,6 +3777,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.3" },
     { name = "papermill", specifier = ">=2.7" },
     { name = "prefect", specifier = ">=3.7" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "requests", specifier = ">=2.34" },
     { name = "rich", specifier = ">=15.0" },
     { name = "scikit-learn", specifier = ">=1.8" },

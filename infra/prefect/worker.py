@@ -2,7 +2,7 @@
 """Start the Prefect work-pool worker on the host.
 
 The Prefect server runs in the cluster; the worker runs on the host so it can
-access local artifacts (DuckDB, trained models). It loads the repo's .env
+access local resources (PostgreSQL, trained models). It loads the repo's .env
 (which defines PREFECT_API_URL pointing at the ingress) and starts a worker
 attached to the process-based `tennis-pool`.
 

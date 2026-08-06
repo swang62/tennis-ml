@@ -1,17 +1,15 @@
-"""Pure-logic tests for infra/duckdb/seed.py's select_matches.
+"""Pure-logic tests for src/flows/seed.py's match selection and bootstrap.
 
-No raw CSV, no DuckDB: exercises only the deterministic match-selection
-logic (top players by latest rank, recent-matches trim, dedupe, ordering).
+No raw CSV, no database: exercises only the deterministic match-selection
+logic (top players by latest rank, recent-matches trim, dedupe, ordering),
+the --all dispatch guard, and the guarded destructive reset.
 """
 
-from importlib.util import module_from_spec, spec_from_file_location
-from pathlib import Path
+from types import SimpleNamespace
 
-SEED_PATH = Path(__file__).resolve().parents[1] / "infra" / "duckdb" / "seed.py"
-_spec = spec_from_file_location("seed", SEED_PATH)
-assert _spec is not None and _spec.loader is not None
-seed = module_from_spec(_spec)
-_spec.loader.exec_module(seed)
+import pytest
+
+from src.flows import init_db, seed
 
 TOP_PLAYERS = seed.TOP_PLAYERS
 RECENT = seed.RECENT
@@ -231,7 +229,7 @@ def test_parse_args_all():
 
 
 def test_seed_exposes_no_enrichment_path():
-    """Task 2 guard: seed must expose no way to trigger Wikipedia enrichment,
+    """Task 3 guard: seed must expose no way to trigger Wikipedia enrichment,
     either via CLI or module surface. It is permanently offline."""
     assert not hasattr(seed, "enrich_players")
     assert not hasattr(seed, "enrich_missing")
@@ -253,3 +251,121 @@ def test_main_dispatches_without_network(monkeypatch):
     calls.clear()
     seed.main(["--all"])
     assert calls == ["all"]
+
+
+def test_default_seed_is_the_28_match_35_player_fixture(postgres_ready):  # noqa: ARG001
+    """The autouse session fixture seeds the deterministic miniset; the test
+    database holds exactly that fixture (28 matches / 35 distinct players) and
+    never the full historical corpus."""
+    from src.db.client import get_conn
+
+    with get_conn().cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM bronze.match_events")
+        row = cur.fetchone()
+        matches = int(row[0] if row is not None else -1)
+        cur.execute(
+            "SELECT COUNT(*) FROM ("
+            "SELECT player1_id AS player_id FROM bronze.match_events "
+            "UNION SELECT player2_id AS player_id FROM bronze.match_events"
+            ") AS p"
+        )
+        row = cur.fetchone()
+        players = int(row[0] if row is not None else -1)
+    assert matches == 28
+    assert players == 35
+
+
+# ── Destructive reset: hard actual-target safety check ────────────────────
+
+
+class _TargetCursor:
+    def __init__(self, conn, target_row):
+        self._conn = conn
+        self._row = target_row
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def execute(self, sql, params=None):  # noqa: ARG002
+        self._conn.statements.append(sql)
+        return self
+
+    def fetchone(self):
+        return self._row
+
+
+class _TargetTxn:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __enter__(self):
+        return self._conn.cursor(None)
+
+    def __exit__(self, *_exc):
+        return False
+
+
+class _TargetConn:
+    """Fake connection that reports a fixed client-side target (psycopg
+    ``conn.info`` — the same source init_db.actual_target reads) and records
+    every SQL statement."""
+
+    def __init__(self, host, port, dbname):
+        self.info = SimpleNamespace(host=host, port=port, dbname=dbname)
+        self.statements: list[str] = []
+
+    def cursor(self, row_factory=None):  # noqa: ARG002
+        return _TargetCursor(self, None)
+
+    def transaction(self):
+        return _TargetTxn(self)
+
+
+@pytest.fixture
+def reset_env(monkeypatch):
+    """Pin the expected dev target so tests only vary the ACTUAL target."""
+    monkeypatch.setattr(init_db.constants, "POSTGRES_PORT", "6543")
+    monkeypatch.setattr(init_db.constants, "POSTGRES_DB", "tennis")
+
+
+def test_reset_refuses_non_local_target(monkeypatch, reset_env):  # noqa: ARG001
+    """A remote address must never authorize a reset, even with ENVIRONMENT set."""
+    conn = _TargetConn("203.0.113.7", 6543, "tennis")
+    monkeypatch.setattr(init_db, "get_conn", lambda: conn)
+
+    with pytest.raises(RuntimeError, match="refusing to reset non-local target"):
+        init_db.reset()
+
+    assert not any("DROP SCHEMA" in s for s in conn.statements)
+
+
+def test_reset_refuses_wrong_database_or_port(monkeypatch, reset_env):  # noqa: ARG001
+    """Wrong port or database name must refuse even on a local-looking host."""
+    for target in [("127.0.0.1", 5432, "tennis"), ("127.0.0.1", 6543, "prod")]:
+        conn = _TargetConn(*target)
+        monkeypatch.setattr(init_db, "get_conn", lambda conn=conn: conn)
+
+        with pytest.raises(RuntimeError, match="refusing to reset non-local target"):
+            init_db.reset()
+
+        assert not any("DROP SCHEMA" in s for s in conn.statements)
+
+
+def test_reset_allowed_only_on_local_dev_target(monkeypatch, reset_env):  # noqa: ARG001
+    """The exact expected local target proceeds: DROP the three schemas, then
+    re-apply the structure-only init.sql."""
+    conn = _TargetConn("127.0.0.1", 6543, "tennis")
+    monkeypatch.setattr(init_db, "get_conn", lambda: conn)
+
+    init_db.reset()
+
+    drops = [s for s in conn.statements if s.startswith("DROP SCHEMA")]
+    assert drops == [
+        "DROP SCHEMA IF EXISTS bronze CASCADE",
+        "DROP SCHEMA IF EXISTS silver CASCADE",
+        "DROP SCHEMA IF EXISTS gold CASCADE",
+    ]
+    assert any(s == init_db.INIT_SQL.read_text() for s in conn.statements)

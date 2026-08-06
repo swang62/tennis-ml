@@ -2,12 +2,13 @@
 
 Target: `src.features.inference.build_inference_features`.
 
-Tests run against the temporary seeded test DB built per session by the
-conftest pretest setup (`infra/duckdb/init.sql` + `infra/duckdb/seed.py` +
-the dbt gold models, pointed at via TENNIS_DB_PATH), never the
-dev database at `data/tennis.duckdb`. All date-dependent
-tests pass an explicit `as_of_date` for determinism, except the default-today
-test, which monkeypatches `date.today` to a fixed date.
+Tests run against the shared seeded PostgreSQL DB built per session by the
+conftest fixture (`infra/postgres/init.sql` + `src/flows/seed.py` + the dbt
+gold models), never a DuckDB file. The dbt-owned gold/silver layers are not
+built until Task 4 (dbt-postgres ETL), so the module is gated on the
+`gold_ready` fixture and skips cleanly until that build exists. All
+date-dependent tests pass an explicit `as_of_date` for determinism, except the
+default-today test, which monkeypatches `date.today` to a fixed date.
 """
 
 import math
@@ -17,8 +18,8 @@ from typing import override
 import pandas as pd
 import pytest
 
-from src.constants import GOLD_ROLLING_FEATURES, PROFILES_TABLE
-from src.db.client import execute_df, get_conn
+from src.constants import PROFILES_TABLE, SILVER_ROLLING_FEATURES
+from src.db.client import analytical_df, execute_df, get_conn
 from src.features import inference
 from src.features.columns import DIFF_COLS, FEATURE_COLS
 from src.features.inference import build_inference_features
@@ -26,6 +27,30 @@ from src.features.inference import build_inference_features
 # All seeded matches are in 2026 (2026-03-15 .. 2026-07-15); a fixed as-of date
 # after the last match exercises the full snapshot history deterministically.
 AS_OF_AFTER_ALL_MATCHES = date(2026, 9, 1)
+
+
+@pytest.fixture(autouse=True)
+def _require_gold(gold_ready):
+    """Skip the whole module until the dbt gold/silver layers exist (Task 4)."""
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_h2h_rows(_require_gold):
+    """Remove synthetic H2H rows from the shared dev PostgreSQL after each test.
+
+    _insert_prior_meetings writes straight into silver.player_matches; those
+    rows have NULL columns (player_match_number, rates, ...), so they would
+    break dbt's uniqueness and 30-day regression tests on the next dbt run.
+    The dev DB is shared across pytest and dbt, so cleanup is mandatory.
+    Depends on the module skip-gate so an unreachable PostgreSQL still skips
+    the module cleanly instead of erroring in teardown.
+    """
+    yield
+    with get_conn().cursor() as cur:
+        cur.execute(
+            "DELETE FROM silver.player_matches "
+            "WHERE player_id LIKE 'H2H_%' OR opponent_id LIKE 'H2H_%'"
+        )
 
 
 def test_output_schema_contract():
@@ -98,6 +123,55 @@ def test_years_pro_time_aware_and_cold_start():
         assert math.isfinite(row[col]), f"{col} is not finite: {row[col]!r}"
 
 
+def test_pool_aggregates_analytical_parity():
+    """Each broad aggregate pool read accelerated via pg_duckdb (analytical_df)
+    returns the same values as normal PostgreSQL execution AND actually binds
+    in DuckDB (no fallback warning).
+
+    These are the pool queries the inference builder routes through the
+    analytical path; the parity check locks the "accelerated only after result
+    parity" contract. Values are compared as floats (the normal path returns
+    numeric Decimals, the analytical path floats — the same number).
+
+    The notice-handler check is the pg_duckdb-compatibility regression: when a
+    forced query cannot bind (e.g. AVG over NUMERIC without declared
+    precision), pg_duckdb logs a "Prepared query returned an error" / "Binder
+    Error" diagnostic and silently falls back to PostgreSQL — parity would
+    still pass, but the acceleration would be gone. Asserting no error-typed
+    diagnostic proves the analytical SQL binds in DuckDB, which requires both
+    the SQL-level DOUBLE PRECISION casts and the
+    duckdb.convert_unsupported_numeric_to_double=true that analytical_df sets
+    (pg_duckdb resolves a scanned column's raw type before expression casts,
+    so either one alone is insufficient).
+    """
+    as_of = "2026-09-01"
+    cases = [
+        (inference._POOL_AGG_SQL, [as_of]),
+        (inference._POOL_COUNTS_SQL, [as_of]),
+        (inference._MEDIAN_DAYS_SQL, [as_of, as_of]),
+        (inference._MEDIAN_MATCHES_30D_SQL, [as_of, as_of, as_of]),
+        (inference._PROFILE_POOL_AGG_SQL, [2026]),
+        (inference._PROFILE_COUNTS_SQL, []),
+    ]
+    for sql, params in cases:
+        normal = execute_df(sql, params).astype(float)
+        diagnostics: list[str] = []
+
+        def _capture(diag, diagnostics=diagnostics) -> None:  # pragma: no cover - trivial capture
+            diagnostics.append(diag.message_primary)
+
+        get_conn().add_notice_handler(_capture)
+        try:
+            accelerated = analytical_df(sql, params).astype(float)
+        finally:
+            get_conn().remove_notice_handler(_capture)
+        assert normal.columns.tolist() == accelerated.columns.tolist(), sql[:60]
+        pd.testing.assert_frame_equal(accelerated, normal, check_exact=False, rtol=1e-9)
+        assert not any("error" in d.lower() for d in diagnostics), (
+            f"pg_duckdb failed to bind and fell back for: {sql[:80]}\n{diagnostics}"
+        )
+
+
 def test_historical_as_of_excludes_later_snapshots():
     """Regression: the as-of lookup must use the newest snapshot strictly before
     the date, not the first or the overall latest.
@@ -116,13 +190,13 @@ def test_historical_as_of_excludes_later_snapshots():
     # Cross-check the expected snapshot directly in the gold table.
     snapshot = execute_df(
         f"SELECT player_match_number, win_rate_10, weighted_form_10 "
-        f"FROM {GOLD_ROLLING_FEATURES} "
-        "WHERE player_id = ? AND snapshot_date < ?::DATE "
+        f"FROM {SILVER_ROLLING_FEATURES} "
+        "WHERE player_id = %s AND snapshot_date < %s::date "
         "ORDER BY player_match_number DESC LIMIT 1",
         ["S0AG", "2026-06-30"],
     ).iloc[0]
     assert snapshot["player_match_number"] == 5
-    assert snapshot["win_rate_10"] == 0.8
+    assert float(snapshot["win_rate_10"]) == 0.8
     # The inference row's per-side weighted form equals that snapshot's value.
     assert out.loc[0, "player_weighted_form_10"] == pytest.approx(
         float(snapshot["weighted_form_10"])
@@ -189,16 +263,16 @@ def test_one_missing_player_imputed_no_nans(args):
     # per-side win_rate_10 are not model columns, so the per-side values that
     # ARE exposed (weighted_form_10, surface_win_rate_10) are checked directly.
     pool = execute_df(
-        "SELECT MEDIAN(streak) AS streak, "
+        "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY streak) AS streak, "
         "AVG(weighted_form_10) AS weighted_form_10, "
         "AVG(win_rate_10) AS win_rate_10, "
         "AVG(hard_win_rate_10) AS hard_win_rate_10 "
-        f"FROM {GOLD_ROLLING_FEATURES} WHERE snapshot_date < ?::DATE",
+        f"FROM {SILVER_ROLLING_FEATURES} WHERE snapshot_date < %s::date",
         ["2026-09-01"],
     ).iloc[0]
     assert row["streak_diff"] != 0  # known streak vs pool-mean streak differ
-    assert row["opponent_weighted_form_10"] == pytest.approx(pool["weighted_form_10"])
-    assert row["opponent_surface_win_rate_10"] == pytest.approx(pool["hard_win_rate_10"])
+    assert row["opponent_weighted_form_10"] == pytest.approx(float(pool["weighted_form_10"]))
+    assert row["opponent_surface_win_rate_10"] == pytest.approx(float(pool["hard_win_rate_10"]))
     # Profile-derived features for the unknown player come from the on-demand
     # aggregate over ALL profiles (mean left-handed rate / years-pro at the
     # as-of date), so they are finite and non-NaN.
@@ -208,8 +282,8 @@ def test_one_missing_player_imputed_no_nans(args):
         "AVG(2026 - turned_pro) AS avg_years_pro "
         f"FROM {PROFILES_TABLE}",
     ).iloc[0]
-    assert row["opponent_is_left_handed"] == pytest.approx(profile_pool["left_handed_rate"])
-    assert row["opponent_years_pro"] == pytest.approx(profile_pool["avg_years_pro"])
+    assert row["opponent_is_left_handed"] == pytest.approx(float(profile_pool["left_handed_rate"]))
+    assert row["opponent_years_pro"] == pytest.approx(float(profile_pool["avg_years_pro"]))
     assert math.isfinite(row["player_years_pro"])
 
 
@@ -506,15 +580,26 @@ def _insert_prior_meetings(pair_a: str, pair_b: str, meetings: list[tuple[str, s
     `pair_a` (the canonical lower id) won. Dates are ISO strings.
     """
     rows = []
+    match_ids = []
     for match_id, date_iso, a_won in meetings:
+        match_ids.append(match_id)
         rows.append((match_id, date_iso, pair_a, pair_b, a_won))
         rows.append((match_id, date_iso, pair_b, pair_a, 1 - a_won))
-    get_conn().executemany(
-        "INSERT INTO silver.player_matches "
-        "(match_id, match_date, player_id, opponent_id, match_won) "
-        "VALUES (?, CAST(? AS DATE), ?, ?, ?)",
-        rows,
-    )
+    with get_conn().cursor() as cur:
+        # The seeded DB is session-scoped and shared across pytest runs, so a
+        # re-run must not collide with rows this pair inserted before: delete
+        # this batch's own match_ids first (distinct ids keep the inserts
+        # within one test accumulating).
+        cur.executemany(
+            "DELETE FROM silver.player_matches WHERE match_id = %s",
+            [(mid,) for mid in match_ids],
+        )
+        cur.executemany(
+            "INSERT INTO silver.player_matches "
+            "(match_id, match_date, player_id, opponent_id, match_won) "
+            "VALUES (%s, CAST(%s AS DATE), %s, %s, %s)",
+            rows,
+        )
 
 
 def test_h2h_zero_prior_meetings_neutral():
@@ -661,10 +746,10 @@ JOIN silver.player_matches p
   ON p.match_id = mf.match_id AND p.player_id = mf.player_id
 JOIN silver.player_matches o
   ON o.match_id = mf.match_id AND o.player_id = mf.opponent_id
-JOIN gold.rolling_features prp
+JOIN silver.rolling_features prp
   ON prp.player_id = mf.player_id
  AND prp.player_match_number = p.player_match_number - 1
-JOIN gold.rolling_features pro
+JOIN silver.rolling_features pro
   ON pro.player_id = mf.opponent_id
  AND pro.player_match_number = o.player_match_number - 1
 WHERE p.player_match_number > 1

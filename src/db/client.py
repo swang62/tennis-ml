@@ -1,94 +1,123 @@
-"""DuckDB client for the tennis-ml pipeline.
+"""PostgreSQL client for the tennis-ml pipeline.
 
-Two serving modes, selected by the single explicit `ENVIRONMENT` switch:
+PostgreSQL (via psycopg) is the only operational backend, configured from the
+shared POSTGRES_* contract in `src.constants` (DATABASE_URL or component
+variables; default port 6543). Every query uses psycopg's `%s` placeholders —
+request data is never concatenated into SQL — and results come back as pandas
+DataFrames.
 
-- `dev` (default): a local embedded DuckDB at `TENNIS_DB_PATH` (or
-  `data/tennis.duckdb`). Used by ETL, training, and local `bentoml serve`.
-- `production`: a Quack remote served by the companion container
-  (infra/duckdb). The production client opens a local session, loads the
-  `quack` extension, ATTACHes the remote URI with the runtime token, and makes
-  it the default catalog (`USE`) so the existing schema-qualified SQL
-  (`bronze.*`, `silver.*`, `gold.*`) resolves verbatim against the remote.
+Multi-step writes run inside an explicit `transaction()` context manager that
+commits on success and rolls back on error, so Prefect tasks and Bento workers
+never leave an idle transaction behind. The opt-in `analytical_df()` path
+applies `SET LOCAL duckdb.force_execution = true` only inside a transaction,
+so pg_duckdb acceleration is scoped to exactly the aggregate reads that opt
+in and never enabled globally.
 
-A missing or invalid `ENVIRONMENT` (or missing Quack config in production mode)
-fails fast with a clear error — it never silently falls back to the dev DB.
+DuckDB remains installed solely for the training database snapshots; it is
+not part of the operational query path.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Any, LiteralString, cast
 
-import duckdb
 import pandas as pd
+import psycopg
+from psycopg.rows import tuple_row
 
 from src import constants
 
-_conn: duckdb.DuckDBPyConnection | None = None
+_conn: psycopg.Connection[Any] | None = None
 
 
-def _connect_dev() -> duckdb.DuckDBPyConnection:
-    db_path = (
-        Path(constants.TENNIS_DB_PATH)
-        if constants.TENNIS_DB_PATH
-        else constants.ROOT / "data" / "tennis.duckdb"
-    )
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    return duckdb.connect(str(db_path))
+def _connect() -> psycopg.Connection[Any]:
+    """Open a PostgreSQL connection from the shared credential contract.
 
-
-def _connect_production() -> duckdb.DuckDBPyConnection:
-    uri = constants.QUACK_URI
-    token = constants.QUACK_TOKEN
-    if not uri or not token:
+    Fails fast when the required configuration is missing; there is no other
+    backend to fall back to.
+    """
+    if not constants.DATABASE_URL and not constants.POSTGRES_PASSWORD:
         raise RuntimeError(
-            "ENVIRONMENT=production requires QUACK_URI and QUACK_TOKEN to be set; "
-            "refusing to fall back to the dev database"
+            "missing PostgreSQL configuration: set DATABASE_URL or POSTGRES_PASSWORD "
+            "(with POSTGRES_USER/POSTGRES_DB/POSTGRES_HOST/POSTGRES_PORT); refusing to "
+            "fall back to any other database"
         )
-    conn = duckdb.connect(":memory:")
-    conn.execute("INSTALL quack FROM core")
-    conn.execute("LOAD quack")
-    # The URI is trusted deployment config (not user SQL), so it is formatted
-    # into the statement; the token is a runtime secret and always bound as a
-    # prepared `?` parameter.
-    conn.execute(
-        f"ATTACH '{uri}' AS {constants.QUACK_CATALOG} (TYPE quack, TOKEN ?, DISABLE_SSL true)",
-        [token],
-    )
-    # Make the remote the default catalog so unqualified `silver.x` /
-    # `gold.x` SQL resolves against it, exactly as it does against the
-    # embedded dev DB.
-    conn.execute(f"USE {constants.QUACK_CATALOG}")
-    return conn
+    return psycopg.connect(constants.build_database_url(), autocommit=True)
 
 
-def get_conn() -> duckdb.DuckDBPyConnection:
+def get_conn() -> psycopg.Connection[Any]:
+    """Return the process-wide lazy PostgreSQL connection (autocommit)."""
     global _conn
     if _conn is None:
-        if constants.ENVIRONMENT == "production":
-            _conn = _connect_production()
-        elif constants.ENVIRONMENT == "dev":
-            _conn = _connect_dev()
-        else:
-            raise RuntimeError(
-                f"invalid ENVIRONMENT={constants.ENVIRONMENT!r}; expected 'dev' or 'production'"
-            )
+        _conn = _connect()
     return _conn
 
 
-def to_dataframe(sql: str) -> pd.DataFrame:
-    return get_conn().sql(sql).fetchdf()
+def close() -> None:
+    """Close and reset the process-wide connection.
 
-
-def execute_df(sql: str, params: list[object] | None = None) -> pd.DataFrame:
-    """Run a query and return results as a DataFrame.
-
-    When `params` is provided, the SQL uses positional `?` placeholders and
-    the query is executed as a prepared statement (no string interpolation).
+    Call when a task or worker finishes so the pool never holds stale
+    connections across runs.
     """
-    if params is None:
-        return to_dataframe(sql)
-    return get_conn().execute(sql, params).fetchdf()
+    global _conn
+    if _conn is not None:
+        _conn.close()
+        _conn = None
+
+
+@contextmanager
+def transaction() -> Iterator[psycopg.Cursor[Any]]:
+    """Run a multi-step write atomically; commits on success, rolls back on error."""
+    conn = get_conn()
+    with conn.transaction(), conn.cursor(row_factory=tuple_row) as cur:
+        yield cur
+
+
+def _cursor_to_df(cur: psycopg.Cursor[Any]) -> pd.DataFrame:
+    columns = [d.name for d in cur.description] if cur.description is not None else []
+    return pd.DataFrame(cur.fetchall(), columns=columns)
+
+
+def execute_df(sql: str, params: list[object] | tuple[object, ...] | None = None) -> pd.DataFrame:
+    """Run a parameterized query and return the results as a DataFrame.
+
+    Positional `%s` placeholders in `sql` are bound to `params` by psycopg, so
+    bound values containing quotes or other SQL metacharacters stay safe.
+    """
+    with get_conn().cursor() as cur:
+        cur.execute(cast(LiteralString, sql), params)
+        return _cursor_to_df(cur)
+
+
+def to_dataframe(sql: str) -> pd.DataFrame:
+    """Run a query with no bound parameters and return a DataFrame."""
+    return execute_df(sql)
+
+
+def analytical_df(
+    sql: str, params: list[object] | tuple[object, ...] | None = None
+) -> pd.DataFrame:
+    """Opt-in analytical read that forces pg_duckdb execution for this query only.
+
+    Runs inside an explicit transaction so both `SET LOCAL` settings (which
+    are transaction-scoped) apply only to this statement and disappear at
+    commit; normal reads and writes never force pg_duckdb.
+
+    `duckdb.convert_unsupported_numeric_to_double` (pg_duckdb documented
+    setting, default false) is required in addition to SQL-level
+    `::double precision` casts: pg_duckdb resolves a scanned column's raw
+    PostgreSQL type before any expression cast, so AVG over a NUMERIC column
+    without declared precision fails to bind even when its input is cast. The
+    setting converts those NUMERICs to DOUBLE at scan time — the same value
+    semantics the explicit casts express, scoped to this query only.
+    """
+    with transaction() as cur:
+        cur.execute("SET LOCAL duckdb.force_execution = true")
+        cur.execute("SET LOCAL duckdb.convert_unsupported_numeric_to_double = true")
+        cur.execute(cast(LiteralString, sql), params)
+        return _cursor_to_df(cur)
 
 
 def first_row_dict(df: pd.DataFrame) -> dict[str, Any]:

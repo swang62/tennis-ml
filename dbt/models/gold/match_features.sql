@@ -2,7 +2,7 @@
 --
 -- ONE ROW PER MATCH (not per player). Each player-match row is paired with
 -- that player's IMMEDIATELY PRECEDING post-match snapshot
--- (player_match_number - 1) from gold.rolling_features, so all rolling
+-- (player_match_number - 1) from silver.rolling_features, so all rolling
 -- history values come strictly from completed matches BEFORE the current
 -- event. The current event (silver.player_matches) supplies CURRENT rankings,
 -- rank points, age, and the correct pre-match 30-day activity count.
@@ -61,8 +61,9 @@ WITH player_match_enriched AS (
         -- Correct pre-match activity count (0 on first match; it is a COUNT)
         CAST(pm.matches_30d_before AS INTEGER) AS matches_30d,
 
-        -- Days since the player's previous completed match; 365 on first match
-        CAST(COALESCE(DATEDIFF('day', pr.snapshot_date, pm.match_date), 365)
+        -- Days since the player's previous completed match; 365 on first match.
+        -- PostgreSQL date subtraction (date - date = integer days).
+        CAST(COALESCE(pm.match_date - pr.snapshot_date, 365)
             AS INTEGER) AS days_since_last_match,
 
         -- Rolling form from the immediately preceding snapshot (NULL on cold
@@ -99,10 +100,11 @@ WITH player_match_enriched AS (
         -- Non-L/R handedness (including NULL) stays NULL so train-time
         -- imputation treats missing handedness like any other missing cell
         CAST(CASE WHEN prof.handedness = 'L' THEN 1
-                  WHEN prof.handedness = 'R' THEN 0 END AS UTINYINT)
+                  WHEN prof.handedness = 'R' THEN 0 END AS SMALLINT)
             AS is_left_handed,
-        -- Years pro AT THIS MATCH (time-aware), not the raw turned_pro year
-        CAST(YEAR(pm.match_date) - prof.turned_pro AS INTEGER) AS years_pro
+        -- Years pro AT THIS MATCH (time-aware), not the raw turned_pro year;
+        -- EXTRACT returns numeric, so the explicit INTEGER cast stays.
+        CAST(EXTRACT(YEAR FROM pm.match_date) - prof.turned_pro AS INTEGER) AS years_pro
 
     FROM {{ ref('player_matches') }} pm
     LEFT JOIN {{ ref('rolling_features') }} pr
@@ -216,19 +218,19 @@ SELECT
     COALESCE(h.player_h2h_wins, 0)    AS player_h2h_wins,
 
     -- ── Numeric match context (one-hot surface for linear and neural models) ──
-    CAST(CASE WHEN p.surface = 'clay'  THEN 1 ELSE 0 END AS UTINYINT) AS is_clay,
-    CAST(CASE WHEN p.surface = 'grass' THEN 1 ELSE 0 END AS UTINYINT) AS is_grass,
-    CAST(CASE WHEN p.surface = 'hard'  THEN 1 ELSE 0 END AS UTINYINT) AS is_hard,
-    CAST(CASE WHEN p.surface = 'carpet' THEN 1 ELSE 0 END AS UTINYINT) AS is_carpet,
+    CAST(CASE WHEN p.surface = 'clay'  THEN 1 ELSE 0 END AS SMALLINT) AS is_clay,
+    CAST(CASE WHEN p.surface = 'grass' THEN 1 ELSE 0 END AS SMALLINT) AS is_grass,
+    CAST(CASE WHEN p.surface = 'hard'  THEN 1 ELSE 0 END AS SMALLINT) AS is_hard,
+    CAST(CASE WHEN p.surface = 'carpet' THEN 1 ELSE 0 END AS SMALLINT) AS is_carpet,
     b.is_indoor,
     CAST(CASE p.tournament
         WHEN 'grand_slam' THEN 4 WHEN 'masters' THEN 3
         WHEN 'atp_500' THEN 2 WHEN 'atp_250' THEN 1 ELSE 0
-    END AS UTINYINT) AS tournament_level,
+    END AS SMALLINT) AS tournament_level,
     CAST(CASE p.round
         WHEN 'r128' THEN 1 WHEN 'r64' THEN 2 WHEN 'r32' THEN 3 WHEN 'r16' THEN 4
         WHEN 'qf' THEN 5 WHEN 'sf' THEN 6 WHEN 'f' THEN 7 ELSE 0
-    END AS UTINYINT) AS round_encoded
+    END AS SMALLINT) AS round_encoded
 FROM player_match_enriched p
 JOIN player_match_enriched o
     ON o.match_id = p.match_id

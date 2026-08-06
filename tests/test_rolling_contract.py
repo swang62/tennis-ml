@@ -17,10 +17,10 @@ from src.features.columns import (
     CONTEXT_COLS,
     DIFF_COLS,
     FEATURE_COLS,
-    GOLD_ROLLING_COLS,
     H2H_COLS,
     MATCH_STATS_COLS,
     PROFILE_COLS,
+    SILVER_ROLLING_COLS,
 )
 
 FINAL_DIFFS = [
@@ -51,7 +51,7 @@ def test_feature_col_counts():
 def test_gold_rolling_cols_exact_order():
     """Retained `_10`-window rolling values, in the SQL window order. Every
     `_5`/`_20` output and the separate win/loss streaks are removed (Task 6)."""
-    assert GOLD_ROLLING_COLS == [
+    assert SILVER_ROLLING_COLS == [
         "weighted_form_10",
         "win_rate_10",
         "ace_rate_10",
@@ -74,17 +74,17 @@ def test_diff_cols_exact_order():
 def test_no_5_or_20_rolling_variants():
     """Task 6: every `_5`/`_20` output and the separate win/loss streaks are
     removed from the rolling contract."""
-    for col in GOLD_ROLLING_COLS:
+    for col in SILVER_ROLLING_COLS:
         assert not col.endswith("_5") and not col.endswith("_20"), col
-    assert "win_streak" not in GOLD_ROLLING_COLS
-    assert "loss_streak" not in GOLD_ROLLING_COLS
-    assert "win_rate_5" not in GOLD_ROLLING_COLS
-    assert "win_rate_20" not in GOLD_ROLLING_COLS
-    assert "rank_trend_20" not in GOLD_ROLLING_COLS
-    assert "avg_rank_faced_5" not in GOLD_ROLLING_COLS
-    assert "matches_30d" not in GOLD_ROLLING_COLS  # computed on demand
-    assert "surface_win_rate_10" not in GOLD_ROLLING_COLS  # derived on demand
-    assert "days_since_last_match" not in GOLD_ROLLING_COLS  # computed on demand
+    assert "win_streak" not in SILVER_ROLLING_COLS
+    assert "loss_streak" not in SILVER_ROLLING_COLS
+    assert "win_rate_5" not in SILVER_ROLLING_COLS
+    assert "win_rate_20" not in SILVER_ROLLING_COLS
+    assert "rank_trend_20" not in SILVER_ROLLING_COLS
+    assert "avg_rank_faced_5" not in SILVER_ROLLING_COLS
+    assert "matches_30d" not in SILVER_ROLLING_COLS  # computed on demand
+    assert "surface_win_rate_10" not in SILVER_ROLLING_COLS  # derived on demand
+    assert "days_since_last_match" not in SILVER_ROLLING_COLS  # computed on demand
 
 
 def test_diff_cols_removed_obsolete():

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from typing import NotRequired, TypedDict
 
 import faiss
@@ -10,7 +11,7 @@ import numpy as np
 import pandas as pd
 from fastembed import TextEmbedding
 
-from src.constants import GOLD_ROLLING_FEATURES, PROFILES_TABLE, ROOT
+from src.constants import GOLD_TABLE, PROFILES_TABLE, ROOT
 from src.db.client import to_dataframe
 
 MODEL_NAME = "BAAI/bge-small-en-v1.5"
@@ -19,6 +20,62 @@ DEFAULT_INDEX = ROOT / "data" / "processed" / "player_similarity.index"
 DEFAULT_METADATA = ROOT / "data" / "processed" / "player_metadata.json"
 
 BIO_COL_PREFIX = "bio_"
+
+# Player state read exclusively from gold.match_features (the two-table
+# training snapshot boundary; the operational per-match tables are never
+# queried here). Each canonical match row appears twice — once per side — and
+# is unioned into player-oriented rows; the latest pre-match absolute values
+# are retained: weighted form from the player's most recent match, surface win
+# rates from the most recent match on each surface. ROW_NUMBER + CASE/MAX keep
+# the query portable to both PostgreSQL and DuckDB (QUALIFY is DuckDB-only, so
+# it has no place here), so the same SQL drives live and offline builds.
+_PLAYER_STATE_SQL = f"""
+WITH player_side AS (
+    SELECT match_id, match_date, surface, player_id AS pid,
+           player_weighted_form_10 AS weighted_form_10,
+           player_surface_win_rate_10 AS surface_win_rate_10
+    FROM {GOLD_TABLE}
+    UNION ALL
+    SELECT match_id, match_date, surface, opponent_id AS pid,
+           opponent_weighted_form_10 AS weighted_form_10,
+           opponent_surface_win_rate_10 AS surface_win_rate_10
+    FROM {GOLD_TABLE}
+),
+latest_state AS (
+    SELECT pid, weighted_form_10
+    FROM (
+        SELECT pid, weighted_form_10,
+               ROW_NUMBER() OVER (
+                   PARTITION BY pid ORDER BY match_date DESC, match_id DESC
+               ) AS rn
+        FROM player_side
+    ) AS ranked_state
+    WHERE rn = 1
+),
+latest_surface AS (
+    SELECT pid, surface, surface_win_rate_10
+    FROM (
+        SELECT pid, surface, surface_win_rate_10,
+               ROW_NUMBER() OVER (
+                   PARTITION BY pid, surface ORDER BY match_date DESC, match_id DESC
+               ) AS rn
+        FROM player_side
+    ) AS ranked_surface
+    WHERE rn = 1
+)
+SELECT
+    st.pid AS player_id,
+    st.weighted_form_10,
+    MAX(CASE WHEN ls.surface = 'clay' THEN ls.surface_win_rate_10 END)
+        AS clay_win_rate_10,
+    MAX(CASE WHEN ls.surface = 'grass' THEN ls.surface_win_rate_10 END)
+        AS grass_win_rate_10,
+    MAX(CASE WHEN ls.surface = 'hard' THEN ls.surface_win_rate_10 END)
+        AS hard_win_rate_10
+FROM latest_state st
+LEFT JOIN latest_surface ls ON ls.pid = st.pid
+GROUP BY st.pid, st.weighted_form_10
+"""
 
 
 def embed_bio_summaries(profiles: pd.DataFrame, model_name: str = MODEL_NAME) -> pd.DataFrame:
@@ -60,35 +117,37 @@ class PlayerSimilarity:
 
     # ── Build ───────────────────────────────────────
 
-    def build(self) -> None:
-        """Query player profiles + latest style snapshots, build FAISS index, save to disk, and load in memory."""
-        profiles = to_dataframe(
+    def build(
+        self,
+        query: Callable[[str], pd.DataFrame] | None = None,
+    ) -> None:
+        """Query player profiles + match state, build FAISS index, save to disk, and load in memory.
+
+        ``query`` is a callable ``query(sql) -> DataFrame`` used for both table
+        reads. It defaults to the live PostgreSQL client; pass the training
+        snapshot helper (``src.db.training.to_dataframe``) for offline builds.
+        """
+        query = query or to_dataframe
+        profiles = query(
             f"SELECT player_id, display_name, backhand, handedness, summary FROM {PROFILES_TABLE}"
         )
         profiles = profiles[profiles["player_id"] != ""].reset_index(drop=True)
         if profiles.empty:
             return
 
-        # Latest post-match style snapshot per player from gold.rolling_features.
-        rolling = to_dataframe(
-            f"SELECT player_id, ace_rate_10, first_serve_pct_10, break_points_saved_pct_10,"
-            f" clay_win_rate_10, grass_win_rate_10, hard_win_rate_10"
-            f" FROM {GOLD_ROLLING_FEATURES}"
-            f" QUALIFY ROW_NUMBER() OVER (PARTITION BY player_id"
-            f" ORDER BY snapshot_date DESC, match_id DESC) = 1"
-        )
+        # Latest pre-match absolute state per player from gold.match_features:
+        # weighted form from the most recent match and clay/grass/hard win
+        # rates from the most recent match on each surface.
+        state = query(_PLAYER_STATE_SQL)
         style_cols = [
-            "ace_rate_10",
-            "first_serve_pct_10",
-            "break_points_saved_pct_10",
+            "weighted_form_10",
             "clay_win_rate_10",
             "grass_win_rate_10",
             "hard_win_rate_10",
         ]
-        df = profiles.merge(rolling, on="player_id", how="left")
-        # Style cells are NULL for players without an eligible snapshot, or
-        # without matches on a surface; impute 0.0 so every profiled player is
-        # still indexed.
+        df = profiles.merge(state, on="player_id", how="left")
+        # Style cells are NULL for players without a match, or without a match
+        # on a surface; impute 0.0 so every profiled player is still indexed.
         df[style_cols] = df[style_cols].fillna(0.0).astype(np.float32)
 
         # One-hot encode categoricals, then stack with style stats and embeddings

@@ -11,6 +11,7 @@ from typing import TextIO
 import papermill as pm
 
 from src.constants import LOGS, OUTPUTS, PARAMS
+from src.db.snapshot import SNAPSHOT_PATH, refresh_snapshot
 from src.utils import ensure_kernel, load_env
 
 # Training notebooks (00-05), run in order.
@@ -77,6 +78,13 @@ if __name__ == "__main__":
         redirect_stdout(_Tee(sys.stdout, log)),
         redirect_stderr(_Tee(sys.stderr, log)),
     ):
+        # Refresh the atomic PostgreSQL -> DuckDB training snapshot before any
+        # notebook runs. Training fails (non-zero exit) rather than silently
+        # reading a stale snapshot when the refresh fails.
+        print("Refreshing training snapshot from PostgreSQL...")
+        refresh_snapshot()
+        print(f"  Snapshot refreshed: {SNAPSHOT_PATH}")
+
         print(f"Pipeline starting — {len(NB_ORDER)} notebooks")
         for name in NB_ORDER:
             # Notebooks own their parameter defaults via their tagged parameter

@@ -1,27 +1,30 @@
-"""End-to-end tests against the shared seeded miniset test DB.
+"""End-to-end tests against the shared seeded miniset in PostgreSQL.
 
-The conftest pretest setup (autouse session fixture `seeded_test_db`) builds a
-temporary DuckDB once per session: `infra/duckdb/init.sql`, the real ingest
-path via `infra/duckdb/seed.py` (the deterministic miniset: the
-RECENT most recent matches of the TOP_PLAYERS best-ranked players), and the
-dbt gold build, then points TENNIS_DB_PATH at it. These tests verify that
-result: populated bronze/gold layers, live gold schema parity with the Python
-feature contract, idempotent re-ingest of the seed rows, and inference against
-the seeded gold. No full-file ingest, no per-test DB, no dev-DB mutation; the
-temp DB is cleaned up after the session.
+The conftest session fixture `seeded_test_db` applies the PostgreSQL bootstrap
+(structure only) and seeds the deterministic miniset — the RECENT most recent
+matches of the TOP_PLAYERS best-ranked players — into the configured local
+PostgreSQL once per session, then points the operational client at it. These
+tests verify that result: the 28-match / 35-player fixture, populated bronze,
+idempotent re-ingest of the seed rows (match_id DO NOTHING), and profile
+upserts that preserve enrichment while refreshing ATP metadata.
+
+Tests that need the dbt-owned gold layer (gold.match_features /
+silver.rolling_features, e.g. schema parity and live inference) opt into the
+`gold_ready` fixture and skip cleanly until that build exists over PostgreSQL
+(Task 4). No test touches a DuckDB file.
 """
 
 from datetime import date
-from importlib.util import module_from_spec, spec_from_file_location
 from typing import cast
 
 import pandas as pd
+import pytest
 
-from src.constants import BRONZE_TABLE, GOLD_ROLLING_FEATURES, GOLD_TABLE, ROOT
+from src.constants import BRONZE_TABLE, GOLD_TABLE, PROFILES_TABLE, ROOT, SILVER_ROLLING_FEATURES
+from src.db import client
 from src.db.client import execute_df
 from src.features.columns import FEATURE_COLS
-from src.features.inference import build_inference_features
-from src.flows import ingest
+from src.flows import ingest, seed
 
 RAW_CSV = ROOT / "data" / "raw" / "2026.csv"
 AS_OF = date(2026, 9, 1)  # after every seeded match, like test_inference_features
@@ -38,17 +41,9 @@ META_COLS = [
     "match_won",
 ]
 
-# seed.py lives under infra/duckdb (no package __init__), so load it by file
-# path, same pattern as tests/test_seed.py.
-SEED_PATH = ROOT / "infra" / "duckdb" / "seed.py"
-_spec = spec_from_file_location("seed", SEED_PATH)
-assert _spec is not None and _spec.loader is not None
-seed = module_from_spec(_spec)
-_spec.loader.exec_module(seed)
-
 
 def _seed_bronze_df() -> pd.DataFrame:
-    """The exact bronze rows seed.py's main() writes (deterministic miniset)."""
+    """The exact bronze rows seed.main() writes (deterministic miniset)."""
     matches = sorted(
         ingest.load_raw_atp_rows(RAW_CSV),
         key=lambda m: (int(m["tourney_date"]), m["tourney_id"], m["match_num"]),
@@ -60,14 +55,18 @@ def _seed_bronze_df() -> pd.DataFrame:
     return ingest.atp_rows_to_bronze(matches, selected_ids=selected_ids)
 
 
-def test_seeded_db_round_trip():
-    """Seed -> dbt build produce populated bronze/gold layers."""
-    assert cast(int, execute_df(f"SELECT COUNT(*) FROM {BRONZE_TABLE}").iloc[0, 0]) > 0
-    assert cast(int, execute_df(f"SELECT COUNT(*) FROM {GOLD_ROLLING_FEATURES}").iloc[0, 0]) > 0
-    assert cast(int, execute_df(f"SELECT COUNT(*) FROM {GOLD_TABLE}").iloc[0, 0]) > 0
+def test_deterministic_miniset_size(postgres_ready):  # noqa: ARG001 — skip-gate fixture, unused in body
+    """The seeded fixture is exactly the existing 28-match/35-player miniset."""
+    df = _seed_bronze_df()
+    assert len(df) == 28
+    assert len(set(df["player1_id"]) | set(df["player2_id"])) == 35
 
 
-def test_reinsert_is_idempotent():
+def test_seeded_bronze_populated(postgres_ready):  # noqa: ARG001 — skip-gate fixture, unused in body
+    assert cast(int, execute_df(f"SELECT COUNT(*) FROM {BRONZE_TABLE}").iloc[0, 0]) == 28
+
+
+def test_reinsert_is_idempotent(postgres_ready):  # noqa: ARG001 — skip-gate fixture, unused in body
     """Re-ingesting the seed's own rows skips duplicates (match_id PK), no doubling."""
     df = _seed_bronze_df()
     first = ingest.insert_bronze_rows(df)
@@ -77,7 +76,7 @@ def test_reinsert_is_idempotent():
     assert count == len(df)
 
 
-def test_reinsert_skips_duplicates_keeps_original_row():
+def test_reinsert_skips_duplicates_keeps_original_row(postgres_ready):  # noqa: ARG001 — skip-gate fixture, unused in body
     """DO NOTHING: re-ingesting an existing match_id must not overwrite it."""
     df = _seed_bronze_df()
     ingest.insert_bronze_rows(df)
@@ -91,13 +90,58 @@ def test_reinsert_skips_duplicates_keeps_original_row():
     stored = cast(
         int,
         execute_df(
-            f"SELECT player1_ranking FROM {BRONZE_TABLE} WHERE match_id = '{match_id}'"
+            f"SELECT player1_ranking FROM {BRONZE_TABLE} WHERE match_id = %s", [match_id]
         ).iloc[0, 0],
     )
     assert stored == original_ranking
 
 
-def test_gold_match_features_schema_matches_python_contract():
+def test_profile_upsert_preserves_enrichment(postgres_ready, tmp_path):  # noqa: ARG001 — skip-gate fixture, unused in body
+    """Loading ATP profiles again refreshes base metadata while leaving an
+    existing Wikipedia summary/enriched_at row untouched."""
+    csv = tmp_path / "atp_profiles.csv"
+    pd.DataFrame(
+        [
+            {
+                "id": "P1",
+                "player": "Player One",
+                "atpname": "P. One",
+                "birthdate": "19930316",
+                "weight": "85",
+                "height": "185",
+                "turnedpro": "2018",
+                "birthplace": "Paris",
+                "coaches": "",
+                "hand": "R",
+                "backhand": "2H",
+                "ioc": "FRA",
+            },
+        ]
+    ).to_csv(csv, index=False)
+
+    ingest.load_atp_profiles(csv, player_ids={"P1"})
+    with client.transaction() as cur:
+        cur.execute(
+            "UPDATE gold.player_profiles SET summary = %s, enriched_at = CURRENT_TIMESTAMP "
+            "WHERE player_id = %s",
+            ["Existing enrichment", "P1"],
+        )
+
+    ingest.load_atp_profiles(csv, player_ids={"P1"})
+
+    row = execute_df(
+        "SELECT summary, weight FROM gold.player_profiles WHERE player_id = %s", ["P1"]
+    ).iloc[0]
+    assert row["summary"] == "Existing enrichment"  # enrichment survives the reload
+    assert int(row["weight"]) == 85  # ATP metadata refreshed
+
+
+def test_gold_layers_populated(gold_ready):  # noqa: ARG001 — skip-gate fixture, unused in body
+    assert cast(int, execute_df(f"SELECT COUNT(*) FROM {SILVER_ROLLING_FEATURES}").iloc[0, 0]) > 0
+    assert cast(int, execute_df(f"SELECT COUNT(*) FROM {GOLD_TABLE}").iloc[0, 0]) > 0
+
+
+def test_gold_match_features_schema_matches_python_contract(gold_ready):  # noqa: ARG001 — skip-gate fixture, unused in body
     """The dbt-built training table's live schema == metadata cols + FEATURE_COLS
     — the parity check that SQL-text tests and inference-builder tests can't see.
     Current-match serve/break analysis rates are no longer part of the gold
@@ -110,7 +154,7 @@ def test_gold_match_features_schema_matches_python_contract():
     assert cols == [*META_COLS, *FEATURE_COLS]
 
 
-def test_gold_has_no_current_match_enrichment_columns():
+def test_gold_has_no_current_match_enrichment_columns(gold_ready):  # noqa: ARG001 — skip-gate fixture, unused in body
     """Task 6: the per-side current-match serve/break enrichment columns are
     removed from gold.match_features entirely — they are derived on demand from
     bronze raw counts where the dashboard/analysis needs them."""
@@ -132,10 +176,9 @@ def test_gold_has_no_current_match_enrichment_columns():
         assert f"opponent_{c}" not in cols, f"{c} still in gold"
 
 
-def test_current_match_rates_derivable_from_bronze():
-    """Task 6: current-match serve/break analysis rates are removed from gold
-    but remain derivable on demand from bronze raw counts with the existing
-    NULLIF zero-denominator behavior."""
+def test_current_match_rates_derivable_from_bronze(gold_ready):  # noqa: ARG001 — skip-gate fixture, unused in body
+    """Task 6: current/break analysis rates are removed from gold but remain
+    derivable on demand from bronze raw counts with NULLIF zero-denominator."""
     row = execute_df(
         "SELECT match_id, player1_id, player2_id, "
         "player1_first_serve_points_won, player1_first_serves_made, "
@@ -147,23 +190,13 @@ def test_current_match_rates_derivable_from_bronze():
     assert not row.empty
     m = row.iloc[0]
     res = execute_df(
-        "SELECT CAST(player1_first_serve_points_won AS DOUBLE)"
+        "SELECT CAST(player1_first_serve_points_won AS DOUBLE PRECISION)"
         "  / NULLIF(player1_first_serves_made, 0) AS first_serve_win_pct,"
-        " CAST(player1_aces AS DOUBLE) / NULLIF(player1_service_games, 0)"
+        " CAST(player1_aces AS DOUBLE PRECISION) / NULLIF(player1_service_games, 0)"
         "  AS aces_per_svc_game"
-        f" FROM {BRONZE_TABLE} WHERE match_id = ?",
+        f" FROM {BRONZE_TABLE} WHERE match_id = %s",
         [m["match_id"]],
     )
-    # Gold.match_features must NOT carry these current-match rates.
-    gold_cols = set(
-        execute_df(
-            "SELECT column_name FROM information_schema.columns "
-            "WHERE table_name = 'match_features' AND table_schema = 'gold'"
-        )["column_name"]
-    )
-    for stem in ("first_serve_win_pct", "aces_per_svc_game"):
-        assert f"player_{stem}" not in gold_cols
-        assert f"opponent_{stem}" not in gold_cols
     assert not res.isnull().all().iloc[0]  # NULLIF zero-denominator survives
 
 
@@ -175,9 +208,11 @@ def _known_pair() -> tuple[str, str]:
     return str(row["player1_id"].iloc[0]), str(row["player2_id"].iloc[0])
 
 
-def test_e2e_inference_contract():
+def test_e2e_inference_contract(gold_ready):  # noqa: ARG001 — skip-gate fixture, unused in body
     """build_inference_features against the shared gold: exact schema,
     one row, canonical ids, finite features."""
+    from src.features.inference import build_inference_features
+
     player_id, opponent_id = _known_pair()
     out = build_inference_features(player_id, opponent_id, "hard", as_of_date=AS_OF)
     assert out.columns.tolist() == [*FEATURE_COLS, "player_id", "opponent_id"]
@@ -186,8 +221,10 @@ def test_e2e_inference_contract():
     assert not out[FEATURE_COLS].isnull().to_numpy().any()
 
 
-def test_e2e_cold_start_imputation():
+def test_e2e_cold_start_imputation(gold_ready):  # noqa: ARG001 — skip-gate fixture, unused in body
     """Unknown players fall back to global aggregates on the seeded DB too."""
+    from src.features.inference import build_inference_features
+
     out = build_inference_features("ZZZZ", "YYYY", "clay", as_of_date=AS_OF)
     assert out.columns.tolist() == [*FEATURE_COLS, "player_id", "opponent_id"]
     assert len(out) == 1

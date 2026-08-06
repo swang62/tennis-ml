@@ -12,18 +12,22 @@ Permanently offline: the seed never performs live Wikipedia/bio enrichment.
 Enrichment is owned exclusively by the ETL flow (src/flows/etl.py) as an
 explicit operator opt-in; seeding stays offline by default and --all.
 
+Writes go to the operational PostgreSQL database (src.db.client), never to a
+local DuckDB file.
+
 Usage:
-    uv run python infra/duckdb/initialize_schemas.py init   # schemas first
-    uv run python infra/duckdb/seed.py                      # or `just db-seed`
-    uv run python infra/duckdb/seed.py --all                # seed every ATP CSV under data/raw/
+    uv run python -m src.flows.init_db init   # schemas first (structure only)
+    uv run python -m src.flows.seed           # or `just db-seed`
+    uv run python -m src.flows.seed --all     # seed every ATP CSV under data/raw/
 """
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Any
+from typing import Any, LiteralString, cast
 
+from src.constants import ROOT
 from src.db.client import get_conn
 from src.flows.ingest import (
     BRONZE_TABLE,
@@ -34,7 +38,6 @@ from src.flows.ingest import (
     player_history,
 )
 
-ROOT = Path(__file__).resolve().parents[2]
 RAW_DIR = ROOT / "data" / "raw"
 RAW_YEAR = RAW_DIR / "2026.csv"
 
@@ -129,7 +132,10 @@ def main_default() -> None:
     conn = get_conn()
     # Re-seeding replaces the seed's own rows so `just db-seed` stays idempotent.
     conn.execute(
-        f"DELETE FROM {BRONZE_TABLE} WHERE match_id IN ({', '.join('?' * len(selected_ids))})",
+        cast(
+            LiteralString,
+            f"DELETE FROM {BRONZE_TABLE} WHERE match_id IN ({', '.join(['%s'] * len(selected_ids))})",
+        ),
         list(selected_ids),
     )
     insert_bronze_rows(bronze)

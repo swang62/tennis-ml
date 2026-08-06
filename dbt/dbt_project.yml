@@ -15,34 +15,37 @@ clean-targets:
 models:
   tennis_ml:
     # Medallion layering: bronze.match_events (raw, ingest) -> silver
-    # (per-player expansion: player_matches) -> gold
-    # (features: rolling_features, match_features).
+    # (per-player expansion: player_matches + post-match rolling snapshots:
+    # rolling_features) -> gold (match_features).
     silver:
       +materialized: table
       +schema: silver
 
       # Silver tables are built via CREATE TABLE AS SELECT, so PKs and
       # secondary indexes cannot live in init.sql (bronze/PK side). Post-hooks
-      # apply them after each model materializes. DuckDB table materialization
-      # replaces the table, so the DDL is re-applied on every build.
+      # apply them after each model materializes. PostgreSQL has no
+      # ADD CONSTRAINT IF NOT EXISTS and dbt-postgres's table swap transiently
+      # keeps the previous incarnation's constraint/index names in the schema,
+      # so the ensure_* macros clean up stale objects before recreating them
+      # (idempotent across first build, rebuilds, and --full-refresh).
       player_matches:
         +post-hook:
-          - "ALTER TABLE {{ this }} ADD CONSTRAINT pk_player_matches PRIMARY KEY (player_id, match_id)"
-          - "CREATE INDEX IF NOT EXISTS idx_player_matches_pid_date ON {{ this }} (player_id, match_date)"
+          - "{{ ensure_primary_key_sql(this, 'pk_player_matches', 'player_id, match_id') }}"
+          - "{{ ensure_index_sql(this, 'idx_player_matches_pid_date', 'player_id, match_date') }}"
+
+      rolling_features:
+        +post-hook:
+          - "{{ ensure_primary_key_sql(this, 'pk_rolling_features', 'player_id, match_id') }}"
+          - "{{ ensure_index_sql(this, 'idx_rolling_pid_date', 'player_id, snapshot_date') }}"
 
     gold:
       +materialized: table
       +schema: gold
 
       # Same post-hook rationale as silver: PKs/indexes are re-applied on every
-      # build because DuckDB table materialization replaces the table.
+      # build because PostgreSQL table materialization replaces the table.
       match_features:
         +post-hook:
-          - "ALTER TABLE {{ this }} ADD CONSTRAINT pk_match_features PRIMARY KEY (match_id)"
-          - "CREATE INDEX IF NOT EXISTS idx_match_features_player_id ON {{ this }} (player_id)"
-          - "CREATE INDEX IF NOT EXISTS idx_match_features_opponent_id ON {{ this }} (opponent_id)"
-
-      rolling_features:
-        +post-hook:
-          - "ALTER TABLE {{ this }} ADD CONSTRAINT pk_rolling_features PRIMARY KEY (player_id, match_id)"
-          - "CREATE INDEX IF NOT EXISTS idx_rolling_pid_date ON {{ this }} (player_id, snapshot_date)"
+          - "{{ ensure_primary_key_sql(this, 'pk_match_features', 'match_id') }}"
+          - "{{ ensure_index_sql(this, 'idx_match_features_player_id', 'player_id') }}"
+          - "{{ ensure_index_sql(this, 'idx_match_features_opponent_id', 'opponent_id') }}"

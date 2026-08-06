@@ -5,7 +5,7 @@ Usage:
 
 Takes a raw ATP-format CSV (winner/loser columns, see
 data/column_glossary.md) and maps it to bronze.match_events rows
-using the same transform as the dev seed flow (infra/duckdb/seed.py). It then
+using the same transform as the dev seed flow (src/flows/seed.py). It then
 loads ATP player profiles for the ingested players and runs best-effort
 Wikipedia enrichment.
 
@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, LiteralString, cast
 
 import pandas as pd
 import requests
@@ -119,7 +119,7 @@ SUMMARY_MAX_CHARS = 2000
 
 load_env()
 
-# ── Raw ATP → Bronze transform (shared with infra/duckdb/seed.py) ───────────
+# ── Raw ATP → Bronze transform (shared with src/flows/seed.py) ──────────────
 
 
 def _stat(row: dict[str, Any], key: str) -> int:
@@ -176,7 +176,7 @@ def atp_rows_to_bronze(
 ) -> pd.DataFrame:
     """Map raw ATP-format rows to bronze.match_events rows.
 
-    Shared by the ingest CLI and the dev seed (infra/duckdb/seed.py) so both
+    Shared by the ingest CLI and the dev seed (src/flows/seed.py) so both
     paths use identical semantics: winner on the player1 side, ISO match dates
     from tourney_date, canonical tournament names (LEVEL_MAP), lowercased
     round/surface, raw break-point saved/faced values, raw serve/rank/age
@@ -283,6 +283,69 @@ def load_atp_csv(path: str | Path) -> pd.DataFrame:
     return atp_rows_to_bronze(load_raw_atp_rows(path))
 
 
+def _copy_row_value(value: Any) -> Any:
+    """Normalize one pandas cell for psycopg binary COPY.
+
+    Pandas reads whole-number integer CSV columns as float64 whenever any cell
+    is empty, so integral floats must become ints for PostgreSQL integer
+    columns; NaN/pd.NA become NULL and Timestamps become Python dates (psycopg
+    does not adapt pandas Timestamp in binary COPY).
+    """
+    if value is None or pd.isna(value):
+        return None
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, pd.Timestamp):
+        return value.date()
+    return value
+
+
+def _copy_df_into(
+    table: str,
+    df: pd.DataFrame,
+    *,
+    conflict_col: str,
+    update_cols: list[str] | None = None,
+) -> None:
+    """Bulk-insert `df` into `table` via COPY through a temp staging table.
+
+    COPY cannot express ON CONFLICT, so the rows land in a transaction-scoped
+    temp table (same columns as the target) and are then moved with a single
+    INSERT ... SELECT that applies the conflict clause: DO NOTHING when
+    `update_cols` is None, otherwise DO UPDATE SET on the given columns. This
+    replaces the old DuckDB `SELECT ... FROM df` relation scan while keeping
+    one code path for bronze (idempotent inserts) and profiles (ATP metadata
+    refresh that leaves enrichment columns untouched).
+    """
+    columns = list(df.columns)
+    columns_sql = ", ".join(columns)
+    conn = get_conn()
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(cast(LiteralString, f"CREATE TEMP TABLE stage (LIKE {table}) ON COMMIT DROP"))
+        # NaN is pandas' NULL marker; COPY binary adapts Python None as SQL NULL.
+        records = df.where(pd.notnull(df), None)
+        with cur.copy(cast(LiteralString, f"COPY stage ({columns_sql}) FROM STDIN")) as copy:
+            for row in records.itertuples(index=False, name=None):
+                copy.write_row([_copy_row_value(v) for v in row])
+        if update_cols is None:
+            cur.execute(
+                cast(
+                    LiteralString,
+                    f"INSERT INTO {table} ({columns_sql}) SELECT {columns_sql} FROM stage "
+                    f"ON CONFLICT ({conflict_col}) DO NOTHING",
+                )
+            )
+        else:
+            updates = ", ".join(f"{col} = excluded.{col}" for col in update_cols)
+            cur.execute(
+                cast(
+                    LiteralString,
+                    f"INSERT INTO {table} ({columns_sql}) SELECT {columns_sql} FROM stage "
+                    f"ON CONFLICT ({conflict_col}) DO UPDATE SET {updates}",
+                )
+            )
+
+
 def insert_bronze_rows(df: pd.DataFrame) -> int:
     """Insert bronze.match_events rows from a DataFrame; returns row count.
 
@@ -305,11 +368,8 @@ def insert_bronze_rows(df: pd.DataFrame) -> int:
     if valid_df.empty:
         return 0
 
-    conn = get_conn()
-    conn.sql(
-        f"INSERT INTO {BRONZE_TABLE} ({', '.join(BRONZE_COLUMNS)}) "
-        f"SELECT {', '.join(BRONZE_COLUMNS)} FROM valid_df "
-        f"ON CONFLICT (match_id) DO NOTHING"
+    _copy_df_into(
+        BRONZE_TABLE, cast(pd.DataFrame, valid_df[list(BRONZE_COLUMNS)]), conflict_col="match_id"
     )
     return len(valid_df)
 
@@ -434,15 +494,12 @@ def load_atp_profiles(
         }
     )
 
-    base_updates = ", ".join(
-        f"{col} = excluded.{col}" for col in ATP_PROFILE_COLUMNS if col != "player_id"
+    _copy_df_into(
+        PROFILES_TABLE,
+        cast(pd.DataFrame, df[ATP_PROFILE_COLUMNS]),
+        conflict_col="player_id",
+        update_cols=[c for c in ATP_PROFILE_COLUMNS if c != "player_id"],
     )
-    conn = get_conn()
-    conn.sql(f"""
-        INSERT INTO {PROFILES_TABLE} ({", ".join(ATP_PROFILE_COLUMNS)})
-        SELECT * FROM df
-        ON CONFLICT (player_id) DO UPDATE SET {base_updates}
-    """)
     return len(df)
 
 
@@ -595,13 +652,16 @@ def enrich_player(name: str, player_id: str | None = None) -> bool:
 
     conn = get_conn()
     conn.execute(
-        f"""INSERT INTO {PROFILES_TABLE}
+        cast(
+            LiteralString,
+            f"""INSERT INTO {PROFILES_TABLE}
             (player_id, display_name, summary, handedness, backhand,
              height, turned_pro, enriched_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
         ON CONFLICT (player_id) DO UPDATE SET
             summary = excluded.summary,
             enriched_at = excluded.enriched_at""",
+        ),
         [
             pid,
             page["title"],
@@ -631,9 +691,12 @@ def enrich_players(player_ids: list[str]) -> int:
         return 0
     conn = get_conn()
     rows = conn.execute(
-        f"SELECT player_id, COALESCE(display_name, atp_name) AS name, summary "
-        f"FROM {PROFILES_TABLE} "
-        f"WHERE player_id IN ({', '.join('?' * len(player_ids))})",
+        cast(
+            LiteralString,
+            f"SELECT player_id, COALESCE(display_name, atp_name) AS name, summary "
+            f"FROM {PROFILES_TABLE} "
+            f"WHERE player_id IN ({', '.join(['%s'] * len(player_ids))})",
+        ),
         player_ids,
     ).fetchall()
     enriched = 0

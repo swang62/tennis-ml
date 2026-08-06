@@ -1,61 +1,66 @@
 """Shared pytest bootstrap for the tennis-ml test suite.
 
-Pytest environment variables are configured in pyproject.toml. The session
-fixture rebuilds the fixed test database under tests/___db, so the development
-database at data/tennis.duckdb is never touched.
+PostgreSQL is the only operational database; no test touches a DuckDB file.
+The autouse session fixture seeds the deterministic miniset (src/flows/seed.py)
+into the configured local PostgreSQL once per session when it is reachable —
+idempotent by design, so it only replaces the seed's own rows and profiles.
+DB-touching tests opt in through `postgres_ready` (skips cleanly when the
+configured server is unreachable or the seed could not be applied) and
+`gold_ready` (skips until the dbt gold build exists over PostgreSQL, Task 4).
 """
 
-import os
-import subprocess
-from pathlib import Path
-
-import duckdb
 import pytest
 
-from src.constants import ROOT
-from src.flows.etl import run_dbt_build
+from src.db import client
+from src.flows import init_db
+from src.flows import seed as seed_flow
 
-# dbt needs a profiles.yml pointing at the test DB (same shape as
-# tests/test_e2e_ingest_to_inference.py) so the gold build never touches
-# data/tennis.duckdb.
-PROFILES_YML = """tennis_ml:
-  target: local
-  outputs:
-    local:
-      type: duckdb
-      path: {db}
-      schema: gold
-      threads: 1
-"""
+_SEED_FAILURE: str | None = None
+
+
+def _postgres_reachable() -> bool:
+    try:
+        with client.get_conn().cursor() as cur:
+            cur.execute("SELECT 1")
+    except Exception:
+        return False
+    else:
+        return True
 
 
 @pytest.fixture(scope="session", autouse=True)
 def seeded_test_db():
-    """Rebuild the fixed, ignored test database once per test session."""
-    db_path = ROOT / os.environ["TENNIS_DB_PATH"]
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    if db_path.exists():
-        db_path.unlink()
+    """Apply the PostgreSQL bootstrap (structure only) and the deterministic
+    miniset seed once per session when the server is reachable."""
+    global _SEED_FAILURE
+    if _postgres_reachable():
+        try:
+            init_db.init()
+            seed_flow.main([])
+        except Exception as exc:  # e.g. pg_duckdb missing or schema drift
+            _SEED_FAILURE = str(exc)
+    yield
+    client.close()
 
-    conn = duckdb.connect(str(db_path))
-    conn.execute((ROOT / "infra" / "duckdb" / "init.sql").read_text())
-    conn.close()
 
-    subprocess.run(
-        ["uv", "run", "python", "infra/duckdb/seed.py"],
-        cwd=ROOT,
-        check=True,
-    )
-
-    profiles_dir = db_path.parent / "profiles"
-    profiles_dir.mkdir(parents=True, exist_ok=True)
-    (profiles_dir / "profiles.yml").write_text(PROFILES_YML.format(db=db_path))
-    run_dbt_build(profiles_dir=profiles_dir)
-
+@pytest.fixture(scope="session")
+def postgres_ready(seeded_test_db):  # noqa: ARG001 — dependency ordering only
+    """Skip the test when the seeded PostgreSQL is not usable."""
+    if not _postgres_reachable():
+        pytest.skip("configured PostgreSQL is not reachable (POSTGRES_* contract)")
+    if _SEED_FAILURE:
+        pytest.skip(f"seeded PostgreSQL unavailable: {_SEED_FAILURE}")
     yield
 
-    import src.db.client as db_client
 
-    if db_client._conn is not None:
-        db_client._conn.close()
-        db_client._conn = None
+@pytest.fixture(scope="session")
+def gold_ready(postgres_ready):  # noqa: ARG001 — skip-gate fixture, unused in body
+    """Skip when dbt has not built gold.match_features over PostgreSQL."""
+    with client.get_conn().cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'gold' AND table_name = 'match_features'"
+        )
+        if cur.fetchone() is None:
+            pytest.skip("gold.match_features not built (dbt ETL over PostgreSQL); skipping")
+    yield

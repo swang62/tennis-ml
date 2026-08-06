@@ -60,7 +60,7 @@ def validate_bronze_row(row: Mapping[str, Any]) -> list[str]:
         if value is None:
             continue
         if value < 0 or value > 255:
-            issues.append(f"{column} outside UTINYINT 0..255: {value}")
+            issues.append(f"{column} outside SMALLINT 0..255: {value}")
 
     for column in BRONZE_COLUMNS_INT32:
         value = _as_number(row.get(column))

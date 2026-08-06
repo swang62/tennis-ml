@@ -1,45 +1,99 @@
-"""Hermetic tests for src/flows/ingest.py (no network, no real DuckDB file)."""
+"""Hermetic tests for src/flows/ingest.py (no network, no live database).
 
-import datetime
+Write paths are exercised against a recording fake connection (the same
+pattern as tests/test_db_client.py): the fake captures every statement and
+bound parameter and accepts COPY rows, so tests can assert that PostgreSQL
+bulk insert uses COPY through a temp stage, that bronze idempotency is
+expressed as `ON CONFLICT (match_id) DO NOTHING`, that profile upserts
+refresh ATP metadata without touching enrichment columns, and that values
+travel as `%s` bound parameters (never interpolated). Live-database behavior
+is covered by tests/test_e2e_ingest_to_inference.py against the configured
+local PostgreSQL.
+"""
+
 from pathlib import Path
 
-import duckdb
 import pandas as pd
 import pytest
 
 import src.flows.ingest as ingest
-from src.constants import ROOT
 from src.features.columns import BRONZE_COLUMNS
 
-PROFILES_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS gold.player_profiles (
-    player_id    VARCHAR PRIMARY KEY,
-    display_name VARCHAR,
-    atp_name     VARCHAR,
-    birthdate    DATE,
-    weight       SMALLINT,
-    height       SMALLINT,
-    turned_pro   INTEGER,
-    birthplace   VARCHAR,
-    coaches      VARCHAR,
-    handedness   VARCHAR,
-    backhand     VARCHAR,
-    ioc          VARCHAR,
-    summary      VARCHAR,
-    enriched_at  TIMESTAMP
-)
-"""
+
+class _FakeCopy:
+    """cur.copy() stand-in that records the COPY SQL and accepted rows."""
+
+    def __init__(self, conn, sql):
+        self._conn = conn
+        self._sql = sql
+
+    def __enter__(self):
+        self._conn.statements.append((self._sql, None))
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def write_row(self, row):
+        self._conn.copied_rows.append(tuple(row))
+
+
+class _FakeCursor:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self._conn.statements.append((sql, params))
+        return self
+
+    def copy(self, sql):
+        return _FakeCopy(self._conn, sql)
+
+    def fetchall(self):
+        return self._conn.fetchall_result
+
+
+class _FakeTxn:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __enter__(self):
+        return self._conn.cursor(None)
+
+    def __exit__(self, *_exc):
+        return False
+
+
+class _FakeConn:
+    """Minimal psycopg-like connection recording statements and COPY rows."""
+
+    def __init__(self):
+        self.statements: list[tuple[str, object | None]] = []
+        self.copied_rows: list[tuple[object, ...]] = []
+        self.fetchall_result: list[tuple[object, ...]] = []
+
+    def cursor(self, row_factory=None):  # noqa: ARG002 — psycopg cursor API surface
+        return _FakeCursor(self)
+
+    def transaction(self):
+        return _FakeTxn(self)
+
+    def execute(self, sql, params=None):
+        self.statements.append((sql, params))
+        return _FakeCursor(self)
 
 
 @pytest.fixture
-def profiles_conn(monkeypatch):
-    """In-memory DuckDB with the gold.player_profiles schema wired to ingest.get_conn."""
-    conn = duckdb.connect(":memory:")
-    conn.execute("CREATE SCHEMA IF NOT EXISTS gold")
-    conn.execute(PROFILES_SCHEMA_SQL)
+def fake_ingest_conn(monkeypatch):
+    conn = _FakeConn()
     monkeypatch.setattr(ingest, "get_conn", lambda: conn)
-    yield conn
-    conn.close()
+    return conn
 
 
 # ── _parse_int / _parse_birthdate ─────────────────────────────────
@@ -322,6 +376,31 @@ def test_load_raw_atp_rows_preserves_present_indoor_values(tmp_path):
     assert ingest.atp_rows_to_bronze(rows).iloc[0]["is_indoor"] == 0
 
 
+# ── insert_bronze_rows (bronze idempotency) ─────────────────────────
+
+
+def test_insert_bronze_rows_copies_valid_rows_with_do_nothing(fake_ingest_conn):
+    """INSERT ... SELECT carries ON CONFLICT (match_id) DO NOTHING so
+    re-ingesting an existing match_id never overwrites or duplicates it."""
+    df = ingest.atp_rows_to_bronze([_raw_row()])
+
+    assert ingest.insert_bronze_rows(df) == 1
+
+    assert fake_ingest_conn.copied_rows  # COPY streamed the valid row
+    insert_sql, _params = fake_ingest_conn.statements[-1]
+    assert insert_sql.startswith(f"INSERT INTO {ingest.BRONZE_TABLE}")
+    assert "ON CONFLICT (match_id) DO NOTHING" in insert_sql
+    assert "DO UPDATE" not in insert_sql
+
+
+def test_insert_bronze_rows_returns_zero_when_all_invalid(fake_ingest_conn):
+    df = ingest.atp_rows_to_bronze([_raw_row()])
+    df.loc[0, "winner_id"] = "L1"  # winner must equal player1_id
+
+    assert ingest.insert_bronze_rows(df) == 0
+    assert fake_ingest_conn.copied_rows == []
+
+
 # ── search_wikipedia / fetch_summary ──────────────────────────────
 
 
@@ -412,54 +491,46 @@ def _write_profiles_csv(tmp_path: Path) -> Path:
     return csv
 
 
-def test_load_atp_profiles_inserts_base_columns(profiles_conn, tmp_path):
+def test_load_atp_profiles_bulk_copies_base_columns(fake_ingest_conn, tmp_path):
     csv = _write_profiles_csv(tmp_path)
 
     assert ingest.load_atp_profiles(csv) == 2
 
-    row = profiles_conn.execute(
-        "SELECT player_id, display_name, atp_name, birthdate, weight, height, turned_pro, "
-        "handedness, backhand, ioc FROM gold.player_profiles WHERE player_id = 'P1'"
-    ).fetchone()
-    assert row == (
-        "P1",
-        "Player One",
-        "P. One",
-        datetime.date(1993, 3, 16),
-        85,
-        185,
-        2018,
-        "R",
-        "2H",
-        "FRA",
+    # COPY streams the rows into a temp stage, then a single INSERT ... SELECT
+    # applies the PK upsert — never a DuckDB relation scan.
+    assert any(
+        sql == f"COPY stage ({', '.join(ingest.ATP_PROFILE_COLUMNS)}) FROM STDIN"
+        for sql, _ in fake_ingest_conn.statements
     )
+    assert len(fake_ingest_conn.copied_rows) == 2
+    insert_sql, _params = fake_ingest_conn.statements[-1]
+    assert insert_sql.startswith(f"INSERT INTO {ingest.PROFILES_TABLE}")
+    assert "ON CONFLICT (player_id) DO UPDATE SET" in insert_sql
 
 
-def test_load_atp_profiles_preserves_enrichment_on_reload(profiles_conn, tmp_path):
+def test_load_atp_profiles_upsert_never_touches_enrichment(fake_ingest_conn, tmp_path):
+    """The DO UPDATE SET refreshes ATP metadata only; existing Wikipedia
+    enrichment (summary/enriched_at) survives re-loads."""
     csv = _write_profiles_csv(tmp_path)
     ingest.load_atp_profiles(csv)
-    profiles_conn.execute(
-        "UPDATE gold.player_profiles SET summary = 'Existing enrichment' WHERE player_id = 'P1'"
-    )
 
-    ingest.load_atp_profiles(csv)
-
-    summary = profiles_conn.execute(
-        "SELECT summary FROM gold.player_profiles WHERE player_id = 'P1'"
-    ).fetchone()[0]
-    assert summary == "Existing enrichment"
+    update_sql = next(s for s, _ in fake_ingest_conn.statements if "DO UPDATE SET" in s)
+    for col in ("summary", "enriched_at"):
+        assert col not in update_sql
+    for col in ("weight", "height", "birthplace", "ioc"):
+        assert f"{col} = excluded.{col}" in update_sql
 
 
-def test_load_atp_profiles_filters_by_player_ids(profiles_conn, tmp_path):
+def test_load_atp_profiles_filters_by_player_ids(fake_ingest_conn, tmp_path):
     csv = _write_profiles_csv(tmp_path)
 
     assert ingest.load_atp_profiles(csv, player_ids={"P2"}) == 1
 
-    rows = profiles_conn.execute("SELECT player_id FROM gold.player_profiles").fetchall()
-    assert [r[0] for r in rows] == ["P2"]
+    assert len(fake_ingest_conn.copied_rows) == 1
+    assert fake_ingest_conn.copied_rows[0][0] == "P2"
 
 
-def test_load_atp_profiles_dedupes_duplicate_ids_last_wins(profiles_conn, tmp_path):
+def test_load_atp_profiles_dedupes_duplicate_ids_last_wins(fake_ingest_conn, tmp_path):
     csv = tmp_path / "dup.csv"
     pd.DataFrame(
         [
@@ -496,16 +567,15 @@ def test_load_atp_profiles_dedupes_duplicate_ids_last_wins(profiles_conn, tmp_pa
 
     assert ingest.load_atp_profiles(csv) == 1
 
-    row = profiles_conn.execute(
-        "SELECT player_id, display_name, weight FROM gold.player_profiles"
-    ).fetchone()
-    assert row == ("P1", "Last", 90)
+    assert len(fake_ingest_conn.copied_rows) == 1
+    assert fake_ingest_conn.copied_rows[0][1] == "Last"
+    assert fake_ingest_conn.copied_rows[0][4] == 90
 
 
 # ── enrich_player / enrich_players / enrich_missing ───────────────
 
 
-def test_enrich_player_apostrophe_name_never_stores_none(monkeypatch, profiles_conn):
+def test_enrich_player_apostrophe_name_binds_as_param(monkeypatch, fake_ingest_conn):
     monkeypatch.setattr(ingest, "search_wikipedia", lambda _name: "Jan O'Brien")
     monkeypatch.setattr(
         ingest,
@@ -519,16 +589,16 @@ def test_enrich_player_apostrophe_name_never_stores_none(monkeypatch, profiles_c
 
     assert ingest.enrich_player("Jan O'Brien") is True
 
-    row = profiles_conn.execute(
-        "SELECT player_id, display_name, summary FROM gold.player_profiles"
-    ).fetchone()
-    assert row[0] == "Jan O'Brien"
-    assert row[1] == "Jan O'Brien"
-    assert row[2] == "Jan O'Brien is a player with an apostrophe."
-    assert profiles_conn.execute("SELECT count(*) FROM gold.player_profiles").fetchone()[0] == 1
+    sql, params = fake_ingest_conn.statements[0]
+    assert "%s" in sql  # psycopg placeholders, never string interpolation
+    assert "O'Brien" not in sql
+    assert "ON CONFLICT (player_id) DO UPDATE SET" in sql
+    assert "summary = excluded.summary" in sql
+    assert params[0] == "Jan O'Brien"  # the name travels as a bound parameter
+    assert params[1] == "Jan O'Brien"
 
 
-def test_enrich_player_uses_explicit_player_id(monkeypatch, profiles_conn):
+def test_enrich_player_uses_explicit_player_id(monkeypatch, fake_ingest_conn):
     monkeypatch.setattr(ingest, "search_wikipedia", lambda _name: "Some Title")
     monkeypatch.setattr(
         ingest,
@@ -538,8 +608,8 @@ def test_enrich_player_uses_explicit_player_id(monkeypatch, profiles_conn):
 
     assert ingest.enrich_player("Name", "REALID") is True
 
-    row = profiles_conn.execute("SELECT player_id FROM gold.player_profiles").fetchone()
-    assert row[0] == "REALID"
+    _sql, params = fake_ingest_conn.statements[0]
+    assert params[0] == "REALID"
 
 
 # ── extract_playing_style_paragraph / extract_lead_paragraph ──────
@@ -578,7 +648,7 @@ def test_extract_lead_paragraph_returns_none_when_empty():
     assert ingest.extract_lead_paragraph("== Career ==\n") is None
 
 
-def test_enrich_player_stores_playing_style_paragraph(monkeypatch, profiles_conn):
+def test_enrich_player_stores_playing_style_paragraph(monkeypatch, fake_ingest_conn):
     """Playing style paragraph is preferred over the article lead."""
     monkeypatch.setattr(ingest, "search_wikipedia", lambda _name: "Title")
     monkeypatch.setattr(
@@ -595,11 +665,11 @@ def test_enrich_player_stores_playing_style_paragraph(monkeypatch, profiles_conn
 
     assert ingest.enrich_player("Player") is True
 
-    summary = profiles_conn.execute("SELECT summary FROM gold.player_profiles").fetchone()[0]
-    assert summary == "Style paragraph."
+    _sql, params = fake_ingest_conn.statements[0]
+    assert params[2] == "Style paragraph."
 
 
-def test_enrich_player_falls_back_to_lead_paragraph(monkeypatch, profiles_conn):
+def test_enrich_player_falls_back_to_lead_paragraph(monkeypatch, fake_ingest_conn):
     """When Playing style is absent, the article lead paragraph is used."""
     monkeypatch.setattr(ingest, "search_wikipedia", lambda _name: "Title")
     monkeypatch.setattr(
@@ -614,11 +684,11 @@ def test_enrich_player_falls_back_to_lead_paragraph(monkeypatch, profiles_conn):
 
     assert ingest.enrich_player("Player") is True
 
-    summary = profiles_conn.execute("SELECT summary FROM gold.player_profiles").fetchone()[0]
-    assert summary == "Lead paragraph."
+    _sql, params = fake_ingest_conn.statements[0]
+    assert params[2] == "Lead paragraph."
 
 
-def test_enrich_player_skips_when_no_usable_paragraph(monkeypatch, profiles_conn):
+def test_enrich_player_skips_when_no_usable_paragraph(monkeypatch, fake_ingest_conn):
     """No Playing style section and no lead paragraph -> SKIP, not counted."""
     monkeypatch.setattr(ingest, "search_wikipedia", lambda _name: "Title")
     monkeypatch.setattr(
@@ -632,7 +702,7 @@ def test_enrich_player_skips_when_no_usable_paragraph(monkeypatch, profiles_conn
     )
 
     assert ingest.enrich_player("Player") is False
-    assert profiles_conn.execute("SELECT count(*) FROM gold.player_profiles").fetchone()[0] == 0
+    assert fake_ingest_conn.statements == []
 
 
 def test_enrich_missing_enriches_missing_players(monkeypatch):
@@ -648,13 +718,12 @@ def test_enrich_missing_noop_when_none_missing(monkeypatch):
     assert ingest.enrich_missing() == 0
 
 
-def test_enrich_players_skips_already_enriched_and_nameless(monkeypatch, profiles_conn):
-    profiles_conn.execute(
-        "INSERT INTO gold.player_profiles (player_id, display_name, summary) VALUES "
-        "('P1', 'Player One', NULL), "
-        "('P2', 'Player Two', 'Already enriched.'), "
-        "('P3', NULL, NULL)"
-    )
+def test_enrich_players_skips_already_enriched_and_nameless(monkeypatch, fake_ingest_conn):
+    fake_ingest_conn.fetchall_result = [
+        ("P1", "Player One", None),
+        ("P2", "Player Two", "Already enriched."),
+        ("P3", None, None),
+    ]
     calls: list[tuple[str, str]] = []
     monkeypatch.setattr(
         ingest, "enrich_player", lambda name, pid: calls.append((pid, name)) or True
@@ -662,6 +731,11 @@ def test_enrich_players_skips_already_enriched_and_nameless(monkeypatch, profile
 
     assert ingest.enrich_players(["P1", "P2", "P3"]) == 1
     assert calls == [("P1", "Player One")]
+
+    # The lookup must use %s placeholders with the ids bound as parameters.
+    sql, params = fake_ingest_conn.statements[0]
+    assert "%s" in sql
+    assert params == ["P1", "P2", "P3"]
 
 
 # ── Indoor normalization ────────────────────────────────────────

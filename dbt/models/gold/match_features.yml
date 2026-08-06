@@ -5,7 +5,7 @@ models:
     description: >
       ONE ROW PER MATCH, lower-id player_* side, built by pairing each
       player_match row with that player's immediately preceding post-match
-      snapshot (player_match_number - 1) from gold.rolling_features,
+      snapshot (player_match_number - 1) from silver.rolling_features,
       then collapsing the two perspectives into one canonical row. The current
       event supplies match context and current rankings; the prior snapshot
       supplies all rolling history, so no value leaks from the current match

@@ -1,53 +1,48 @@
-# Production BentoML serving via Docker Hub + Docker Compose — no Kubernetes.
-# deploy.py sets DOCKER_IMAGE (Docker Hub repo); the image is pulled, never
-# built locally. Always serves the moving `latest` tag. Bento runs at
-# http://127.0.0.1:3000.
-#
-# The production DuckDB is served by the Quack companion image; the Bento
-# connects to it over the Compose network (ENVIRONMENT=production). The DB is
-# persisted in a named volume owned by quack-db, independent of the Bento, and
-# is NOT baked into the Bento image.
 services:
-  quack-db:
-    build: ./infra/duckdb
+  postgres:
+    image: pgduckdb/pgduckdb:17-v1.1.1
     restart: unless-stopped
-    volumes:
-      - tennis-db:/data
-    # Publish the Quack port on the host so host-side operators can ATTACH and
-    # init/seed the running server directly (quack:127.0.0.1:9494); the Bento
-    # still reaches it over the Compose network at quack:quack-db:9494.
     ports:
-      - "9494:9494"
+      - "6543:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     environment:
-      ENVIRONMENT: production
-      QUACK_URI: quack:0.0.0.0:9494
-      QUACK_URI_CANONICAL: quack:127.0.0.1:9494
-      QUACK_TOKEN: ${QUACK_TOKEN:?QUACK_TOKEN must be set}
-      QUACK_DB_PATH: /data/tennis.duckdb
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: ${POSTGRES_DB:-tennis}
     healthcheck:
-      test: [ "CMD", "python", "/usr/local/bin/quack_healthcheck.py" ]
-      interval: 30s
+      test:
+        [
+          "CMD-SHELL",
+          'pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-tennis} && psql -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-tennis} -tAc "SELECT 1 FROM pg_extension WHERE extname = ''pg_duckdb''" | grep -q 1',
+        ]
+      interval: 60s
       timeout: 5s
-      retries: 3
-      start_period: 20s
-    pull_policy: always
+      retries: 6
+      start_period: 30s
 
   bento:
-    image: ${DOCKER_IMAGE}:latest
+    image: ${DOCKER_IMAGE:-${DOCKER_REPO}/${IMAGE_NAME}}:latest
     restart: unless-stopped
     depends_on:
-      quack-db:
+      postgres:
         condition: service_healthy
     ports:
       - "3000:3000"
     environment:
-      ENVIRONMENT: production
-      QUACK_URI: quack:quack-db:9494
-      QUACK_TOKEN: ${QUACK_TOKEN:?QUACK_TOKEN must be set}
-      QUACK_CATALOG: tennis
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: ${POSTGRES_DB:-tennis}
     healthcheck:
-      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/healthz').read()" ]
-      interval: 30s
+      test:
+        [
+          "CMD-SHELL",
+          'python -c "import os,psycopg;c=psycopg.connect(host=''postgres'',port=5432,user=os.environ[''POSTGRES_USER''],password=os.environ[''POSTGRES_PASSWORD''],dbname=os.environ[''POSTGRES_DB'']);assert c.execute(''SELECT 1'').fetchone()==(1,)"',
+        ]
+      interval: 60s
       timeout: 5s
       retries: 3
       start_period: 60s
@@ -61,13 +56,12 @@ services:
         condition: service_healthy
     ports:
       - "8187:80"
-    # nginx:alpine ships busybox wget; probe the SPA root.
     healthcheck:
-      test: [ "CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/" ]
-      interval: 30s
+      test: wget -nv --spider 127.0.0.1 || exit 1
+      interval: 60s
       timeout: 5s
       retries: 3
       start_period: 10s
 
 volumes:
-  tennis-db:
+  postgres-data:

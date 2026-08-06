@@ -23,6 +23,7 @@ import json
 import math
 import pickle
 from datetime import date, datetime
+from decimal import Decimal
 from time import perf_counter
 
 import bentoml
@@ -37,11 +38,11 @@ from starlette.routing import Route
 
 from src.constants import (
     BRONZE_TABLE,
-    GOLD_ROLLING_FEATURES,
     PRODUCTION_MODEL,
     PROFILES_TABLE,
     ROOT,
     SILVER_PLAYER_MATCHES,
+    SILVER_ROLLING_FEATURES,
 )
 from src.db.client import execute_df, first_row_dict
 from src.features.columns import FEATURE_COLS
@@ -52,9 +53,12 @@ AUX_DIR = ROOT / "data" / "processed"
 
 load_env()
 
-# v2 image spec: deps declared here, NOT in bentofile.yaml. Keeps the install
+# v2 image spec: deps declared here, NOT in bentoml.yaml. Keeps the install
 # list next to the service that consumes it. torch + lightning are dropped
-# (the NN is served via ONNX Runtime); everything else is pinned to the exact
+# (the NN is served via ONNX Runtime); DuckDB is dropped too — operational
+# serving reads PostgreSQL through psycopg (the inference builder and the
+# dashboard), and DuckDB stays a training-snapshot tool (src.db.snapshot),
+# never part of the serving image. Everything else is pinned to the exact
 # versions the training venv used — the sklearn/lightgbm/xgboost models are
 # pickled, so version drift breaks loading.
 SERVING_IMAGE = Image(
@@ -66,7 +70,8 @@ SERVING_IMAGE = Image(
     "xgboost-cpu==3.2.0",
     "lightgbm==4.6.0",
     "catboost==1.2.10",  # 02_tune_gbdt tries xgb/lgbm/catboost; image must support whichever wins
-    "duckdb==1.5.4",
+    "psycopg[binary]==3.3.4",
+    "psycopg-pool==3.3.1",
     "pandas==2.3.3",
     "pyarrow==24.0.0",
     "numpy==2.4.6",
@@ -80,7 +85,7 @@ SERVING_IMAGE = Image(
 # POST routes (the SDK's HTTP server hardcodes methods=["POST"]), while the
 # dashboard reads player/career data over plain GET with query params. The
 # mounted app runs in the same process/worker as the service, so it shares the
-# lazy DuckDB connection from src.db.client (same env-configurable path the
+# lazy PostgreSQL connection from src.db.client (same env-configurable path the
 # inference builder uses).
 #
 # All SQL is parameterized (prepared statements via src.db.client.execute_df);
@@ -98,15 +103,23 @@ def _err(status: int, message: str) -> JSONResponse:
 
 
 def _iso(value: object) -> object:
-    """JSON-safe scalar: dates to ISO strings, NaN/None stay null."""
+    """JSON-safe scalar: dates to ISO strings, NaN/None stay null.
+
+    PostgreSQL numerics arrive as Decimal (AVG/counts) and pandas may wrap
+    integers as numpy scalars (np.int64 for bigint/smallint columns); both
+    are converted to native Python numbers so JSON serialization never fails.
+    """
     if value is None or isinstance(value, (str, int, bool)):
         return value
     if isinstance(value, pd.Timestamp):
         return value.date().isoformat()
     if isinstance(value, (date, datetime)):
         return value.isoformat()
-    if isinstance(value, float):
-        return None if math.isnan(value) else value
+    if isinstance(value, (float, Decimal, np.floating)):
+        number = float(value)
+        return None if math.isnan(number) else number
+    if isinstance(value, (np.integer, np.bool_)):
+        return int(value)
     return value
 
 
@@ -122,7 +135,7 @@ def _require_id(request: Request, name: str) -> str | None:
     return raw.strip()
 
 
-# ── SQL (table names interpolated from constants; values always via `?`) ──
+# ── SQL (table names interpolated from constants; values always via `%s`) ──
 
 _PLAYERS_SQL = f"""
 SELECT
@@ -141,28 +154,30 @@ SELECT
     player_id, display_name, handedness, backhand, height,
     turned_pro, birthplace, summary
 FROM {PROFILES_TABLE}
-WHERE player_id = ?
+WHERE player_id = %s
 """
 
 # Career stats from the player's oriented history in silver.player_matches.
 # Serve/breakpoint rates are aggregate sums (NULL-safe: NULLIF guards zero
-# denominators), mirroring the rolling_features rate conventions.
+# denominators), mirroring the rolling_features rate conventions. The integer
+# sums are cast to double precision so the ratios are float division, not
+# integer truncation.
 _PROFILE_CAREER_SQL = f"""
 SELECT
     COUNT(*) AS matches_played,
     AVG(match_won) AS win_rate,
-    SUM(first_serve_points_won)::DOUBLE / NULLIF(SUM(first_serves_made), 0)
+    SUM(first_serve_points_won)::double precision / NULLIF(SUM(first_serves_made), 0)
         AS first_serve_win_pct,
-    SUM(second_serve_points_won)::DOUBLE
+    SUM(second_serve_points_won)::double precision
         / NULLIF(SUM(total_serve_points - first_serves_made), 0)
         AS second_serve_win_pct,
-    SUM(first_serve_points_won + second_serve_points_won)::DOUBLE
+    SUM(first_serve_points_won + second_serve_points_won)::double precision
         / NULLIF(SUM(total_serve_points), 0)
         AS serve_win_pct,
-    SUM(break_points_saved)::DOUBLE / NULLIF(SUM(break_points_faced), 0)
+    SUM(break_points_saved)::double precision / NULLIF(SUM(break_points_faced), 0)
         AS break_points_saved_pct
 FROM {SILVER_PLAYER_MATCHES}
-WHERE player_id = ?
+WHERE player_id = %s
 """
 
 # All-time per-surface win rates from the player's oriented history. One row
@@ -175,15 +190,15 @@ SELECT
     COUNT(*) AS matches,
     AVG(match_won) AS win_rate
 FROM {SILVER_PLAYER_MATCHES}
-WHERE player_id = ?
+WHERE player_id = %s
 GROUP BY surface
 """
 
 # Newest as-of rolling snapshot per player (recent form).
 _PROFILE_FORM_SQL = f"""
 SELECT snapshot_date, win_rate_10
-FROM {GOLD_ROLLING_FEATURES}
-WHERE player_id = ?
+FROM {SILVER_ROLLING_FEATURES}
+WHERE player_id = %s
 ORDER BY player_match_number DESC
 LIMIT 1
 """
@@ -192,7 +207,7 @@ LIMIT 1
 _PROFILE_RANK_POINTS_SQL = f"""
 SELECT match_date, player_rank_points
 FROM {SILVER_PLAYER_MATCHES}
-WHERE player_id = ? AND player_rank_points IS NOT NULL
+WHERE player_id = %s AND player_rank_points IS NOT NULL
 ORDER BY match_date, match_id
 """
 
@@ -208,7 +223,7 @@ FROM (
     SELECT match_date, player2_id AS player_id, player2_ranking AS ranking
     FROM {BRONZE_TABLE}
 )
-WHERE player_id = ? AND ranking IS NOT NULL AND ranking > 0
+WHERE player_id = %s AND ranking IS NOT NULL AND ranking > 0
 ORDER BY match_date
 """
 
@@ -224,9 +239,9 @@ SELECT
 FROM {SILVER_PLAYER_MATCHES} pm
 LEFT JOIN {BRONZE_TABLE} br ON br.match_id = pm.match_id
 LEFT JOIN {PROFILES_TABLE} pr ON pr.player_id = pm.opponent_id
-WHERE pm.player_id = ?
+WHERE pm.player_id = %s
 ORDER BY pm.match_date DESC, pm.match_id DESC
-LIMIT ?
+LIMIT %s
 """
 
 # Prior meetings between a pair. silver.player_matches has TWO rows per match
@@ -244,8 +259,8 @@ SELECT
              ELSE 1 - pm.match_won END) AS a_won
 FROM {SILVER_PLAYER_MATCHES} pm
 LEFT JOIN {BRONZE_TABLE} br ON br.match_id = pm.match_id
-WHERE ((? = pm.player_id AND ? = pm.opponent_id)
-    OR (? = pm.opponent_id AND ? = pm.player_id))
+WHERE ((%s = pm.player_id AND %s = pm.opponent_id)
+    OR (%s = pm.opponent_id AND %s = pm.player_id))
 GROUP BY pm.match_id, pm.match_date, br.surface, br.tournament, br.round
 ORDER BY pm.match_date DESC, pm.match_id DESC
 """
@@ -280,12 +295,12 @@ def _player_profile(request: Request) -> JSONResponse:
     bio = first_row_dict(bio_df)
     career = first_row_dict(career_df)
     career_out: dict[str, object] = {
-        "matches_played": int(career["matches_played"]),
-        "win_rate": career["win_rate"],
-        "first_serve_win_pct": career["first_serve_win_pct"],
-        "second_serve_win_pct": career["second_serve_win_pct"],
-        "serve_win_pct": career["serve_win_pct"],
-        "break_points_saved_pct": career["break_points_saved_pct"],
+        "matches_played": _iso(career["matches_played"]),
+        "win_rate": _iso(career["win_rate"]),
+        "first_serve_win_pct": _iso(career["first_serve_win_pct"]),
+        "second_serve_win_pct": _iso(career["second_serve_win_pct"]),
+        "serve_win_pct": _iso(career["serve_win_pct"]),
+        "break_points_saved_pct": _iso(career["break_points_saved_pct"]),
     }
 
     # All-time per-surface win rates; locked to clay/grass/hard (the model's
@@ -295,7 +310,7 @@ def _player_profile(request: Request) -> JSONResponse:
         {
             "surface": s,
             "matches": int(surf_rates[s]["matches"]) if s in surf_rates else 0,
-            "win_rate": surf_rates[s]["win_rate"] if s in surf_rates else None,
+            "win_rate": _iso(surf_rates[s]["win_rate"]) if s in surf_rates else None,
         }
         for s in ("clay", "grass", "hard")
     ]
@@ -306,7 +321,7 @@ def _player_profile(request: Request) -> JSONResponse:
         form = first_row_dict(form_df)
         recent_form = {
             "snapshot_date": _iso(form["snapshot_date"]),
-            "last_10_win_rate": form["win_rate_10"],
+            "last_10_win_rate": _iso(form["win_rate_10"]),
         }
 
     # Rank-points trend: latest vs earliest rank points across the player's
@@ -591,13 +606,14 @@ class TennisPredictor:
         as_of_date: date | None = None,
         indoor: int | None = None,
     ) -> dict[str, object]:
-        """Build the feature row on demand from the baked-in DuckDB and predict.
+        """Build the feature row on demand from live PostgreSQL gold tables.
 
         Minimal human inputs: two player ids + surface, optional integer
         tournament_level/round_encoded (or their string aliases tournament/
         round, e.g. "grand_slam" / "f"), as_of_date, and indoor status
         (1=indoor, 0=outdoor, None/omitted=unknown which defaults to 0).
-        Queries the bundled gold tables (snapshot from deploy time).
+        Queries the operational silver.rolling_features / silver.player_matches
+        / gold.player_profiles tables as-of-dated.
         """
         started_at = perf_counter()
         row, meta = _build_inference_features_with_meta(
