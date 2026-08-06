@@ -16,11 +16,23 @@ worker:
 db-init:
     uv run python infra/duckdb/initialize_schemas.py init
 
-db-seed:
-    uv run python infra/duckdb/seed.py
+db-seed *args:
+    uv run python infra/duckdb/seed.py {{args}}
 
-db-etl:
-    uv run python src/flows/etl.py
+# Pass args (e.g. --enrich) directly: just db-etl --enrich
+db-etl *args:
+    uv run python src/flows/etl.py {{args}}
+
+# --- Production, host-side (against the running Quack server) ---
+# The compose quack-db publishes :9494 on the host. These connect over the
+# Quack protocol (quack:127.0.0.1:9494) with ENVIRONMENT=production and the
+# QUACK_TOKEN from .env. The DB file is never opened on the host and seeding
+# runs against the server (not inside its container). Copy args as above.
+db-seed-prod *args:
+    ENVIRONMENT=production QUACK_URI=quack:127.0.0.1:9494 uv run python infra/duckdb/seed.py {{args}}
+
+db-etl-prod *args:
+    ENVIRONMENT=production QUACK_URI=quack:127.0.0.1:9494 uv run python src/flows/etl.py {{args}}
 
 db-dbt:
     uv run dbt build --project-dir dbt --profiles-dir dbt
@@ -28,6 +40,15 @@ db-dbt:
 db-reset:
     rm -f data/tennis.duckdb
     just db-init
+
+# Build the Quack companion image that serves the production DuckDB remotely
+quack-build:
+    docker build -f infra/duckdb/Dockerfile -t tennis-quack-db:latest .
+
+# Run the Quack companion server against a local production DB (dev/production
+# data path); for local testing only — production runs it via Docker Compose.
+quack-local:
+    uv run python infra/duckdb/server.py
 
 # Local frontend dev server for the React dashboard
 dashboard-local:

@@ -4,26 +4,22 @@
 -- that player's IMMEDIATELY PRECEDING post-match snapshot
 -- (player_match_number - 1) from gold.rolling_features, so all rolling
 -- history values come strictly from completed matches BEFORE the current
--- event. The current event (silver.player_matches) supplies match context,
--- CURRENT rankings, and the correct pre-match 30-day activity count.
--- The two perspectives then collapse into one canonical row: the lower/stable
--- ATP id is the `player_*` side, the other is `opponent_*`, so the table is
--- order-invariant (swapping player1/player2 in bronze changes nothing).
+-- event. The current event (silver.player_matches) supplies CURRENT rankings,
+-- rank points, age, and the correct pre-match 30-day activity count.
+-- tournament / round / is_indoor are joined from bronze by match_id (kept out
+-- of silver.player_matches). The two perspectives then collapse into one
+-- canonical row: the lower/stable ATP id is the `player_*` side, the other is
+-- `opponent_*`, so the table is order-invariant (swapping player1/player2 in
+-- bronze changes nothing).
 --
 -- match_won = 1 iff the canonical player_* side won, else 0. It is the LABEL,
--- not a feature. Current-match serve/break stats ARE exposed per side
--- (player/opponent_first_serve_win_pct, ..._serve_win_pct,
--- ..._aces_per_svc_game, ..._df_per_svc_game,
--- ..._break_points_saved_pct) as enriched columns for dashboard/analysis
--- only — they have no as-of-date inference source, so they are NOT model
--- features. The rolling versions of those stats (from the prior snapshot)
--- are the model features.
+-- not a feature.
 --
--- Head-to-head (player/opponent_h2h_matches/wins/win_rate): pair-level
--- aggregates over prior meetings between the canonical pair (strictly before
--- this match's date, deduped to distinct match_ids, most recent 5 only).
--- Zero prior meetings -> counts 0, win rates 0.5 (neutral). Both sides of a
--- match agree on matches; wins sum to matches; rates sum to 1.
+-- Head-to-head (player_h2h_matches / player_h2h_wins): pair-level aggregates
+-- over prior meetings between the canonical pair (strictly before this match's
+-- date, deduped to distinct match_ids, most recent 5 only). The final contract
+-- keeps only the canonical player side's counts; the opponent perspective and
+-- the win rate are derived on demand.
 --
 -- Cold start: a player's first match has no prior snapshot, so all rolling
 -- features are NULL (no zero filling). The only documented fallback is
@@ -33,39 +29,34 @@
 -- 0 -> NULL mapping in silver.player_matches) are kept, so matches are never
 -- silently dropped for missing rankings. NULL rankings, rank_trend, and
 -- rank_diff are imputed at train time (median) alongside the other NULLs.
+--
+-- Task 6: current-match per-side serve/break analysis rates are REMOVED from
+-- this contract. Where the dashboard/analysis needs them, they are derived on
+-- demand from bronze raw counts with the existing NULLIF zero-denominator
+-- behavior. height is NOT a model feature here (it stays in gold.player_profiles
+-- for the profile API); only is_left_handed and years_pro are model profile
+-- features. The output columns are exactly FEATURE_COLS (36) plus the metadata
+-- (match_id, match_date, player_id, opponent_id, tournament, round, surface,
+-- match_won), in that order.
 
 WITH player_match_enriched AS (
     SELECT
         pm.match_id,
         pm.match_date,
-        pm.tournament,
-        pm.round,
+        bron.match_date       AS bronze_date,
+        bron.tournament,
+        bron.round,
         pm.surface,
-        pm.is_indoor,
+        bron.is_indoor,
         pm.player_id,
         pm.opponent_id,
         pm.match_won,
-        -- CURRENT event rankings, not the prior snapshot's
+        -- CURRENT event rankings/rank points/age, not the prior snapshot's
         pm.player_ranking,
         pm.opponent_ranking,
         pm.player_rank_points,
         pm.player_age,
         pm.player_match_number,
-
-        -- Current-match serve/break stats, exposed as enriched per-side
-        -- columns ONLY (no as-of-date inference source, so never model
-        -- features; the rolling versions below are the features).
-        pm.first_serve_points_won
-            / NULLIF(pm.first_serves_made, 0) AS first_serve_win_pct,
-        pm.second_serve_points_won
-            / NULLIF(pm.total_serve_points - pm.first_serves_made, 0)
-            AS second_serve_win_pct,
-        (pm.first_serve_points_won + pm.second_serve_points_won)
-            / NULLIF(pm.total_serve_points, 0) AS serve_win_pct,
-        pm.aces / NULLIF(pm.service_games, 0) AS aces_per_svc_game,
-        pm.double_faults / NULLIF(pm.service_games, 0) AS df_per_svc_game,
-        pm.break_points_saved / NULLIF(pm.break_points_faced, 0)
-            AS break_points_saved_pct,
 
         -- Correct pre-match activity count (0 on first match; it is a COUNT)
         CAST(pm.matches_30d_before AS INTEGER) AS matches_30d,
@@ -76,37 +67,24 @@ WITH player_match_enriched AS (
 
         -- Rolling form from the immediately preceding snapshot (NULL on cold
         -- start — no zero filling)
-        pr.win_rate_5,
-        pr.win_rate_10,
-        pr.win_rate_20,
         pr.weighted_form_10,
-        pr.ace_rate_5,
+        pr.win_rate_10,
         pr.ace_rate_10,
-        pr.first_serve_pct_5,
         pr.first_serve_pct_10,
-        pr.break_points_saved_pct_5,
         pr.break_points_saved_pct_10,
-        pr.first_serve_win_pct_5,
         pr.first_serve_win_pct_10,
-        pr.second_serve_win_pct_5,
         pr.second_serve_win_pct_10,
-        pr.serve_win_pct_5,
         pr.serve_win_pct_10,
-        pr.df_rate_5,
         pr.df_rate_10,
-        pr.aces_per_svc_game_5,
         pr.aces_per_svc_game_10,
 
         -- Rank trend: prior rolling avg ranking minus CURRENT event ranking
         pr.avg_player_rank_10 - pm.player_ranking AS rank_trend_10,
-        pr.avg_player_rank_20 - pm.player_ranking AS rank_trend_20,
 
         -- Strength of schedule: prior snapshot's rolling average opponent rank
-        pr.avg_rank_faced_5,
         pr.avg_rank_faced_10,
 
-        CAST(pr.win_streak AS UTINYINT) AS win_streak,
-        CAST(pr.loss_streak AS UTINYINT) AS loss_streak,
+        CAST(pr.streak AS INTEGER) AS streak,
 
         -- Surface-specific form: prior snapshot's rate on the current surface
         CASE pm.surface
@@ -118,7 +96,6 @@ WITH player_match_enriched AS (
         -- Profile-derived identity (static; NULL when the player has no
         -- profile or a cell is missing, same no-zero-filling policy as the
         -- rolling features — train-time imputation handles the NULLs)
-        prof.height,
         -- Non-L/R handedness (including NULL) stays NULL so train-time
         -- imputation treats missing handedness like any other missing cell
         CAST(CASE WHEN prof.handedness = 'L' THEN 1
@@ -131,6 +108,8 @@ WITH player_match_enriched AS (
     LEFT JOIN {{ ref('rolling_features') }} pr
         ON pr.player_id = pm.player_id
        AND pr.player_match_number = pm.player_match_number - 1
+    LEFT JOIN {{ source('bronze', 'match_events') }} bron
+        ON bron.match_id = pm.match_id
     LEFT JOIN gold.player_profiles prof
         ON prof.player_id = pm.player_id
 ),
@@ -155,12 +134,11 @@ pair_meetings AS (
 -- p.opponent_id): matches with match_date STRICTLY BEFORE the current row's
 -- match_date (same-date meetings excluded), deduped to distinct match_ids,
 -- restricted to the MOST RECENT 5 meetings (ORDER BY match_date DESC,
--- match_id DESC LIMIT 5 — the locked last-5 recency window). All three H2H
--- fields come from that 5-window. The INNER JOIN already keeps only the
--- canonical p-side perspective of each current match (the o-side row's
--- player_id is the higher id, so no meeting matches it), so the window
--- partitions cleanly per current match. Matches with no prior meeting produce
--- no row here; the final select COALESCEs to 0 matches / 0 wins / 0.5 rate.
+-- match_id DESC LIMIT 5 — the locked last-5 recency window). The INNER JOIN
+-- already keeps only the canonical p-side perspective of each current match
+-- (the o-side row's player_id is the higher id, so no meeting matches it), so
+-- the window partitions cleanly per current match. Matches with no prior
+-- meeting produce no row here; the final select COALESCEs to 0 matches / 0 wins.
 prior_meeting_rows AS (
     SELECT
         current_match.match_id,
@@ -187,7 +165,8 @@ prior_h2h AS (
 -- Collapse the two player-perspective rows of each match into one canonical
 -- row: the lower ATP id is the player_* side (p), the higher is the
 -- opponent_* side (o). Exactly one row per match, regardless of the raw
--- player1/player2 assignment.
+-- player1/player2 assignment. Output columns follow FEATURE_COLS order after
+-- the metadata block.
 SELECT
     p.match_id,
     p.match_date,
@@ -198,123 +177,13 @@ SELECT
     p.surface,
     p.match_won,
 
-    -- Current-match per-side serve/break stats (enriched columns only; the
-    -- rolling versions are the model features, see header)
-    p.first_serve_win_pct     AS player_first_serve_win_pct,
-    p.second_serve_win_pct    AS player_second_serve_win_pct,
-    p.serve_win_pct           AS player_serve_win_pct,
-    p.aces_per_svc_game       AS player_aces_per_svc_game,
-    p.df_per_svc_game         AS player_df_per_svc_game,
-    p.break_points_saved_pct  AS player_break_points_saved_pct,
-    o.first_serve_win_pct     AS opponent_first_serve_win_pct,
-    o.second_serve_win_pct    AS opponent_second_serve_win_pct,
-    o.serve_win_pct           AS opponent_serve_win_pct,
-    o.aces_per_svc_game       AS opponent_aces_per_svc_game,
-    o.df_per_svc_game         AS opponent_df_per_svc_game,
-    o.break_points_saved_pct  AS opponent_break_points_saved_pct,
-
-    -- Canonical player side (lower ATP id)
-    p.player_ranking,
-    p.player_age,
-    p.win_rate_5            AS player_win_rate_5,
-    p.win_rate_10           AS player_win_rate_10,
-    p.win_rate_20           AS player_win_rate_20,
-    p.weighted_form_10      AS player_weighted_form_10,
-    p.ace_rate_5            AS player_ace_rate_5,
-    p.ace_rate_10           AS player_ace_rate_10,
-    p.first_serve_pct_5     AS player_first_serve_pct_5,
-    p.first_serve_pct_10    AS player_first_serve_pct_10,
-    p.break_points_saved_pct_5  AS player_break_points_saved_pct_5,
-    p.break_points_saved_pct_10 AS player_break_points_saved_pct_10,
-    p.first_serve_win_pct_5 AS player_first_serve_win_pct_5,
-    p.first_serve_win_pct_10 AS player_first_serve_win_pct_10,
-    p.second_serve_win_pct_5 AS player_second_serve_win_pct_5,
-    p.second_serve_win_pct_10 AS player_second_serve_win_pct_10,
-    p.serve_win_pct_5       AS player_serve_win_pct_5,
-    p.serve_win_pct_10      AS player_serve_win_pct_10,
-    p.df_rate_5             AS player_df_rate_5,
-    p.df_rate_10            AS player_df_rate_10,
-    p.aces_per_svc_game_5   AS player_aces_per_svc_game_5,
-    p.aces_per_svc_game_10  AS player_aces_per_svc_game_10,
-    p.rank_trend_10         AS player_rank_trend_10,
-    p.rank_trend_20         AS player_rank_trend_20,
-    p.avg_rank_faced_5      AS player_avg_rank_faced_5,
-    p.avg_rank_faced_10     AS player_avg_rank_faced_10,
-    p.win_streak            AS player_win_streak,
-    p.loss_streak           AS player_loss_streak,
-    p.days_since_last_match AS player_days_since_last_match,
-    p.matches_30d           AS player_matches_30d,
-    p.surface_win_rate_10   AS player_surface_win_rate_10,
-
-    -- Profile-derived identity (canonical player side)
-    p.height            AS player_height,
-    p.is_left_handed    AS player_is_left_handed,
-    p.years_pro         AS player_years_pro,
-
-    -- Head-to-head vs the opponent: prior meetings strictly before this
-    -- match, deduped, most recent 5. 0/0/0.5 when never met before.
-    COALESCE(h.player_h2h_matches, 0) AS player_h2h_matches,
-    COALESCE(h.player_h2h_wins, 0)    AS player_h2h_wins,
-    CASE WHEN COALESCE(h.player_h2h_matches, 0) > 0
-         THEN COALESCE(h.player_h2h_wins, 0)
-              / COALESCE(h.player_h2h_matches, 0)
-         ELSE 0.5 END AS player_h2h_win_rate,
-
-    -- Opponent side (higher ATP id)
-    o.player_ranking AS opponent_ranking,
-    o.player_age AS opponent_age,
-    o.win_rate_5            AS opponent_win_rate_5,
-    o.win_rate_10           AS opponent_win_rate_10,
-    o.win_rate_20           AS opponent_win_rate_20,
-    o.weighted_form_10      AS opponent_weighted_form_10,
-    o.ace_rate_5            AS opponent_ace_rate_5,
-    o.ace_rate_10           AS opponent_ace_rate_10,
-    o.first_serve_pct_5     AS opponent_first_serve_pct_5,
-    o.first_serve_pct_10    AS opponent_first_serve_pct_10,
-    o.break_points_saved_pct_5  AS opponent_break_points_saved_pct_5,
-    o.break_points_saved_pct_10 AS opponent_break_points_saved_pct_10,
-    o.first_serve_win_pct_5 AS opponent_first_serve_win_pct_5,
-    o.first_serve_win_pct_10 AS opponent_first_serve_win_pct_10,
-    o.second_serve_win_pct_5 AS opponent_second_serve_win_pct_5,
-    o.second_serve_win_pct_10 AS opponent_second_serve_win_pct_10,
-    o.serve_win_pct_5       AS opponent_serve_win_pct_5,
-    o.serve_win_pct_10      AS opponent_serve_win_pct_10,
-    o.df_rate_5             AS opponent_df_rate_5,
-    o.df_rate_10            AS opponent_df_rate_10,
-    o.aces_per_svc_game_5   AS opponent_aces_per_svc_game_5,
-    o.aces_per_svc_game_10  AS opponent_aces_per_svc_game_10,
-    o.rank_trend_10         AS opponent_rank_trend_10,
-    o.rank_trend_20         AS opponent_rank_trend_20,
-    o.avg_rank_faced_5      AS opponent_avg_rank_faced_5,
-    o.avg_rank_faced_10     AS opponent_avg_rank_faced_10,
-    o.win_streak            AS opponent_win_streak,
-    o.loss_streak           AS opponent_loss_streak,
-    o.days_since_last_match AS opponent_days_since_last_match,
-    o.matches_30d           AS opponent_matches_30d,
-    o.surface_win_rate_10   AS opponent_surface_win_rate_10,
-
-    -- Profile-derived identity (opponent side)
-    o.height            AS opponent_height,
-    o.is_left_handed    AS opponent_is_left_handed,
-    o.years_pro         AS opponent_years_pro,
-
-    -- Opponent's H2H perspective, derived from the SAME prior meetings:
-    -- matches always agree with the player side; wins are the complement
-    -- (wins sum to matches); win rate is 1 - player rate (0.5 neutral).
-    COALESCE(h.player_h2h_matches, 0) AS opponent_h2h_matches,
-    COALESCE(h.player_h2h_matches, 0) - COALESCE(h.player_h2h_wins, 0)
-        AS opponent_h2h_wins,
-    CASE WHEN COALESCE(h.player_h2h_matches, 0) > 0
-         THEN 1 - COALESCE(h.player_h2h_wins, 0)
-                  / COALESCE(h.player_h2h_matches, 0)
-         ELSE 0.5 END AS opponent_h2h_win_rate,
-
-    -- Comparison (differential) features: canonical side minus opponent side
+    -- ── Matchup differences (canonical side minus opponent) ──
     p.player_ranking - o.player_ranking AS rank_diff,
     p.player_rank_points - o.player_rank_points AS rank_points_diff,
     p.player_age - o.player_age AS age_diff,
     p.win_rate_10 - o.win_rate_10 AS win_rate_diff,
     p.ace_rate_10 - o.ace_rate_10 AS ace_rate_diff,
+    p.first_serve_pct_10 - o.first_serve_pct_10 AS first_serve_pct_diff,
     p.break_points_saved_pct_10 - o.break_points_saved_pct_10
         AS break_points_saved_pct_diff,
     p.first_serve_win_pct_10 - o.first_serve_win_pct_10
@@ -322,23 +191,36 @@ SELECT
     p.second_serve_win_pct_10 - o.second_serve_win_pct_10
         AS second_serve_win_pct_diff,
     p.serve_win_pct_10 - o.serve_win_pct_10 AS serve_win_pct_diff,
+    p.df_rate_10 - o.df_rate_10 AS df_rate_diff,
     p.aces_per_svc_game_10 - o.aces_per_svc_game_10 AS aces_per_svc_game_diff,
-    CAST(p.win_streak AS INTEGER) - CAST(o.win_streak AS INTEGER) AS win_streak_diff,
-    p.matches_30d - o.matches_30d AS matches_30d_diff,
-    p.surface_win_rate_10 - o.surface_win_rate_10 AS surface_win_rate_diff,
     p.rank_trend_10 - o.rank_trend_10 AS rank_trend_diff,
     p.avg_rank_faced_10 - o.avg_rank_faced_10 AS avg_rank_faced_diff,
-    p.height - o.height AS height_diff,
-    CAST(p.is_left_handed AS INTEGER) - CAST(o.is_left_handed AS INTEGER)
-        AS handedness_diff,
-    p.years_pro - o.years_pro AS years_pro_diff,
+    p.streak - o.streak AS streak_diff,
 
-    -- Context
+    -- ── Absolute state values where both sides matter ──
+    p.weighted_form_10      AS player_weighted_form_10,
+    o.weighted_form_10      AS opponent_weighted_form_10,
+    p.days_since_last_match AS player_days_since_last_match,
+    o.days_since_last_match AS opponent_days_since_last_match,
+    p.matches_30d           AS player_matches_30d,
+    o.matches_30d           AS opponent_matches_30d,
+    p.surface_win_rate_10   AS player_surface_win_rate_10,
+    o.surface_win_rate_10   AS opponent_surface_win_rate_10,
+    p.is_left_handed        AS player_is_left_handed,
+    o.is_left_handed        AS opponent_is_left_handed,
+    p.years_pro             AS player_years_pro,
+    o.years_pro             AS opponent_years_pro,
+
+    -- ── Canonical-player head-to-head history (0/0 when never met) ──
+    COALESCE(h.player_h2h_matches, 0) AS player_h2h_matches,
+    COALESCE(h.player_h2h_wins, 0)    AS player_h2h_wins,
+
+    -- ── Numeric match context (one-hot surface for linear and neural models) ──
     CAST(CASE WHEN p.surface = 'clay'  THEN 1 ELSE 0 END AS UTINYINT) AS is_clay,
     CAST(CASE WHEN p.surface = 'grass' THEN 1 ELSE 0 END AS UTINYINT) AS is_grass,
     CAST(CASE WHEN p.surface = 'hard'  THEN 1 ELSE 0 END AS UTINYINT) AS is_hard,
     CAST(CASE WHEN p.surface = 'carpet' THEN 1 ELSE 0 END AS UTINYINT) AS is_carpet,
-    p.is_indoor,
+    b.is_indoor,
     CAST(CASE p.tournament
         WHEN 'grand_slam' THEN 4 WHEN 'masters' THEN 3
         WHEN 'atp_500' THEN 2 WHEN 'atp_250' THEN 1 ELSE 0
@@ -351,6 +233,8 @@ FROM player_match_enriched p
 JOIN player_match_enriched o
     ON o.match_id = p.match_id
    AND o.player_id = p.opponent_id
+LEFT JOIN bronze.match_events b
+    ON b.match_id = p.match_id
 LEFT JOIN prior_h2h h
     ON h.match_id = p.match_id
 WHERE p.player_id < o.player_id

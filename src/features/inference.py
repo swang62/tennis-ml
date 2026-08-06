@@ -5,7 +5,7 @@ players as of a given date, mirroring `gold.match_features` semantics:
 
 * Canonicalization: the lexicographically lower player id is the `player_*`
   side and the higher is `opponent_*`, so `(X, Y)` and `(Y, X)` produce
-  identical rows (same as `match_features.sql`'s `WHERE p.player_id < o.player_id`).
+  identical rows (same as `match_features.sql`'s canonical-side collapse).
 * Rolling form comes from each player's newest
   `gold.rolling_features` snapshot STRICTLY BEFORE the as-of date
   (no dedicated latest table/view; the newest snapshot is immediately usable).
@@ -15,22 +15,20 @@ players as of a given date, mirroring `gold.match_features` semantics:
 * Head-to-head: the most recent 5 prior meetings between the canonical pair
   (match_date STRICTLY BEFORE the as-of date, deduped to distinct match_ids)
   come from ONE parameterized query. `player_h2h_*` is the canonical
-  player side's perspective; `opponent_h2h_*` is the complement from the same
-  result set (wins sum to matches, win rates sum to 1). Zero prior meetings ->
-  counts 0, win rate 0.5 (neutral, locked).
+  player side's perspective (matches + wins); zero prior meetings -> counts 0.
 * Missing players (no eligible snapshot) and NULL snapshot cells are imputed
   from on-demand global aggregates over the eligible snapshot pool: MEDIAN
   for ranking/streak-related values, MEAN for other numerics. When BOTH
   players are missing, both sides receive the same imputed values, so every
   pairwise differential is 0 (neutral).
-* Profile-derived identity (height, is_left_handed, years_pro-at-as-of-date)
-  comes from `gold.player_profiles`; players without a profile and NULL cells
-  are imputed from on-demand aggregates over all profiles (mean height, mean
-  left-handed rate, mean years-pro at the as-of date), so the same neutral
-  differentials hold for two profile-less players.
+* Profile-derived identity (is_left_handed, years_pro-at-as-of-date) comes
+  from `gold.player_profiles`; players without a profile and NULL cells are
+  imputed from on-demand aggregates over all profiles (mean left-handed rate,
+  mean years-pro at the as-of date), so the same neutral differentials hold
+  for two profile-less players.
 * If the eligible pool is empty, constant fallbacks are used:
   ranking=100, rank_points=500, age=26, rates=0.0, streak=0,
-  days_since_last_match=365, matches_30d=0, height=183, left-handed rate=0.0,
+  days_since_last_match=365, matches_30d=0, left-handed rate=0.0,
   years_pro=8.
 
 Player ids and dates NEVER appear inside SQL strings: every one flows through
@@ -53,11 +51,7 @@ from src.constants import (
     SILVER_PLAYER_MATCHES,
 )
 from src.db.client import execute_df, first_row_dict
-from src.features.columns import (
-    FEATURE_COLS,
-    OPPONENT_COLS,
-    PLAYER_COLS,
-)
+from src.features.columns import FEATURE_COLS
 
 VALID_SURFACES = {"clay", "grass", "hard", "carpet"}
 VALID_TOURNAMENT_LEVELS = {0, 1, 2, 3, 4}
@@ -72,7 +66,6 @@ _TOURNAMENT_LEVELS = {
     "masters": 3,
     "atp_500": 2,
     "atp_250": 1,
-    "challenger": 0,
     "davis_cup": 0,
     "atp_finals": 0,
     "olympics": 0,
@@ -98,7 +91,6 @@ _DEFAULT_RATE = 0.0
 _DEFAULT_STREAK = 0
 _DEFAULT_DAYS_SINCE = 365
 _DEFAULT_MATCHES_30D = 0
-_DEFAULT_HEIGHT = 183.0
 _DEFAULT_LEFT_HANDED_RATE = 0.0
 _DEFAULT_YEARS_PRO = 8.0
 
@@ -133,9 +125,9 @@ WHERE player_id = ?
 # a-side (the lower id, always the player_* side) won the meeting — both
 # perspective rows of a meeting agree on it, so MAX is safe. Same
 # date-granularity rule as match_features.sql: match_date strictly before the
-# as-of date; same-date meetings excluded. Both H2H perspectives derive from
-# this ONE result set. Params: lower_id, higher_id, lower_id, higher_id,
-# as_of_iso (prepared only — ids/dates never appear in the SQL text).
+# as-of date; same-date meetings excluded. Params: lower_id, higher_id,
+# lower_id, higher_id, as_of_iso (prepared only — ids/dates never appear in
+# the SQL text).
 _H2H_PRIOR_SQL = f"""
 SELECT match_id, a_won
 FROM (
@@ -163,32 +155,19 @@ SELECT
     MEDIAN(latest_player_ranking)    AS latest_player_ranking,
     MEDIAN(latest_player_rank_points) AS latest_player_rank_points,
     AVG(latest_player_age)           AS latest_player_age,
-    MEDIAN(win_streak)               AS win_streak,
-    AVG(win_rate_5)                  AS win_rate_5,
-    AVG(win_rate_10)                 AS win_rate_10,
-    AVG(win_rate_20)                 AS win_rate_20,
+    MEDIAN(streak)                   AS streak,
     AVG(weighted_form_10)            AS weighted_form_10,
-    AVG(ace_rate_5)                  AS ace_rate_5,
+    AVG(win_rate_10)                 AS win_rate_10,
     AVG(ace_rate_10)                 AS ace_rate_10,
-    AVG(first_serve_pct_5)           AS first_serve_pct_5,
     AVG(first_serve_pct_10)          AS first_serve_pct_10,
-    AVG(break_points_saved_pct_5)    AS break_points_saved_pct_5,
     AVG(break_points_saved_pct_10)   AS break_points_saved_pct_10,
-    AVG(first_serve_win_pct_5)       AS first_serve_win_pct_5,
     AVG(first_serve_win_pct_10)      AS first_serve_win_pct_10,
-    AVG(second_serve_win_pct_5)      AS second_serve_win_pct_5,
     AVG(second_serve_win_pct_10)     AS second_serve_win_pct_10,
-    AVG(serve_win_pct_5)             AS serve_win_pct_5,
     AVG(serve_win_pct_10)            AS serve_win_pct_10,
-    AVG(df_rate_5)                   AS df_rate_5,
     AVG(df_rate_10)                  AS df_rate_10,
-    AVG(aces_per_svc_game_5)         AS aces_per_svc_game_5,
     AVG(aces_per_svc_game_10)        AS aces_per_svc_game_10,
     AVG(avg_player_rank_10)          AS avg_player_rank_10,
-    AVG(avg_player_rank_20)          AS avg_player_rank_20,
-    AVG(avg_rank_faced_5)            AS avg_rank_faced_5,
     AVG(avg_rank_faced_10)           AS avg_rank_faced_10,
-    MEDIAN(loss_streak)              AS loss_streak,
     AVG(clay_win_rate_10)            AS clay_win_rate_10,
     AVG(grass_win_rate_10)           AS grass_win_rate_10,
     AVG(hard_win_rate_10)            AS hard_win_rate_10
@@ -240,7 +219,6 @@ WHERE player_id = ?
 # no profiles exist.
 _PROFILE_POOL_AGG_SQL = f"""
 SELECT
-    AVG(height) AS avg_height,
     AVG(CASE WHEN handedness = 'L' THEN 1 ELSE 0 END) AS left_handed_rate,
     AVG(?::INTEGER - turned_pro) AS avg_years_pro
 FROM {PROFILES_TABLE}
@@ -291,7 +269,11 @@ def _side_values(
 ) -> dict[str, int | float]:
     """Build one canonical side's values, imputing NULLs and cold starts.
 
-    Keys: "ranking", "rank_points", "age" plus the GOLD_ROLLING_COLS names.
+    Keys: "ranking", "rank_points", "age", "weighted_form_10", "win_rate_10",
+    "ace_rate_10", "first_serve_pct_10", "break_points_saved_pct_10",
+    "first_serve_win_pct_10", "second_serve_win_pct_10", "serve_win_pct_10",
+    "df_rate_10", "aces_per_svc_game_10", "rank_trend_10", "avg_rank_faced_10",
+    "streak", "days_since_last_match", "matches_30d", "surface_win_rate_10".
     `row` is the side's latest eligible snapshot (None on cold start).
     """
 
@@ -307,7 +289,6 @@ def _side_values(
     rank_points = round(cell("latest_player_rank_points", _DEFAULT_RANK_POINTS))
     age = cell("latest_player_age", _DEFAULT_AGE)
     avg_rank_10 = cell("avg_player_rank_10", _DEFAULT_RANKING)
-    avg_rank_20 = cell("avg_player_rank_20", _DEFAULT_RANKING)
 
     if row is not None:
         days_since = int((as_of_date - _to_date(row["snapshot_date"])).days)
@@ -330,32 +311,19 @@ def _side_values(
         "ranking": ranking,
         "rank_points": rank_points,
         "age": age,
-        "win_rate_5": cell("win_rate_5", _DEFAULT_RATE),
-        "win_rate_10": cell("win_rate_10", _DEFAULT_RATE),
-        "win_rate_20": cell("win_rate_20", _DEFAULT_RATE),
         "weighted_form_10": cell("weighted_form_10", _DEFAULT_RATE),
-        "ace_rate_5": cell("ace_rate_5", _DEFAULT_RATE),
+        "win_rate_10": cell("win_rate_10", _DEFAULT_RATE),
         "ace_rate_10": cell("ace_rate_10", _DEFAULT_RATE),
-        "first_serve_pct_5": cell("first_serve_pct_5", _DEFAULT_RATE),
         "first_serve_pct_10": cell("first_serve_pct_10", _DEFAULT_RATE),
-        "break_points_saved_pct_5": cell("break_points_saved_pct_5", _DEFAULT_RATE),
         "break_points_saved_pct_10": cell("break_points_saved_pct_10", _DEFAULT_RATE),
-        "first_serve_win_pct_5": cell("first_serve_win_pct_5", _DEFAULT_RATE),
         "first_serve_win_pct_10": cell("first_serve_win_pct_10", _DEFAULT_RATE),
-        "second_serve_win_pct_5": cell("second_serve_win_pct_5", _DEFAULT_RATE),
         "second_serve_win_pct_10": cell("second_serve_win_pct_10", _DEFAULT_RATE),
-        "serve_win_pct_5": cell("serve_win_pct_5", _DEFAULT_RATE),
         "serve_win_pct_10": cell("serve_win_pct_10", _DEFAULT_RATE),
-        "df_rate_5": cell("df_rate_5", _DEFAULT_RATE),
         "df_rate_10": cell("df_rate_10", _DEFAULT_RATE),
-        "aces_per_svc_game_5": cell("aces_per_svc_game_5", _DEFAULT_RATE),
         "aces_per_svc_game_10": cell("aces_per_svc_game_10", _DEFAULT_RATE),
         "rank_trend_10": avg_rank_10 - ranking,
-        "rank_trend_20": avg_rank_20 - ranking,
-        "avg_rank_faced_5": cell("avg_rank_faced_5", _DEFAULT_RANKING),
         "avg_rank_faced_10": cell("avg_rank_faced_10", _DEFAULT_RANKING),
-        "win_streak": int(cell("win_streak", _DEFAULT_STREAK)),
-        "loss_streak": int(cell("loss_streak", _DEFAULT_STREAK)),
+        "streak": int(cell("streak", _DEFAULT_STREAK)),
         "days_since_last_match": days_since,
         "matches_30d": matches_30d,
         "surface_win_rate_10": surface_win_rate,
@@ -365,22 +333,19 @@ def _side_values(
 def _profile_values(pid: str, as_of_date: date, agg: dict[str, float]) -> dict[str, float]:
     """Fetch one side's profile-derived values from gold.player_profiles.
 
-    Keys: "height", "is_left_handed", "years_pro". A missing profile (or a
-    NULL height/turned_pro/handedness cell) falls back to the on-demand pool
-    aggregates, so two unknown players get identical defaults (every profile
-    differential collapses to 0) and the row stays NaN-free. years_pro is
-    time-aware: as-of year minus turned_pro, not the raw year.
+    Keys: "is_left_handed", "years_pro". A missing profile (or a NULL
+    turned_pro/handedness cell) falls back to the on-demand pool aggregates, so
+    two unknown players get identical defaults (every profile differential
+    collapses to 0) and the row stays NaN-free. years_pro is time-aware: as-of
+    year minus turned_pro, not the raw year.
     """
     df = execute_df(_PROFILE_SQL, [pid])
     if df.empty:
         return {
-            "height": _agg_or(agg, "avg_height", _DEFAULT_HEIGHT),
             "is_left_handed": _agg_or(agg, "left_handed_rate", _DEFAULT_LEFT_HANDED_RATE),
             "years_pro": _agg_or(agg, "avg_years_pro", _DEFAULT_YEARS_PRO),
         }
     row = df.iloc[0]
-    height = row["height"]
-    height = float(height) if not pd.isna(height) else _agg_or(agg, "avg_height", _DEFAULT_HEIGHT)
     turned_pro = row["turned_pro"]
     years_pro = (
         float(as_of_date.year - int(turned_pro))
@@ -397,7 +362,6 @@ def _profile_values(pid: str, as_of_date: date, agg: dict[str, float]) -> dict[s
         else _agg_or(agg, "left_handed_rate", _DEFAULT_LEFT_HANDED_RATE)
     )
     return {
-        "height": height,
         "is_left_handed": is_left_handed,
         "years_pro": years_pro,
     }
@@ -515,39 +479,35 @@ def _build_inference_features_with_meta(
     player_side.update(_profile_values(lower_id, as_of_date, profile_agg))
     opponent_side.update(_profile_values(higher_id, as_of_date, profile_agg))
 
-    # ── Head-to-head: one query for the canonical pair, both perspectives ──
+    # ── Head-to-head: one query for the canonical pair (player side) ──
     # The SQL returns the most recent 5 prior meetings (deduped to distinct
     # match_ids, strictly before the as-of date) with a_won = 1 iff the
-    # canonical player side won. The opponent perspective is the complement of
-    # the SAME result set: wins sum to matches, win rates sum to 1.
+    # canonical player side won. The final contract keeps only the canonical
+    # player side's counts (opponent = complement, derived on demand).
     h2h_df = execute_df(_H2H_PRIOR_SQL, [lower_id, higher_id, lower_id, higher_id, as_of_iso])
     h2h_matches = len(h2h_df)
     h2h_player_wins = int(h2h_df["a_won"].sum()) if h2h_matches else 0
-    h2h_player_rate = h2h_player_wins / h2h_matches if h2h_matches else 0.5
-    player_side["h2h_matches"] = h2h_matches
-    player_side["h2h_wins"] = h2h_player_wins
-    player_side["h2h_win_rate"] = h2h_player_rate
-    opponent_side["h2h_matches"] = h2h_matches
-    opponent_side["h2h_wins"] = h2h_matches - h2h_player_wins
-    opponent_side["h2h_win_rate"] = 1.0 - h2h_player_rate
 
     # ── Assemble the canonical row in FEATURE_COLS order ──
     row: dict[str, int | float | str] = {}
-    for col in PLAYER_COLS:
-        row[col] = player_side[
-            "ranking" if col == "player_ranking" else col.removeprefix("player_")
-        ]
-    for col in OPPONENT_COLS:
-        row[col] = opponent_side[
-            "ranking" if col == "opponent_ranking" else col.removeprefix("opponent_")
+
+    def side(name: str, p: dict[str, int | float], o: dict[str, int | float]) -> int | float:
+        """Return the player/opponent value for a per-side feature name."""
+        if name in ("player_ranking", "opponent_ranking"):
+            return p["ranking"] if name.startswith("player_") else o["ranking"]
+        return (p if name.startswith("player_") else o)[
+            name.removeprefix("player_").removeprefix("opponent_")
         ]
 
-    # Differentials, computed after imputation (canonical side minus opponent)
+    # Matchup differences (canonical side minus opponent).
     row["rank_diff"] = player_side["ranking"] - opponent_side["ranking"]
     row["rank_points_diff"] = player_side["rank_points"] - opponent_side["rank_points"]
     row["age_diff"] = player_side["age"] - opponent_side["age"]
     row["win_rate_diff"] = player_side["win_rate_10"] - opponent_side["win_rate_10"]
     row["ace_rate_diff"] = player_side["ace_rate_10"] - opponent_side["ace_rate_10"]
+    row["first_serve_pct_diff"] = (
+        player_side["first_serve_pct_10"] - opponent_side["first_serve_pct_10"]
+    )
     row["break_points_saved_pct_diff"] = (
         player_side["break_points_saved_pct_10"] - opponent_side["break_points_saved_pct_10"]
     )
@@ -558,23 +518,38 @@ def _build_inference_features_with_meta(
         player_side["second_serve_win_pct_10"] - opponent_side["second_serve_win_pct_10"]
     )
     row["serve_win_pct_diff"] = player_side["serve_win_pct_10"] - opponent_side["serve_win_pct_10"]
+    row["df_rate_diff"] = player_side["df_rate_10"] - opponent_side["df_rate_10"]
     row["aces_per_svc_game_diff"] = (
         player_side["aces_per_svc_game_10"] - opponent_side["aces_per_svc_game_10"]
-    )
-    row["win_streak_diff"] = player_side["win_streak"] - opponent_side["win_streak"]
-    row["matches_30d_diff"] = player_side["matches_30d"] - opponent_side["matches_30d"]
-    row["surface_win_rate_diff"] = (
-        player_side["surface_win_rate_10"] - opponent_side["surface_win_rate_10"]
     )
     row["rank_trend_diff"] = player_side["rank_trend_10"] - opponent_side["rank_trend_10"]
     row["avg_rank_faced_diff"] = (
         player_side["avg_rank_faced_10"] - opponent_side["avg_rank_faced_10"]
     )
-    row["height_diff"] = player_side["height"] - opponent_side["height"]
-    row["handedness_diff"] = player_side["is_left_handed"] - opponent_side["is_left_handed"]
-    row["years_pro_diff"] = player_side["years_pro"] - opponent_side["years_pro"]
+    row["streak_diff"] = player_side["streak"] - opponent_side["streak"]
 
-    # Context
+    # Absolute state values (both sides matter).
+    for name in (
+        "player_weighted_form_10",
+        "opponent_weighted_form_10",
+        "player_days_since_last_match",
+        "opponent_days_since_last_match",
+        "player_matches_30d",
+        "opponent_matches_30d",
+        "player_surface_win_rate_10",
+        "opponent_surface_win_rate_10",
+        "player_is_left_handed",
+        "opponent_is_left_handed",
+        "player_years_pro",
+        "opponent_years_pro",
+    ):
+        row[name] = side(name, player_side, opponent_side)
+
+    # Canonical-player head-to-head history.
+    row["player_h2h_matches"] = h2h_matches
+    row["player_h2h_wins"] = h2h_player_wins
+
+    # Numeric match context (one-hot surface).
     row["is_clay"] = int(surface == "clay")
     row["is_grass"] = int(surface == "grass")
     row["is_hard"] = int(surface == "hard")
@@ -625,8 +600,6 @@ def _build_inference_features_with_meta(
         "player_days_since_last_match": int(player_side["days_since_last_match"]),
         "opponent_days_since_last_match": int(opponent_side["days_since_last_match"]),
         "h2h_prior_meetings": h2h_matches,
-        "player_profile_height": float(player_side["height"]),
-        "opponent_profile_height": float(opponent_side["height"]),
         "build_ms": builtins.round((perf_counter() - started_at) * 1000, 3),
     }
     return out, meta

@@ -1,7 +1,19 @@
+# dbt connects to the same DuckDB the pipeline uses. The active target is
+# selected by the same explicit ENVIRONMENT switch as src.db.client:
+#   dev  -> local embedded data/tennis.duckdb (default)
+#   production -> the production DuckDB path
+# dbt-duckdb offers no native Quack transport, so in production mode dbt still
+# targets the embedded file (an offline ETL concern); runtime serving reads the
+# same database through the Quack companion container instead.
 tennis_ml:
-  target: local
+  target: "{{ env_var('ENVIRONMENT', 'dev') }}"
   outputs:
-    local:
+    dev:
+      type: duckdb
+      path: data/tennis.duckdb
+      schema: gold
+      threads: 1
+    production:
       type: duckdb
       path: data/tennis.duckdb
       schema: gold

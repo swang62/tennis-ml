@@ -2,7 +2,7 @@
 
 The conftest pretest setup (autouse session fixture `seeded_test_db`) builds a
 temporary DuckDB once per session: `infra/duckdb/init.sql`, the real ingest
-path via `infra/duckdb/seed.py --offline` (the deterministic miniset: the
+path via `infra/duckdb/seed.py` (the deterministic miniset: the
 RECENT most recent matches of the TOP_PLAYERS best-ranked players), and the
 dbt gold build, then points TENNIS_DB_PATH at it. These tests verify that
 result: populated bronze/gold layers, live gold schema parity with the Python
@@ -19,15 +19,14 @@ import pandas as pd
 
 from src.constants import BRONZE_TABLE, GOLD_ROLLING_FEATURES, GOLD_TABLE, ROOT
 from src.db.client import execute_df
-from src.features.columns import FEATURE_COLS, MATCH_STATS_COLS
+from src.features.columns import FEATURE_COLS
 from src.features.inference import build_inference_features
 from src.flows import ingest
 
 RAW_CSV = ROOT / "data" / "raw" / "2026.csv"
 AS_OF = date(2026, 9, 1)  # after every seeded match, like test_inference_features
 
-# match_features carries these 8 metadata columns before the per-side
-# current-match stats and the 97 feature columns.
+# match_features carries these 8 metadata columns before the 36 feature columns.
 META_COLS = [
     "match_id",
     "match_date",
@@ -99,37 +98,73 @@ def test_reinsert_skips_duplicates_keeps_original_row():
 
 
 def test_gold_match_features_schema_matches_python_contract():
-    """The dbt-built training table's live schema == metadata cols +
-    per-side current-match stats + FEATURE_COLS — the parity check that
-    SQL-text tests and inference-builder tests can't see."""
+    """The dbt-built training table's live schema == metadata cols + FEATURE_COLS
+    — the parity check that SQL-text tests and inference-builder tests can't see.
+    Current-match serve/break analysis rates are no longer part of the gold
+    contract (Task 6)."""
     cols = execute_df(
         "SELECT column_name FROM information_schema.columns "
         "WHERE table_name = 'match_features' AND table_schema = 'gold' "
         "ORDER BY ordinal_position"
     )["column_name"].tolist()
-    assert cols == [
-        *META_COLS,
-        *[f"player_{c}" for c in MATCH_STATS_COLS],
-        *[f"opponent_{c}" for c in MATCH_STATS_COLS],
-        *FEATURE_COLS,
-    ]
+    assert cols == [*META_COLS, *FEATURE_COLS]
 
 
-def test_gold_only_enrichment_columns_in_gold_but_not_in_contract():
-    """The 12 per-side current-match serve/break enrichment columns exist in
-    gold.match_features (dashboard/analysis value) but are excluded from the
-    99-feature model contract — they have no as-of-date inference source."""
+def test_gold_has_no_current_match_enrichment_columns():
+    """Task 6: the per-side current-match serve/break enrichment columns are
+    removed from gold.match_features entirely — they are derived on demand from
+    bronze raw counts where the dashboard/analysis needs them."""
     cols = set(
         execute_df(
             "SELECT column_name FROM information_schema.columns "
             "WHERE table_name = 'match_features' AND table_schema = 'gold'"
         )["column_name"]
     )
-    for prefix in ("player", "opponent"):
-        for c in MATCH_STATS_COLS:
-            name = f"{prefix}_{c}"
-            assert name in cols, f"{name} missing from gold.match_features"
-            assert name not in FEATURE_COLS, f"{name} leaked into FEATURE_COLS"
+    for c in (
+        "first_serve_win_pct",
+        "second_serve_win_pct",
+        "serve_win_pct",
+        "aces_per_svc_game",
+        "df_per_svc_game",
+        "break_points_saved_pct",
+    ):
+        assert f"player_{c}" not in cols, f"{c} still in gold"
+        assert f"opponent_{c}" not in cols, f"{c} still in gold"
+
+
+def test_current_match_rates_derivable_from_bronze():
+    """Task 6: current-match serve/break analysis rates are removed from gold
+    but remain derivable on demand from bronze raw counts with the existing
+    NULLIF zero-denominator behavior."""
+    row = execute_df(
+        "SELECT match_id, player1_id, player2_id, "
+        "player1_first_serve_points_won, player1_first_serves_made, "
+        "player1_aces, player1_service_games "
+        "FROM bronze.match_events "
+        "WHERE player1_total_serve_points > 0 "
+        "ORDER BY player1_id, player2_id LIMIT 1"
+    )
+    assert not row.empty
+    m = row.iloc[0]
+    res = execute_df(
+        "SELECT CAST(player1_first_serve_points_won AS DOUBLE)"
+        "  / NULLIF(player1_first_serves_made, 0) AS first_serve_win_pct,"
+        " CAST(player1_aces AS DOUBLE) / NULLIF(player1_service_games, 0)"
+        "  AS aces_per_svc_game"
+        f" FROM {BRONZE_TABLE} WHERE match_id = ?",
+        [m["match_id"]],
+    )
+    # Gold.match_features must NOT carry these current-match rates.
+    gold_cols = set(
+        execute_df(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'match_features' AND table_schema = 'gold'"
+        )["column_name"]
+    )
+    for stem in ("first_serve_win_pct", "aces_per_svc_game"):
+        assert f"player_{stem}" not in gold_cols
+        assert f"opponent_{stem}" not in gold_cols
+    assert not res.isnull().all().iloc[0]  # NULLIF zero-denominator survives
 
 
 def _known_pair() -> tuple[str, str]:

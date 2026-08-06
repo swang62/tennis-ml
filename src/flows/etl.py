@@ -1,10 +1,10 @@
 """Prefect flow: Bronze → Gold ETL.
 
 Runs `dbt build` which builds the medallion layers in dependency order:
-silver.player_matches (player-perspective rows) and silver.player_rankings
-(ranking series) -> gold.rolling_features (post-match snapshots) ->
-gold.match_features (canonical one-row-per-match training table). Also
-enriches player bios once the gold layer exists.
+silver.player_matches (player-perspective rows) -> gold.rolling_features
+(post-match snapshots) -> gold.match_features (canonical one-row-per-match
+training table). Also enriches player bios (first `Playing style` paragraph,
+lead fallback) once the gold layer exists.
 """
 
 import subprocess
@@ -84,15 +84,26 @@ def enrich_bios():
 
 
 @flow(log_prints=True)
-def etl_flow():
+def etl_flow(enrich: bool = False):
+    """Bronze → gold ETL. Offline by default: never triggers Wikipedia
+    enrichment. Pass `enrich=True` (or `just db-etl -- --enrich`) as the
+    explicit operator opt-in for bio enrichment.
+    """
     load_env()
     rows = bronze_to_gold()
-    if rows > 0:
+    print(f"ETL complete: {rows} gold rows")
+    if enrich:
         enrich_bios()
-        print(f"ETL complete: {rows} gold rows")
-    else:
-        print("No rows in bronze, skipping validation")
 
 
 if __name__ == "__main__":
-    etl_flow()
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--enrich",
+        action="store_true",
+        help="explicit opt-in to Wikipedia bio enrichment after the gold build (default: offline)",
+    )
+    args = parser.parse_args()
+    etl_flow(enrich=args.enrich)

@@ -15,8 +15,6 @@ from __future__ import annotations
 # ── Bronze ingestion schema (raw rows, validated before insert) ──
 
 BRONZE_COLUMNS_INT: tuple[str, ...] = (
-    "player1_wins_last_10",
-    "player1_matches_last_10",
     "player1_aces",
     "player1_double_faults",
     "player1_first_serves_made",
@@ -26,8 +24,6 @@ BRONZE_COLUMNS_INT: tuple[str, ...] = (
     "player1_service_games",
     "player1_break_points_saved",
     "player1_break_points_faced",
-    "player2_wins_last_10",
-    "player2_matches_last_10",
     "player2_aces",
     "player2_double_faults",
     "player2_first_serves_made",
@@ -80,62 +76,47 @@ _REQUIRED_STRING_COLUMNS: tuple[str, ...] = (
     "winner_id",
 )
 
-# ── Rolling features computed in SQL (gold.match_features, canonical side) ──
-
+# ── Rolling features computed in SQL (gold.rolling_features, post-match) ──
+#
+# Task 6 reductions: only the retained `_10`-window values the final match
+# contract and inference need. Every `_5`/`_20` output, the separate win/loss
+# streaks (replaced by a single signed `streak`), and intermediate/source
+# outputs not consumed by gold.match_features or inference are removed.
+# Raw serve/break counts stay in silver.player_matches because the retained
+# rolling rates are computed from them.
 
 GOLD_ROLLING_COLS: list[str] = [
-    "win_rate_5",
-    "win_rate_10",
-    "win_rate_20",
     "weighted_form_10",
-    "ace_rate_5",
+    "win_rate_10",
     "ace_rate_10",
-    "first_serve_pct_5",
     "first_serve_pct_10",
-    "break_points_saved_pct_5",
     "break_points_saved_pct_10",
-    "first_serve_win_pct_5",
     "first_serve_win_pct_10",
-    "second_serve_win_pct_5",
     "second_serve_win_pct_10",
-    "serve_win_pct_5",
     "serve_win_pct_10",
-    "df_rate_5",
     "df_rate_10",
-    "aces_per_svc_game_5",
     "aces_per_svc_game_10",
-    "rank_trend_10",
-    "rank_trend_20",
-    "avg_rank_faced_5",
+    "streak",
     "avg_rank_faced_10",
-    "win_streak",
-    "loss_streak",
-    "days_since_last_match",
-    "matches_30d",
-    "surface_win_rate_10",
 ]
 
 
 # ── Per-side feature columns of the canonical match-level table ──
 
-# Current-match per-side serve/break stats exposed ONLY in gold.match_features
-# (dashboard/analysis value). The rolling versions in GOLD_ROLLING_COLS are the
-# model features — a current match's own stats have no as-of-date inference
-# source, so they are never in FEATURE_COLS.
-MATCH_STATS_COLS: list[str] = [
-    "first_serve_win_pct",
-    "second_serve_win_pct",
-    "serve_win_pct",
-    "aces_per_svc_game",
-    "df_per_svc_game",
-    "break_points_saved_pct",
-]
+# Current-match per-side serve/break analysis rates are REMOVED from the gold
+# contract (Task 6). Where the dashboard/analysis needs them, they derive on
+# demand from bronze raw counts with the existing NULLIF zero-denominator
+# behavior. The rolling versions in GOLD_ROLLING_COLS are the model features —
+# a current match's own stats have no as-of-date inference source, so they are
+# never in FEATURE_COLS.
+MATCH_STATS_COLS: list[str] = []
 
-# Profile-derived identity features (from gold.player_profiles), exposed
-# per side in the canonical row. years_pro is time-aware: years pro as of the
-# match date, not the raw turned_pro year.
+# Profile-derived identity features (from gold.player_profiles), exposed per
+# side in the canonical row. years_pro is time-aware: years pro as of the
+# match date, not the raw turned_pro year. height is retained in
+# gold.player_profiles and the profile API (dashboard data), but is NOT a model
+# feature — the final contract keeps only is_left_handed and years_pro.
 PROFILE_COLS: list[str] = [
-    "height",
     "is_left_handed",
     "years_pro",
 ]
@@ -143,32 +124,13 @@ PROFILE_COLS: list[str] = [
 # Pair-level head-to-head history, exposed per side. NOT a rolling snapshot
 # feature: it aggregates prior meetings between the canonical pair (strictly
 # before the current match date, deduped to distinct match_ids, restricted to
-# the most recent 5) straight from silver.player_matches. player_h2h_* always
-# describes the canonical player_id side; opponent_h2h_* the opponent side.
-# With zero prior meetings the counts are 0 and both win rates are 0.5
-# (neutral, per locked decision). Wins sum to matches; rates sum to 1.
+# the most recent 5) straight from silver.player_matches. Final contract keeps
+# only the counts (matches + wins); the win rate is derived on demand.
 H2H_COLS: list[str] = [
     "h2h_matches",
     "h2h_wins",
-    "h2h_win_rate",
 ]
 
-
-PLAYER_COLS: list[str] = [
-    "player_ranking",
-    "player_age",
-    *[f"player_{c}" for c in GOLD_ROLLING_COLS],
-    *[f"player_{c}" for c in PROFILE_COLS],
-    *[f"player_{c}" for c in H2H_COLS],
-]
-
-OPPONENT_COLS: list[str] = [
-    "opponent_ranking",
-    "opponent_age",
-    *[f"opponent_{c}" for c in GOLD_ROLLING_COLS],
-    *[f"opponent_{c}" for c in PROFILE_COLS],
-    *[f"opponent_{c}" for c in H2H_COLS],
-]
 
 DIFF_COLS: list[str] = [
     "rank_diff",
@@ -176,19 +138,16 @@ DIFF_COLS: list[str] = [
     "age_diff",
     "win_rate_diff",
     "ace_rate_diff",
+    "first_serve_pct_diff",
     "break_points_saved_pct_diff",
     "first_serve_win_pct_diff",
     "second_serve_win_pct_diff",
     "serve_win_pct_diff",
+    "df_rate_diff",
     "aces_per_svc_game_diff",
-    "win_streak_diff",
-    "matches_30d_diff",
-    "surface_win_rate_diff",
     "rank_trend_diff",
     "avg_rank_faced_diff",
-    "height_diff",
-    "handedness_diff",
-    "years_pro_diff",
+    "streak_diff",
 ]
 
 CONTEXT_COLS: list[str] = [
@@ -201,4 +160,52 @@ CONTEXT_COLS: list[str] = [
     "round_encoded",
 ]
 
-FEATURE_COLS: list[str] = PLAYER_COLS + OPPONENT_COLS + DIFF_COLS + CONTEXT_COLS
+# ── Final model feature contract (36 numeric columns) ──
+#
+# Task 6 finalized order (plan lines 186-231): matchup differentials first,
+# then the absolute player/opponent state values, then canonical-player H2H
+# counts, then numeric match context. This is the exact, ordered contract every
+# consumer (gold.match_features, inference, notebooks, feature_cols.json,
+# serving) must emit. Rolling values are all 10-match values.
+FEATURE_COLS: list[str] = [
+    # Matchup differences (rolling values are all 10-match values).
+    "rank_diff",
+    "rank_points_diff",
+    "age_diff",
+    "win_rate_diff",
+    "ace_rate_diff",
+    "first_serve_pct_diff",
+    "break_points_saved_pct_diff",
+    "first_serve_win_pct_diff",
+    "second_serve_win_pct_diff",
+    "serve_win_pct_diff",
+    "df_rate_diff",
+    "aces_per_svc_game_diff",
+    "rank_trend_diff",
+    "avg_rank_faced_diff",
+    "streak_diff",
+    # Values where the absolute state of both players matters.
+    "player_weighted_form_10",
+    "opponent_weighted_form_10",
+    "player_days_since_last_match",
+    "opponent_days_since_last_match",
+    "player_matches_30d",
+    "opponent_matches_30d",
+    "player_surface_win_rate_10",
+    "opponent_surface_win_rate_10",
+    "player_is_left_handed",
+    "opponent_is_left_handed",
+    "player_years_pro",
+    "opponent_years_pro",
+    # Canonical-player head-to-head history.
+    "player_h2h_matches",
+    "player_h2h_wins",
+    # Numeric match context; keep one-hot surface for linear and neural models.
+    "is_clay",
+    "is_grass",
+    "is_hard",
+    "is_carpet",
+    "is_indoor",
+    "tournament_level",
+    "round_encoded",
+]

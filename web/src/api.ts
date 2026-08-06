@@ -3,7 +3,10 @@
 // (400/404/500); predict_from_ids returns a flat, unwrapped dict. Shapes are
 // the dashboard's contract with the backend — keep them in sync.
 
-const BASE = '/api'
+// Default: relative /api, proxied to the Bento by nginx (production) or the
+// Vite dev proxy (local). VITE_API_BASE_URL overrides for local dev against a
+// bare backend origin.
+const BASE = import.meta.env.VITE_API_BASE_URL || '/api'
 
 export interface Player {
   player_id: string
@@ -32,7 +35,7 @@ export interface RankPointsTrend {
 }
 
 export type Surface = 'clay' | 'grass' | 'hard' | 'carpet'
-export type TournamentTier = 'grand_slam' | 'masters' | 'atp_500' | 'atp_250' | 'challenger' | 'davis_cup' | 'atp_finals' | 'olympics' | 'professional'
+export type TournamentTier = 'grand_slam' | 'masters' | 'atp_500' | 'atp_250' | 'davis_cup' | 'atp_finals' | 'olympics' | 'professional'
 export type MatchRound = 'r128' | 'r64' | 'r32' | 'r16' | 'qf' | 'sf' | 'f'
 
 export interface SurfaceRate {

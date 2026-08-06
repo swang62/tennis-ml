@@ -19,7 +19,6 @@ const TOURNAMENT_TIERS: { value: TournamentTier; label: string }[] = [
   { value: 'masters', label: 'Masters' },
   { value: 'atp_500', label: 'ATP 500' },
   { value: 'atp_250', label: 'ATP 250' },
-  { value: 'challenger', label: 'Challenger' },
   { value: 'davis_cup', label: 'Davis Cup' },
   { value: 'atp_finals', label: 'ATP Finals' },
   { value: 'olympics', label: 'Olympics' },

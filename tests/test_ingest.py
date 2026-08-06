@@ -542,6 +542,99 @@ def test_enrich_player_uses_explicit_player_id(monkeypatch, profiles_conn):
     assert row[0] == "REALID"
 
 
+# ── extract_playing_style_paragraph / extract_lead_paragraph ──────
+
+
+def test_extract_playing_style_paragraph_prefers_style_section():
+    summary = (
+        "Lead paragraph of the article.\n\n"
+        "== Player profile ==\n\n"
+        "=== Playing style ===\n"
+        "Aggressive baseliner with a powerful serve.\n\n"
+        "== Career ==\n\n"
+        "Won many titles."
+    )
+    assert ingest.extract_playing_style_paragraph(summary) == (
+        "Aggressive baseliner with a powerful serve."
+    )
+
+
+def test_extract_playing_style_returns_none_when_section_absent():
+    summary = "Lead paragraph.\n\n== Career ==\nWon many titles."
+    assert ingest.extract_playing_style_paragraph(summary) is None
+
+
+def test_extract_playing_style_returns_none_when_section_empty():
+    summary = "Lead paragraph.\n\n=== Playing style ===\n\n== Career ==\n"
+    assert ingest.extract_playing_style_paragraph(summary) is None
+
+
+def test_extract_lead_paragraph_returns_first_paragraph():
+    summary = "First paragraph.\n\nSecond paragraph.\n\n== Career ==\n"
+    assert ingest.extract_lead_paragraph(summary) == "First paragraph."
+
+
+def test_extract_lead_paragraph_returns_none_when_empty():
+    assert ingest.extract_lead_paragraph("== Career ==\n") is None
+
+
+def test_enrich_player_stores_playing_style_paragraph(monkeypatch, profiles_conn):
+    """Playing style paragraph is preferred over the article lead."""
+    monkeypatch.setattr(ingest, "search_wikipedia", lambda _name: "Title")
+    monkeypatch.setattr(
+        ingest,
+        "fetch_summary",
+        lambda _title: {
+            "title": "Title",
+            "page_id": "1",
+            "summary": (
+                "Lead paragraph.\n\n=== Playing style ===\nStyle paragraph.\n\n== Career ==\n"
+            ),
+        },
+    )
+
+    assert ingest.enrich_player("Player") is True
+
+    summary = profiles_conn.execute("SELECT summary FROM gold.player_profiles").fetchone()[0]
+    assert summary == "Style paragraph."
+
+
+def test_enrich_player_falls_back_to_lead_paragraph(monkeypatch, profiles_conn):
+    """When Playing style is absent, the article lead paragraph is used."""
+    monkeypatch.setattr(ingest, "search_wikipedia", lambda _name: "Title")
+    monkeypatch.setattr(
+        ingest,
+        "fetch_summary",
+        lambda _title: {
+            "title": "Title",
+            "page_id": "1",
+            "summary": "Lead paragraph.\n\n== Career ==\n",
+        },
+    )
+
+    assert ingest.enrich_player("Player") is True
+
+    summary = profiles_conn.execute("SELECT summary FROM gold.player_profiles").fetchone()[0]
+    assert summary == "Lead paragraph."
+
+
+def test_enrich_player_skips_when_no_usable_paragraph(monkeypatch, profiles_conn):
+    """No Playing style section and no lead paragraph -> SKIP, not counted."""
+    monkeypatch.setattr(ingest, "search_wikipedia", lambda _name: "Title")
+    monkeypatch.setattr(
+        ingest,
+        "fetch_summary",
+        lambda _title: {
+            "title": "Title",
+            "page_id": "1",
+            "summary": "  \n\n== Career ==\n",
+        },
+    )
+
+    assert ingest.enrich_player("Player") is False
+    assert profiles_conn.execute("SELECT count(*) FROM gold.player_profiles").fetchone()[0] == 0
+
+
 def test_enrich_missing_enriches_missing_players(monkeypatch):
     monkeypatch.setattr(ingest, "get_players_without_profiles", lambda: ["X"])
     monkeypatch.setattr(ingest, "enrich_player", lambda _name: True)

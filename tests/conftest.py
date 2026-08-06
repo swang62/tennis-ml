@@ -42,7 +42,7 @@ def seeded_test_db():
     conn.close()
 
     subprocess.run(
-        ["uv", "run", "python", "infra/duckdb/seed.py", "--offline"],
+        ["uv", "run", "python", "infra/duckdb/seed.py"],
         cwd=ROOT,
         check=True,
     )

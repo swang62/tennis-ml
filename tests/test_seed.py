@@ -111,7 +111,7 @@ def test_select_matches_empty_input():
     assert select_matches([]) == []
 
 
-def test_discover_atp_csvs_includes_regular_and_challenger_excludes_non_csv(tmp_path):
+def test_discover_atp_csvs_includes_regular_excludes_challenger_and_non_csv(tmp_path):
     import csv
 
     def write(name):
@@ -127,11 +127,10 @@ def test_discover_atp_csvs_includes_regular_and_challenger_excludes_non_csv(tmp_
 
     found = discover_atp_csvs(tmp_path)
 
+    # Regular tour CSVs are discovered; Challenger-named and non-CSV files are not.
     assert found == [
         tmp_path / "2025.csv",
-        tmp_path / "2025_challenger.csv",
         tmp_path / "2026.csv",
-        tmp_path / "2026_challenger.csv",
     ]
 
 
@@ -202,7 +201,7 @@ def test_load_all_raw_atp_rows_sorts_chronologically(tmp_path):
         ],
     )
     write(
-        "2025_challenger.csv",
+        "2025.csv",
         [
             {
                 "tourney_id": "T1",
@@ -216,21 +215,41 @@ def test_load_all_raw_atp_rows_sorts_chronologically(tmp_path):
         ],
     )
 
-    rows = load_all_raw_atp_rows([tmp_path / "2026.csv", tmp_path / "2025_challenger.csv"])
+    rows = load_all_raw_atp_rows([tmp_path / "2026.csv", tmp_path / "2025.csv"])
 
     assert [m["tourney_id"] for m in rows] == ["T1", "T2"]
 
 
-def test_parse_args_all_offline_by_default():
+def test_parse_args_defaults_to_deterministic_miniset():
+    args = parse_args([])
+    assert args.all is False
+
+
+def test_parse_args_all():
     args = parse_args(["--all"])
-    assert args.all and args.enrich is False
+    assert args.all is True
 
 
-def test_parse_args_offline():
-    args = parse_args(["--offline"])
-    assert args.offline and args.all is False and args.enrich is False
+def test_seed_exposes_no_enrichment_path():
+    """Task 2 guard: seed must expose no way to trigger Wikipedia enrichment,
+    either via CLI or module surface. It is permanently offline."""
+    assert not hasattr(seed, "enrich_players")
+    assert not hasattr(seed, "enrich_missing")
+    assert "--enrich" not in (seed.__doc__ or "")
+    assert "--offline" not in (seed.__doc__ or "")
 
 
-def test_parse_args_enrich_opt_in():
-    args = parse_args(["--all", "--enrich"])
-    assert args.all and args.enrich is True
+def test_main_dispatches_without_network(monkeypatch):
+    """Default seed (no args) and --all dispatch to the offline paths; neither
+    main_default nor main_all takes enrichment args. Guards against network I/O."""
+    calls = []
+
+    monkeypatch.setattr(seed, "main_default", lambda: calls.append("default"))
+    monkeypatch.setattr(seed, "main_all", lambda: calls.append("all"))
+
+    seed.main([])
+    assert calls == ["default"]
+
+    calls.clear()
+    seed.main(["--all"])
+    assert calls == ["all"]

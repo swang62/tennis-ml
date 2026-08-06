@@ -41,7 +41,7 @@ assert IMAGE_NAME is not None, "IMAGE_NAME not set in env; load_env() must be ca
 # Docker Hub repo: DOCKER_REPO/IMAGE_NAME. Only the moving `latest` tag is
 # pushed; Compose pulls `${DOCKER_IMAGE}:latest`.
 DOCKER_REPO = os.getenv("DOCKER_REPO", "swang62")
-COMPOSE_FILE = ROOT / "compose.production.yaml"
+COMPOSE_FILE = ROOT / "compose.yaml"
 
 # The BentoML model name each pinned MLflow registered model maps to —
 # exactly the names the service references via `bentoml.models.BentoModel`.
@@ -51,14 +51,15 @@ COMPOSE_FILE = ROOT / "compose.production.yaml"
 BASE_BENTO_NAMES = {"linear": "linear_best", "gbdt": "gbdt_best", "nn": "nn_best"}
 
 # Serving artifacts packaged into the Bento (written by pipeline notebooks or
-# materialized by this flow); content changes trigger a rebuild.
+# materialized by this flow); content changes trigger a rebuild. The production
+# DuckDB is NOT packaged here — it is served by the Quack companion container
+# and mounted at /data in Compose, independent of the Bento.
 NN_ONNX_FILE = DATA_PROCESSED / "nn_best.onnx"
 AUX_FILES = [
     DATA_PROCESSED / "linear_scaler.pkl",
     DATA_PROCESSED / "bio_embeddings.parquet",
     DATA_PROCESSED / "bio_feature_cols.json",
     NN_ONNX_FILE,
-    ROOT / "data" / "tennis.duckdb",
 ]
 
 # Files whose content changes should trigger a rebuild.
@@ -441,6 +442,15 @@ def deploy_bento(force: bool = False) -> None:
     """
     local_image, production_version = build_bento_image(force=force)
 
+    # The Quack token flows through to Compose (quack-db + bento) so the served
+    # DB and the Bento share the same runtime secret. Fail fast before any
+    # Docker work; the token travels via environment, never in logs or argv.
+    if not os.getenv("QUACK_TOKEN"):
+        raise RuntimeError(
+            "QUACK_TOKEN is required for production deploy; "
+            "set it in the environment before running deploy"
+        )
+
     latest = f"{DOCKER_REPO}/{IMAGE_NAME}:latest"
     _docker_login()
     LOGS.mkdir(parents=True, exist_ok=True)
@@ -452,8 +462,15 @@ def deploy_bento(force: bool = False) -> None:
             compose_env = {
                 **os.environ,
                 "DOCKER_IMAGE": f"{DOCKER_REPO}/{IMAGE_NAME}",
-                "DOCKER_TAG": "latest",
             }
+            # Build the web (nginx + SPA) image. force rebuilds from scratch
+            # (no docker build cache); the Bento image is not built here —
+            # build_bento_image() already did that above.
+            web_build = ["docker", "compose", "-f", str(COMPOSE_FILE), "build"]
+            if force:
+                web_build.append("--no-cache")
+            web_build.append("web")
+            _run_teed(web_build, log, env=compose_env)
             _run_teed(
                 ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", "--pull", "always"],
                 log,

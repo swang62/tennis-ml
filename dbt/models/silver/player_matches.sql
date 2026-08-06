@@ -10,8 +10,6 @@
 --
 -- Event-relative activity fields (per player, ordered by match_date, match_id):
 --   * player_match_number: 1-based ordinal of this player's matches.
---   * previous_match_date: date of this player's immediately preceding match;
---     NULL for the player's first match.
 --   * matches_30d_before: count of this player's PRIOR matches with match_date
 --     in [match_date - 30 days, match_date). Excludes the current match and any
 --     match on the same date (only strictly earlier dates qualify); 0 for the
@@ -31,20 +29,25 @@
 --
 -- No canonicalization: player/opponent orientation is the raw player1/player2
 -- assignment from bronze.
+--
+-- Task 6 reductions: tournament/round/is_indoor are JOINED from bronze by
+-- match_id in the consumers that need them (kept out of this table; only
+-- surface stays because rolling surface form needs it). winner_id,
+-- opponent_rank_points, opponent_age, the ATP-provided wins_last_10 /
+-- matches_last_10, and previous_match_date are removed. Each player row keeps
+-- its own player_rank_points / player_age, so the collapse in
+-- gold.match_features still has both sides' rank points and age via the two
+-- perspective rows.
 
 WITH expanded AS (
     SELECT
-        match_id, match_date, tournament, round, surface, is_indoor,
+        match_id, match_date, surface,
         player1_id AS player_id,
         player2_id AS opponent_id,
         NULLIF(player1_ranking, 0) AS player_ranking,
         NULLIF(player2_ranking, 0) AS opponent_ranking,
         NULLIF(player1_rank_points, 0) AS player_rank_points,
-        NULLIF(player2_rank_points, 0) AS opponent_rank_points,
         NULLIF(player1_age, 0) AS player_age,
-        NULLIF(player2_age, 0) AS opponent_age,
-        player1_wins_last_10 AS wins_last_10,
-        player1_matches_last_10 AS matches_last_10,
         player1_aces AS aces,
         player1_double_faults AS double_faults,
         player1_first_serves_made AS first_serves_made,
@@ -54,24 +57,19 @@ WITH expanded AS (
         player1_service_games AS service_games,
         player1_break_points_saved AS break_points_saved,
         player1_break_points_faced AS break_points_faced,
-        winner_id,
         CASE WHEN winner_id = player1_id THEN 1 ELSE 0 END AS match_won
     FROM {{ source('bronze', 'match_events') }}
 
     UNION ALL
 
     SELECT
-        match_id, match_date, tournament, round, surface, is_indoor,
+        match_id, match_date, surface,
         player2_id AS player_id,
         player1_id AS opponent_id,
         NULLIF(player2_ranking, 0) AS player_ranking,
         NULLIF(player1_ranking, 0) AS opponent_ranking,
         NULLIF(player2_rank_points, 0) AS player_rank_points,
-        NULLIF(player1_rank_points, 0) AS opponent_rank_points,
         NULLIF(player2_age, 0) AS player_age,
-        NULLIF(player1_age, 0) AS opponent_age,
-        player2_wins_last_10 AS wins_last_10,
-        player2_matches_last_10 AS matches_last_10,
         player2_aces AS aces,
         player2_double_faults AS double_faults,
         player2_first_serves_made AS first_serves_made,
@@ -81,26 +79,19 @@ WITH expanded AS (
         player2_service_games AS service_games,
         player2_break_points_saved AS break_points_saved,
         player2_break_points_faced AS break_points_faced,
-        winner_id,
         CASE WHEN winner_id = player2_id THEN 1 ELSE 0 END AS match_won
     FROM {{ source('bronze', 'match_events') }}
 )
 SELECT
     match_id,
     match_date,
-    tournament,
-    round,
     surface,
-    is_indoor,
     player_id,
     opponent_id,
     player_ranking,
     opponent_ranking,
     player_rank_points,
-    opponent_rank_points,
     player_age,
-    opponent_age,
-    winner_id,
     match_won,
     aces,
     double_faults,
@@ -111,14 +102,9 @@ SELECT
     service_games,
     break_points_saved,
     break_points_faced,
-    wins_last_10,
-    matches_last_10,
     ROW_NUMBER() OVER (
         PARTITION BY player_id ORDER BY match_date, match_id
     ) AS player_match_number,
-    LAG(match_date) OVER (
-        PARTITION BY player_id ORDER BY match_date, match_id
-    ) AS previous_match_date,
     COUNT(*) OVER (
         PARTITION BY player_id ORDER BY match_date
         RANGE BETWEEN INTERVAL '30 days' PRECEDING AND INTERVAL '1 day' PRECEDING

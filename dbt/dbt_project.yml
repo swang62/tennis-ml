@@ -15,7 +15,7 @@ clean-targets:
 models:
   tennis_ml:
     # Medallion layering: bronze.match_events (raw, ingest) -> silver
-    # (per-player expansion: player_matches, player_rankings) -> gold
+    # (per-player expansion: player_matches) -> gold
     # (features: rolling_features, match_features).
     silver:
       +materialized: table
@@ -29,11 +29,6 @@ models:
         +post-hook:
           - "ALTER TABLE {{ this }} ADD CONSTRAINT pk_player_matches PRIMARY KEY (player_id, match_id)"
           - "CREATE INDEX IF NOT EXISTS idx_player_matches_pid_date ON {{ this }} (player_id, match_date)"
-
-      player_rankings:
-        +post-hook:
-          - "ALTER TABLE {{ this }} ADD CONSTRAINT pk_player_rankings PRIMARY KEY (player_id, match_id)"
-          - "CREATE INDEX IF NOT EXISTS idx_player_rankings_pid_date ON {{ this }} (player_id, match_date)"
 
     gold:
       +materialized: table

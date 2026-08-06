@@ -36,12 +36,12 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from src.constants import (
+    BRONZE_TABLE,
     GOLD_ROLLING_FEATURES,
     PRODUCTION_MODEL,
     PROFILES_TABLE,
     ROOT,
     SILVER_PLAYER_MATCHES,
-    SILVER_PLAYER_RANKINGS,
 )
 from src.db.client import execute_df, first_row_dict
 from src.features.columns import FEATURE_COLS
@@ -196,16 +196,25 @@ WHERE player_id = ? AND player_rank_points IS NOT NULL
 ORDER BY match_date, match_id
 """
 
+# Rank series from bronze: each match row records both players' rankings, so
+# the player-perspective ranking time series is derived on demand by expanding
+# bronze rows (both raw sides) into one ranking observation per (player, date).
 _RANK_HISTORY_SQL = f"""
 SELECT match_date, ranking
-FROM {SILVER_PLAYER_RANKINGS}
-WHERE player_id = ?
-ORDER BY match_date, match_id
+FROM (
+    SELECT match_date, player1_id AS player_id, player1_ranking AS ranking
+    FROM {BRONZE_TABLE}
+    UNION ALL
+    SELECT match_date, player2_id AS player_id, player2_ranking AS ranking
+    FROM {BRONZE_TABLE}
+)
+WHERE player_id = ? AND ranking IS NOT NULL AND ranking > 0
+ORDER BY match_date
 """
 
 _MATCH_HISTORY_SQL = f"""
 SELECT
-    pm.match_id, pm.match_date, pm.tournament, pm.surface, pm.round,
+    pm.match_id, pm.match_date, br.tournament, pm.surface, br.round,
     pm.opponent_id, pr.display_name AS opponent_name,
     pm.player_ranking, pm.match_won,
     pm.aces, pm.double_faults,
@@ -213,6 +222,7 @@ SELECT
     pm.total_serve_points, pm.service_games,
     pm.break_points_saved, pm.break_points_faced
 FROM {SILVER_PLAYER_MATCHES} pm
+LEFT JOIN {BRONZE_TABLE} br ON br.match_id = pm.match_id
 LEFT JOIN {PROFILES_TABLE} pr ON pr.player_id = pm.opponent_id
 WHERE pm.player_id = ?
 ORDER BY pm.match_date DESC, pm.match_id DESC
@@ -223,19 +233,21 @@ LIMIT ?
 # (one per player perspective); GROUP BY collapses them to distinct match_ids
 # (same dedupe rule as the model's H2H lookup). a_won = 1 iff the canonical
 # a-side (the lower id, always the player_* side) won the meeting; both
-# perspective rows of a meeting agree on it, so MAX is safe. Params:
+# perspective rows of a meeting agree on it, so MAX is safe. winner_id is
+# read from bronze (removed from silver). Params:
 # lower_id, higher_id, lower_id, higher_id.
 _H2H_MEETINGS_SQL = f"""
 SELECT
-    match_id, match_date, surface, tournament, round,
-    MAX(winner_id) AS winner_id,
-    MAX(CASE WHEN player_id < opponent_id THEN match_won
-             ELSE 1 - match_won END) AS a_won
-FROM {SILVER_PLAYER_MATCHES}
-WHERE ((? = player_id AND ? = opponent_id)
-    OR (? = opponent_id AND ? = player_id))
-GROUP BY match_id, match_date, surface, tournament, round
-ORDER BY match_date DESC, match_id DESC
+    pm.match_id, pm.match_date, br.surface, br.tournament, br.round,
+    MAX(br.winner_id) AS winner_id,
+    MAX(CASE WHEN pm.player_id < pm.opponent_id THEN pm.match_won
+             ELSE 1 - pm.match_won END) AS a_won
+FROM {SILVER_PLAYER_MATCHES} pm
+LEFT JOIN {BRONZE_TABLE} br ON br.match_id = pm.match_id
+WHERE ((? = pm.player_id AND ? = pm.opponent_id)
+    OR (? = pm.opponent_id AND ? = pm.player_id))
+GROUP BY pm.match_id, pm.match_date, br.surface, br.tournament, br.round
+ORDER BY pm.match_date DESC, pm.match_id DESC
 """
 
 

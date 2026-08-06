@@ -94,7 +94,7 @@ RAW_ATP_COLUMNS = [
 
 # Raw ATP tourney_level -> canonical bronze.tournament.
 # Tiered: grand_slam(4), masters(3), atp_500(2), atp_250(1).
-# Non-tier: challenger, davis_cup, atp_finals, olympics, professional → map to
+# Non-tier: davis_cup, atp_finals, olympics, professional → map to
 # numeric 0 at final feature-encoding time.
 LEVEL_MAP = {
     "G": "grand_slam",
@@ -102,7 +102,6 @@ LEVEL_MAP = {
     "A": "atp_500",
     "500": "atp_500",
     "250": "atp_250",
-    "C": "challenger",
     "D": "davis_cup",
     "F": "atp_finals",
     "O": "olympics",
@@ -480,7 +479,8 @@ def fetch_summary(title: str) -> dict[str, str] | None:
         "action": "query",
         "titles": title,
         "prop": "extracts|pageprops",
-        "exintro": True,
+        # Full plaintext extract (not just the intro) so the `Playing style`
+        # section is available for paragraph extraction.
         "explaintext": True,
         "format": "json",
     }
@@ -512,6 +512,37 @@ def extract_infobox_fields(summary: str) -> dict[str, str]:
     return fields
 
 
+def extract_playing_style_paragraph(summary: str) -> str | None:
+    """First paragraph of the article's `Playing style` section, or None.
+
+    The plaintext Wikipedia extract uses `\n\n`-separated paragraphs and
+    `=== Playing style ===` section headers. Returns the first non-empty
+    paragraph after the header, trimmed of the header marker; None when the
+    section is absent or has no usable paragraph.
+    """
+    header = re.search(r"^==+\s*Playing style\s*==+\s*$", summary, re.MULTILINE)
+    if not header:
+        return None
+    tail = summary[header.end() :]
+    # Stop at the next section header (start of a sibling section).
+    body = re.split(r"^==+ .*$", tail, maxsplit=1, flags=re.MULTILINE)[0]
+    for paragraph in body.split("\n\n"):
+        text = paragraph.strip()
+        if text:
+            return text
+    return None
+
+
+def extract_lead_paragraph(summary: str) -> str | None:
+    """First non-empty paragraph of the article lead (before any header)."""
+    lead = re.split(r"^==+ .*$", summary, maxsplit=1, flags=re.MULTILINE)[0]
+    for paragraph in lead.split("\n\n"):
+        text = paragraph.strip()
+        if text:
+            return text
+    return None
+
+
 def enrich_player(name: str, player_id: str | None = None) -> bool:
     """Fetch a Wikipedia bio for NAME and write it into the profiles table.
 
@@ -520,8 +551,10 @@ def enrich_player(name: str, player_id: str | None = None) -> bool:
     metadata on the row survives; a fresh row additionally gets the Wikipedia
     title as display_name plus any infobox plays/backhand/height/turned-pro.
     Returns True only when a non-empty summary was written. Pages without a
-    search match, without extract data, or with an empty extract are SKIPped
-    and never counted as success.
+    search match, without extract data, without a usable paragraph, or with an
+    empty extract are SKIPped and never counted as success. The stored bio is
+    the first paragraph of the `Playing style` section, falling back to the
+    first paragraph of the article lead only when the section is unavailable.
     """
     pid = player_id or name
     title = search_wikipedia(name)
@@ -538,6 +571,16 @@ def enrich_player(name: str, player_id: str | None = None) -> bool:
         print(f"  SKIP {pid}: empty Wikipedia summary for {title!r}")
         return False
 
+    # Bio text: first paragraph of the `Playing style` section, falling back
+    # to the first paragraph of the article lead only when that section or a
+    # usable paragraph is unavailable.
+    bio_paragraph = extract_playing_style_paragraph(page["summary"]) or extract_lead_paragraph(
+        page["summary"]
+    )
+    if not bio_paragraph:
+        print(f"  SKIP {pid}: no usable paragraph for {title!r}")
+        return False
+
     infobox = extract_infobox_fields(page["summary"])
 
     # Typed fields: infobox height is meters ("1.85 m") but the column is cm;
@@ -548,7 +591,7 @@ def enrich_player(name: str, player_id: str | None = None) -> bool:
     turned_pro = int(turned_pro_raw) if turned_pro_raw else None
 
     # Prepared statement: None binds as NULL, apostrophes need no escaping.
-    summary_text = page["summary"][:SUMMARY_MAX_CHARS]
+    summary_text = bio_paragraph[:SUMMARY_MAX_CHARS]
 
     conn = get_conn()
     conn.execute(

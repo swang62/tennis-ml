@@ -5,14 +5,19 @@ models:
     description: >
       Normalized player-perspective match rows: each bronze.match_events row
       expands into exactly two rows, one per player. Each row carries that
-      player's current match context (tournament, round, surface), ranking,
-      rank points, age, opponent ranking, raw serve/break stats, outcome, and
-      event-relative activity fields (player_match_number, previous_match_date,
-      matches_30d_before). No canonical player/opponent orientation and no
-      rolling or differential features — downstream models build those from
-      this expansion. Composite grain (match_id, player_id) is unique; the
-      composite uniqueness test below mirrors the (player_id, match_id) PK
-      enforced by the model's post-hook.
+      player's current match context (surface), ranking, rank points, age,
+      opponent ranking, raw serve/break stats, outcome, and event-relative
+      activity fields (player_match_number, matches_30d_before). No canonical
+      player/opponent orientation and no rolling or differential features —
+      downstream models build those from this expansion. Composite grain
+      (match_id, player_id) is unique; the composite uniqueness test below
+      mirrors the (player_id, match_id) PK enforced by the model's post-hook.
+
+      Task 6 reductions: tournament and round are removed (joined from bronze
+      by match_id where needed); is_indoor is removed (joined from bronze);
+      winner_id, opponent_rank_points, opponent_age, the ATP-provided
+      wins_last_10/matches_last_10, and previous_match_date are removed.
+      Surface stays because rolling surface form needs it.
     tests:
       - unique:
           arguments:
@@ -26,14 +31,8 @@ models:
         description: Match date.
         tests:
           - not_null
-      - name: tournament
-        description: Tournament name.
-      - name: round
-        description: Draw round (r128, r64, r32, r16, qf, sf, f; non-draw stages like "rr" pass through).
       - name: surface
         description: Court surface (clay, grass, hard, carpet); "0" when the raw CSV left it blank.
-      - name: is_indoor
-        description: 1 if indoor, 0 if outdoor, NULL when unknown.
       - name: player_id
         description: The player this row represents (raw player1_id or player2_id from bronze).
         tests:
@@ -48,16 +47,10 @@ models:
         description: Opponent's ATP ranking at match time.
       - name: player_rank_points
         description: This player's ATP rank points at match time; NULL when missing (0 maps to NULL, the same 0 -> NULL convention as player_ranking).
-      - name: opponent_rank_points
-        description: Opponent's ATP rank points at match time; NULL when missing.
       - name: player_age
         description: This player's age in fractional years at match time; NULL when missing (0 maps to NULL).
-      - name: opponent_age
-        description: Opponent's age in fractional years at match time; NULL when missing.
-      - name: winner_id
-        description: Player who won the match (player_id or opponent_id).
       - name: match_won
-        description: 1 if this player won the match, else 0.
+        description: 1 if this player won the match (winner_id == this player), else 0.
       - name: aces
         description: This player's aces in this match.
       - name: double_faults
@@ -76,18 +69,10 @@ models:
         description: This player's break points saved in this match (raw w/l_bpSaved).
       - name: break_points_faced
         description: This player's break points faced in this match (raw w/l_bpFaced).
-      - name: wins_last_10
-        description: This player's wins in the 10 matches before this one.
-      - name: matches_last_10
-        description: This player's matches played in the 10 before this one.
       - name: player_match_number
         description: >
           1-based ordinal of this player's matches ordered by match_date,
           match_id. 1 for the player's first match.
-      - name: previous_match_date
-        description: >
-          Date of this player's immediately preceding match; NULL for the
-          player's first match.
       - name: matches_30d_before
         description: >
           Count of this player's prior matches with match_date in

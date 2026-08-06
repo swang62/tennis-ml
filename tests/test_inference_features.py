@@ -3,8 +3,8 @@
 Target: `src.features.inference.build_inference_features`.
 
 Tests run against the temporary seeded test DB built per session by the
-conftest pretest setup (`infra/duckdb/init.sql` + `infra/duckdb/seed.py
---offline` + the dbt gold models, pointed at via TENNIS_DB_PATH), never the
+conftest pretest setup (`infra/duckdb/init.sql` + `infra/duckdb/seed.py` +
+the dbt gold models, pointed at via TENNIS_DB_PATH), never the
 dev database at `data/tennis.duckdb`. All date-dependent
 tests pass an explicit `as_of_date` for determinism, except the default-today
 test, which monkeypatches `date.today` to a fixed date.
@@ -32,7 +32,7 @@ def test_output_schema_contract():
     """Exact column order [*FEATURE_COLS, "player_id", "opponent_id"], one row."""
     out = build_inference_features("S0AG", "Z355", "clay", as_of_date=AS_OF_AFTER_ALL_MATCHES)
     assert out.columns.tolist() == [*FEATURE_COLS, "player_id", "opponent_id"]
-    assert len(out.columns) == 101  # 99 features + 2 ids
+    assert len(out.columns) == 38  # 36 features + 2 ids
     assert len(out) == 1
     assert out["player_id"].dtype == object
     assert out["opponent_id"].dtype == object
@@ -68,22 +68,19 @@ def test_reversed_ids_canonical_identical():
 def test_known_players_profile_features():
     """Profile-derived features for two known players, in canonical order.
 
-    S0AG (Sinner): height 191, right-handed, turned pro 2018. Z355 (Zverev):
-    height 198, right-handed, turned pro 2013. Canonical order puts S0AG on
-    the player_* side; years_pro is years-pro AT the as-of date (2026 - year),
-    not the raw turned_pro year.
+    S0AG (Sinner): right-handed, turned pro 2018. Z355 (Zverev): right-handed,
+    turned pro 2013. Canonical order puts S0AG on the player_* side; years_pro
+    is years-pro AT the as-of date (2026 - year). Height is NOT a model feature
+    (Task 6) — only is_left_handed and years_pro remain.
     """
     out = build_inference_features("S0AG", "Z355", "clay", as_of_date=AS_OF_AFTER_ALL_MATCHES)
     row = out.iloc[0]
-    assert row["player_height"] == 191.0
-    assert row["opponent_height"] == 198.0
-    assert row["height_diff"] == -7.0
     assert row["player_is_left_handed"] == 0.0
     assert row["opponent_is_left_handed"] == 0.0
-    assert row["handedness_diff"] == 0.0
     assert row["player_years_pro"] == 8.0  # 2026 - 2018
     assert row["opponent_years_pro"] == 13.0  # 2026 - 2013
-    assert row["years_pro_diff"] == -5.0
+    assert "player_height" not in out.columns
+    assert "height_diff" not in out.columns
 
 
 def test_years_pro_time_aware_and_cold_start():
@@ -97,7 +94,6 @@ def test_years_pro_time_aware_and_cold_start():
     row = out.iloc[0]
     assert row["player_years_pro"] == 7.0  # 2025 - 2018
     assert row["opponent_years_pro"] == 12.0  # 2025 - 2013
-    assert row["years_pro_diff"] == -5.0
     for col in FEATURE_COLS:
         assert math.isfinite(row[col]), f"{col} is not finite: {row[col]!r}"
 
@@ -111,20 +107,26 @@ def test_historical_as_of_excludes_later_snapshots():
     (Wimbledon R128, won). At as_of 2026-06-30 the newest strictly-before
     snapshot is #5 with win_rate_10 = 4/5 = 0.8; snapshot #6 (2026-07-01) is
     one-match stale (5/6 = 0.833). A builder that used snapshot #1 (win_rate
-    1.0) or the overall latest (0.9) fails loudly.
+    1.0) or the overall latest (0.9) fails loudly. The per-side win_rate_10 is
+    not a model column, so the selection is verified via player_weighted_form_10
+    (exponentially-decayed, changes per snapshot) and the direct gold-table
+    cross-check.
     """
     out = build_inference_features("S0AG", "Z355", "hard", as_of_date=date(2026, 6, 30))
-    assert out.loc[0, "player_win_rate_10"] == 0.8
     # Cross-check the expected snapshot directly in the gold table.
     snapshot = execute_df(
-        f"SELECT player_match_number, win_rate_10 FROM {GOLD_ROLLING_FEATURES} "
+        f"SELECT player_match_number, win_rate_10, weighted_form_10 "
+        f"FROM {GOLD_ROLLING_FEATURES} "
         "WHERE player_id = ? AND snapshot_date < ?::DATE "
         "ORDER BY player_match_number DESC LIMIT 1",
         ["S0AG", "2026-06-30"],
     ).iloc[0]
     assert snapshot["player_match_number"] == 5
     assert snapshot["win_rate_10"] == 0.8
-    assert out.loc[0, "player_win_rate_10"] == snapshot["win_rate_10"]
+    # The inference row's per-side weighted form equals that snapshot's value.
+    assert out.loc[0, "player_weighted_form_10"] == pytest.approx(
+        float(snapshot["weighted_form_10"])
+    )
 
 
 class _FixedTodayDate(date):
@@ -182,35 +184,33 @@ def test_one_missing_player_imputed_no_nans(args):
         assert math.isfinite(row[col]), f"{col} is not finite: {row[col]!r}"
     # The known player's form differs from the pool default (diff exists).
     assert row["win_rate_diff"] != 0
-    # The opponent side equals the on-demand global pool aggregates
-    # (MEDIAN for ranking/streak, MEAN for rates), same SQL as the builder.
+    # The unknown opponent side equals the on-demand global pool aggregates
+    # (MEDIAN for streak, MEAN for rates), same SQL as the builder. Ranking/
+    # per-side win_rate_10 are not model columns, so the per-side values that
+    # ARE exposed (weighted_form_10, surface_win_rate_10) are checked directly.
     pool = execute_df(
-        "SELECT MEDIAN(latest_player_ranking) AS latest_player_ranking, "
-        "MEDIAN(win_streak) AS win_streak, "
+        "SELECT MEDIAN(streak) AS streak, "
+        "AVG(weighted_form_10) AS weighted_form_10, "
         "AVG(win_rate_10) AS win_rate_10, "
         "AVG(hard_win_rate_10) AS hard_win_rate_10 "
         f"FROM {GOLD_ROLLING_FEATURES} WHERE snapshot_date < ?::DATE",
         ["2026-09-01"],
     ).iloc[0]
-    assert row["opponent_ranking"] == round(float(pool["latest_player_ranking"]))
-    assert row["opponent_win_streak"] == int(float(pool["win_streak"]))
-    assert row["opponent_win_rate_10"] == pytest.approx(pool["win_rate_10"])
+    assert row["streak_diff"] != 0  # known streak vs pool-mean streak differ
+    assert row["opponent_weighted_form_10"] == pytest.approx(pool["weighted_form_10"])
     assert row["opponent_surface_win_rate_10"] == pytest.approx(pool["hard_win_rate_10"])
     # Profile-derived features for the unknown player come from the on-demand
-    # aggregate over ALL profiles (mean height / left-handed rate / years-pro
-    # at the as-of date), so they are finite and non-NaN.
+    # aggregate over ALL profiles (mean left-handed rate / years-pro at the
+    # as-of date), so they are finite and non-NaN.
     profile_pool = execute_df(
-        "SELECT AVG(height) AS avg_height, "
+        "SELECT "
         "AVG(CASE WHEN handedness = 'L' THEN 1 ELSE 0 END) AS left_handed_rate, "
         "AVG(2026 - turned_pro) AS avg_years_pro "
         f"FROM {PROFILES_TABLE}",
     ).iloc[0]
-    assert row["opponent_height"] == pytest.approx(profile_pool["avg_height"])
     assert row["opponent_is_left_handed"] == pytest.approx(profile_pool["left_handed_rate"])
     assert row["opponent_years_pro"] == pytest.approx(profile_pool["avg_years_pro"])
-    assert math.isfinite(row["height_diff"])
-    assert math.isfinite(row["handedness_diff"])
-    assert math.isfinite(row["years_pro_diff"])
+    assert math.isfinite(row["player_years_pro"])
 
 
 def test_one_missing_player_reversed_identical():
@@ -323,7 +323,6 @@ def test_valid_round_encodings_accepted(round_encoded, expected):
         ("masters", 3),
         ("atp_500", 2),
         ("atp_250", 1),
-        ("challenger", 0),
         ("davis_cup", 0),
         ("atp_finals", 0),
         ("olympics", 0),
@@ -483,11 +482,10 @@ def test_null_handedness_falls_back_to_pool_rate(monkeypatch):
         ]
     )
     monkeypatch.setattr("src.features.inference.execute_df", lambda _sql, _params=None: profile)
-    agg = {"avg_height": 185.0, "left_handed_rate": 0.08, "avg_years_pro": 8.0}
+    agg = {"left_handed_rate": 0.08, "avg_years_pro": 8.0}
     values = inference._profile_values("S0AG", date(2026, 9, 1), agg)
     assert values["is_left_handed"] == pytest.approx(0.08)
     # Non-NULL cells are still read directly.
-    assert values["height"] == 191.0
     assert values["years_pro"] == 8.0  # 2026 - 2018
 
 
@@ -521,17 +519,15 @@ def _insert_prior_meetings(pair_a: str, pair_b: str, meetings: list[tuple[str, s
 
 def test_h2h_zero_prior_meetings_neutral():
     """A pair that never met (UNKNOWN_ID has no silver rows at all) gets the
-    locked neutral fallback: 0 counts, 0.5 win rate on both sides."""
+    locked neutral fallback: 0 counts for the canonical player side."""
     out = build_inference_features("S0AG", "UNKNOWN_ID", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
     row = out.iloc[0]
     assert row["player_id"] == "S0AG"
     assert row["opponent_id"] == "UNKNOWN_ID"
     assert row["player_h2h_matches"] == 0
     assert row["player_h2h_wins"] == 0
-    assert row["player_h2h_win_rate"] == 0.5
-    assert row["opponent_h2h_matches"] == 0
-    assert row["opponent_h2h_wins"] == 0
-    assert row["opponent_h2h_win_rate"] == 0.5
+    assert "player_h2h_win_rate" not in out.columns
+    assert "opponent_h2h_matches" not in out.columns
 
 
 def test_h2h_real_seeded_meeting():
@@ -543,15 +539,10 @@ def test_h2h_real_seeded_meeting():
     assert row["player_id"] == "S0AG"  # 'S0AG' < 'Z355'
     assert row["player_h2h_matches"] == 1
     assert row["player_h2h_wins"] == 1
-    assert row["player_h2h_win_rate"] == pytest.approx(1.0)
-    assert row["opponent_h2h_matches"] == 1
-    assert row["opponent_h2h_wins"] == 0
-    assert row["opponent_h2h_win_rate"] == pytest.approx(0.0)
     # Before that meeting (strictly-before): zero priors, neutral.
     out_before = build_inference_features("S0AG", "Z355", "hard", as_of_date=date(2026, 7, 12))
     row_before = out_before.iloc[0]
     assert row_before["player_h2h_matches"] == 0
-    assert row_before["player_h2h_win_rate"] == 0.5
     # Reversed raw ids: identical canonical row (H2H included).
     row_ba = build_inference_features("Z355", "S0AG", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
     pd.testing.assert_frame_equal(out, row_ba, check_exact=True)
@@ -567,26 +558,17 @@ def test_h2h_first_and_second_meeting_boundaries():
     row1 = out1.iloc[0]
     assert row1["player_h2h_matches"] == 0
     assert row1["player_h2h_wins"] == 0
-    assert row1["player_h2h_win_rate"] == 0.5
-    assert row1["opponent_h2h_win_rate"] == 0.5
     # A second meeting: exactly one prior, A won it.
     _insert_prior_meetings(a, b, [("h2h-f2", "2026-06-20", 0)])
     out2 = build_inference_features(a, b, "clay", as_of_date=date(2026, 6, 20))
     row2 = out2.iloc[0]
     assert row2["player_h2h_matches"] == 1
     assert row2["player_h2h_wins"] == 1
-    assert row2["player_h2h_win_rate"] == pytest.approx(1.0)
-    assert row2["opponent_h2h_matches"] == 1
-    assert row2["opponent_h2h_wins"] == 0
-    assert row2["opponent_h2h_win_rate"] == pytest.approx(0.0)
     # After the second meeting: both priors, 1 win each side.
     out3 = build_inference_features(a, b, "clay", as_of_date=date(2026, 6, 21))
     row3 = out3.iloc[0]
     assert row3["player_h2h_matches"] == 2
     assert row3["player_h2h_wins"] == 1
-    assert row3["player_h2h_win_rate"] == pytest.approx(0.5)
-    assert row3["opponent_h2h_wins"] == 1
-    assert row3["opponent_h2h_win_rate"] == pytest.approx(0.5)
 
 
 def test_h2h_last5_recency_drops_oldest():
@@ -609,10 +591,6 @@ def test_h2h_last5_recency_drops_oldest():
     row = out.iloc[0]
     assert row["player_h2h_matches"] == 5
     assert row["player_h2h_wins"] == 0  # the sole A win is the dropped oldest
-    assert row["player_h2h_win_rate"] == pytest.approx(0.0)
-    assert row["opponent_h2h_matches"] == 5
-    assert row["opponent_h2h_wins"] == 5
-    assert row["opponent_h2h_win_rate"] == pytest.approx(1.0)
 
 
 def test_h2h_same_date_meetings_excluded():
@@ -623,13 +601,10 @@ def test_h2h_same_date_meetings_excluded():
     out_same = build_inference_features(a, b, "hard", as_of_date=date(2026, 3, 10))
     row_same = out_same.iloc[0]
     assert row_same["player_h2h_matches"] == 0
-    assert row_same["player_h2h_win_rate"] == 0.5
     out_next = build_inference_features(a, b, "hard", as_of_date=date(2026, 3, 11))
     row_next = out_next.iloc[0]
     assert row_next["player_h2h_matches"] == 2
     assert row_next["player_h2h_wins"] == 1
-    assert row_next["opponent_h2h_wins"] == 1
-    assert row_next["player_h2h_win_rate"] == pytest.approx(0.5)
 
 
 def test_h2h_reversed_raw_ids_identical():
@@ -642,7 +617,6 @@ def test_h2h_reversed_raw_ids_identical():
     pd.testing.assert_frame_equal(row_ab, row_ba, check_exact=True)
     assert row_ab.iloc[0]["player_h2h_matches"] == 2
     assert row_ab.iloc[0]["player_h2h_wins"] == 1
-    assert row_ab.iloc[0]["player_h2h_win_rate"] == pytest.approx(0.5)
 
 
 # ── Train/inference parity (strongest train/serve agreement check) ──
@@ -668,9 +642,7 @@ ASYM_MATCH_DAY_COLS = {
     "opponent_ranking",
     "rank_diff",
     "player_rank_trend_10",
-    "player_rank_trend_20",
     "opponent_rank_trend_10",
-    "opponent_rank_trend_20",
     "rank_trend_diff",
     "rank_points_diff",
     "player_age",
@@ -689,10 +661,16 @@ JOIN silver.player_matches p
   ON p.match_id = mf.match_id AND p.player_id = mf.player_id
 JOIN silver.player_matches o
   ON o.match_id = mf.match_id AND o.player_id = mf.opponent_id
+JOIN gold.rolling_features prp
+  ON prp.player_id = mf.player_id
+ AND prp.player_match_number = p.player_match_number - 1
+JOIN gold.rolling_features pro
+  ON pro.player_id = mf.opponent_id
+ AND pro.player_match_number = o.player_match_number - 1
 WHERE p.player_match_number > 1
   AND o.player_match_number > 1
-  AND p.previous_match_date < mf.match_date
-  AND o.previous_match_date < mf.match_date
+  AND prp.snapshot_date < mf.match_date
+  AND pro.snapshot_date < mf.match_date
 ORDER BY mf.match_date, mf.match_id
 LIMIT 1
 """
@@ -730,7 +708,7 @@ def test_train_inference_parity_on_historical_match():
         compared += 1
     # The fixture must actually compare most of the contract, so it cannot
     # silently degenerate to a handful of columns.
-    assert compared >= 70
+    assert compared >= 20
 
 
 # ── is_indoor context feature ────────────────────────────────────
