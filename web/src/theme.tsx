@@ -1,0 +1,64 @@
+import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
+
+// Persistent light/dark mode. Dark is the default; light mode adds the
+// `light` class to documentElement (see index.css). The class is applied
+// before first paint by an inline script in index.html to avoid a flash,
+// then kept in sync here. Stored choice wins; otherwise the OS preference.
+const STORAGE_KEY = 'tm-theme'
+
+export type ThemeName = 'dark' | 'light'
+
+export function resolveTheme(): ThemeName {
+  const stored = localStorage.getItem(STORAGE_KEY)
+  if (stored === 'dark' || stored === 'light') return stored
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+}
+
+export function applyTheme(theme: ThemeName): void {
+  document.documentElement.classList.toggle('light', theme === 'light')
+  document.documentElement.style.colorScheme = theme
+}
+
+interface ThemeContextValue {
+  theme: ThemeName
+  toggle: () => void
+}
+
+const ThemeContext = createContext<ThemeContextValue>({
+  theme: 'dark',
+  toggle: () => {},
+})
+
+export function ThemeProvider({ children }: { children: ReactNode }) {
+  const [theme, setTheme] = useState<ThemeName>(() => resolveTheme())
+
+  // Apply synchronously at mount and on every change so the class is
+  // never a render behind the charts that read it via chartTokens().
+  useEffect(() => {
+    applyTheme(theme)
+  }, [theme])
+
+  // Follow system changes until the user makes an explicit choice.
+  useEffect(() => {
+    const mq = window.matchMedia('(prefers-color-scheme: dark)')
+    const onChange = (e: MediaQueryListEvent) => {
+      if (!localStorage.getItem(STORAGE_KEY)) setTheme(e.matches ? 'dark' : 'light')
+    }
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [])
+
+  const toggle = () => {
+    setTheme((current) => {
+      const next = current === 'dark' ? 'light' : 'dark'
+      localStorage.setItem(STORAGE_KEY, next)
+      return next
+    })
+  }
+
+  return <ThemeContext.Provider value={{ theme, toggle }}>{children}</ThemeContext.Provider>
+}
+
+export function useTheme(): ThemeContextValue {
+  return useContext(ThemeContext)
+}

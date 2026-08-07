@@ -3,7 +3,26 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tennis ML Dashboard</title>
+    <meta
+      name="description"
+      content="Courtside — model-driven tennis predictions, head-to-heads and player statistics."
+    />
+    <title>Courtside — Tennis Intelligence</title>
+    <script>
+      // Apply the theme class before first paint to avoid a light/dark flash.
+      // Dark is the default; light mode is an explicit class on <html>.
+      ;(function () {
+        var t = null
+        var light = false
+        try {
+          t = localStorage.getItem('tm-theme')
+          light = t ? t === 'light' : !window.matchMedia('(prefers-color-scheme: dark)').matches
+          document.documentElement.classList.toggle('light', light)
+        } catch (e) {
+          document.documentElement.classList.remove('light')
+        }
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

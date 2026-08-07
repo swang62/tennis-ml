@@ -227,20 +227,54 @@ WHERE player_id = %s AND ranking IS NOT NULL AND ranking > 0
 ORDER BY match_date
 """
 
+# Match history shows only the highest round entered per tournament. The
+# tourney key is derived from match_id (`{tourney_date}-{tourney_id}-{match_num}`
+# in silver/bronze; the zero-padded match number is always the trailing
+# `-\d{3}` segment), so no schema change is needed. Round depth: standard
+# draw rounds R128 < R64 < R32 < R16 < QF < SF < F; nonstandard/unknown
+# rounds (RR, round robins, walkovers...) rank 0. Grouping happens BEFORE the
+# visible limit so the API never fetches an arbitrary subset first.
 _MATCH_HISTORY_SQL = f"""
-SELECT
-    pm.match_id, pm.match_date, br.tournament, pm.surface, br.round,
-    pm.opponent_id, pr.display_name AS opponent_name,
-    pm.player_ranking, pm.match_won,
-    pm.aces, pm.double_faults,
-    pm.first_serve_points_won, pm.second_serve_points_won,
-    pm.total_serve_points, pm.service_games,
-    pm.break_points_saved, pm.break_points_faced
-FROM {SILVER_PLAYER_MATCHES} pm
-LEFT JOIN {BRONZE_TABLE} br ON br.match_id = pm.match_id
-LEFT JOIN {PROFILES_TABLE} pr ON pr.player_id = pm.opponent_id
-WHERE pm.player_id = %s
-ORDER BY pm.match_date DESC, pm.match_id DESC
+WITH per_match AS (
+    SELECT
+        pm.match_id, pm.match_date, br.tournament, pm.surface, br.round,
+        pm.opponent_id, pr.display_name AS opponent_name,
+        pm.player_ranking, pm.match_won,
+        pm.aces, pm.double_faults,
+        pm.first_serve_points_won, pm.second_serve_points_won,
+        pm.total_serve_points, pm.service_games,
+        pm.break_points_saved, pm.break_points_faced,
+        regexp_replace(pm.match_id, '-[0-9]{{3}}$', '') AS tourney_key,
+        CASE br.round
+            WHEN 'R128' THEN 1
+            WHEN 'R64' THEN 2
+            WHEN 'R32' THEN 3
+            WHEN 'R16' THEN 4
+            WHEN 'QF' THEN 5
+            WHEN 'SF' THEN 6
+            WHEN 'F' THEN 7
+            ELSE 0
+        END AS round_encoded
+    FROM {SILVER_PLAYER_MATCHES} pm
+    LEFT JOIN {BRONZE_TABLE} br ON br.match_id = pm.match_id
+    LEFT JOIN {PROFILES_TABLE} pr ON pr.player_id = pm.opponent_id
+    WHERE pm.player_id = %s
+),
+ranked AS (
+    SELECT per_match.*,
+        ROW_NUMBER() OVER (
+            PARTITION BY tourney_key
+            ORDER BY round_encoded DESC, match_date DESC, match_id DESC
+        ) AS rn
+    FROM per_match
+)
+SELECT match_id, match_date, tournament, surface, round,
+       opponent_id, opponent_name, player_ranking, match_won,
+       aces, double_faults, first_serve_points_won, second_serve_points_won,
+       total_serve_points, service_games, break_points_saved, break_points_faced
+FROM ranked
+WHERE rn = 1
+ORDER BY match_date DESC, match_id DESC
 LIMIT %s
 """
 
