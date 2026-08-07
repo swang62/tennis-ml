@@ -4,8 +4,7 @@ No live PostgreSQL server is required: `db_client._conn` is swapped for a
 fake connection that mimics the minimal psycopg surface the client uses
 (`cursor()`, `transaction()`, `execute`, `description`, `fetchall`). The fake
 records every statement it receives so tests can assert that `%s` placeholders
-are used, bound values travel as parameters (never interpolated), and
-pg_duckdb is forced only inside the explicit analytical path.
+are used and bound values travel as parameters (never interpolated).
 """
 
 from types import SimpleNamespace
@@ -29,9 +28,9 @@ class FakeCursor:
         return False
 
     def execute(self, sql: str, params: object | None = None):
-        # Record (sql, params, in-transaction) so tests can assert placeholder
-        # use, parameter binding, and the transaction scope of SET LOCAL.
-        self.conn.statements.append((sql, params, self.conn.in_tx))
+        # Record (sql, params) so tests can assert placeholder use and that
+        # bound values travel as parameters, never interpolated.
+        self.conn.statements.append((sql, params))
         columns, rows = self.conn.results.get(sql, ([], []))
         self.description = [SimpleNamespace(name=name) for name in columns]
         self._rows = rows
@@ -41,34 +40,15 @@ class FakeCursor:
         return self._rows
 
 
-class FakeTransaction:
-    def __init__(self, conn):
-        self.conn = conn
-
-    def __enter__(self):
-        self.conn.tx_entered += 1
-        self.conn.in_tx = True
-        return self
-
-    def __exit__(self, _exc_type, _exc, _tb):
-        self.conn.in_tx = False
-        return False
-
-
 class FakeConn:
     def __init__(self):
         self.results: dict[str, tuple[list[str], list[tuple[object, ...]]]] = {}
-        self.statements: list[tuple[str, object | None, bool]] = []
-        self.tx_entered = 0
-        self.in_tx = False
+        self.statements: list[tuple[str, object | None]] = []
         self.closed = False
 
     def cursor(self, row_factory=None):
         del row_factory  # fake accepts the psycopg signature but ignores it
         return FakeCursor(self)
-
-    def transaction(self):
-        return FakeTransaction(self)
 
     def close(self):
         self.closed = True
@@ -123,7 +103,7 @@ def test_execute_df_uses_placeholder_and_binds_params(fake_conn):
     sql = "SELECT id FROM t WHERE name = %s"
     db_client.execute_df(sql, ["O'Brien"])
 
-    statement, params, _in_tx = fake_conn.statements[0]
+    statement, params = fake_conn.statements[0]
     assert statement == sql  # SQL text untouched: the quote never enters it
     assert params == ["O'Brien"]  # value travels as a bound parameter
 
@@ -132,7 +112,7 @@ def test_execute_df_with_tuple_params(fake_conn):
     sql = "SELECT id FROM t WHERE name = %s AND id = %s"
     db_client.execute_df(sql, ("O'Brien", 2))
 
-    statement, params, _in_tx = fake_conn.statements[0]
+    statement, params = fake_conn.statements[0]
     assert statement == sql
     assert params == ("O'Brien", 2)
 
@@ -173,55 +153,3 @@ def test_close_resets_connection(monkeypatch):
 
     assert conn.closed
     assert db_client._conn is None
-
-
-# --- Analytical path: pg_duckdb forced only inside a transaction ---
-
-
-def test_analytical_df_forces_pg_duckdb_inside_transaction(monkeypatch):
-    conn = FakeConn()
-    conn.results["SELECT count(*) FROM gold.match_features"] = (["cnt"], [(42,)])
-    monkeypatch.setattr(db_client, "_conn", conn)
-
-    df = db_client.analytical_df("SELECT count(*) FROM gold.match_features")
-
-    assert df.iloc[0, 0] == 42
-    assert conn.tx_entered == 1
-    set_local, _params, in_tx = conn.statements[0]
-    assert set_local == "SET LOCAL duckdb.force_execution = true"
-    assert in_tx is True  # SET LOCAL is transaction-scoped
-    numeric_set_local, _params, in_tx = conn.statements[1]
-    assert numeric_set_local == "SET LOCAL duckdb.convert_unsupported_numeric_to_double = true"
-    assert in_tx is True
-    query, _params, _in_tx = conn.statements[2]
-    assert query == "SELECT count(*) FROM gold.match_features"
-
-
-def test_analytical_df_binds_params_inside_transaction(monkeypatch):
-    conn = FakeConn()
-    conn.results["SELECT surface FROM gold.match_features WHERE match_date > %s"] = (
-        ["surface"],
-        [("clay",)],
-    )
-    monkeypatch.setattr(db_client, "_conn", conn)
-
-    df = db_client.analytical_df(
-        "SELECT surface FROM gold.match_features WHERE match_date > %s",
-        ["2026-01-01"],
-    )
-
-    assert df.iloc[0, 0] == "clay"
-    _set_local, _params, _in_tx = conn.statements[0]
-    _numeric_set_local, _params, _in_tx = conn.statements[1]
-    query, params, in_tx = conn.statements[2]
-    assert query == "SELECT surface FROM gold.match_features WHERE match_date > %s"
-    assert params == ["2026-01-01"]
-    assert in_tx is True
-
-
-def test_normal_reads_never_force_pg_duckdb(fake_conn):
-    db_client.execute_df("SELECT id, name FROM t ORDER BY id")
-    db_client.to_dataframe("SELECT id, name FROM t ORDER BY id")
-
-    assert fake_conn.tx_entered == 0
-    assert not any("force_execution" in sql for sql, _p, _t in fake_conn.statements)

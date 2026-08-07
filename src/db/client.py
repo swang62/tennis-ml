@@ -2,16 +2,12 @@
 
 PostgreSQL (via psycopg) is the only operational backend, configured from the
 shared POSTGRES_* contract in `src.constants` (DATABASE_URL or component
-variables; default port 6543). Every query uses psycopg's `%s` placeholders —
-request data is never concatenated into SQL — and results come back as pandas
-DataFrames.
+variables). Every query uses psycopg's `%s` placeholders — request data is
+never concatenated into SQL — and results come back as pandas DataFrames.
 
 Multi-step writes run inside an explicit `transaction()` context manager that
 commits on success and rolls back on error, so Prefect tasks and Bento workers
-never leave an idle transaction behind. The opt-in `analytical_df()` path
-applies `SET LOCAL duckdb.force_execution = true` only inside a transaction,
-so pg_duckdb acceleration is scoped to exactly the aggregate reads that opt
-in and never enabled globally.
+never leave an idle transaction behind.
 
 DuckDB remains installed solely for the training database snapshots; it is
 not part of the operational query path.
@@ -94,30 +90,6 @@ def execute_df(sql: str, params: list[object] | tuple[object, ...] | None = None
 def to_dataframe(sql: str) -> pd.DataFrame:
     """Run a query with no bound parameters and return a DataFrame."""
     return execute_df(sql)
-
-
-def analytical_df(
-    sql: str, params: list[object] | tuple[object, ...] | None = None
-) -> pd.DataFrame:
-    """Opt-in analytical read that forces pg_duckdb execution for this query only.
-
-    Runs inside an explicit transaction so both `SET LOCAL` settings (which
-    are transaction-scoped) apply only to this statement and disappear at
-    commit; normal reads and writes never force pg_duckdb.
-
-    `duckdb.convert_unsupported_numeric_to_double` (pg_duckdb documented
-    setting, default false) is required in addition to SQL-level
-    `::double precision` casts: pg_duckdb resolves a scanned column's raw
-    PostgreSQL type before any expression cast, so AVG over a NUMERIC column
-    without declared precision fails to bind even when its input is cast. The
-    setting converts those NUMERICs to DOUBLE at scan time — the same value
-    semantics the explicit casts express, scoped to this query only.
-    """
-    with transaction() as cur:
-        cur.execute("SET LOCAL duckdb.force_execution = true")
-        cur.execute("SET LOCAL duckdb.convert_unsupported_numeric_to_double = true")
-        cur.execute(cast(LiteralString, sql), params)
-        return _cursor_to_df(cur)
 
 
 def first_row_dict(df: pd.DataFrame) -> dict[str, Any]:

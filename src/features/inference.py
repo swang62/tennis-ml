@@ -51,7 +51,7 @@ from src.constants import (
     SILVER_PLAYER_MATCHES,
     SILVER_ROLLING_FEATURES,
 )
-from src.db.client import analytical_df, execute_df, first_row_dict
+from src.db.client import execute_df, first_row_dict
 from src.features.columns import FEATURE_COLS
 
 VALID_SURFACES = {"clay", "grass", "hard", "carpet"}
@@ -149,60 +149,45 @@ ORDER BY match_date DESC, match_id DESC
 LIMIT 5
 """
 
-# Broad aggregate reads below are pg_duckdb acceleration candidates
-# (analytical_df): each scans the whole snapshot/profile pool to produce one
-# row of aggregates, and its normal-PostgreSQL and pg_duckdb executions are
-# result-parity-tested in test_inference_features.py. Point lookups above stay
-# on normal PostgreSQL execution.
+# Broad aggregate reads below each scan the whole snapshot/profile pool to
+# produce one row of aggregates. They run through the regular parameterized
+# `execute_df` path like every other query — plain PostgreSQL aggregates.
+# Result parity with the pool they impute from is covered by
+# test_inference_features.py::test_pool_aggregates_return_expected_values.
 
 # On-demand global imputation pool over all snapshots strictly before the
 # as-of date. One row; MEDIAN (percentile_cont 0.5) for ranking/streak-related
 # values, MEAN for the others. Broad aggregate read.
-#
-# pg_duckdb compatibility: every aggregate input is cast to DOUBLE PRECISION —
-# percentile_cont 0.5 order inputs and AVG inputs alike. rolling_features'
-# AVG-based columns (weighted_form_10, win_rate_10, avg_player_rank_10,
-# avg_rank_faced_10, the per-surface win rates) are NUMERIC without declared
-# precision, which DuckDB cannot bind; the other ratio rates and age are
-# already DOUBLE/INTEGER but the explicit casts keep every aggregate input
-# uniformly typed. Values are identical to the numeric/integer aggregates
-# within float rounding, so pool aggregates (and the features they impute) are
-# unchanged. analytical_df additionally sets the documented
-# duckdb.convert_unsupported_numeric_to_double=true, which is still required
-# because pg_duckdb resolves a scanned column's raw type before expression
-# casts.
 _POOL_AGG_SQL = f"""
 SELECT
-    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY latest_player_ranking::double precision)     AS latest_player_ranking,
-    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY latest_player_rank_points::double precision) AS latest_player_rank_points,
-    AVG(latest_player_age::double precision)     AS latest_player_age,
-    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY streak::double precision)                      AS streak,
-    AVG(weighted_form_10::double precision)     AS weighted_form_10,
-    AVG(win_rate_10::double precision)          AS win_rate_10,
-    AVG(ace_rate_10::double precision)          AS ace_rate_10,
-    AVG(first_serve_pct_10::double precision)   AS first_serve_pct_10,
-    AVG(break_points_saved_pct_10::double precision) AS break_points_saved_pct_10,
-    AVG(first_serve_win_pct_10::double precision) AS first_serve_win_pct_10,
-    AVG(second_serve_win_pct_10::double precision) AS second_serve_win_pct_10,
-    AVG(serve_win_pct_10::double precision)     AS serve_win_pct_10,
-    AVG(df_rate_10::double precision)           AS df_rate_10,
-    AVG(aces_per_svc_game_10::double precision) AS aces_per_svc_game_10,
-    AVG(avg_player_rank_10::double precision)   AS avg_player_rank_10,
-    AVG(avg_rank_faced_10::double precision)    AS avg_rank_faced_10,
-    AVG(clay_win_rate_10::double precision)     AS clay_win_rate_10,
-    AVG(grass_win_rate_10::double precision)    AS grass_win_rate_10,
-    AVG(hard_win_rate_10::double precision)     AS hard_win_rate_10
+    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY latest_player_ranking)     AS latest_player_ranking,
+    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY latest_player_rank_points) AS latest_player_rank_points,
+    AVG(latest_player_age)     AS latest_player_age,
+    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY streak)                      AS streak,
+    AVG(weighted_form_10)     AS weighted_form_10,
+    AVG(win_rate_10)          AS win_rate_10,
+    AVG(ace_rate_10)          AS ace_rate_10,
+    AVG(first_serve_pct_10)   AS first_serve_pct_10,
+    AVG(break_points_saved_pct_10) AS break_points_saved_pct_10,
+    AVG(first_serve_win_pct_10) AS first_serve_win_pct_10,
+    AVG(second_serve_win_pct_10) AS second_serve_win_pct_10,
+    AVG(serve_win_pct_10)     AS serve_win_pct_10,
+    AVG(df_rate_10)           AS df_rate_10,
+    AVG(aces_per_svc_game_10) AS aces_per_svc_game_10,
+    AVG(avg_player_rank_10)   AS avg_player_rank_10,
+    AVG(avg_rank_faced_10)    AS avg_rank_faced_10,
+    AVG(clay_win_rate_10)     AS clay_win_rate_10,
+    AVG(grass_win_rate_10)    AS grass_win_rate_10,
+    AVG(hard_win_rate_10)     AS hard_win_rate_10
 FROM {SILVER_ROLLING_FEATURES}
 WHERE snapshot_date < %s::date
 """
 
 # MEDIAN of per-player days_since_last_match at the as-of date, over players
 # that have an eligible snapshot. One row; NULL when the pool is empty. Date
-# subtraction returns whole days in PostgreSQL; the percentile order input is
-# cast to DOUBLE PRECISION for pg_duckdb binding (see _POOL_AGG_SQL). Broad
-# aggregate read.
+# subtraction returns whole days in PostgreSQL. Broad aggregate read.
 _MEDIAN_DAYS_SQL = f"""
-SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY days_since::double precision) AS median_days_since
+SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY days_since) AS median_days_since
 FROM (
     SELECT %s::date - MAX(snapshot_date) AS days_since
     FROM {SILVER_ROLLING_FEATURES}
@@ -213,10 +198,9 @@ FROM (
 
 # MEDIAN of per-player matches_30d at the as-of date, over players that have
 # an eligible snapshot (players with zero window matches contribute 0). Broad
-# aggregate read. The COUNT-derived order input is cast to DOUBLE PRECISION
-# for pg_duckdb binding (see _POOL_AGG_SQL).
+# aggregate read.
 _MEDIAN_MATCHES_30D_SQL = f"""
-SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY matches_30d::double precision) AS median_matches_30d
+SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY matches_30d) AS median_matches_30d
 FROM (
     SELECT pr.player_id, COUNT(pm.match_id) AS matches_30d
     FROM (
@@ -243,12 +227,11 @@ WHERE player_id = %s
 # On-demand profile imputation pool over ALL profiles (identity is static, so
 # no as-of window applies beyond the years_pro computation): mean left-handed
 # rate, and mean years-pro at the as-of date. One row; NULL when no profiles
-# exist. Broad aggregate read. Both AVG inputs are cast to DOUBLE PRECISION
-# for pg_duckdb binding (see _POOL_AGG_SQL).
+# exist. Broad aggregate read.
 _PROFILE_POOL_AGG_SQL = f"""
 SELECT
-    AVG((CASE WHEN handedness = 'L' THEN 1 ELSE 0 END)::double precision) AS left_handed_rate,
-    AVG((%s::int - turned_pro)::double precision) AS avg_years_pro
+    AVG(CASE WHEN handedness = 'L' THEN 1 ELSE 0 END) AS left_handed_rate,
+    AVG(%s::int - turned_pro) AS avg_years_pro
 FROM {PROFILES_TABLE}
 """
 
@@ -484,24 +467,22 @@ def _build_inference_features_with_meta(
 
     # ── On-demand global imputation pool (one set of aggregates) ──
     # Pool reads are broad aggregate scans over silver.rolling_features /
-    # gold.player_profiles, so they run through the pg_duckdb analytical path
-    # (result parity with normal PostgreSQL is covered by
-    # test_inference_features.py::test_pool_aggregates_analytical_parity).
+    # gold.player_profiles; they run through the regular execute_df path.
     as_of_iso = as_of_date.isoformat()
-    agg = first_row_dict(analytical_df(_POOL_AGG_SQL, [as_of_iso]))
-    pool_counts = first_row_dict(analytical_df(_POOL_COUNTS_SQL, [as_of_iso]))
+    agg = first_row_dict(execute_df(_POOL_AGG_SQL, [as_of_iso]))
+    pool_counts = first_row_dict(execute_df(_POOL_COUNTS_SQL, [as_of_iso]))
     median_days = _agg_or(
-        first_row_dict(analytical_df(_MEDIAN_DAYS_SQL, [as_of_iso, as_of_iso])),
+        first_row_dict(execute_df(_MEDIAN_DAYS_SQL, [as_of_iso, as_of_iso])),
         "median_days_since",
         _DEFAULT_DAYS_SINCE,
     )
     median_matches = _agg_or(
-        first_row_dict(analytical_df(_MEDIAN_MATCHES_30D_SQL, [as_of_iso, as_of_iso, as_of_iso])),
+        first_row_dict(execute_df(_MEDIAN_MATCHES_30D_SQL, [as_of_iso, as_of_iso, as_of_iso])),
         "median_matches_30d",
         _DEFAULT_MATCHES_30D,
     )
-    profile_agg = first_row_dict(analytical_df(_PROFILE_POOL_AGG_SQL, [as_of_date.year]))
-    profile_counts = first_row_dict(analytical_df(_PROFILE_COUNTS_SQL))
+    profile_agg = first_row_dict(execute_df(_PROFILE_POOL_AGG_SQL, [as_of_date.year]))
+    profile_counts = first_row_dict(execute_df(_PROFILE_COUNTS_SQL))
 
     def _latest_snapshot(pid: str) -> dict[str, object] | None:
         df = execute_df(_LATEST_SNAPSHOT_SQL, [pid, as_of_iso])

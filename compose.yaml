@@ -1,11 +1,17 @@
 services:
   postgres:
-    image: pgduckdb/pgduckdb:17-v1.1.1
+    image: postgres:18.4
     restart: unless-stopped
     ports:
       - "6543:5432"
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      # PostgreSQL 18 image layout: PGDATA lives at
+      # /var/lib/postgresql/18/docker under the image-managed parent, so the
+      # named volume mounts the parent. The old PostgreSQL 17 data volume
+      # (postgres-data) is never mounted here; its data was logically migrated
+      # into postgres-data-18 and the old volume is retained for deletion
+      # approval.
+      - postgres-data-18:/var/lib/postgresql
       - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
@@ -15,7 +21,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          'pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-tennis} && psql -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-tennis} -tAc "SELECT 1 FROM pg_extension WHERE extname = ''pg_duckdb''" | grep -q 1',
+          'pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-tennis}',
         ]
       interval: 60s
       timeout: 5s
@@ -64,4 +70,4 @@ services:
       start_period: 10s
 
 volumes:
-  postgres-data:
+  postgres-data-18:

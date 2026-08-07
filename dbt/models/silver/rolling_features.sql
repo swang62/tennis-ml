@@ -28,11 +28,11 @@
 -- explicit: for each snapshot, a windowed conditional MAX picks the most
 -- recent player_match_number with that surface at-or-before the snapshot
 -- (surface_carry), and the per-surface rate CTE is joined back on that key.
--- This preserves the exact as-of semantics of the old DuckDB IGNORE NULLS
--- form without correlated row-by-row scans: the current match's surface rate
--- is updated by this match; the other two surfaces' rates are unchanged by it
--- (this match is not on those surfaces). A surface rate is NULL until the
--- player's first match on that surface.
+-- This preserves the exact as-of semantics without correlated row-by-row
+-- scans: the current match's surface rate is updated by this match; the other
+-- two surfaces' rates are unchanged by it (this match is not on those
+-- surfaces). A surface rate is NULL until the player's first match on that
+-- surface.
 --
 -- streak is a SINGLE SIGNED current run: positive = consecutive wins ending at
 -- and including this snapshot's match, negative = consecutive losses (the
@@ -49,13 +49,13 @@
 -- 10-match window containing unranked matches averages the known ranks, never a
 -- bogus 0.
 --
--- PostgreSQL port notes (Task 4): SUM over SMALLINT columns returns BIGINT,
--- and BIGINT / BIGINT is INTEGER division (it truncates), so every ratio
--- rate casts its numerator to DOUBLE PRECISION — PostgreSQL would otherwise
--- silently truncate rates that DuckDB computed in floating point. AVG-based
--- rates (win_rate_10, avg_player_rank_10, avg_rank_faced_10, surface rates)
--- return NUMERIC, which carries the same values exactly. The surface carry is
--- the conditional-MAX + join-back design described above.
+-- PostgreSQL division notes: SUM over SMALLINT columns returns BIGINT, and
+-- BIGINT / BIGINT is INTEGER division (it truncates), so every ratio rate
+-- casts its numerator to DOUBLE PRECISION — PostgreSQL would otherwise
+-- silently truncate the floating-point rates. AVG-based rates (win_rate_10,
+-- avg_player_rank_10, avg_rank_faced_10, surface rates) return NUMERIC, which
+-- carries the same values exactly. The surface carry is the conditional-MAX +
+-- join-back design described above.
 --
 -- Task 6 reductions: every `_5`/`_20` output, the separate win/loss streaks,
 -- last_match_date (== snapshot_date by construction), and intermediate/source

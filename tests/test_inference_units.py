@@ -1,8 +1,8 @@
 """Hermetic unit tests for src/features/inference.py.
 
 Covers the pure helpers `_to_date` and `_agg_or`, plus the boundary validation
-of `build_inference_features`, which runs before any DuckDB access — no DB
-file, no network. The one test that would reach the DB (valid string aliases)
+of `build_inference_features`, which runs before any database access — no DB,
+no network. The one test that would reach the DB (valid string aliases)
 monkeypatches `execute_df` to an empty pool so the row builds from constant
 fallbacks.
 """
@@ -143,16 +143,10 @@ def empty_pool(monkeypatch):
     Patching only `execute_df` is not enough: `first_row_dict` indexes
     `df.iloc[0]` (raises on an empty frame) and the *_COUNTS_SQL result dicts
     are subscripted directly. Patch both so every aggregate falls back to its
-    constant and the counts read as 0. The pool aggregates run through
-    `analytical_df` (pg_duckdb analytical path), so that import must be
-    patched too.
+    constant and the counts read as 0.
     """
     monkeypatch.setattr(
         "src.features.inference.execute_df",
-        lambda _sql, _params=None: pd.DataFrame(),
-    )
-    monkeypatch.setattr(
-        "src.features.inference.analytical_df",
         lambda _sql, _params=None: pd.DataFrame(),
     )
     monkeypatch.setattr(

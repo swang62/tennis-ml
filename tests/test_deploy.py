@@ -346,21 +346,29 @@ def test_compose_image_has_safe_default_when_docker_image_unset():
 
 
 def test_compose_has_pinned_postgres_service():
-    """PostgreSQL runs as a Compose service on the pinned pgduckdb image:
-    host port 6543 -> container 5432, named volume, init.sql under
-    /docker-entrypoint-initdb.d/, and a real healthcheck."""
+    """PostgreSQL runs as a Compose service on the pinned postgres:18.4 image:
+    host port 6543 -> container 5432, named volume at the version-18 parent
+    path (never the old version-17 data dir), init.sql under
+    /docker-entrypoint-initdb.d/, and a readiness-only healthcheck that does
+    not probe any extension."""
     cfg = _compose()
     assert "postgres" in cfg["services"]
     svc = cfg["services"]["postgres"]
-    assert svc["image"] == "pgduckdb/pgduckdb:17-v1.1.1"
+    assert svc["image"] == "postgres:18.4"
     assert "6543:5432" in svc["ports"]
     assert "healthcheck" in svc
-    assert "postgres-data" in cfg.get("volumes", {})
-    assert any("/var/lib/postgresql/data" in v for v in svc["volumes"])
+    assert "postgres-data-18" in cfg.get("volumes", {})
+    assert "postgres-data" not in cfg.get("volumes", {})
+    assert any(v.endswith(":/var/lib/postgresql") for v in svc["volumes"])
+    assert not any(":/var/lib/postgresql/data" in v for v in svc["volumes"])
     assert any(
         "infra/postgres/init.sql" in v and "docker-entrypoint-initdb.d/init.sql" in v
         for v in svc["volumes"]
     )
+    healthcheck = svc["healthcheck"]["test"]
+    assert healthcheck[0] == "CMD-SHELL"
+    assert len(healthcheck) == 2  # readiness-only: a single pg_isready command
+    assert "pg_isready" in healthcheck[1]
 
 
 def test_compose_postgres_requires_shared_secret():
@@ -373,7 +381,7 @@ def test_compose_postgres_requires_shared_secret():
 
 
 def test_compose_bento_reaches_postgres_via_compose_dns():
-    """The Bento reaches the pgduckdb Compose service over DNS (postgres:5432),
+    """The Bento reaches the postgres Compose service over DNS (postgres:5432),
     not a host gateway, and shares the operator credential."""
     bento_env = _compose()["services"]["bento"]["environment"]
     assert bento_env["POSTGRES_HOST"] == "postgres"
@@ -384,7 +392,7 @@ def test_compose_bento_reaches_postgres_via_compose_dns():
 
 
 def test_compose_bento_depends_on_postgres_healthy():
-    """Bento starts only after the pgduckdb service is healthy."""
+    """Bento starts only after the postgres service is healthy."""
     deps = _compose()["services"]["bento"]["depends_on"]
     assert deps["postgres"]["condition"] == "service_healthy"
 

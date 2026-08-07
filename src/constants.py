@@ -18,13 +18,13 @@ load_env()
 IMAGE_NAME = os.getenv("IMAGE_NAME")
 
 # --- PostgreSQL connection contract (single shared credential source) ---
-# PostgreSQL runs as the pinned pgduckdb Compose service (host port 6543).
-# Host commands and containers derive the same DATABASE_URL from these
-# components; only POSTGRES_HOST/POSTGRES_PORT differ between endpoints — host
-# commands use 127.0.0.1:6543 while the Bento container on the Compose network
-# uses the service DNS postgres:5432. POSTGRES_PASSWORD is a required runtime
-# secret (never defaulted, never printed); DATABASE_URL, when provided,
-# overrides the components entirely.
+# PostgreSQL is the only operational backend. Host commands and containers
+# derive the same DATABASE_URL from these components; only
+# POSTGRES_HOST/POSTGRES_PORT differ between endpoints — host commands use the
+# configured .env target (the local Homebrew instance) while the Bento
+# container on the Compose network uses the service DNS postgres:5432.
+# POSTGRES_PASSWORD is a required runtime secret (never defaulted, never
+# printed); DATABASE_URL, when provided, overrides the components entirely.
 POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
 POSTGRES_DB = os.getenv("POSTGRES_DB", "tennis")

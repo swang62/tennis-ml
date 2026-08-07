@@ -1,32 +1,19 @@
--- PostgreSQL bootstrap for the pgduckdb runtime (Task 1).
+-- PostgreSQL bootstrap: structure only.
 --
--- PostgreSQL runs as the pinned `pgduckdb/pgduckdb` Compose service. Mounted
--- at /docker-entrypoint-initdb.d/init.sql, the official postgres entrypoint
--- runs this on a fresh data volume (never on restart). Host operators may also
--- apply it manually to the 127.0.0.1:6543 endpoint, e.g.:
+-- Runs on any standard PostgreSQL 18 instance: the Compose `postgres:18.4`
+-- service executes it from /docker-entrypoint-initdb.d/init.sql on a fresh
+-- data volume (never on restart), and host operators may apply it manually to
+-- the configured local database, e.g.:
 --
---   psql -U postgres -d tennis -p 6543 -f infra/postgres/init.sql
+--   psql -U <user> -d <db> -f infra/postgres/init.sql
 --
 -- It is idempotent (CREATE ... IF NOT EXISTS), so re-running it is safe.
---
--- pg_duckdb is a hard requirement, not an optional acceleration: if the
--- PostgreSQL lacks the extension, we fail clearly rather than silently
--- continuing without DuckDB execution. The pgduckdb/pgduckdb image ships the
--- extension and the entrypoint's initdb user (superuser) can create it.
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_duckdb') THEN
-        CREATE EXTENSION pg_duckdb;
-    END IF;
-END
-$$;
 
--- Creates structure only: the three schemas, the pg_duckdb extension, and the
--- two non-dbt-owned base tables (bronze.match_events and gold.
--- player_profiles). No data is loaded here — dbt owns
--- silver.player_matches / silver.rolling_features / gold.match_features, and
--- data is written later by just db-seed / db-etl. Nothing is baked into an
--- image; the Compose named volume persists everything.
+-- Creates structure only: the three schemas and the two non-dbt-owned base
+-- tables (bronze.match_events and gold.player_profiles). No data is loaded
+-- here — dbt owns silver.player_matches / silver.rolling_features /
+-- gold.match_features, and data is written later by just db-seed / db-etl.
+-- Nothing is baked into an image; the Compose named volume persists everything.
 
 CREATE SCHEMA IF NOT EXISTS bronze;
 CREATE SCHEMA IF NOT EXISTS silver;
@@ -35,10 +22,10 @@ CREATE SCHEMA IF NOT EXISTS gold;
 -- Raw match data: one row per match with both players' stats in the row.
 -- The gold layer expands each row into two player-perspective rows.
 --
--- The DuckDB UTINYINT count columns map to SMALLINT in PostgreSQL (there is
--- no SQL-standard unsigned tiny int); the 0..255 range the row validator
--- (src.features.validate) enforces is re-asserted here as a CHECK. Rank 0 is
--- this project's missing/unranked marker, so ranking/rank_points allow 0.
+-- The small-integer count columns hold counts in the 0..255 range the row
+-- validator (src.features.validate) enforces; that range is re-asserted here
+-- as a CHECK. Rank 0 is this project's missing/unranked marker, so
+-- ranking/rank_points allow 0.
 CREATE TABLE IF NOT EXISTS bronze.match_events (
     match_id                   VARCHAR NOT NULL,
     match_date                 DATE    NOT NULL,

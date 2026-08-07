@@ -14,9 +14,9 @@ worker:
     uv run python infra/prefect/worker.py
 
 # PostgreSQL bootstrap: schemas + base tables (structure only, idempotent).
-# All db commands connect via the .env PostgreSQL contract (DATABASE_URL ->
-# the pgduckdb Compose service on 127.0.0.1:6543). Data loading is the
-# explicit `just db-seed` / `just db-seed --all` step.
+# All db commands connect via the .env PostgreSQL contract (DATABASE_URL or
+# POSTGRES_* components). Data loading is the explicit `just db-seed` /
+# `just db-seed --all` step.
 db-init:
     uv run python -m src.flows.init_db init
 
@@ -40,9 +40,9 @@ db-snapshot:
     uv run python -m src.db.snapshot
 
 # Destructive: drops the bronze/silver/gold schemas, then recreates structure.
-# init_db refuses unless the ACTUAL connection target is the local dev database
-# (127.0.0.1:6543 / configured POSTGRES_DB) — an ENVIRONMENT value alone can
-# never authorize resetting a non-local database.
+# init_db refuses unless the ACTUAL connection target is a local host
+# (127.0.0.1/localhost/::1) with the configured POSTGRES_PORT and POSTGRES_DB —
+# an ENVIRONMENT value alone can never authorize resetting a non-local database.
 db-reset:
     uv run python -m src.flows.init_db reset
 

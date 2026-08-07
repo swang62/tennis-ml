@@ -4,11 +4,11 @@ Target: `src.features.inference.build_inference_features`.
 
 Tests run against the shared seeded PostgreSQL DB built per session by the
 conftest fixture (`infra/postgres/init.sql` + `src/flows/seed.py` + the dbt
-gold models), never a DuckDB file. The dbt-owned gold/silver layers are not
-built until Task 4 (dbt-postgres ETL), so the module is gated on the
-`gold_ready` fixture and skips cleanly until that build exists. All
-date-dependent tests pass an explicit `as_of_date` for determinism, except the
-default-today test, which monkeypatches `date.today` to a fixed date.
+gold models), never a DuckDB file. The module is gated on the `gold_ready`
+fixture and skips cleanly until dbt has built the gold/silver layers over
+PostgreSQL. All date-dependent tests pass an explicit `as_of_date` for
+determinism, except the default-today test, which monkeypatches `date.today`
+to a fixed date.
 """
 
 import math
@@ -19,7 +19,7 @@ import pandas as pd
 import pytest
 
 from src.constants import PROFILES_TABLE, SILVER_ROLLING_FEATURES
-from src.db.client import analytical_df, execute_df, get_conn
+from src.db.client import execute_df, get_conn
 from src.features import inference
 from src.features.columns import DIFF_COLS, FEATURE_COLS
 from src.features.inference import build_inference_features
@@ -123,53 +123,87 @@ def test_years_pro_time_aware_and_cold_start():
         assert math.isfinite(row[col]), f"{col} is not finite: {row[col]!r}"
 
 
-def test_pool_aggregates_analytical_parity():
-    """Each broad aggregate pool read accelerated via pg_duckdb (analytical_df)
-    returns the same values as normal PostgreSQL execution AND actually binds
-    in DuckDB (no fallback warning).
+def test_pool_aggregates_return_expected_values():
+    """The six broad aggregate reads return their expected single-row results
+    over the seeded pool, and the builder imputes exactly those values for a
+    cold-start player.
 
-    These are the pool queries the inference builder routes through the
-    analytical path; the parity check locks the "accelerated only after result
-    parity" contract. Values are compared as floats (the normal path returns
-    numeric Decimals, the analytical path floats — the same number).
-
-    The notice-handler check is the pg_duckdb-compatibility regression: when a
-    forced query cannot bind (e.g. AVG over NUMERIC without declared
-    precision), pg_duckdb logs a "Prepared query returned an error" / "Binder
-    Error" diagnostic and silently falls back to PostgreSQL — parity would
-    still pass, but the acceleration would be gone. Asserting no error-typed
-    diagnostic proves the analytical SQL binds in DuckDB, which requires both
-    the SQL-level DOUBLE PRECISION casts and the
-    duckdb.convert_unsupported_numeric_to_double=true that analytical_df sets
-    (pg_duckdb resolves a scanned column's raw type before expression casts,
-    so either one alone is insufficient).
+    These are the pool queries the inference builder routes through the plain
+    parameterized `execute_df` path; this locks the "aggregates match the pool
+    they impute from" contract on standard PostgreSQL, with no extension path.
+    The seeded pool is non-empty at the fixed as-of date, so every aggregate
+    is non-NULL and finite.
     """
     as_of = "2026-09-01"
     cases = [
-        (inference._POOL_AGG_SQL, [as_of]),
-        (inference._POOL_COUNTS_SQL, [as_of]),
-        (inference._MEDIAN_DAYS_SQL, [as_of, as_of]),
-        (inference._MEDIAN_MATCHES_30D_SQL, [as_of, as_of, as_of]),
-        (inference._PROFILE_POOL_AGG_SQL, [2026]),
-        (inference._PROFILE_COUNTS_SQL, []),
+        (
+            inference._POOL_AGG_SQL,
+            [as_of],
+            [
+                "latest_player_ranking",
+                "latest_player_rank_points",
+                "latest_player_age",
+                "streak",
+                "weighted_form_10",
+                "win_rate_10",
+                "ace_rate_10",
+                "first_serve_pct_10",
+                "break_points_saved_pct_10",
+                "first_serve_win_pct_10",
+                "second_serve_win_pct_10",
+                "serve_win_pct_10",
+                "df_rate_10",
+                "aces_per_svc_game_10",
+                "avg_player_rank_10",
+                "avg_rank_faced_10",
+                "clay_win_rate_10",
+                "grass_win_rate_10",
+                "hard_win_rate_10",
+            ],
+        ),
+        (inference._POOL_COUNTS_SQL, [as_of], ["snapshot_pool_rows", "snapshot_pool_players"]),
+        (inference._MEDIAN_DAYS_SQL, [as_of, as_of], ["median_days_since"]),
+        (inference._MEDIAN_MATCHES_30D_SQL, [as_of, as_of, as_of], ["median_matches_30d"]),
+        (inference._PROFILE_POOL_AGG_SQL, [2026], ["left_handed_rate", "avg_years_pro"]),
+        (inference._PROFILE_COUNTS_SQL, [], ["profile_rows"]),
     ]
-    for sql, params in cases:
-        normal = execute_df(sql, params).astype(float)
-        diagnostics: list[str] = []
+    for sql, params, expected_cols in cases:
+        df = execute_df(sql, params)
+        assert df.shape == (1, len(expected_cols)), sql[:60]
+        assert df.columns.tolist() == expected_cols, sql[:60]
+        for col in expected_cols:
+            assert not pd.isna(df.iloc[0][col]), f"{col} is NULL for {sql[:60]}"
+            assert math.isfinite(float(df.iloc[0][col])), f"{col} not finite for {sql[:60]}"
 
-        def _capture(diag, diagnostics=diagnostics) -> None:  # pragma: no cover - trivial capture
-            diagnostics.append(diag.message_primary)
+    # Deterministic: re-running a pool read returns identical aggregates.
+    first = execute_df(inference._POOL_AGG_SQL, [as_of])
+    pd.testing.assert_frame_equal(first, execute_df(inference._POOL_AGG_SQL, [as_of]))
 
-        get_conn().add_notice_handler(_capture)
-        try:
-            accelerated = analytical_df(sql, params).astype(float)
-        finally:
-            get_conn().remove_notice_handler(_capture)
-        assert normal.columns.tolist() == accelerated.columns.tolist(), sql[:60]
-        pd.testing.assert_frame_equal(accelerated, normal, check_exact=False, rtol=1e-9)
-        assert not any("error" in d.lower() for d in diagnostics), (
-            f"pg_duckdb failed to bind and fell back for: {sql[:80]}\n{diagnostics}"
-        )
+    # The builder imputes exactly these aggregates for two unknown players
+    # (cold-start sides equal the pool aggregates; every diff stays neutral).
+    out = build_inference_features("ZZZZ", "YYYY", "hard", as_of_date=date(2026, 9, 1))
+    row = out.iloc[0]
+    agg = execute_df(inference._POOL_AGG_SQL, [as_of]).iloc[0]
+    profile_agg = execute_df(inference._PROFILE_POOL_AGG_SQL, [2026]).iloc[0]
+    median_days = float(
+        execute_df(inference._MEDIAN_DAYS_SQL, [as_of, as_of]).iloc[0]["median_days_since"]
+    )
+    median_matches = float(
+        execute_df(inference._MEDIAN_MATCHES_30D_SQL, [as_of, as_of, as_of]).iloc[0][
+            "median_matches_30d"
+        ]
+    )
+    assert row["player_weighted_form_10"] == pytest.approx(float(agg["weighted_form_10"]))
+    assert row["player_surface_win_rate_10"] == pytest.approx(float(agg["hard_win_rate_10"]))
+    # win_rate_10 / ace_rate_10 are only exposed as canonical-minus-opponent
+    # diffs; two unknowns impute the same pool value on both sides, so the
+    # diffs collapse to exactly 0 and lock the imputed pool values.
+    assert row["win_rate_diff"] == 0
+    assert row["ace_rate_diff"] == 0
+    assert row["player_days_since_last_match"] == pytest.approx(round(median_days))
+    assert row["player_matches_30d"] == pytest.approx(round(median_matches))
+    assert row["player_is_left_handed"] == pytest.approx(float(profile_agg["left_handed_rate"]))
+    assert row["player_years_pro"] == pytest.approx(float(profile_agg["avg_years_pro"]))
 
 
 def test_historical_as_of_excludes_later_snapshots():

@@ -1,15 +1,15 @@
 """PostgreSQL bootstrap: structure only, plus a guarded destructive reset.
 
 `init` runs infra/postgres/init.sql against the configured PostgreSQL (the
-three schemas, the pg_duckdb extension, and the two non-dbt-owned base tables).
-It never loads data — seeding is the explicit `just db-seed` / `just db-seed
---all` step.
+three schemas and the two non-dbt-owned base tables). It never loads data —
+seeding is the explicit `just db-seed` / `just db-seed --all` step.
 
 `reset` drops and recreates the bronze/silver/gold schemas, but only after
 checking the ACTUAL connection target (server address, port, and database
 name, read from the live connection). It refuses to run against anything other
-than the expected local development database (127.0.0.1:6543, the configured
-POSTGRES_DB), so a stray environment name can never reset a non-local database.
+than the expected local development database (the configured POSTGRES_HOST /
+POSTGRES_PORT / POSTGRES_DB), so a stray environment name can never reset a
+non-local database.
 """
 
 from __future__ import annotations
@@ -41,12 +41,12 @@ def actual_target() -> tuple[str | None, int, str]:
     """(host, port, database) the current connection actually uses.
 
     Read from the live psycopg connection's client-side info, not the
-    server-reported address: behind Docker NAT (the pgduckdb Compose service on
-    host port 6543) ``inet_server_addr()`` reports the container-internal
-    bridge address and port (e.g. 192.168.x.y:5432), which would always look
-    non-local. The client-side endpoint is exactly what the operator configured
-    (DATABASE_URL), so a stray environment name still can never authorize
-    resetting a remote database — a remote URL reports the remote host here.
+    server-reported address: behind Docker NAT (the Compose postgres service)
+    ``inet_server_addr()`` reports the container-internal bridge address and
+    port, which would always look non-local. The client-side endpoint is
+    exactly what the operator configured (DATABASE_URL), so a stray
+    environment name still can never authorize resetting a remote database —
+    a remote URL reports the remote host here.
     """
     info = get_conn().info
     return info.host, int(info.port), info.dbname

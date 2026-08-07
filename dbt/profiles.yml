@@ -1,9 +1,10 @@
-# dbt runs against the same PostgreSQL the pipeline uses (the pinned
-# pgduckdb Compose service on 127.0.0.1:6543). Credentials come from the
-# shared POSTGRES_* contract in .env; POSTGRES_PASSWORD is a required runtime
-# secret (never defaulted, never committed). The profile itself contains no
-# secrets. dbt does not load .env itself, so export it first (`just db-dbt`
-# sources .env before invoking dbt; `just db-etl` inherits it via load_env).
+# dbt runs against the same PostgreSQL the pipeline uses (the local dev
+# database configured through the POSTGRES_* contract in .env). Credentials
+# come from the shared POSTGRES_* contract in .env; POSTGRES_PASSWORD is a
+# required runtime secret (never defaulted, never committed). The profile
+# itself contains no secrets. dbt does not load .env itself, so export it
+# first (`just db-dbt` sources .env before invoking dbt; `just db-etl`
+# inherits it via load_env).
 tennis_ml:
   target: dev
   outputs:

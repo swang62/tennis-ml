@@ -37,7 +37,7 @@ def seeded_test_db():
         try:
             init_db.init()
             seed_flow.main([])
-        except Exception as exc:  # e.g. pg_duckdb missing or schema drift
+        except Exception as exc:  # e.g. server unreachable, init failure, or schema drift
             _SEED_FAILURE = str(exc)
     yield
     client.close()

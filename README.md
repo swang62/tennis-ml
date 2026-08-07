@@ -9,7 +9,7 @@ Production-grade MLOps pipeline for tennis match prediction. Prefect, PostgreSQL
 | Orchestration       | Prefect (retries, ETL triggers)           |
 | Experiment tracking | MLflow (model registry, trial comparison) |
 | Model serving       | BentoML                                   |
-| Data warehouse      | PostgreSQL (pg_duckdb)                    |
+| Data warehouse      | PostgreSQL                             |
 | Development         | Jupyter + Papermill                       |
 
 ## Project Structure
@@ -135,15 +135,17 @@ web deployment step.
 
 | Service    | Image source                 | Host port | Healthcheck                                 |
 | ---------- | ---------------------------- | --------- | ------------------------------------------- |
-| `postgres` | `pgduckdb/pgduckdb` (pinned) | 6543      | `pg_isready` + `pg_duckdb` extension check  |
+| `postgres` | `postgres:18.4` (pinned)     | 6543      | `pg_isready` (database readiness)           |
 | `bento`    | Docker Hub `latest`          | 3000      | authenticated `SELECT 1` against PostgreSQL |
 | `web`      | built locally                | 8187      | `wget` of the SPA root inside the container |
 
-- PostgreSQL runs on the pinned `pgduckdb/pgduckdb` image, mapped to host port
+- PostgreSQL runs on the pinned `postgres:18.4` image, mapped to host port
   **6543:5432**; the Bento reaches it over the Compose network at
   `postgres:5432`. It owns a named volume and applies
-  `infra/postgres/init.sql` (extension + schemas + base tables — structure
-  only) on first start.
+  `infra/postgres/init.sql` (schemas + base tables — structure only) on first
+  start. The version-18 image keeps PGDATA beneath the image-managed
+  `/var/lib/postgresql` parent, so the volume mounts that parent — the old
+  PostgreSQL 17 data layout is never mounted into it.
 - `bento` starts after PostgreSQL is healthy; `web` starts after `bento` is
   healthy.
 - The webapp serves the compiled SPA via nginx and proxies `/api/*` to the
@@ -158,8 +160,8 @@ printed or committed:
 - `DATABASE_URL` (or `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB`) —
   the shared PostgreSQL connection contract. Host commands, dbt, and the
   Compose stack derive the same URL from these components, differing only in
-  host/port (`127.0.0.1:6543` on the host, `postgres:5432` on the Compose
-  network).
+  host/port (the configured local dev database on the host, `postgres:5432` on
+  the Compose network).
 - `DOCKER_TOKEN` (optional) — Docker Hub auth, passed to `docker login` via
   stdin; when unset, deploy relies on an already-authenticated Docker CLI.
 - `DOCKER_USERNAME` / `DOCKER_REPO` / `IMAGE_NAME` — Docker Hub identity and
@@ -175,9 +177,10 @@ PostgreSQL is the only operational backend. Host commands (`just db-init`,
 through the shared `DATABASE_URL` contract in `.env`. `just deploy-bento`
 requires the PostgreSQL credential (passed to Compose, never printed).
 `just db-reset` (destructive) drops and recreates the bronze/silver/gold
-schemas; it refuses to run against any target other than the expected local
-dev database (`127.0.0.1:6543` + configured `POSTGRES_DB`), so a stray
-environment name can never reset a non-local database.
+schemas; it refuses to run against any target other than a local host
+(`127.0.0.1`/`localhost`) with the configured `POSTGRES_PORT` and
+`POSTGRES_DB`, so a stray environment name can never reset a non-local
+database.
 
 Training is the only DuckDB consumer: `just db-snapshot` pulls an atomic,
 validated two-table snapshot (`gold.match_features` + `gold.player_profiles`)
