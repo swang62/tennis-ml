@@ -1,11 +1,4 @@
-"""Focused tests for the PostgreSQL operational client.
-
-No live PostgreSQL server is required: `db_client._conn` is swapped for a
-fake connection that mimics the minimal psycopg surface the client uses
-(`cursor()`, `transaction()`, `execute`, `description`, `fetchall`). The fake
-records every statement it receives so tests can assert that `%s` placeholders
-are used and bound values travel as parameters (never interpolated).
-"""
+"""PostgreSQL client tests using a recording psycopg-shaped fake."""
 
 from types import SimpleNamespace
 
@@ -28,8 +21,7 @@ class FakeCursor:
         return False
 
     def execute(self, sql: str, params: object | None = None):
-        # Record (sql, params) so tests can assert placeholder use and that
-        # bound values travel as parameters, never interpolated.
+        # Record SQL and bound values for parameterization checks.
         self.conn.statements.append((sql, params))
         columns, rows = self.conn.results.get(sql, ([], []))
         self.description = [SimpleNamespace(name=name) for name in columns]
@@ -121,8 +113,7 @@ def test_execute_df_with_tuple_params(fake_conn):
 
 
 def test_get_conn_uses_passwordless_local_database_url(monkeypatch):
-    """The host Homebrew trust path: the active local DATABASE_URL carries no
-    password and is used verbatim."""
+    """Use the passwordless local DATABASE_URL verbatim."""
     monkeypatch.setattr(
         db_client.constants, "DATABASE_URL", "postgresql://steve@127.0.0.1:5432/postgres"
     )
@@ -148,8 +139,7 @@ def test_missing_config_fails_before_any_fallback(monkeypatch):
 
 
 def test_get_conn_uses_password_bearing_database_url(monkeypatch):
-    """The Compose/Bento path: the password-bearing DATABASE_URL is used
-    verbatim — the container authenticates with it."""
+    """Use the password-bearing Compose DATABASE_URL verbatim."""
     monkeypatch.setattr(
         db_client.constants,
         "DATABASE_URL",

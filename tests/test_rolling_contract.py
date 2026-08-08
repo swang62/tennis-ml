@@ -1,8 +1,4 @@
-"""Contract tests for src/features/columns.py (no DB access).
-
-columns.py is the single source of truth for the feature contract:
-36 features -> 38-column rows when the two ids are prepended.
-"""
+"""Database-free contract tests for feature columns."""
 
 import json
 
@@ -50,8 +46,7 @@ def test_feature_col_counts():
 
 
 def test_gold_rolling_cols_exact_order():
-    """Retained `_10`-window rolling values, in the SQL window order. Every
-    `_5`/`_20` output and the separate win/loss streaks are removed (Task 6)."""
+    """Retained 10-match rolling values in SQL order."""
     assert SILVER_ROLLING_COLS == [
         "weighted_form_10",
         "win_rate_10",
@@ -90,9 +85,7 @@ def test_no_5_or_20_rolling_variants():
 
 
 def test_diff_cols_removed_obsolete():
-    """Task 6: obsolete diff outputs (win/loss streak, matches_30d,
-    surface_win_rate, height, handedness, years_pro) are gone from the final
-    contract; streak_diff replaces win_streak_diff."""
+    """Obsolete differentials are absent; streak_diff replaces win_streak_diff."""
     for col in (
         "win_streak_diff",
         "loss_streak_diff",
@@ -118,9 +111,7 @@ def test_match_stats_cols_removed_from_contract():
 
 
 def test_profile_cols_keep_handedness_and_years_pro_only():
-    """Task 6: height is dropped from the model contract (stays in
-    gold.player_profiles + profile API); only is_left_handed and years_pro are
-    model profile features."""
+    """Only handedness and time-aware years_pro are model profile features."""
     assert PROFILE_COLS == ["is_left_handed", "years_pro"]
     assert "player_height" not in FEATURE_COLS
     assert "opponent_height" not in FEATURE_COLS
@@ -223,11 +214,7 @@ def test_naming_conventions():
 
 
 def test_similarity_cols_exact_order_and_not_model_features():
-    """The similarity-analysis serve/return percentages are appended to
-    gold.match_features purely for the PlayerSimilarity index; they are never
-    model features and never leak into FEATURE_COLS or any diff/context slot.
-    The return side is a genuine return-points-won rate — not the serving-side
-    break-point save rate, which stays only as break_points_saved_pct_diff."""
+    """Similarity serve/return columns never enter model features or contexts."""
     assert SIMILARITY_COLS == [
         "player_first_serve_pct_10",
         "opponent_first_serve_pct_10",
@@ -305,15 +292,7 @@ def test_feature_cols_json_matches_columns_py():
 
 
 def test_old_99_column_shape_rejected():
-    """The serving endpoint rejects a row carrying the old 99-feature shape.
-
-    `predict` requires every [*FEATURE_COLS, player_id, opponent_id] column to
-    be present. An old 99-column payload drops the finalized diff/context
-    columns (e.g. rank_diff, ... is_hard, tournament_level) and uses pre-36
-    names, so the required-column check fires. This locks that an old-shape
-    row is structurally incompatible: it is missing columns the current
-    contract demands (even when some columns, like player_weighted_form_10,
-    were retained and overlap by name)."""
+    """Old 99-column payloads miss required finalized columns and are rejected."""
     old_99_cols = [
         "player_win_rate_5",
         "player_win_rate_10",

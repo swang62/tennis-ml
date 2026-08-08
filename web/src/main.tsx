@@ -6,8 +6,7 @@ import { router } from './router'
 import { ThemeProvider, applyTheme } from './theme'
 import './index.css'
 
-// Apply the persisted/system theme before first paint (index.html already
-// runs the same logic inline; this is the authoritative store for the app).
+// Keep the app theme synchronized with the pre-paint inline choice.
 applyTheme(resolveInitialTheme())
 
 function resolveInitialTheme(): 'dark' | 'light' {

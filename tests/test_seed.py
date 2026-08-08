@@ -1,9 +1,4 @@
-"""Pure-logic tests for src/flows/seed.py's match selection and bootstrap.
-
-No raw CSV, no database: exercises only the deterministic match-selection
-logic (top players by latest rank, recent-matches trim, dedupe, ordering),
-the --all dispatch guard, and the guarded destructive reset.
-"""
+"""Seed selection and reset-safety tests."""
 
 from types import SimpleNamespace
 
@@ -38,8 +33,7 @@ def test_select_matches_dedupes_and_orders_by_date():
 
     selected = select_matches([m3, m1, m2])
 
-    # m1 is shared between two selected players but appears exactly once;
-    # output is re-sorted by (tourney_date, tourney_id, match_num).
+    # Shared matches dedupe before chronological sorting.
     assert selected == [m1, m2, m3]
 
 
@@ -229,8 +223,7 @@ def test_parse_args_all():
 
 
 def test_seed_exposes_no_enrichment_path():
-    """Task 3 guard: seed must expose no way to trigger Wikipedia enrichment,
-    either via CLI or module surface. It is permanently offline."""
+    """Seed exposes no Wikipedia enrichment path."""
     assert not hasattr(seed, "enrich_players")
     assert not hasattr(seed, "enrich_missing")
     assert "--enrich" not in (seed.__doc__ or "")
@@ -238,8 +231,7 @@ def test_seed_exposes_no_enrichment_path():
 
 
 def test_main_dispatches_without_network(monkeypatch):
-    """Default seed (no args) and --all dispatch to the offline paths; neither
-    main_default nor main_all takes enrichment args. Guards against network I/O."""
+    """Default and --all seed paths remain offline."""
     calls = []
 
     monkeypatch.setattr(seed, "main_default", lambda: calls.append("default"))
@@ -254,9 +246,7 @@ def test_main_dispatches_without_network(monkeypatch):
 
 
 def test_default_seed_is_the_28_match_35_player_fixture(postgres_ready):  # noqa: ARG001
-    """The autouse session fixture seeds the deterministic miniset; the test
-    database holds exactly that fixture (28 matches / 35 distinct players) and
-    never the full historical corpus."""
+    """The database contains the deterministic miniset, not full history."""
     from src.db.client import get_conn
 
     with get_conn().cursor() as cur:

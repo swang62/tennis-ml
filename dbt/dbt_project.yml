@@ -14,20 +14,12 @@ clean-targets:
 
 models:
   tennis_ml:
-    # Medallion layering: bronze.match_events (raw, ingest) -> silver
-    # (per-player expansion: player_matches + post-match rolling snapshots:
-    # rolling_features) -> gold (match_features).
+    # bronze raw matches -> silver player snapshots -> gold match features.
     silver:
       +materialized: table
       +schema: silver
 
-      # Silver tables are built via CREATE TABLE AS SELECT, so PKs and
-      # secondary indexes cannot live in init.sql (bronze/PK side). Post-hooks
-      # apply them after each model materializes. PostgreSQL has no
-      # ADD CONSTRAINT IF NOT EXISTS and dbt-postgres's table swap transiently
-      # keeps the previous incarnation's constraint/index names in the schema,
-      # so the ensure_* macros clean up stale objects before recreating them
-      # (idempotent across first build, rebuilds, and --full-refresh).
+      # CTAS tables need post-hooks; macros replace stale objects after dbt swaps.
       player_matches:
         +post-hook:
           - "{{ ensure_primary_key_sql(this, 'pk_player_matches', 'player_id, match_id') }}"
@@ -42,8 +34,7 @@ models:
       +materialized: table
       +schema: gold
 
-      # Same post-hook rationale as silver: PKs/indexes are re-applied on every
-      # build because PostgreSQL table materialization replaces the table.
+      # Reapply keys and indexes after materialization replaces the table.
       match_features:
         +post-hook:
           - "{{ ensure_primary_key_sql(this, 'pk_match_features', 'match_id') }}"

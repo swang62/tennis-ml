@@ -1,13 +1,4 @@
-"""Tests for the /similar_players endpoint on the dashboard Starlette app.
-
-The endpoint reads ONLY the FAISS similarity index (no PostgreSQL), so it is
-exercised in isolation: the module-level lazy finder is replaced with a
-hand-built in-memory index via monkeypatch. Request-cardinality contract: one
-request returns a single payload with at most `limit` (clamped to 3) results,
-self excluded, sorted by descending score, and each entry carries only
-player_id + display_name (+ score) — ids are internal link/request values,
-never rendered.
-"""
+"""/similar_players tests using an in-memory finder."""
 
 import faiss
 import numpy as np
@@ -70,8 +61,7 @@ def test_similar_players_returns_top_3_sorted_self_excluded(setup):
 
 
 def test_similar_players_limit_clamped_to_three(setup):
-    """An out-of-range limit is bounded to 3, so the endpoint never triggers
-    unbounded work; the default limit is also 3."""
+    """Limit is capped at the default maximum of three results."""
     client, _ = setup
     for params in ({"player_id": "P1", "limit": 10}, {"player_id": "P1"}):
         res = client.get("/similar_players", params=params)
@@ -80,8 +70,7 @@ def test_similar_players_limit_clamped_to_three(setup):
 
 
 def test_similar_players_response_keys_are_ids_and_names_only(setup):
-    """Each entry is just player_id + display_name (+ numeric score) — the id is
-    an internal link/request value, never a visible/ARIA id."""
+    """Results expose only the link id, display name, and numeric score."""
     client, _ = setup
     res = client.get("/similar_players", params={"player_id": "P1", "limit": 3})
     assert res.status_code == 200

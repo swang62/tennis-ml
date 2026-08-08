@@ -1,11 +1,6 @@
-// Typed client for the local Bento service (src/serving/service.py).
-// All GET endpoints return {ok: true, data: {...}} or {ok: false, error: str}
-// (400/404/500); predict_from_ids returns a flat, unwrapped dict. Shapes are
-// the dashboard's contract with the backend — keep them in sync.
+// Bento client: GET uses envelopes; predict_from_ids returns a flat response.
 
-// Default: relative /api, proxied to the Bento by nginx (production) or the
-// Vite dev proxy (local). VITE_API_BASE_URL overrides for local dev against a
-// bare backend origin.
+// Relative /api uses nginx or Vite proxy; VITE_API_BASE_URL overrides it.
 const BASE = import.meta.env.VITE_API_BASE_URL || '/api'
 
 export interface Player {
@@ -220,12 +215,7 @@ async function doPredictFromIds(input: PredictInput): Promise<PredictResponse> {
   return body as unknown as PredictResponse
 }
 
-// Dedupe identical prediction POSTs: repeated identical inputs share one
-// in-flight/completed request keyed by the canonical JSON payload, so the
-// predictor makes exactly one network request per distinct input. The Bento
-// is deterministic for identical inputs, so a resolved response is safe to
-// reuse; failures are dropped from the cache so an identical retry re-hits
-// the network.
+// Reuse deterministic requests; evict failures so retries reach the network.
 const predictCache = new Map<string, Promise<PredictResponse>>()
 
 export function predictFromIds(input: PredictInput): Promise<PredictResponse> {

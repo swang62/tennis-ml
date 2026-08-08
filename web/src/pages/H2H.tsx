@@ -49,9 +49,7 @@ const ROUNDS: { value: MatchRound; label: string }[] = [
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
 
-// Meeting metadata line: tournament, surface and round, joined by middots.
-// A missing segment is dropped rather than replaced with a placeholder; an
-// unknown value falls back to its raw label text (functional, never an id).
+// Join known meeting metadata; retain unknown labels rather than ids.
 function meetingMeta(m: H2HMeeting): string {
   const parts = [
     m.tournament ? (TIER_LABEL[m.tournament as keyof typeof TIER_LABEL] ?? m.tournament) : '',
@@ -61,8 +59,7 @@ function meetingMeta(m: H2HMeeting): string {
   return parts.filter(Boolean).join(' · ')
 }
 
-// Latest known rank: the last non-null point of the rank history. The rank
-// graph is gone; the current rank is the only rank signal this page shows.
+// Latest non-null rank is this page's sole rank signal.
 function lastRank(history: RankHistory | undefined): { rank: number; date: string } | null {
   const pts = (history?.rank_history ?? []).filter((p) => p.rank != null)
   if (pts.length === 0) return null
@@ -71,9 +68,7 @@ function lastRank(history: RankHistory | undefined): { rank: number; date: strin
   return { rank: latest.rank as number, date: latest.rank_date }
 }
 
-// One diverging row of the mirrored comparison: both halves measured against
-// each other, longer bar = bigger share. `invert` flips the encoding for rank
-// (lower is better), so the better-ranked player gets the longer bar.
+// Mirrored comparison row; invert makes lower ranks fill farther.
 interface MirrorRow {
   label: string
   a: number | null
@@ -83,9 +78,7 @@ interface MirrorRow {
   invert?: boolean
 }
 
-// Fill widths per side, as fractions of the row. A zero total (no direct
-// meetings) leaves both sides empty; a null side (unranked) leaves that side
-// empty while the other side fills.
+// Zero totals leave both sides empty; an unranked side does not fill.
 function mirrorWidths(row: MirrorRow): [number, number] {
   if (row.a == null || row.b == null) return row.a == null ? [0, 1] : [1, 0]
   const total = row.a + row.b
@@ -145,9 +138,7 @@ export default function H2H() {
   const summary = h2h?.summary
   const sortedMeetings = [...meetings].sort((a, b) => b.match_date.localeCompare(a.match_date))
 
-  // Canonical orientation: the model and the h2h summary are computed for the
-  // lower-id player. `orient` maps a canonical probability onto Player A so
-  // displayed values always belong to the name they sit next to.
+  // Map lower-id canonical probabilities back to Player A.
   const orient = (p: number) => (playerA! < playerB! ? p : 1 - p)
   const pred = predict.data
   const orientA = pred ? orient(pred.p_win) : 0
@@ -208,10 +199,7 @@ export default function H2H() {
       }
     : null
 
-  // Mirrored comparison rows: every row splits at the center line, the left
-  // player's bar grows left and the right player's bar grows right. Every row
-  // is derived purely from direct meetings (all-time and per-surface) or the
-  // labeled current rank — nothing invented.
+  // Compare direct-meeting results and labeled current ranks only.
   const p1 = h2h ? name(h2h.player1_id) : ''
   const p2 = h2h ? name(h2h.player2_id) : ''
   const mirrorRows: MirrorRow[] = []
@@ -493,9 +481,7 @@ export default function H2H() {
             ) : (
               <div className="meetings-list">
                 {sortedMeetings.map((m) => {
-                  // Left/right mirrors the picker order; player1_won is
-                  // canonical (lower id), so flip it when Player A is the
-                  // canonical second side.
+                  // player1_won is canonical lower-id, not picker order.
                   const aWon = m.player1_won === (playerA === h2h.player1_id)
                   return (
                     <div key={`${m.match_date}-${m.winner_id}`} className="meeting">

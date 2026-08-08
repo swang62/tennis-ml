@@ -1,15 +1,4 @@
-"""Hermetic tests for src/flows/ingest.py (no network, no live database).
-
-Write paths are exercised against a recording fake connection (the same
-pattern as tests/test_db_client.py): the fake captures every statement and
-bound parameter and accepts COPY rows, so tests can assert that PostgreSQL
-bulk insert uses COPY through a temp stage, that bronze idempotency is
-expressed as `ON CONFLICT (match_id) DO NOTHING`, that profile upserts
-refresh ATP metadata without touching enrichment columns, and that values
-travel as `%s` bound parameters (never interpolated). Live-database behavior
-is covered by tests/test_e2e_ingest_to_inference.py against the configured
-local PostgreSQL.
-"""
+"""Hermetic ingest tests with fake network, database, and ATP CSV seams."""
 
 from pathlib import Path
 
@@ -321,9 +310,7 @@ def test_load_raw_atp_rows_and_load_atp_csv_reject_missing_columns(tmp_path):
 
 
 def test_load_raw_atp_rows_passes_ranks_through_raw(tmp_path):
-    """Ranks are NOT imputed at ingest: 0 stays 0 (ATP missing marker) and
-    empty cells become 0, so silver NULLIFs them and gold imputes at train
-    time. Only missing player ids are dropped."""
+    """Ingest preserves ATP zero-rank markers; training handles imputation."""
     df = _raw_atp_df()
     null_rank = _raw_atp_df()
     null_rank.loc[0, "winner_rank"] = None
@@ -509,8 +496,7 @@ def test_load_atp_profiles_bulk_copies_base_columns(fake_ingest_conn, tmp_path):
 
 
 def test_load_atp_profiles_upsert_never_touches_enrichment(fake_ingest_conn, tmp_path):
-    """The DO UPDATE SET refreshes ATP metadata only; existing Wikipedia
-    enrichment (summary/enriched_at) survives re-loads."""
+    """ATP upserts preserve Wikipedia enrichment fields."""
     csv = _write_profiles_csv(tmp_path)
     ingest.load_atp_profiles(csv)
 

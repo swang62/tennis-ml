@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Run pytest --testmon and normalize exit code 5 (no tests collected/selected)
-# to success, so pre-commit passes when testmon selects nothing. Other exit
-# codes (e.g. failures) are preserved.
+# Treat testmon's "no tests selected" exit code as success; preserve failures.
 uv run pytest --testmon
 status=$?
 if [ "$status" -eq 5 ]; then

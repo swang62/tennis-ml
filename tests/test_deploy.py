@@ -1,11 +1,4 @@
-"""Offline tests for the host deployment path (src/flows/deploy.py).
-
-These test command construction, secure credential handling, and force
-behavior WITHOUT a Docker daemon, Docker Hub login/push, Docker Compose, or a
-model deployment. build_bento_image / deploy_bento are exercised with their
-heavy dependencies (MLflow, BentoML, Docker) mocked away. The deploy flow is
-push-only: it never invokes Docker Compose or builds the web image.
-"""
+"""Offline deployment tests with mocked MLflow, BentoML, Docker, and Compose."""
 
 import importlib
 import sys
@@ -147,16 +140,14 @@ def test_deploy_bento_pushes_only_latest_no_compose_no_web(monkeypatch, tmp_path
 
     d.deploy_bento(force=False)
 
-    # The ONLY command is the push of the Docker Hub `latest` image: no Compose
-    # build/up, no web build, no `docker tag` of a versioned image.
+    # Push only the Docker Hub latest image.
     assert calls == [["docker", "push", "acme/tennis-ml:latest"]]
     assert written["deployed_version"] == 5
     assert written["deployed_image"] == "acme/tennis-ml:latest"
 
 
 def test_deploy_bento_does_not_require_postgres_password(monkeypatch, tmp_path):
-    """Deploy pushes the image with no PostgreSQL credential involved — the
-    POSTGRES_PASSWORD gate existed only for the removed Compose boot."""
+    """Deploy does not require a PostgreSQL credential."""
     d = _deploy()
     monkeypatch.setattr(d, "DOCKER_REPO", "acme")
     monkeypatch.setattr(d, "IMAGE_NAME", "tennis-ml")
@@ -270,8 +261,7 @@ def test_build_force_rebuilds_over_cache_hit(monkeypatch):
     image, version = d.build_bento_image(force=True)
     assert built["bento"] == 1
     assert built["container"] == 1
-    # Only the moving local `latest` Docker image tag is ever produced; no
-    # versioned image tag and no `docker tag` retagging.
+    # Build only the moving local latest tag.
     assert built["image_tags"] == [("tennis-ml:latest",)]
     assert image == "tennis-ml:latest"
     assert version == 7
@@ -281,8 +271,7 @@ def test_build_force_rebuilds_over_cache_hit(monkeypatch):
 def test_build_no_force_reuses_cache_hit(monkeypatch):
     d, built = _stub_bento_build(monkeypatch)
 
-    # force=False: cache hit -> no rebuild, and the local image exists -> no
-    # containerization.
+    # Cache hit with a local image skips rebuild and containerization.
     d.build_bento_image(force=False)
     assert built["bento"] == 0
     assert built["container"] == 0
@@ -354,11 +343,7 @@ def test_compose_image_uses_repository_and_name():
 
 
 def test_compose_has_pinned_postgres_service():
-    """PostgreSQL runs as a Compose service on the pinned postgres:18.4 image:
-    host port 6543 -> container 5432, named volume at the version-18 parent
-    path (never the old version-17 data dir), init.sql under
-    /docker-entrypoint-initdb.d/, and a readiness-only healthcheck that does
-    not probe any extension."""
+    """Compose PostgreSQL uses its pinned image, v18 volume, init SQL, and readiness check."""
     cfg = _compose()
     assert "postgres" in cfg["services"]
     svc = cfg["services"]["postgres"]
@@ -380,9 +365,7 @@ def test_compose_has_pinned_postgres_service():
 
 
 def test_compose_postgres_uses_fixed_local_dev_credential():
-    """The Compose postgres service is password-authenticated with the fixed
-    local-dev credential baked into tracked compose.yaml — never a .env
-    interpolation, never trust/passwordless."""
+    """Compose PostgreSQL uses its tracked fixed local-development credential."""
     env = _compose()["services"]["postgres"]["environment"]
     assert env["POSTGRES_USER"] == "postgres"
     assert env["POSTGRES_DB"] == "tennis"
@@ -391,9 +374,7 @@ def test_compose_postgres_uses_fixed_local_dev_credential():
 
 
 def test_compose_bento_gets_single_database_url():
-    """The Bento receives exactly one application connection variable — the
-    password-bearing Compose DATABASE_URL over postgres service DNS. No
-    POSTGRES_* auth variables remain."""
+    """Bento receives only the Compose DATABASE_URL."""
     bento_env = _compose()["services"]["bento"]["environment"]
     assert bento_env == {"DATABASE_URL": "postgresql://postgres:password@postgres:5432/tennis"}
 
@@ -405,9 +386,7 @@ def test_compose_bento_depends_on_postgres_healthy():
 
 
 def test_compose_bento_readiness_runs_authenticated_postgres_query():
-    """Bento readiness must execute a REAL authenticated PostgreSQL query, not a
-    process-liveness HTTP probe: it connects over Compose DNS (postgres:5432)
-    using the single DATABASE_URL and runs SELECT 1."""
+    """Bento readiness runs an authenticated SELECT 1 over DATABASE_URL."""
     cfg = _compose()
     assert "healthcheck" in cfg["services"]["bento"]
     test = cfg["services"]["bento"]["healthcheck"]["test"]
@@ -421,12 +400,7 @@ def test_compose_bento_readiness_runs_authenticated_postgres_query():
 
 
 def test_web_image_uses_exactly_one_nginx_worker():
-    """The web image must pin nginx to one worker in the MAIN config, not in the
-    server-only conf.d file: nginx:alpine's `worker_processes auto` would start
-    one worker per visible CPU (10 on this host) for a static SPA that needs
-    one. worker_processes is main-context, so it can never live in
-    web/nginx.conf (conf.d/default.conf, http context) — this test locks both
-    the pin and the placement."""
+    """Pin nginx to one main-config worker for the static SPA."""
     root = _deploy().ROOT
     dockerfile = (root / "web" / "Dockerfile").read_text()
     nginx_conf = (root / "web" / "nginx.conf").read_text()
@@ -442,10 +416,7 @@ def test_web_image_uses_exactly_one_nginx_worker():
 
 
 def test_web_dockerfile_builds_with_pnpm_frozen_lockfile():
-    """The web image must build with pnpm (Corepack) against the FROZEN
-    dashboard lockfile — npm (package-lock.json / npm ci) must
-    not reappear, and the install layer must be keyed on the manifests only so
-    source edits don't blow the dependency cache."""
+    """Build the dashboard with Corepack pnpm and its frozen lockfile."""
     dockerfile = (_deploy().ROOT / "web" / "Dockerfile").read_text()
     assert "corepack enable" in dockerfile
     assert "pnpm install --frozen-lockfile" in dockerfile
@@ -464,9 +435,7 @@ def test_compose_bento_has_no_host_published_port():
 
 
 def test_nginx_proxies_only_allowlisted_routes():
-    """nginx must proxy exactly the allowlisted SPA routes to the Bento and
-    reject everything else: model-only /predict, unknown /api paths, and any
-    /api/ path that is not allowlisted."""
+    """nginx proxies only allowlisted routes and rejects other API paths."""
     conf = (_deploy().ROOT / "web" / "nginx.conf").read_text()
     # Allowlisted GET routes (stripped: /api/players -> /players).
     for route in (

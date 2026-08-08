@@ -1,14 +1,4 @@
-"""Build the promoted Bento serving image and push it to Docker Hub.
-
-Deploy is host-executed and independent of k3d: build_bento_image() builds the
-Bento into the local Docker engine as `${IMAGE_NAME}:latest`, then
-deploy_bento() pushes it to Docker Hub as `${DOCKER_REPO}/${IMAGE_NAME}:latest`.
-Docker Compose is NOT part of the deploy flow; the Compose stack is a separate
-manual/test workflow (`pnpm docker`).
-
-Usage:
-    uv run python src/flows/deploy.py
-"""
+"""Build the promoted Bento image locally and push it to Docker Hub."""
 
 import json
 import os
@@ -40,26 +30,15 @@ STATE_FILE = DATA_PROCESSED / "bento_build_state.json"
 load_env()
 
 assert IMAGE_NAME is not None, "IMAGE_NAME not set in env; load_env() must be called first"
-# Docker Hub repo: DOCKER_REPO/IMAGE_NAME. Only the moving `latest` Docker
-# image tag is ever built or pushed; MLflow version numbers and Bento tags
-# stay in state for internal cache/production tracking only.
+# Docker Hub uses only `latest`; MLflow and Bento versions remain cache state.
 DOCKER_REPO = os.getenv("DOCKER_REPO", "swang62")
 
-# The BentoML model name each pinned MLflow registered model maps to —
-# exactly the names the service references via `bentoml.models.BentoModel`.
-# `nn_best` is imported into the BentoML store (for the deploy-time ONNX
-# export) but its tag is NOT added to the pinned bentofile's models: the
-# service consumes it via the onnx artifact under `include:` instead.
+# nn_best is exported to ONNX and included as an artifact, not a BentoModel.
 BASE_BENTO_NAMES = {"linear": "linear_best", "gbdt": "gbdt_best", "nn": "nn_best"}
 
-# Serving artifacts packaged into the Bento (written by pipeline notebooks,
-# materialized by this flow, or built by the similarity EDA notebook); content
-# changes trigger a rebuild. The database is NOT packaged here — production
-# serving reads PostgreSQL live through psycopg; training data never enters
-# the image.
+# Packaged artifacts; serving reads PostgreSQL live, never training data.
 NN_ONNX_FILE = DATA_PROCESSED / "nn_best.onnx"
-# Similarity index + metadata (built by notebooks/eda/01_player_similarity.ipynb),
-# packaged so the /similar_players endpoint serves the same index offline.
+# Packaged index for offline /similar_players requests.
 SIMILARITY_INDEX = DATA_PROCESSED / "player_similarity.index"
 SIMILARITY_METADATA = DATA_PROCESSED / "player_metadata.json"
 AUX_FILES = [
@@ -81,23 +60,12 @@ FINGERPRINT_FILES = [
 
 @flow(log_prints=True)
 def deploy_flow(force: bool = False) -> None:
-    """Deploy-only flow: run the single deployment path for the promoted model.
-
-    No-op unless 05 promoted a production version newer than the last
-    deployed one. Evaluation/promotion already ran in the training pipeline;
-    no notebook runs here. With force=True, bypass the Bento/image cache and
-    rebuild + redeploy regardless.
-    """
+    """Deploy the promoted model; force bypasses the Bento and image caches."""
     deploy_bento(force=force)
 
 
 def _latest_production_version(client: Any) -> Any:
-    """Return the version `models:/ensemble_lr_model@champion` resolves to.
-
-    MLflow's `champion` alias points at the promoted production version;
-    mirror that exactly instead of guessing. Returns None when no version
-    has been aliased yet (no champion).
-    """
+    """Return the version resolved by `ensemble_lr_model@champion`, if any."""
     from mlflow.exceptions import MlflowException
 
     try:
@@ -118,17 +86,7 @@ def _write_state(state: dict[str, Any]) -> None:
 
 
 def _resolve_pins(client: Any, production: Any) -> dict[str, dict[str, Any]]:
-    """Resolve the exact MLflow identities (name, alias, version) for all four models.
-
-    Source of truth is the source run of `ensemble_lr_model`'s latest version
-    — the promoted 04 candidate run that logged the three base pins. The
-    recorded values are used as-is (no validation); a missing pin just means
-    there is nothing pinned to build from. Each pin also carries the resolved
-    MLflow `version` (the int the alias currently points at) so downstream
-    reuse/cache checks can compare on version, not on the alias URI string —
-    `@best` / `@champion` stay constant when repointed, so the URI alone
-    cannot detect a stale local BentoML import.
-    """
+    """Resolve model pins by version, since aliases can be repointed."""
     run = client.get_run(production.run_id)
 
     def _pin(registered_name: str, alias: str) -> dict[str, Any]:
@@ -166,15 +124,7 @@ def _check_aux_files() -> None:
 
 
 def _import_or_reuse(pin: dict[str, Any]) -> Any:
-    """Import the pinned MLflow version into the BentoML store, or reuse an
-    existing local import when it's the SAME MLflow version.
-
-    Reuse is keyed on the resolved MLflow `version` (stamped into the Bento store
-    metadata on import), NOT on the alias URI string: `@best`/`@champion` stay
-    constant when repointed to a new version, so a URI match would happily
-    reuse a stale local import. The version is the only identity that actually
-    moves.
-    """
+    """Import or reuse a pinned MLflow version; aliases alone are stale-prone."""
     import bentoml
 
     registered_name = pin["registered_model_name"]
@@ -195,14 +145,7 @@ def _import_or_reuse(pin: dict[str, Any]) -> Any:
 
 
 def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
-    """Materialize the pinned nn_best MLflow model to ONNX at deploy time.
-
-    Training logs nn_best as a PyTorch TabularBioMLP to MLflow. Serving runs it
-    through ONNX Runtime instead of torch (smaller image, faster build). Pulls
-    the pinned nn version from MLflow into the local BentoML store (version-keyed
-    reuse via `_import_or_reuse`), loads it, exports to ONNX with the three
-    inputs the service expects (tab, bio_p, bio_o).
-    """
+    """Export the pinned PyTorch nn_best model to the service's ONNX artifact."""
     import logging
     import warnings
 
@@ -212,10 +155,7 @@ def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
     # Needed so torch.load can resolve the class — torch.save records the path.
     from src.models.nn import TabularBioMLP  # type: ignore[reportUnusedImport]
 
-    # Silence torch's ONNX exporter noise: torchvision operator-skip warnings
-    # (torchvision is not a serving dep), opset version hints, dynamic axes
-    # deprecation, and onnxscript version converter logs. None affect the
-    # exported model — our MLP uses only standard ops (Linear, ReLU, Concat).
+    # The MLP uses standard ONNX ops; suppress unrelated exporter warnings.
     logging.getLogger("torch.onnx").setLevel(logging.ERROR)
     warnings.filterwarnings("ignore", category=UserWarning, module="torch.*")
     warnings.filterwarnings("ignore", category=FutureWarning, message=".*LeafSpec.*")
@@ -273,18 +213,7 @@ def _file_hash(path: Path) -> str:
 
 
 def _state_fingerprint(production_version: int) -> str:
-    """Fingerprint of what gets baked into the Bento.
-
-    Keys on the promoted `ensemble_lr_model@champion` VERSION NUMBER (not its
-    alias string — `@champion` is constant, so the alias alone would never
-    signal a change). When the champion version increments, the base models'
-    `@best` aliases now point at the matching new MLflow versions, so they are
-    pulled in fresh on the rebuild. The constant base-model alias strings are
-    deliberately NOT in the fingerprint: a `@best` repoint without a champion
-    promotion doesn't affect the deployed ensemble, so it must not trigger a
-    rebuild. File hashes of the baked-in artifacts (ONNX, scaler, embeddings)
-    cover the rest.
-    """
+    """Fingerprint the champion version and baked artifacts, not mutable aliases."""
     parts = [f"ensemble_lr_model@champion=v{production_version}"]
     parts.extend(f"{path.relative_to(ROOT)}:{_file_hash(path)}" for path in FINGERPRINT_FILES)
     return "\n".join(parts)
@@ -388,13 +317,7 @@ def _run_teed(
 
 
 def build_bento_image(force: bool = False) -> tuple[str, int]:
-    """Build the promoted Bento into the local Docker image `${IMAGE_NAME}:latest`.
-
-    force=True skips the fingerprint and image cache checks so the Bento and
-    local image are always rebuilt. Only the moving `latest` Docker image tag
-    is produced; the Bento's own tag and the MLflow production version stay in
-    state (and BENTO_TAG_FILE) for cache invalidation.
-    """
+    """Build the promoted Bento as `${IMAGE_NAME}:latest`; force skips caches."""
     import bentoml
     from mlflow.tracking.client import MlflowClient
 
@@ -437,16 +360,7 @@ def build_bento_image(force: bool = False) -> tuple[str, int]:
 
 
 def deploy_bento(force: bool = False) -> None:
-    """Build the promoted Bento image locally, then push it to Docker Hub.
-
-    Builds the Bento into the local Docker engine tagged `${IMAGE_NAME}:latest`
-    and pushes it as `${DOCKER_REPO}/${IMAGE_NAME}:latest`. Docker Hub
-    authentication: if DOCKER_TOKEN is set, log in via `docker login
-    --password-stdin` (token never touches argv/logs) using DOCKER_USERNAME or
-    the DOCKER_REPO owner; otherwise rely on an already-authenticated Docker
-    CLI. force=True rebuilds the Bento and image (no cache) even when cached.
-    No Compose stack is started or stopped.
-    """
+    """Build then push the promoted image; token login uses stdin."""
     local_image, production_version = build_bento_image(force=force)
 
     latest = f"{DOCKER_REPO}/{IMAGE_NAME}:latest"

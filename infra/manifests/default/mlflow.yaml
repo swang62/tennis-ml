@@ -38,9 +38,7 @@ spec:
             - "5000"
             - --backend-store-uri
             - sqlite:///data/mlflow.db
-            # artifacts-destination + serve-artifacts proxy artifact IO over
-            # HTTP (mlflow-artifacts: URIs), so host clients never write
-            # file:///data directly (that only works on a shared filesystem).
+            # Proxy artifact IO because host file:///data is not shared.
             - --artifacts-destination
             - /data/artifacts
             - --serve-artifacts
@@ -56,9 +54,7 @@ spec:
             - configMapRef:
                 name: tennis-default-config
           env:
-            # v3.x security middleware validates the Host header (DNS
-            # rebinding protection). Allow the ingress hostname and the
-            # in-cluster service DNS name.
+            # Allow ingress and service hosts for v3 DNS-rebinding protection.
             - name: MLFLOW_SERVER_ALLOWED_HOSTS
               value: "mlflow.macsteve.lan,mlflow"
           ports:

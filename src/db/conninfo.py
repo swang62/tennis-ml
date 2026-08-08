@@ -1,11 +1,4 @@
-"""Derive dbt connection fields from the single DATABASE_URL contract.
-
-dbt-postgres needs discrete host/port/user/password/dbname fields, so the
-entry points that spawn dbt (`just db-dbt`, the ETL flow) export POSTGRES_*
-variables parsed from the one application connection URL. psycopg's conninfo
-parser handles userinfo, host, port, dbname, and query parameters, so the
-same URL works passwordless (Homebrew trust) or password-bearing (Compose).
-"""
+"""Derive dbt's discrete connection fields from DATABASE_URL."""
 
 from __future__ import annotations
 
@@ -37,8 +30,7 @@ def dbt_env(url: str) -> dict[str, str]:
 
 
 def dbt_exports() -> str:
-    """Shell `export` lines for the current DATABASE_URL (captured by eval in
-    `just db-dbt`, so the values never reach a terminal or log)."""
+    """Return shell exports for DATABASE_URL without printing values."""
     env = dbt_env(os.environ["DATABASE_URL"])
     return "\n".join(f"export {key}={shlex.quote(env[key])}" for key in DBT_ENV_KEYS)
 

@@ -29,8 +29,7 @@ def test_run_dbt_build_invokes_dbt_build_with_exact_args(monkeypatch):
     assert args == (DBT_BUILD_CMD,)
     assert kwargs["cwd"] == ROOT
     assert kwargs["check"] is True
-    # dbt gets the discrete connection fields derived from the single
-    # DATABASE_URL (password-bearing here, matching the Compose stack).
+    # dbt receives fields derived from the single DATABASE_URL.
     env = kwargs["env"]
     assert env["POSTGRES_HOST"] == "db"
     assert env["POSTGRES_PORT"] == "5432"
@@ -67,8 +66,7 @@ def test_dbt_build_cmd_is_exact():
 
 
 def test_etl_flow_does_not_trigger_wikipedia_enrichment(monkeypatch):
-    """Task 2 guard: `just db-etl` must build silver/gold from bronze with no
-    online enrichment. enrich_bios (the Wikipedia path) must never be called."""
+    """ETL builds bronze-to-gold without online enrichment."""
     monkeypatch.setattr("src.flows.etl.bronze_to_gold", lambda: FAKE_GOLD_COUNT)
     monkeypatch.setattr(
         "src.flows.etl.enrich_bios",

@@ -20,24 +20,8 @@ DEFAULT_METADATA = ROOT / "data" / "processed" / "player_metadata.json"
 
 BIO_COL_PREFIX = "bio_"
 
-# Player state read exclusively from gold.match_features (the two-table
-# training snapshot boundary; the operational per-match tables are never
-# queried here). Each canonical match row appears twice — once per side — and
-# is unioned into player-oriented rows; the latest pre-match absolute values
-# are retained: weighted form, serve/return percentages from the player's most
-# recent match, surface win rates from the most recent match on each surface.
-# ROW_NUMBER + CASE/MAX keep the query portable to both PostgreSQL and DuckDB
-# (QUALIFY is DuckDB-only, so it has no place here), so the same SQL drives
-# live and offline builds.
-#
-# The feature vector is deliberately STYLE-ONLY: bio embedding + surface win
-# rates + serve/return percentages + handedness + backhand. Physical and
-# résumé attributes — age, height, turned_pro/pro tenure, birthplace, rankings,
-# career totals/lifetime achievements — are never selected here, so they can
-# never enter the similarity signal. The return percentage is a genuine
-# return-points-won rate (opponent serve points not won / opponent serve
-# points); the player's break-point SAVE rate is a serving stat and is never
-# used as a similarity signal.
+# Read only gold so live and snapshot builds share portable SQL. The vector is
+# style-only: bio, handedness/backhand, surface rates, and serve/return rates.
 _PLAYER_STATE_SQL = f"""
 WITH player_side AS (
     SELECT match_id, match_date, surface, player_id AS pid,
@@ -110,14 +94,7 @@ GROUP BY st.pid, st.weighted_form_10,
          st.return_points_won_pct_10
 """
 
-# Style signals stacked between the one-hot block and the bio embedding:
-# surface-preference win rates, serve percentages, and the return-side
-# return-points-won rate (opponent serve points not won / opponent serve
-# points), all 10-match rolling values from the player's most recent match.
-# A player's break-point SAVE rate is a serving stat and is deliberately not a
-# similarity signal. Excluded by design (never selected above): age, height,
-# turned-pro/pro tenure, birthplace, rankings, and career totals/lifetime
-# achievements.
+# Latest rolling style signals; physical and career attributes are excluded.
 STYLE_COLS: list[str] = [
     "weighted_form_10",
     "clay_win_rate_10",
@@ -132,16 +109,7 @@ STYLE_COLS: list[str] = [
 
 
 def embed_bio_summaries(profiles: pd.DataFrame, model_name: str = MODEL_NAME) -> pd.DataFrame:
-    """Embed each profile's summary into a player_id -> bio_* embedding frame.
-
-    Pure function of the input frame: no DB access, no disk writes. Empty or
-    missing summaries embed as the empty-string vector so every player stays
-    joinable. Shared by the FAISS similarity index and the NN static pathway.
-
-    fastembed is imported lazily inside the function: the serving image ships
-    faiss (for the packaged similarity index) but not fastembed, so loading the
-    module there must not require it.
-    """
+    """Embed summaries; lazy import keeps fastembed out of the serving image."""
     import fastembed
 
     model = fastembed.TextEmbedding(model_name)
@@ -180,17 +148,7 @@ class PlayerSimilarity:
         self,
         query: Callable[[str], pd.DataFrame] | None = None,
     ) -> None:
-        """Query player profiles + match state, build FAISS index, save to disk, and load in memory.
-
-        ``query`` is a callable ``query(sql) -> DataFrame`` used for both table
-        reads. It defaults to the live PostgreSQL client; pass the training
-        snapshot helper (``src.db.training.to_dataframe``) for offline builds.
-
-        Each player's vector stacks one-hot handedness/backhand, style stats
-        (STYLE_COLS: surface win rates + serve/return percentages), and the bio
-        embedding. Physical and résumé attributes are excluded — see the
-        ``_PLAYER_STATE_SQL`` header.
-        """
+        """Build and save the index using the live client or an offline query helper."""
         query = query or to_dataframe
         profiles = query(
             f"SELECT player_id, display_name, backhand, handedness, summary FROM {PROFILES_TABLE}"

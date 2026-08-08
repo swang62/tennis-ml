@@ -1,13 +1,4 @@
-"""Shared pytest bootstrap for the tennis-ml test suite.
-
-PostgreSQL is the only operational database; no test touches a DuckDB file.
-The autouse session fixture seeds the deterministic miniset (src/flows/seed.py)
-into the configured local PostgreSQL once per session when it is reachable —
-idempotent by design, so it only replaces the seed's own rows and profiles.
-DB-touching tests opt in through `postgres_ready` (skips cleanly when the
-configured server is unreachable or the seed could not be applied) and
-`gold_ready` (skips until the dbt gold build exists over PostgreSQL, Task 4).
-"""
+"""Session-scoped PostgreSQL and dbt fixtures for the test suite."""
 
 import pytest
 
@@ -30,8 +21,7 @@ def _postgres_reachable() -> bool:
 
 @pytest.fixture(scope="session", autouse=True)
 def seeded_test_db():
-    """Apply the PostgreSQL bootstrap (structure only) and the deterministic
-    miniset seed once per session when the server is reachable."""
+    """Bootstrap and seed PostgreSQL once when it is reachable."""
     global _SEED_FAILURE
     if _postgres_reachable():
         try:

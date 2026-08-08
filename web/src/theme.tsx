@@ -1,9 +1,6 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
 
-// Persistent light/dark mode. Dark is the default; light mode adds the
-// `light` class to documentElement (see index.css). The class is applied
-// before first paint by an inline script in index.html to avoid a flash,
-// then kept in sync here. Stored choice wins; otherwise the OS preference.
+// Stored choice wins; otherwise use the OS preference and avoid first-paint flash.
 const STORAGE_KEY = 'tm-theme'
 
 export type ThemeName = 'dark' | 'light'
@@ -32,8 +29,7 @@ const ThemeContext = createContext<ThemeContextValue>({
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setTheme] = useState<ThemeName>(() => resolveTheme())
 
-  // Apply synchronously at mount and on every change so the class is
-  // never a render behind the charts that read it via chartTokens().
+  // Keep chart CSS tokens synchronized with the document class.
   useEffect(() => {
     applyTheme(theme)
   }, [theme])

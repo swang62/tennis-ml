@@ -1,51 +1,18 @@
 -- silver.player_matches: normalized player-perspective match rows.
 --
--- Each bronze.match_events row (one row per match holding both players' stats)
--- expands into exactly two player-perspective rows: one with player1_id as the
--- player, one with player2_id as the player. Rows keep the player's current
--- match context, ranking, raw serve/break stats, and outcome only — no rolling
--- features, no pairwise differentials, no encoded context columns. This is the
--- expansion step that match_features.sql previously inlined; downstream models
--- build rolling features from here.
+-- Expand each bronze match into two raw player perspectives for downstream rolling features.
 --
--- Event-relative activity fields (per player, ordered by match_date, match_id):
---   * player_match_number: 1-based ordinal of this player's matches.
---   * matches_30d_before: count of this player's PRIOR matches with match_date
---     in [match_date - 30 days, match_date). Excludes the current match and any
---     match on the same date (only strictly earlier dates qualify); 0 for the
---     player's first match. Computed with a RANGE frame so the 30-day cutoff is
---     relative to the current row's date — the ROWS-based formulation in the
---     old match_features.sql compared each frame row against itself, counting
---     every preceding row instead.
+-- Activity fields are match ordinal and strictly-prior 30-day count. RANGE keeps
+-- the cutoff relative to each match date.
 --
--- Ranking semantics: ATP rank 0 is the CSV missing marker for unranked
--- players, so player_ranking/opponent_ranking are NULLIF'd to NULL. Rank 0
--- would otherwise read as "better than rank 1" and corrupt rank_diff,
--- rank_trend, and the rolling average-rank windows downstream. NULLs are
--- imputed at train time (median) and by the inference pool (median).
--- The same 0 -> NULL mapping applies to rank_points (0 rank points is the CSV
--- missing marker) and age (0 is the missing marker): a 0 would otherwise
--- corrupt rank_points_diff downstream.
+-- ATP zero rank, points, and age mean missing, not a real value; map to NULL.
 --
 -- No canonicalization: player/opponent orientation is the raw player1/player2
 -- assignment from bronze.
 --
--- Task 6 reductions: tournament/round/is_indoor are JOINED from bronze by
--- match_id in the consumers that need them (kept out of this table; only
--- surface stays because rolling surface form needs it). winner_id,
--- opponent_rank_points, opponent_age, the ATP-provided wins_last_10 /
--- matches_last_10, and previous_match_date are removed. Each player row keeps
--- its own player_rank_points / player_age, so the collapse in
--- gold.match_features still has both sides' rank points and age via the two
--- perspective rows.
+-- Context stays in bronze except surface; consumers rebuild both sides from perspectives.
 --
--- Return-side derivation: a player's return performance is the complement of
--- the OPPONENT's serve performance in the same match, so each row also carries
--- return_points_available (= the opponent's total serve points) and
--- return_points_won (= opponent serve points NOT won: opponent total serve
--- points minus the opponent's first + second serve points won). Both derive
--- from the bronze raw serve counts already on the match row; rolling_features
--- rolls them into return_points_won_pct_10 for the similarity index.
+-- Return points are derived from the opponent's raw serve totals for similarity rates.
 
 WITH expanded AS (
     SELECT

@@ -1,25 +1,4 @@
-"""Deterministic dev seed: raw ATP matches -> bronze -> profiles.
-
-Single seed entrypoint for the dev dataset. Mirrors the prod ingest path
-(src/flows/ingest.py): the same raw ATP -> bronze transform and the same ATP
-player-profile load (filtered to the seeded players only).
-
-Selection is deterministic: the RECENT most recent matches of the TOP_PLAYERS
-players with the best ranking at their latest match in data/raw/2026.csv,
-deduped (~100 matches).
-
-Permanently offline: the seed never performs live Wikipedia/bio enrichment.
-Enrichment is owned exclusively by the ETL flow (src/flows/etl.py) as an
-explicit operator opt-in; seeding stays offline by default and --all.
-
-Writes go to the operational PostgreSQL database (src.db.client), never to a
-local DuckDB file.
-
-Usage:
-    uv run python -m src.flows.init_db init   # schemas first (structure only)
-    uv run python -m src.flows.seed           # or `just db-seed`
-    uv run python -m src.flows.seed --all     # seed every ATP CSV under data/raw/
-"""
+"""Deterministically seed PostgreSQL from ATP CSVs without network enrichment."""
 
 from __future__ import annotations
 
@@ -46,23 +25,12 @@ RECENT = 10
 
 
 def discover_atp_csvs(raw_dir: Path = RAW_DIR) -> list[Path]:
-    """Every regular ATP match CSV under `raw_dir`, sorted.
-
-    Only regular tour files are in scope: Challenger CSVs are excluded so a
-    future `*_challenger.csv` file is never loaded. Excludes non-CSV files
-    (.DS_Store, etc.). Deterministic order: the paths are sorted so matches
-    seed chronologically regardless of on-disk order.
-    """
+    """Return sorted regular-tour ATP CSVs, excluding Challenger files."""
     return sorted(p for p in raw_dir.glob("*.csv") if p.is_file() and "_challenger" not in p.name)
 
 
 def load_all_raw_atp_rows(csv_paths: list[Path]) -> list[dict[str, Any]]:
-    """Load every raw ATP CSV and sort all rows chronologically.
-
-    The per-file rows are concatenated, then sorted by (tourney_date,
-    tourney_id, match_num) so rolling form computed over the full history in
-    atp_rows_to_bronze is correct across file boundaries.
-    """
+    """Load and chronologically sort ATP rows across CSV boundaries."""
     rows = [row for path in csv_paths for row in load_raw_atp_rows(path)]
     return sorted(rows, key=lambda m: (int(m["tourney_date"]), m["tourney_id"], m["match_num"]))
 
@@ -70,12 +38,7 @@ def load_all_raw_atp_rows(csv_paths: list[Path]) -> list[dict[str, Any]]:
 def select_matches(
     matches: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """The RECENT most recent matches of the TOP_PLAYERS best-ranked players.
-
-    Ranks every player by their ranking at their latest match in `matches`,
-    takes the top TOP_PLAYERS by (latest_rank, player_id), and keeps their
-    RECENT most recent matches, deduped to distinct matches.
-    """
+    """Select recent distinct matches for the best-ranked players."""
     ranks: dict[str, int] = {}
     for m in matches:
         ranks[m["winner_id"]] = m["winner_rank"]
@@ -146,13 +109,7 @@ def main_default() -> None:
 
 
 def main_all() -> None:
-    """Seed every ATP CSV under data/raw/ into bronze.
-
-    Idempotent at the database level: rows are inserted via insert_bronze_rows
-    (match_id PK, ON CONFLICT DO NOTHING), so re-running --all never duplicates
-    or deletes existing data. No source CSV is rewritten and the database is not
-    dropped. Permanently offline: no Wikipedia/bio enrichment is ever performed.
-    """
+    """Seed every ATP CSV idempotently without rewriting sources or enriching bios."""
     csv_paths = discover_atp_csvs(RAW_DIR)
     if not csv_paths:
         print(f"No ATP CSVs found under {RAW_DIR}; nothing to seed")

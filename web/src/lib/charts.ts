@@ -1,8 +1,7 @@
 import type { EChartsOption } from 'echarts'
 import type { ThemeName } from '../theme'
 
-// Theme-aware ECharts helpers. Charts read the resolved CSS variables at
-// render time; pages remount charts with key={theme} so colors always match.
+// Read resolved CSS tokens; pages remount charts when the theme changes.
 export interface ChartTokens {
   theme: ThemeName
   text: string
@@ -40,8 +39,7 @@ export function withAlpha(hex: string, alpha: number): string {
   return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`
 }
 
-// Shared option base: accessibility (aria.enabled is the ECharts >=5 name
-// for the legacy aria.show), themed tooltip/legend text.
+// Shared accessible, themed chart options.
 export function baseChartOption(t: ChartTokens): EChartsOption {
   return {
     aria: { enabled: true, decal: { show: true } },
@@ -62,9 +60,7 @@ export function baseChartOption(t: ChartTokens): EChartsOption {
   }
 }
 
-// Muted categorical colors for the four surfaces. Clay-orange stays
-// reserved for the betting signal, so the clay surface gets a desaturated
-// terracotta rather than the accent color.
+// Clay surface stays muted because orange signals betting.
 const SURFACE_FALLBACK: Record<string, string> = {
   clay: '#b98a63',
   grass: '#3fae7a',

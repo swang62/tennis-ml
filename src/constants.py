@@ -18,23 +18,12 @@ load_env()
 IMAGE_NAME = os.getenv("IMAGE_NAME")
 
 # --- PostgreSQL connection contract (single DATABASE_URL) ---
-# PostgreSQL is the only operational backend. Application connections use
-# exactly one environment variable: DATABASE_URL — a passwordless URL for the
-# local Homebrew instance (trust auth) or a password-bearing URL for the
-# password-authenticated Compose stack (fixed local-dev credential in
-# compose.yaml). There are no POSTGRES_* auth components for applications;
-# dbt entry points derive their discrete fields from the same URL
-# (src/db/conninfo.py).
+# Applications and dbt derive all connection settings from DATABASE_URL.
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 
 def build_database_url() -> str:
-    """Return the application connection URL: the single DATABASE_URL contract.
-
-    Fails fast when it is missing — there is no other backend and no component
-    fallback to silently target. The URL is returned verbatim, passwordless
-    (Homebrew trust) or password-bearing (Compose), exactly as configured.
-    """
+    """Return DATABASE_URL or fail rather than selecting an implicit backend."""
     if not DATABASE_URL:
         raise RuntimeError(
             "missing PostgreSQL configuration: set DATABASE_URL "

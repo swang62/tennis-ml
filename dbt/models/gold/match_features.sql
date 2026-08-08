@@ -1,46 +1,20 @@
 -- gold.match_features: canonical match-level training table.
 --
--- ONE ROW PER MATCH (not per player). Each player-match row is paired with
--- that player's IMMEDIATELY PRECEDING post-match snapshot
--- (player_match_number - 1) from silver.rolling_features, so all rolling
--- history values come strictly from completed matches BEFORE the current
--- event. The current event (silver.player_matches) supplies CURRENT rankings,
--- rank points, age, and the correct pre-match 30-day activity count.
--- tournament / round / is_indoor are joined from bronze by match_id (kept out
--- of silver.player_matches). The two perspectives then collapse into one
--- canonical row: the lower/stable ATP id is the `player_*` side, the other is
--- `opponent_*`, so the table is order-invariant (swapping player1/player2 in
--- bronze changes nothing).
+-- One row per match. Rolling values use the prior snapshot; current rankings,
+-- rank points, age, and 30-day activity come from player_matches. The lower
+-- ATP id is canonical `player_*`, making raw player order irrelevant.
 --
 -- match_won = 1 iff the canonical player_* side won, else 0. It is the LABEL,
 -- not a feature.
 --
--- Head-to-head (player_h2h_matches / player_h2h_wins): pair-level aggregates
--- over prior meetings between the canonical pair (strictly before this match's
--- date, deduped to distinct match_ids, most recent 5 only). The final contract
--- keeps only the canonical player side's counts; the opponent perspective and
--- the win rate are derived on demand.
+-- H2H uses the five most recent distinct, strictly-prior canonical meetings.
 --
--- Cold start: a player's first match has no prior snapshot, so all rolling
--- features are NULL (no zero filling). The only documented fallback is
--- days_since_last_match = 365; matches_30d is naturally 0 (it is a COUNT).
+-- Cold starts retain NULL rolling values; days_since_last_match defaults to 365.
 --
--- Rankings are never a row filter: unranked players (rank NULL after the
--- 0 -> NULL mapping in silver.player_matches) are kept, so matches are never
--- silently dropped for missing rankings. NULL rankings, rank_trend, and
--- rank_diff are imputed at train time (median) alongside the other NULLs.
+-- Unranked players are retained; training imputes NULL ranking values.
 --
--- Task 6: current-match per-side serve/break analysis rates are REMOVED from
--- this contract. Where the dashboard/analysis needs them, they are derived on
--- demand from bronze raw counts with the existing NULLIF zero-denominator
--- behavior. height is NOT a model feature here (it stays in gold.player_profiles
--- for the profile API); only is_left_handed and years_pro are model profile
--- features. The output columns are exactly FEATURE_COLS (36) plus the metadata
--- (match_id, match_date, player_id, opponent_id, tournament, round, surface,
--- match_won), in that order, followed by 10 appended similarity-analysis
--- columns (per-side absolute serve/return percentages — the return side being
--- a genuine return-points-won rate) consumed by the PlayerSimilarity index;
--- these are NOT model features.
+-- Model columns are metadata plus FEATURE_COLS; appended serve/return columns
+-- are for similarity only. Height and current-match rates are not model features.
 
 WITH player_match_enriched AS (
     SELECT
@@ -64,13 +38,11 @@ WITH player_match_enriched AS (
         -- Correct pre-match activity count (0 on first match; it is a COUNT)
         CAST(pm.matches_30d_before AS INTEGER) AS matches_30d,
 
-        -- Days since the player's previous completed match; 365 on first match.
-        -- PostgreSQL date subtraction (date - date = integer days).
+        -- 365 on a first match.
         CAST(COALESCE(pm.match_date - pr.snapshot_date, 365)
             AS INTEGER) AS days_since_last_match,
 
-        -- Rolling form from the immediately preceding snapshot (NULL on cold
-        -- start — no zero filling)
+        -- Prior rolling snapshot; NULL on cold start.
         pr.weighted_form_10,
         pr.win_rate_10,
         pr.ace_rate_10,
@@ -98,16 +70,11 @@ WITH player_match_enriched AS (
             WHEN 'hard'  THEN pr.hard_win_rate_10
         END AS surface_win_rate_10,
 
-        -- Profile-derived identity (static; NULL when the player has no
-        -- profile or a cell is missing, same no-zero-filling policy as the
-        -- rolling features — train-time imputation handles the NULLs)
-        -- Non-L/R handedness (including NULL) stays NULL so train-time
-        -- imputation treats missing handedness like any other missing cell
+        -- Missing or non-L/R handedness stays NULL for train-time imputation.
         CAST(CASE WHEN prof.handedness = 'L' THEN 1
                   WHEN prof.handedness = 'R' THEN 0 END AS SMALLINT)
             AS is_left_handed,
-        -- Years pro AT THIS MATCH (time-aware), not the raw turned_pro year;
-        -- EXTRACT returns numeric, so the explicit INTEGER cast stays.
+        -- Time-aware years pro.
         CAST(EXTRACT(YEAR FROM pm.match_date) - prof.turned_pro AS INTEGER) AS years_pro
 
     FROM {{ ref('player_matches') }} pm
@@ -119,12 +86,7 @@ WITH player_match_enriched AS (
     LEFT JOIN gold.player_profiles prof
         ON prof.player_id = pm.player_id
 ),
--- One row per distinct match between a canonical pair. silver.player_matches
--- has TWO rows per match (one per player perspective); this dedupes to match
--- level. a/b are the canonical ids (lower id is `a`), and a_won is 1 iff the
--- canonical a-side won that meeting — both perspective rows of a match agree
--- on it (the loser's row reports match_won = 1 - the winner's), so MAX is
--- safe. H2H aggregates read from here, never from raw silver rows.
+-- Dedupe player perspectives to canonical meetings for H2H aggregation.
 pair_meetings AS (
     SELECT
         CASE WHEN player_id < opponent_id THEN player_id ELSE opponent_id END AS a,
@@ -136,15 +98,7 @@ pair_meetings AS (
     FROM {{ ref('player_matches') }}
     GROUP BY 1, 2, 3, 4
 ),
--- Prior-meeting aggregates for the canonical pair (p.player_id vs
--- p.opponent_id): matches with match_date STRICTLY BEFORE the current row's
--- match_date (same-date meetings excluded), deduped to distinct match_ids,
--- restricted to the MOST RECENT 5 meetings (ORDER BY match_date DESC,
--- match_id DESC LIMIT 5 — the locked last-5 recency window). The INNER JOIN
--- already keeps only the canonical p-side perspective of each current match
--- (the o-side row's player_id is the higher id, so no meeting matches it), so
--- the window partitions cleanly per current match. Matches with no prior
--- meeting produce no row here; the final select COALESCEs to 0 matches / 0 wins.
+-- Strictly-prior H2H rows, limited to the five most recent per match.
 prior_meeting_rows AS (
     SELECT
         current_match.match_id,
@@ -168,11 +122,7 @@ prior_h2h AS (
     WHERE rn <= 5
     GROUP BY match_id
 )
--- Collapse the two player-perspective rows of each match into one canonical
--- row: the lower ATP id is the player_* side (p), the higher is the
--- opponent_* side (o). Exactly one row per match, regardless of the raw
--- player1/player2 assignment. Output columns follow FEATURE_COLS order after
--- the metadata block.
+-- Collapse perspectives into one lower-id canonical row per match.
 SELECT
     p.match_id,
     p.match_date,
@@ -237,13 +187,7 @@ SELECT
     END AS SMALLINT) AS round_encoded,
 
     -- ── Similarity-analysis serve/return percentages (NOT model features) ──
-    -- Absolute per-side 10-match serve/return rates, consumed by the
-    -- PlayerSimilarity index as a style signal. Appended after the feature
-    -- contract so the leading columns stay in FEATURE_COLS order; they are
-    -- never part of FEATURE_COLS. The return side is a genuine return-points-
-    -- won rate (opponent serve points not won / opponent serve points); a
-    -- player's break-point save rate is a SERVING stat and is deliberately
-    -- absent here (it stays only as the model's break_points_saved_pct_diff).
+    -- Appended style signals for PlayerSimilarity, never FEATURE_COLS.
     p.first_serve_pct_10        AS player_first_serve_pct_10,
     o.first_serve_pct_10        AS opponent_first_serve_pct_10,
     p.first_serve_win_pct_10    AS player_first_serve_win_pct_10,

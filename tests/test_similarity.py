@@ -1,15 +1,4 @@
-"""Tests for src/models/similarity.py (no network, no live PostgreSQL needed).
-
-fastembed.TextEmbedding is stubbed with a fake that yields fixed 4-dim ones
-vectors. Player state is read from an in-memory DuckDB fixture holding the
-two-table snapshot boundary — gold.match_features (the columns the builder
-reads) and gold.player_profiles — through an explicit query function, exactly
-as an offline build passes ``src.db.training.to_dataframe``. A live parity
-test rebuilds the real two-table snapshot from PostgreSQL via
-``src.db.snapshot.refresh_snapshot`` and asserts bit-identical FAISS vectors
-between the live PostgreSQL and snapshot DuckDB query paths when the seeded
-database is reachable.
-"""
+"""Similarity tests with fake embeddings, DuckDB fixtures, and live parity."""
 
 import re
 import sys
@@ -45,26 +34,14 @@ class _FakeFastembed:
 
 
 def _patch_embedding(monkeypatch: pytest.MonkeyPatch) -> FakeTextEmbedding:
-    # embed_bio_summaries imports fastembed lazily inside the function, so the
-    # fake module is injected into sys.modules (never by patching a similarity
-    # module attribute, which the lazy import would clobber).
+    # Inject the fake module because fastembed is imported lazily.
     fake = FakeTextEmbedding()
     monkeypatch.setitem(sys.modules, "fastembed", _FakeFastembed(lambda _model_name: fake))
     return fake
 
 
 def _create_two_table_fixture(con: duckdb.DuckDBPyConnection) -> None:
-    """Create the gold.match_features + gold.player_profiles fixture tables.
-
-    match_features declares the columns the builder's state query reads (the
-    full 44-column contract is exercised by the live parity test) plus a set
-    of physical/résumé columns the builder must NEVER read (age, rankings) so
-    the exclusion test can prove they do not affect the vectors. Rows:
-      m1 clay  P1 vs P4   m2 grass P1 vs P2   m3 hard  P2 vs P4
-      m4 clay  P1 vs P2 (later than m1: latest weighted form / clay rate win
-                         and the latest serve/return percentages for P1/P2)
-    P4 appears only on the opponent side; P3 has a profile but no matches.
-    """
+    """Create match/profile fixtures including excluded physical attributes."""
     con.execute("CREATE SCHEMA gold")
     con.execute(
         """
@@ -111,10 +88,7 @@ def _create_two_table_fixture(con: duckdb.DuckDBPyConnection) -> None:
         )
         """
     )
-    # Column order: match_id, match_date, surface, player_id, opponent_id,
-    # pw, ps, ow, os, then per-side serve/return (player then opponent):
-    # first_serve_pct, first_serve_win, second_serve_win, serve_win,
-    # return_points_won; then excluded age/ranking (player then opponent).
+    # Match columns include style signals followed by excluded age/rank fields.
     con.executemany(
         "INSERT INTO gold.match_features VALUES "
         "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -260,10 +234,9 @@ def _build_with_fixture(tmp_path: Path, monkeypatch) -> PlayerSimilarity:
         con.close()
     return finder
 
+    # One-hot identity precedes STYLE_COLS; bio embeddings follow.
 
-# One-hot block (backhand x2, handedness x2) precedes the style stats; the bio
-# block trails them. STYLE_COLS is imported so the layout stays in sync with
-# the builder's vector contract.
+
 ONE_HOT = 4
 STYLE = STYLE_COLS
 
@@ -283,11 +256,7 @@ def test_build_uses_latest_pre_match_absolute_state(tmp_path: Path, monkeypatch)
 
     p1 = index.reconstruct(finder.player_ids.index("P1"))
     p1_style = _style_block(p1)
-    # P1's latest match (m4) supplies weighted form 0.90, clay rate 0.58 and
-    # the serve/return percentages (fp .62 fw .72 sw .50 sv .64 rp .55), not
-    # the older clay match's 0.80/0.55/...; grass comes from the only grass
-    # match; hard was never played and stays 0.0. L2 normalization scales all
-    # components by one factor, so within-vector ratios survive.
+    # Latest state wins; L2 normalization preserves within-vector ratios.
     assert np.isclose(p1_style[0] / p1_style[1], 0.90 / 0.58)
     assert np.isclose(p1_style[2], p1_style[1] * (0.60 / 0.58))
     assert p1_style[3] == 0.0
@@ -354,9 +323,7 @@ def test_build_embeds_bio_and_one_hot_identity(tmp_path: Path, monkeypatch):
 
 
 def test_build_excludes_physical_and_resume_metrics(tmp_path: Path, monkeypatch):
-    """Age, height, turned_pro, birthplace, rankings and career totals never
-    enter the similarity signal: mutating them across the tables leaves every
-    vector bit-identical, while mutating a serve percentage changes it."""
+    """Excluded physical/career fields leave vectors unchanged; style fields do not."""
     _patch_embedding(monkeypatch)
     monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
     monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
@@ -423,11 +390,7 @@ def test_find_by_name_exact_case_insensitive_and_unknown():
 
 
 def _hand_built_finder() -> PlayerSimilarity:
-    """PlayerSimilarity with a 3-vector FAISS index and matching metadata.
-
-    P1 (row 0) is the query player in the search tests; its vector has the
-    highest dot product with itself (1.0), then P2 (0.9), then P3 (0.5).
-    """
+    """Build a three-vector FAISS fixture with descending P1 similarity."""
     finder = PlayerSimilarity()
     finder.index = faiss.IndexFlatIP(4)
     finder.index.add(

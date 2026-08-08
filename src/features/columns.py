@@ -1,14 +1,4 @@
-"""Single source of truth for every column definition in the pipeline.
-
-Holds the canonical match-level training feature columns (`gold.match_features`;
-player/opponent rolling stats, profile-derived identity, differentials, context)
-and the bronze ingestion schema. Consumer modules import from here instead of
-re-declaring column lists.
-
-Rolling-feature *formulas* stay in dbt SQL only; Python never re-implements
-them. The ID-based inference row builder lives in `src.features.inference`
-(`build_inference_features`); row validation lives in `src.features.validate`.
-"""
+"""Column contracts for bronze ingestion and canonical match features."""
 
 from __future__ import annotations
 
@@ -64,9 +54,7 @@ BRONZE_COLUMNS: tuple[str, ...] = (
     "winner_id",
 )
 
-# String bronze columns that must be non-blank at ingestion time. `round` is
-# excluded: non-draw stages (Davis Cup, round robins, blank) are legitimate
-# and encode as round_encoded 0 in gold.
+# round may be a legitimate non-draw stage and encodes to 0 in gold.
 _REQUIRED_STRING_COLUMNS: tuple[str, ...] = (
     "match_id",
     "player1_id",
@@ -78,12 +66,7 @@ _REQUIRED_STRING_COLUMNS: tuple[str, ...] = (
 
 # ── Rolling features computed in SQL (silver.rolling_features, post-match) ──
 #
-# Task 6 reductions: only the retained `_10`-window values the final match
-# contract and inference need. Every `_5`/`_20` output, the separate win/loss
-# streaks (replaced by a single signed `streak`), and intermediate/source
-# outputs not consumed by gold.match_features or inference are removed.
-# Raw serve/break counts stay in silver.player_matches because the retained
-# rolling rates are computed from them.
+# Retain only required 10-match values; raw counts remain in player_matches.
 
 SILVER_ROLLING_COLS: list[str] = [
     "weighted_form_10",
@@ -104,29 +87,16 @@ SILVER_ROLLING_COLS: list[str] = [
 
 # ── Per-side feature columns of the canonical match-level table ──
 
-# Current-match per-side serve/break analysis rates are REMOVED from the gold
-# contract (Task 6). Where the dashboard/analysis needs them, they derive on
-# demand from bronze raw counts with the existing NULLIF zero-denominator
-# behavior. The rolling versions in SILVER_ROLLING_COLS are the model features —
-# a current match's own stats have no as-of-date inference source, so they are
-# never in FEATURE_COLS.
+# Current-match rates lack an as-of source, so they are never model features.
 MATCH_STATS_COLS: list[str] = []
 
-# Profile-derived identity features (from gold.player_profiles), exposed per
-# side in the canonical row. years_pro is time-aware: years pro as of the
-# match date, not the raw turned_pro year. height is retained in
-# gold.player_profiles and the profile API (dashboard data), but is NOT a model
-# feature — the final contract keeps only is_left_handed and years_pro.
+# Time-aware profile features; height remains profile-only.
 PROFILE_COLS: list[str] = [
     "is_left_handed",
     "years_pro",
 ]
 
-# Pair-level head-to-head history, exposed per side. NOT a rolling snapshot
-# feature: it aggregates prior meetings between the canonical pair (strictly
-# before the current match date, deduped to distinct match_ids, restricted to
-# the most recent 5) straight from silver.player_matches. Final contract keeps
-# only the counts (matches + wins); the win rate is derived on demand.
+# Last-five, strictly-prior canonical H2H counts; win rate is derived on demand.
 H2H_COLS: list[str] = [
     "h2h_matches",
     "h2h_wins",
@@ -135,16 +105,7 @@ H2H_COLS: list[str] = [
 
 # ── Similarity-analysis serve/return percentages (NOT model features) ──
 #
-# Absolute per-side 10-match serve/return rates appended to gold.match_features
-# after the FEATURE_COLS contract, consumed by the PlayerSimilarity style index
-# (bio embedding + surface win rates + serve/return percentages + handedness +
-# backhand). The return side is a genuine return-points-won rate (opponent
-# serve points not won / opponent serve points); break_points_saved_pct_10 is a
-# SERVING stat and is deliberately NOT a similarity signal (it remains a model
-# feature only as break_points_saved_pct_diff). Deliberately NEVER in
-# FEATURE_COLS: not fed to training or serving prediction. Single source of
-# truth for the snapshot column contract; the names match the appended dbt
-# SELECT in match_features.sql.
+# Appended 10-match style signals for PlayerSimilarity, never FEATURE_COLS.
 SIMILARITY_COLS: list[str] = [
     "player_first_serve_pct_10",
     "opponent_first_serve_pct_10",
@@ -189,11 +150,7 @@ CONTEXT_COLS: list[str] = [
 
 # ── Final model feature contract (36 numeric columns) ──
 #
-# Task 6 finalized order (plan lines 186-231): matchup differentials first,
-# then the absolute player/opponent state values, then canonical-player H2H
-# counts, then numeric match context. This is the exact, ordered contract every
-# consumer (gold.match_features, inference, notebooks, feature_cols.json,
-# serving) must emit. Rolling values are all 10-match values.
+# Exact consumer contract: differentials, absolute state, H2H, then context.
 FEATURE_COLS: list[str] = [
     # Matchup differences (rolling values are all 10-match values).
     "rank_diff",

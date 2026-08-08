@@ -1,21 +1,4 @@
-"""Atomic PostgreSQL -> DuckDB training snapshot.
-
-Builds the local training database that the notebooks and PlayerSimilarity
-read: a DuckDB file containing exactly two tables — ``gold.match_features``
-and ``gold.player_profiles`` — copied from PostgreSQL through DuckDB's
-``postgres`` extension. The copy runs inside one DuckDB transaction, which the
-scanner maps to a single PostgreSQL transaction, so both tables come from one
-consistent source snapshot. The temp file is then validated read-only
-(exactly two tables, exact META_COLS + FEATURE_COLS column order, non-empty,
-no duplicate keys) and only after validation is it atomically swapped over the
-previous snapshot. Any failure deletes the temp file and leaves the previous
-snapshot untouched, so training either reads a fully validated snapshot or
-fails loudly — it never silently uses stale data.
-
-The operational PostgreSQL client (``src.db.client``) is deliberately not used
-here: this module talks to PostgreSQL only through the DuckDB postgres
-scanner, and training code reads the result via ``src.db.training``.
-"""
+"""Build and atomically install a validated PostgreSQL-to-DuckDB training snapshot."""
 
 from __future__ import annotations
 
@@ -27,12 +10,10 @@ import duckdb
 from src.constants import DATA_PROCESSED, build_database_url
 from src.features.columns import FEATURE_COLS, SIMILARITY_COLS
 
-# The one file the training pipeline is allowed to read. Git-ignored and
-# atomically replaced on every refresh; no retention or archives.
+# Training's single, atomically replaced local input.
 SNAPSHOT_PATH = DATA_PROCESSED / "training_snapshot.duckdb"
 
-# The only tables copied into the snapshot. Bronze, silver, and
-# silver.rolling_features stay operational-only and never enter training data.
+# Training reads only these gold tables.
 SNAPSHOT_TABLES = (
     ("gold", "match_features"),
     ("gold", "player_profiles"),
@@ -50,9 +31,7 @@ META_COLS = (
     "match_won",
 )
 
-# The exact ordered contract every snapshot must match: the 8 metadata
-# columns, the 36 FEATURE_COLS, then the appended similarity-analysis serve/
-# return columns (which are NOT model features — see columns.py).
+# Snapshot order: metadata, model features, then similarity-only columns.
 EXPECTED_FEATURE_ORDER = (*META_COLS, *FEATURE_COLS, *SIMILARITY_COLS)
 
 
@@ -61,13 +40,7 @@ class SnapshotError(RuntimeError):
 
 
 def _copy_tables(tmp_path: Path, pg_url: str) -> None:
-    """Copy the two gold tables from PostgreSQL into a fresh DuckDB file.
-
-    Both CREATE TABLE AS SELECT statements run inside one DuckDB transaction,
-    which the postgres scanner executes as a single PostgreSQL transaction, so
-    the two reads see one consistent snapshot even if the source tables change
-    mid-copy.
-    """
+    """Copy both gold tables in one transaction for a consistent source view."""
     con = duckdb.connect(str(tmp_path))
     try:
         con.execute(f"ATTACH '{pg_url}' AS pg (TYPE postgres)")
@@ -83,12 +56,7 @@ def _copy_tables(tmp_path: Path, pg_url: str) -> None:
 
 
 def validate_snapshot(path: Path) -> None:
-    """Open a snapshot read-only and assert its structure and content.
-
-    Checks: exactly the two expected user tables, gold.match_features columns
-    exactly META_COLS + FEATURE_COLS in order, both tables non-empty, and no
-    duplicate match_id / player_id rows. Raises SnapshotError on any mismatch.
-    """
+    """Validate required tables, order, non-empty content, and unique keys."""
     con = duckdb.connect(str(path), read_only=True)
     try:
         tables = {
@@ -135,12 +103,7 @@ def validate_snapshot(path: Path) -> None:
 
 
 def refresh_snapshot(path: Path = SNAPSHOT_PATH, pg_url: str | None = None) -> Path:
-    """Build, validate, and atomically install a fresh training snapshot.
-
-    Writes to a temp file next to ``path``, validates it read-only, then swaps
-    it over the previous snapshot with os.replace. On any failure the temp
-    file is removed and the previous snapshot (if any) is left untouched.
-    """
+    """Build, validate, and atomically replace the training snapshot."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:

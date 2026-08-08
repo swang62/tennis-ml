@@ -1,10 +1,8 @@
 @import "tailwindcss";
 
 /* ============================================================
-   Courtside — tennis intelligence terminal
-   Dark is the default (no class on <html>). Light mode adds the
-   `light` class to documentElement, applied before first paint by
-   the inline script in index.html and kept in sync by theme.tsx.
+   Courtside - tennis intelligence terminal
+   Dark defaults; `light` is applied before first paint and synced by theme.tsx.
    ============================================================ */
 
 :root {
@@ -179,8 +177,7 @@ html.light {
     flex-direction: column;
   }
 
-  /* Let grid items shrink below their content's min-content width so
-     fixed-size chart canvases never force page-level horizontal overflow. */
+  /* Let charts shrink without page-level horizontal overflow. */
   .grid > * {
     min-width: 0;
   }
@@ -232,9 +229,7 @@ html.light {
     border-bottom: 1px solid var(--line);
   }
 
-  /* Stable three-column bar: brand (start), centered nav (middle), theme (end).
-     Equal 1fr gutters on either side keep the tab group visually centered
-     regardless of brand or toggle width. */
+  /* Equal gutters keep the centered tabs independent of side widths. */
   .nav-inner {
     display: grid;
     grid-template-columns: 1fr auto 1fr;

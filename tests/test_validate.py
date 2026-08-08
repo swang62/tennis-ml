@@ -126,10 +126,7 @@ def test_validate_bronze_row_flags_blank_required_string_columns():
 
 
 def test_validate_bronze_row_accepts_non_draw_rounds():
-    # Davis Cup ties and round robins are legitimate: they are preserved and
-    # mapped to round ordinal 0 in silver, never dropped here. (Raw blank
-    # rounds arrive as the string "0" after fillna, so they never reach
-    # validation as NULL.)
+    # Non-draw rounds are valid and encode to 0 downstream.
     for round_value in ("rr", "0"):
         row = _valid_row()
         row["round"] = round_value

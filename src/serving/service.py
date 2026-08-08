@@ -1,21 +1,6 @@
-"""BentoML service composing the 4 stacked-ensemble artifacts.
+"""BentoML service for the stacked ensemble and read-only dashboard data.
 
-`linear_best` and `gbdt_best` are sklearn classifiers, `nn_best` is the
-PyTorch MLP with the bio-embedding pathway, and `ensemble_lr_model` is the
-logistic-regression stack head over `[p_linear, p_gbdt, p_nn]`.
-
-The NN path runs through ONNX Runtime, not torch: the deploy flow exports the
-pinned `nn_best` MLflow version to `data/processed/nn_best.onnx` at deploy
-time, and this service loads that artifact at init. torch is not a serving
-dependency.
-
-The request carries a finalized `FEATURE_COLS` row plus `player_id` and
-`opponent_id` (needed for the NN bio lookup); no rolling/diff/context
-features are derived here. See `src/serving/README.md` for the full
-payload contract (what upstream must precompute vs. what Bento does).
-Decoupled aux artifacts (`linear_scaler.pkl`, `bio_embeddings.parquet`,
-`bio_feature_cols.json`, `nn_best.onnx`) are packaged by the build step
-and loaded from disk at init.
+The NN uses the deploy-time ONNX artifact; finalized features are built upstream.
 """
 
 import builtins
@@ -54,14 +39,7 @@ AUX_DIR = ROOT / "data" / "processed"
 
 load_env()
 
-# v2 image spec: deps declared here, NOT in bentoml.yaml. Keeps the install
-# list next to the service that consumes it. torch + lightning are dropped
-# (the NN is served via ONNX Runtime); DuckDB is dropped too — operational
-# serving reads PostgreSQL through psycopg (the inference builder and the
-# dashboard), and DuckDB stays a training-snapshot tool (src.db.snapshot),
-# never part of the serving image. Everything else is pinned to the exact
-# versions the training venv used — the sklearn/lightgbm/xgboost models are
-# pickled, so version drift breaks loading.
+# Serving dependencies stay here. Model packages are pinned because models are pickled.
 SERVING_IMAGE = Image(
     python_version="3.12", distro="debian", lock_python_packages=False
 ).python_packages(
@@ -83,16 +61,8 @@ SERVING_IMAGE = Image(
 
 
 # ── Read-only data endpoints (GET, no auth) ────────────────────────────────
-# Served from a mounted Starlette app: BentoML's `@bentoml.api` only registers
-# POST routes (the SDK's HTTP server hardcodes methods=["POST"]), while the
-# dashboard reads player/career data over plain GET with query params. The
-# mounted app runs in the same process/worker as the service, so it shares the
-# lazy PostgreSQL connection from src.db.client (same env-configurable path the
-# inference builder uses).
-#
-# All SQL is parameterized (prepared statements via src.db.client.execute_df);
-# ids/dates never appear in SQL text. JSON shapes below are the dashboard's
-# contract — keep them stable.
+# Bento APIs are POST-only, so dashboard GET routes use a mounted Starlette app.
+# SQL values are always parameterized; response shapes are a dashboard contract.
 
 
 # Response envelope used by every data endpoint.
@@ -105,12 +75,7 @@ def _err(status: int, message: str) -> JSONResponse:
 
 
 def _iso(value: object) -> object:
-    """JSON-safe scalar: dates to ISO strings, NaN/None stay null.
-
-    PostgreSQL numerics arrive as Decimal (AVG/counts) and pandas may wrap
-    integers as numpy scalars (np.int64 for bigint/smallint columns); both
-    are converted to native Python numbers so JSON serialization never fails.
-    """
+    """Convert database and pandas scalars to JSON-safe values."""
     if value is None or isinstance(value, (str, int, bool)):
         return value
     if isinstance(value, pd.Timestamp):
@@ -159,11 +124,7 @@ FROM {PROFILES_TABLE}
 WHERE player_id = %s
 """
 
-# Career stats from the player's oriented history in silver.player_matches.
-# Serve/breakpoint rates are aggregate sums (NULL-safe: NULLIF guards zero
-# denominators), mirroring the rolling_features rate conventions. The integer
-# sums are cast to double precision so the ratios are float division, not
-# integer truncation.
+# Career rates use NULLIF and double precision to avoid divide-by-zero and truncation.
 _PROFILE_CAREER_SQL = f"""
 SELECT
     COUNT(*) AS matches_played,
@@ -182,10 +143,7 @@ FROM {SILVER_PLAYER_MATCHES}
 WHERE player_id = %s
 """
 
-# All-time per-surface win rates from the player's oriented history. One row
-# per surface actually played; unplayed surfaces have no row at all. The
-# handler fills those in with matches=0 and a NULL win_rate — the dashboard
-# renders them as "n/a (n=0)", never 0%.
+# Unplayed surfaces have no row; the handler renders them as n/a, not 0%.
 _PROFILE_SURFACE_SQL = f"""
 SELECT
     surface,
@@ -213,9 +171,7 @@ WHERE player_id = %s AND player_rank_points IS NOT NULL
 ORDER BY match_date, match_id
 """
 
-# Rank series from bronze: each match row records both players' rankings, so
-# the player-perspective ranking time series is derived on demand by expanding
-# bronze rows (both raw sides) into one ranking observation per (player, date).
+# Expand both bronze sides into a player ranking time series.
 _RANK_HISTORY_SQL = f"""
 SELECT match_date, ranking
 FROM (
@@ -229,13 +185,7 @@ WHERE player_id = %s AND ranking IS NOT NULL AND ranking > 0
 ORDER BY match_date
 """
 
-# Match history shows only the highest round entered per tournament. The
-# tourney key is derived from match_id (`{tourney_date}-{tourney_id}-{match_num}`
-# in silver/bronze; the zero-padded match number is always the trailing
-# `-\d{3}` segment), so no schema change is needed. Round depth: standard
-# draw rounds R128 < R64 < R32 < R16 < QF < SF < F; nonstandard/unknown
-# rounds (RR, round robins, walkovers...) rank 0. Grouping happens BEFORE the
-# visible limit so the API never fetches an arbitrary subset first.
+# Keep the deepest round per tournament before applying the visible limit.
 _MATCH_HISTORY_SQL = f"""
 WITH per_match AS (
     SELECT
@@ -280,13 +230,7 @@ ORDER BY match_date DESC, match_id DESC
 LIMIT %s
 """
 
-# Prior meetings between a pair. silver.player_matches has TWO rows per match
-# (one per player perspective); GROUP BY collapses them to distinct match_ids
-# (same dedupe rule as the model's H2H lookup). a_won = 1 iff the canonical
-# a-side (the lower id, always the player_* side) won the meeting; both
-# perspective rows of a meeting agree on it, so MAX is safe. winner_id is
-# read from bronze (removed from silver). Params:
-# lower_id, higher_id, lower_id, higher_id.
+# Dedupe player perspectives; a_won is the canonical lower-id side's result.
 _H2H_MEETINGS_SQL = f"""
 SELECT
     pm.match_id, pm.match_date, br.surface, br.tournament, br.round,
@@ -339,8 +283,7 @@ def _player_profile(request: Request) -> JSONResponse:
         "break_points_saved_pct": _iso(career["break_points_saved_pct"]),
     }
 
-    # All-time per-surface win rates; locked to clay/grass/hard (the model's
-    # surface set). Unplayed surfaces: matches 0, NULL win_rate (n/a, not 0%).
+    # Unplayed model surfaces are n/a, not 0%.
     surf_rates = {r["surface"]: r for r in surf_df.to_dict("records")}
     surface_rates = [
         {
@@ -360,8 +303,7 @@ def _player_profile(request: Request) -> JSONResponse:
             "last_10_win_rate": _iso(form["win_rate_10"]),
         }
 
-    # Rank-points trend: latest vs earliest rank points across the player's
-    # matches (fallback to last-5 delta when only one point exists).
+    # Rank-points trend from earliest to latest observation.
     rank_points_trend: dict[str, object] | None = None
     if not rp_df.empty:
         points = rp_df["player_rank_points"].tolist()
@@ -446,8 +388,7 @@ def _match_history(request: Request) -> JSONResponse:
 
 
 def _head_to_head(request: Request) -> JSONResponse:
-    # Accept both parameter conventions: player1_id/player2_id (MUST DO) and
-    # player_id/opponent_id (the /predict_from_ids style, used by the dashboard).
+    # Support both H2H and prediction parameter conventions.
     p1 = _require_id(request, "player1_id") or _require_id(request, "player_id")
     p2 = _require_id(request, "player2_id") or _require_id(request, "opponent_id")
     if p1 is None or p2 is None:
@@ -501,9 +442,7 @@ def _head_to_head(request: Request) -> JSONResponse:
     )
 
 
-# Similarity index + metadata are packaged into the Bento (bentofile include);
-# loaded lazily on the first /similar_players request so the healthcheck and
-# the rest of the dashboard never pay the load cost when it isn't used.
+# Lazy-load the packaged index so health checks do not pay its load cost.
 _similarity_finder: PlayerSimilarity | None = None
 
 
@@ -576,11 +515,7 @@ class TennisPredictor:
         self.bio_by_player = {pid: i for i, pid in enumerate(bio_df["player_id"])}
         self.bio_array = bio_df[self.bio_feature_cols].to_numpy(np.float32)
 
-    # Non-batchable: BentoML 1.4.39's batch dispatcher has a bug sizing pandas
-    # DataFrame inputs (`get_batch_size = lambda x: x.sample.batch_size` hits
-    # `DataFrame.sample` the method and returns a tuple, not an int), raising
-    # `TypeError: int + tuple` and surfacing as `ServiceUnavailable: process is
-    # overloaded`. Single-match predictions don't need batch concat anyway.
+    # BentoML 1.4.39 mis-sizes DataFrame batches; this endpoint serves one match.
     @bentoml.api
     def predict(self, input: pd.DataFrame) -> pd.DataFrame:
         required = [*FEATURE_COLS, "player_id", "opponent_id"]
@@ -590,14 +525,7 @@ class TennisPredictor:
         return self._predict_proba(input)
 
     def _predict_proba(self, input: pd.DataFrame) -> pd.DataFrame:
-        """Run the stacked ensemble on a finalized row. Shared by the
-        model-only `/predict` endpoint and `/predict-from-ids`.
-
-        Called DIRECTLY (not via `self.predict`) so `/predict-from-ids` doesn't
-        route a nested HTTP call back into the same single-worker service —
-        that would self-deadlock (the worker is busy handling the outer call
-        and can't service the inner one), surfacing as a timeout.
-        """
+        """Run the stacked ensemble without recursively calling the HTTP endpoint."""
         started_at = perf_counter()
         features = input[FEATURE_COLS]
 
@@ -614,9 +542,7 @@ class TennisPredictor:
         gbdt_started_at = perf_counter()
         p_gbdt = self.gbdt.predict_proba(features)[:, 1]
         gbdt_ms = (perf_counter() - gbdt_started_at) * 1000
-        # NN path: scaled row (as in training) + player/opponent bio lookup,
-        # run through ONNX Runtime. The ONNX graph was exported with the three
-        # inputs the training forward() takes: tab, bio_p, bio_o.
+        # ONNX inputs match the training forward signature.
         nn_inputs = {
             "tab": features_scaled.astype(np.float32),
             "bio_p": self._row_bio_np(input["player_id"].to_numpy()),
@@ -677,15 +603,7 @@ class TennisPredictor:
         as_of_date: date | None = None,
         indoor: int | None = None,
     ) -> dict[str, object]:
-        """Build the feature row on demand from live PostgreSQL gold tables.
-
-        Minimal human inputs: two player ids + surface, optional integer
-        tournament_level/round_encoded (or their string aliases tournament/
-        round, e.g. "grand_slam" / "f"), as_of_date, and indoor status
-        (1=indoor, 0=outdoor, None/omitted=unknown which defaults to 0).
-        Queries the operational silver.rolling_features / silver.player_matches
-        / gold.player_profiles tables as-of-dated.
-        """
+        """Build an as-of-dated feature row from player ids, then predict."""
         started_at = perf_counter()
         row, meta = _build_inference_features_with_meta(
             player_id,

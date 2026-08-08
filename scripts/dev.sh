@@ -1,16 +1,13 @@
 #!/bin/sh
-# One-command local development against the Homebrew PostgreSQL instance
-# configured in .env: starts Bento (127.0.0.1:3000, --reload) and the Vite
-# dashboard (HMR) concurrently, and stops both on exit/interrupt.
-#
-# Preflight (fails before anything starts, never prints credentials):
+# Start Bento and Vite against the Homebrew PostgreSQL target in .env.
+# Preflight never prints credentials and verifies:
 #   - .env exists and provides the single DATABASE_URL
 #   - the database is reachable and is the configured/expected database
 #   - the required application schemas/tables exist
 #   - the target is not the Compose database (127.0.0.1:6543)
 #   - ports 3000 (Bento) and 5173 (Vite) are free
 #
-# Homebrew services, Compose, migrations, and seeding are never touched.
+# It never changes services, Compose, migrations, or seed data.
 
 set -u
 
@@ -27,9 +24,7 @@ set -a
 set +a
 
 # --- Resolve the effective database target --------------------------------
-# The single connection contract is DATABASE_URL (see README); the local
-# Homebrew URL carries no password, and values are only used to connect, never
-# echoed.
+# DATABASE_URL is used only to connect and is never echoed.
 if [ -z "${DATABASE_URL:-}" ]; then
     echo "error: .env must set DATABASE_URL for the local workflow (see README)" >&2
     exit 1
@@ -48,8 +43,7 @@ esac
 DB_NAME=$dbname
 
 # --- Reject the Compose database target -----------------------------------
-# The Compose stack publishes PostgreSQL on host port 6543; the local workflow
-# targets Homebrew PostgreSQL. Report only the keys, never the values.
+# Reject Compose's port 6543; report keys, never values.
 case "$DB_HOST:$DB_PORT" in
     127.0.0.1:6543 | localhost:6543 | ::1:6543)
         echo "error: database target is the Compose stack host port (6543)" >&2
@@ -143,8 +137,7 @@ BENTO_PID=$!
 ) &
 VITE_PID=$!
 
-# Run until one child exits (detecting zombies via ps stat so a crashed
-# server ends the session instead of hanging), then stop the other.
+# Stop both servers if either exits; detect zombies to avoid hanging.
 alive() {
     kill -0 "$1" 2>/dev/null && [ "$(ps -p "$1" -o stat= 2>/dev/null)" != "Z" ]
 }

@@ -1,15 +1,4 @@
-"""CSV ingestion and player profile enrichment for tennis match data.
-
-Usage:
-    uv run python -m src.flows.ingest data/matches.csv
-
-Takes a raw ATP-format CSV (winner/loser columns, see
-data/column_glossary.md) and maps it to bronze.match_events rows
-using the same transform as the dev seed flow (src/flows/seed.py). It then
-loads ATP player profiles for the ingested players and runs best-effort
-Wikipedia enrichment.
-
-Shared enrichment logic also used by the Prefect ETL flow."""
+"""Ingest ATP CSVs into bronze and best-effort enrich player profiles."""
 
 from __future__ import annotations
 
@@ -31,15 +20,10 @@ BRONZE_TABLE = "bronze.match_events"
 GOLD_TABLE = "gold.match_features"
 PROFILES_TABLE = "gold.player_profiles"
 
-# The ATP player database is the identity backbone for player_profiles; the
-# Wikipedia flow below is the enrichment fallback for players it does not cover.
+# ATP data provides player identity; Wikipedia adds missing enrichment.
 ATP_DATABASE_CSV = ROOT / "data" / "ATP_player_database.csv"
 
-# Base metadata columns mirrored from the ATP player database (id, player,
-# atpname, birthdate, weight, height, turnedpro, birthplace, coaches, hand,
-# backhand, ioc). Enrichment columns (summary, enriched_at) are
-# not loaded here; they are filled by the Wikipedia fallback in
-# enrich_player().
+# ATP metadata columns; Wikipedia owns summary and enriched_at.
 ATP_PROFILE_COLUMNS = [
     "player_id",
     "display_name",
@@ -92,10 +76,7 @@ RAW_ATP_COLUMNS = [
     "l_bpFaced",
 ]
 
-# Raw ATP tourney_level -> canonical bronze.tournament.
-# Tiered: grand_slam(4), masters(3), atp_500(2), atp_250(1).
-# Non-tier: davis_cup, atp_finals, olympics, professional → map to
-# numeric 0 at final feature-encoding time.
+# Raw ATP level to bronze tournament; non-tier events encode to 0 later.
 LEVEL_MAP = {
     "G": "grand_slam",
     "M": "masters",
@@ -174,19 +155,7 @@ def _recent_form(m: dict[str, Any], hist: list[dict[str, Any]]) -> tuple[int, in
 def atp_rows_to_bronze(
     rows: list[dict[str, Any]], selected_ids: set[str] | None = None
 ) -> pd.DataFrame:
-    """Map raw ATP-format rows to bronze.match_events rows.
-
-    Shared by the ingest CLI and the dev seed (src/flows/seed.py) so both
-    paths use identical semantics: winner on the player1 side, ISO match dates
-    from tourney_date, canonical tournament names (LEVEL_MAP), lowercased
-    round/surface, raw break-point saved/faced values, raw serve/rank/age
-    stats, and per-player wins/matches_last_10 over the RECENT matches
-    strictly before each match.
-
-    `rows` is the full history (rolling form is computed over all of it); when
-    `selected_ids` is given, only those match_ids
-    (tourney_date-tourney_id-match_num) are emitted.
-    """
+    """Map ATP rows to bronze using full-history, strictly-prior form."""
     if not rows:
         return pd.DataFrame({col: [] for col in BRONZE_COLUMNS})
     rows = sorted(rows, key=lambda m: (int(m["tourney_date"]), m["tourney_id"], m["match_num"]))
@@ -194,9 +163,7 @@ def atp_rows_to_bronze(
 
     out = []
     for m in rows:
-        # tourney_id is not unique across events (e.g. id 416 hosts both an
-        # atp_500 and a masters in the same year), so the event date is part
-        # of the match_id to keep every match distinct.
+        # tourney_id repeats, so match_id also includes the event date.
         match_id = f"{int(m['tourney_date'])}-{m['tourney_id']}-{int(m['match_num']):03d}"
         if selected_ids is not None and match_id not in selected_ids:
             continue
@@ -258,16 +225,7 @@ def atp_rows_to_bronze(
 
 
 def load_raw_atp_rows(path: str | Path) -> list[dict[str, Any]]:
-    """Read a raw ATP-format CSV into eligible raw rows (shared seed/ingest).
-
-    Only rows with missing player ids (walkovers, Davis Cup ties) are dropped.
-    Rankings pass through raw: 0 stays 0 (the ATP missing marker) and empty
-    cells become 0, so silver can NULLIF them and gold imputes at train time.
-    Empty stat cells become 0.
-
-    Every raw ATP CSV is required to carry the `indoor` column (I/O); a file
-    missing it is a schema error, not a silently-unknown value.
-    """
+    """Read eligible ATP rows; require indoor data and preserve zero rank markers."""
     df = pd.read_csv(path)
     missing = set(RAW_ATP_COLUMNS) - set(df.columns)
     if missing:
@@ -284,13 +242,7 @@ def load_atp_csv(path: str | Path) -> pd.DataFrame:
 
 
 def _copy_row_value(value: Any) -> Any:
-    """Normalize one pandas cell for psycopg binary COPY.
-
-    Pandas reads whole-number integer CSV columns as float64 whenever any cell
-    is empty, so integral floats must become ints for PostgreSQL integer
-    columns; NaN/pd.NA become NULL and Timestamps become Python dates (psycopg
-    does not adapt pandas Timestamp in binary COPY).
-    """
+    """Convert pandas nulls, integral floats, and timestamps for binary COPY."""
     if value is None or pd.isna(value):
         return None
     if isinstance(value, float) and value.is_integer():
@@ -307,16 +259,7 @@ def _copy_df_into(
     conflict_col: str,
     update_cols: list[str] | None = None,
 ) -> None:
-    """Bulk-insert `df` into `table` via COPY through a temp staging table.
-
-    COPY cannot express ON CONFLICT, so the rows land in a transaction-scoped
-    temp table (same columns as the target) and are then moved with a single
-    INSERT ... SELECT that applies the conflict clause: DO NOTHING when
-    `update_cols` is None, otherwise DO UPDATE SET on the given columns. This
-    replaces the old DuckDB `SELECT ... FROM df` relation scan while keeping
-    one code path for bronze (idempotent inserts) and profiles (ATP metadata
-    refresh that leaves enrichment columns untouched).
-    """
+    """COPY via a transactional stage table so INSERT can apply ON CONFLICT."""
     columns = list(df.columns)
     columns_sql = ", ".join(columns)
     conn = get_conn()
@@ -443,27 +386,13 @@ def _parse_birthdate(series: pd.Series, player_ids: pd.Series) -> pd.Series:
 def load_atp_profiles(
     csv_path: str | Path = ATP_DATABASE_CSV, player_ids: set[str] | None = None
 ) -> int:
-    """Load the ATP player database into gold.player_profiles (identity backbone).
-
-    Maps the ATP header (id, player, atpname, birthdate, weight, height,
-    turnedpro, birthplace, coaches, hand, backhand, ioc) onto the table's
-    base metadata columns. Typed fields (birthdate, weight, height,
-    turned_pro) are parsed exactly once here and land in the table with
-    their real DB types; malformed non-empty values raise. Enrichment
-    columns are left untouched, so existing Wikipedia enrichment survives
-    re-loads. When `player_ids` is given, only those ATP ids are loaded
-    (used by the seed flow for the seeded players only). Returns the count
-    of distinct player ids loaded (duplicate CSV ids collapse under the PK
-    upsert).
-    """
+    """Load typed ATP identity metadata while preserving Wikipedia enrichment."""
     atp = pd.read_csv(csv_path, dtype=str)
     if not {"id", "player", "atpname", "hand", "backhand", "ioc"} <= set(atp.columns):
         raise ValueError(f"ATP database CSV missing expected columns: {csv_path}")
     if player_ids is not None:
         atp = atp[atp["id"].isin(list(player_ids))]
-    # gold.player_profiles.player_id is the PK, so duplicate CSV ids collapse
-    # under the upsert below. Dedupe first (last row wins, same as the upsert)
-    # so the returned count reflects distinct player ids, not raw CSV rows.
+    # Dedupe before upsert so the count reflects distinct player ids.
     atp = atp[~cast(pd.Series, atp["id"]).duplicated(keep="last")]
 
     ids = cast(pd.Series, atp["id"])
@@ -601,18 +530,7 @@ def extract_lead_paragraph(summary: str) -> str | None:
 
 
 def enrich_player(name: str, player_id: str | None = None) -> bool:
-    """Fetch a Wikipedia bio for NAME and write it into the profiles table.
-
-    The row is keyed by `player_id` (defaults to `name`). Enrichment columns
-    (summary, enriched_at) are UPSERTed, so existing ATP base
-    metadata on the row survives; a fresh row additionally gets the Wikipedia
-    title as display_name plus any infobox plays/backhand/height/turned-pro.
-    Returns True only when a non-empty summary was written. Pages without a
-    search match, without extract data, without a usable paragraph, or with an
-    empty extract are SKIPped and never counted as success. The stored bio is
-    the first paragraph of the `Playing style` section, falling back to the
-    first paragraph of the article lead only when the section is unavailable.
-    """
+    """Upsert a usable Wikipedia bio, preferring the Playing style paragraph."""
     pid = player_id or name
     title = search_wikipedia(name)
     if not title:
@@ -628,9 +546,7 @@ def enrich_player(name: str, player_id: str | None = None) -> bool:
         print(f"  SKIP {pid}: empty Wikipedia summary for {title!r}")
         return False
 
-    # Bio text: first paragraph of the `Playing style` section, falling back
-    # to the first paragraph of the article lead only when that section or a
-    # usable paragraph is unavailable.
+    # Prefer Playing style; fall back to the lead paragraph.
     bio_paragraph = extract_playing_style_paragraph(page["summary"]) or extract_lead_paragraph(
         page["summary"]
     )
@@ -640,8 +556,7 @@ def enrich_player(name: str, player_id: str | None = None) -> bool:
 
     infobox = extract_infobox_fields(page["summary"])
 
-    # Typed fields: infobox height is meters ("1.85 m") but the column is cm;
-    # both height and turned_pro become NULL when Wikipedia has no value.
+    # Wikipedia height is meters; the database stores centimeters.
     height_m = cast(str | None, infobox.get("height"))
     height_cm = round(float(height_m) * 100) if height_m else None
     turned_pro_raw = cast(str | None, infobox.get("turned_pro"))
@@ -677,16 +592,7 @@ def enrich_player(name: str, player_id: str | None = None) -> bool:
 
 
 def enrich_players(player_ids: list[str]) -> int:
-    """Enrich existing profile rows for the given player ids, by name.
-
-    Looks each id up in gold.player_profiles and refreshes its Wikipedia
-    enrichment columns (summary/enriched_at) using the profile's
-    display name. Profiles that already carry a non-empty summary are skipped
-    so re-running ingest/seed does not re-fetch Wikipedia. Best-effort: ids
-    without a profile row, or where Wikipedia has no page or returns an empty
-    summary, are skipped. Returns the count of profiles with a non-empty
-    summary written.
-    """
+    """Best-effort enrich profile rows that do not already have a summary."""
     if not player_ids:
         return 0
     conn = get_conn()

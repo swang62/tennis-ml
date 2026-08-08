@@ -15,8 +15,7 @@ from src.features.columns import (
     BRONZE_COLUMNS_INT32,
 )
 
-# Columns where NULL is a legitimate value (unknown/unavailable at ingest time).
-# These are not checked for null by validate_bronze_row.
+# Unknown indoor status is valid at ingest.
 BRONZE_COLUMNS_NULLABLE: tuple[str, ...] = ("is_indoor",)
 
 

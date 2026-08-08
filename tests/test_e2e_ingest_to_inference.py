@@ -1,18 +1,4 @@
-"""End-to-end tests against the shared seeded miniset in PostgreSQL.
-
-The conftest session fixture `seeded_test_db` applies the PostgreSQL bootstrap
-(structure only) and seeds the deterministic miniset — the RECENT most recent
-matches of the TOP_PLAYERS best-ranked players — into the configured local
-PostgreSQL once per session, then points the operational client at it. These
-tests verify that result: the 28-match / 35-player fixture, populated bronze,
-idempotent re-ingest of the seed rows (match_id DO NOTHING), and profile
-upserts that preserve enrichment while refreshing ATP metadata.
-
-Tests that need the dbt-owned gold layer (gold.match_features /
-silver.rolling_features, e.g. schema parity and live inference) opt into the
-`gold_ready` fixture and skip cleanly until that build exists over PostgreSQL
-(Task 4). No test touches a DuckDB file.
-"""
+"""End-to-end PostgreSQL tests for seed, dbt, and ID inference."""
 
 from datetime import date
 from typing import cast
@@ -97,8 +83,7 @@ def test_reinsert_skips_duplicates_keeps_original_row(postgres_ready):  # noqa: 
 
 
 def test_profile_upsert_preserves_enrichment(postgres_ready, tmp_path):  # noqa: ARG001 — skip-gate fixture, unused in body
-    """Loading ATP profiles again refreshes base metadata while leaving an
-    existing Wikipedia summary/enriched_at row untouched."""
+    """Reload ATP metadata without overwriting Wikipedia enrichment."""
     csv = tmp_path / "atp_profiles.csv"
     pd.DataFrame(
         [
@@ -142,10 +127,7 @@ def test_gold_layers_populated(gold_ready):  # noqa: ARG001 — skip-gate fixtur
 
 
 def test_gold_match_features_schema_matches_python_contract(gold_ready):  # noqa: ARG001 — skip-gate fixture, unused in body
-    """The dbt-built training table's live schema == metadata cols + FEATURE_COLS
-    + the appended similarity serve/return columns — the parity check that
-    SQL-text tests and inference-builder tests can't see. Current-match
-    serve/break analysis rates are no longer part of the gold contract (Task 6)."""
+    """Gold schema is metadata, FEATURE_COLS, then similarity-only columns."""
     cols = execute_df(
         "SELECT column_name FROM information_schema.columns "
         "WHERE table_name = 'match_features' AND table_schema = 'gold' "
@@ -155,9 +137,7 @@ def test_gold_match_features_schema_matches_python_contract(gold_ready):  # noqa
 
 
 def test_gold_has_no_current_match_enrichment_columns(gold_ready):  # noqa: ARG001 — skip-gate fixture, unused in body
-    """Task 6: the per-side current-match serve/break enrichment columns are
-    removed from gold.match_features entirely — they are derived on demand from
-    bronze raw counts where the dashboard/analysis needs them."""
+    """Current-match rates stay out of gold and remain derivable from bronze."""
     cols = set(
         execute_df(
             "SELECT column_name FROM information_schema.columns "

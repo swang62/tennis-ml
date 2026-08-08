@@ -1,38 +1,7 @@
-"""ID-based inference feature builder backed by PostgreSQL gold tables.
+"""Build canonical, as-of-dated inference rows from PostgreSQL.
 
-Builds ONE finalized canonical `FEATURE_COLS` row for a match between two
-players as of a given date, mirroring `gold.match_features` semantics:
-
-* Canonicalization: the lexicographically lower player id is the `player_*`
-  side and the higher is `opponent_*`, so `(X, Y)` and `(Y, X)` produce
-  identical rows (same as `match_features.sql`'s canonical-side collapse).
-* Rolling form comes from each player's newest
-  `silver.rolling_features` snapshot STRICTLY BEFORE the as-of date
-  (no dedicated latest table/view; the newest snapshot is immediately usable).
-* `days_since_last_match` (as-of date minus that snapshot's date) and
-  `matches_30d` (count of `silver.player_matches` rows in
-  `[as_of - 30 days, as_of)`) are computed at the as-of date.
-* Head-to-head: the most recent 5 prior meetings between the canonical pair
-  (match_date STRICTLY BEFORE the as-of date, deduped to distinct match_ids)
-  come from ONE parameterized query. `player_h2h_*` is the canonical
-  player side's perspective (matches + wins); zero prior meetings -> counts 0.
-* Missing players (no eligible snapshot) and NULL snapshot cells are imputed
-  from on-demand global aggregates over the eligible snapshot pool: MEDIAN
-  for ranking/streak-related values, MEAN for other numerics. When BOTH
-  players are missing, both sides receive the same imputed values, so every
-  pairwise differential is 0 (neutral).
-* Profile-derived identity (is_left_handed, years_pro-at-as-of-date) comes
-  from `gold.player_profiles`; players without a profile and NULL cells are
-  imputed from on-demand aggregates over all profiles (mean left-handed rate,
-  mean years-pro at the as-of date), so the same neutral differentials hold
-  for two profile-less players.
-* If the eligible pool is empty, constant fallbacks are used:
-  ranking=100, rank_points=500, age=26, rates=0.0, streak=0,
-  days_since_last_match=365, matches_30d=0, left-handed rate=0.0,
-  years_pro=8.
-
-Player ids and dates NEVER appear inside SQL strings: every one flows through
-`%s` placeholders and a params list.
+Rolling values use snapshots strictly before the requested date. Missing values
+use pool aggregates; SQL values are always passed as parameters.
 """
 
 from __future__ import annotations
@@ -58,10 +27,7 @@ VALID_SURFACES = {"clay", "grass", "hard", "carpet"}
 VALID_TOURNAMENT_LEVELS = {0, 1, 2, 3, 4}
 VALID_ROUND_ENCODINGS = {0, 1, 2, 3, 4, 5, 6, 7}
 
-# Optional convenience layer: human-readable tournament/round strings mapped to
-# the SAME integer encodings as the CASE expressions in
-# dbt/models/gold/match_features.sql. Unknown strings map to 0 (that codebook's
-# ELSE branch), so stored encodings are unchanged.
+# String aliases mirror the dbt context codebook; unknown values map to 0.
 _TOURNAMENT_LEVELS = {
     "grand_slam": 4,
     "masters": 3,
@@ -82,9 +48,7 @@ _ROUND_ENCODINGS = {
     "f": 7,
 }
 
-# Constant fallbacks when the imputation pool is empty (no eligible snapshots
-# anywhere before the as-of date). Mirrors the documented cold-start fallback
-# days_since_last_match=365 from gold.match_features.
+# Empty-pool cold-start fallbacks mirror gold.match_features.
 _DEFAULT_RANKING = 100
 _DEFAULT_RANK_POINTS = 500.0
 _DEFAULT_AGE = 26.0
@@ -110,8 +74,7 @@ ORDER BY player_match_number DESC
 LIMIT 1
 """
 
-# 30-day pre-match activity count, same window semantics as player_matches'
-# matches_30d_before ([as_of - 30 days, as_of), strictly). Point lookup.
+# Pre-match activity count for [as_of - 30 days, as_of).
 _MATCHES_30D_SQL = f"""
 SELECT COUNT(*) AS n
 FROM {SILVER_PLAYER_MATCHES}
@@ -120,15 +83,7 @@ WHERE player_id = %s
   AND match_date < %s::date
 """
 
-# Most recent 5 prior meetings between the canonical pair, deduped to distinct
-# match_ids (silver.player_matches has TWO rows per match — one per player
-# perspective; the GROUP BY collapses them). a_won = 1 iff the canonical
-# a-side (the lower id, always the player_* side) won the meeting — both
-# perspective rows of a meeting agree on it, so MAX is safe. Same
-# date-granularity rule as match_features.sql: match_date strictly before the
-# as-of date; same-date meetings excluded. Params: lower_id, higher_id,
-# lower_id, higher_id, as_of_iso (prepared only — ids/dates never appear in
-# the SQL text). Point lookup on the pair/date path.
+# Last five distinct, strictly-prior meetings for the canonical pair.
 _H2H_PRIOR_SQL = f"""
 SELECT match_id, a_won
 FROM (
@@ -149,15 +104,7 @@ ORDER BY match_date DESC, match_id DESC
 LIMIT 5
 """
 
-# Broad aggregate reads below each scan the whole snapshot/profile pool to
-# produce one row of aggregates. They run through the regular parameterized
-# `execute_df` path like every other query — plain PostgreSQL aggregates.
-# Result parity with the pool they impute from is covered by
-# test_inference_features.py::test_pool_aggregates_return_expected_values.
-
-# On-demand global imputation pool over all snapshots strictly before the
-# as-of date. One row; MEDIAN (percentile_cont 0.5) for ranking/streak-related
-# values, MEAN for the others. Broad aggregate read.
+# Snapshot imputation pool: medians for rank/streak values, means otherwise.
 _POOL_AGG_SQL = f"""
 SELECT
     PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY latest_player_ranking)     AS latest_player_ranking,
@@ -183,9 +130,7 @@ FROM {SILVER_ROLLING_FEATURES}
 WHERE snapshot_date < %s::date
 """
 
-# MEDIAN of per-player days_since_last_match at the as-of date, over players
-# that have an eligible snapshot. One row; NULL when the pool is empty. Date
-# subtraction returns whole days in PostgreSQL. Broad aggregate read.
+# Median per-player days since the latest eligible snapshot.
 _MEDIAN_DAYS_SQL = f"""
 SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY days_since) AS median_days_since
 FROM (
@@ -196,9 +141,7 @@ FROM (
 )
 """
 
-# MEDIAN of per-player matches_30d at the as-of date, over players that have
-# an eligible snapshot (players with zero window matches contribute 0). Broad
-# aggregate read.
+# Median 30-day count across players with eligible snapshots.
 _MEDIAN_MATCHES_30D_SQL = f"""
 SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY matches_30d) AS median_matches_30d
 FROM (
@@ -216,18 +159,14 @@ FROM (
 )
 """
 
-# Per-player static identity from gold.player_profiles (one row per player).
-# Point lookup.
+# Per-player static identity lookup.
 _PROFILE_SQL = f"""
 SELECT player_id, height, handedness, turned_pro
 FROM {PROFILES_TABLE}
 WHERE player_id = %s
 """
 
-# On-demand profile imputation pool over ALL profiles (identity is static, so
-# no as-of window applies beyond the years_pro computation): mean left-handed
-# rate, and mean years-pro at the as-of date. One row; NULL when no profiles
-# exist. Broad aggregate read.
+# Profile imputation pool; years_pro is calculated at the as-of year.
 _PROFILE_POOL_AGG_SQL = f"""
 SELECT
     AVG(CASE WHEN handedness = 'L' THEN 1 ELSE 0 END) AS left_handed_rate,
@@ -249,10 +188,7 @@ FROM {PROFILES_TABLE}
 """
 
 
-# Import-time reference to the real date class. Tests monkeypatch the module
-# level `date` name (to fix date.today() for default-as-of tests), so
-# `_to_date`'s isinstance checks must use a reference that patching cannot
-# shadow.
+# Keep the real type because tests monkeypatch the module's `date` name.
 _DATE_TYPE = date
 
 
@@ -286,22 +222,12 @@ def _side_values(
     median_days_since: float,
     median_matches_30d: float,
 ) -> dict[str, int | float]:
-    """Build one canonical side's values, imputing NULLs and cold starts.
-
-    Keys: "ranking", "rank_points", "age", "weighted_form_10", "win_rate_10",
-    "ace_rate_10", "first_serve_pct_10", "break_points_saved_pct_10",
-    "first_serve_win_pct_10", "second_serve_win_pct_10", "serve_win_pct_10",
-    "df_rate_10", "aces_per_svc_game_10", "rank_trend_10", "avg_rank_faced_10",
-    "streak", "days_since_last_match", "matches_30d", "surface_win_rate_10".
-    `row` is the side's latest eligible snapshot (None on cold start).
-    """
+    """Build one side's values from its latest snapshot or pool defaults."""
 
     def cell(snapshot_col: str, default: float) -> float:
         if row is not None:
             value = row.get(snapshot_col)
-            # PostgreSQL returns numeric columns as Decimal and float columns
-            # as float. NaN self-compares unequal, so `value == value` is the
-            # NaN test (Decimal and int are always self-equal).
+            # NaN is the only supported numeric value that is not self-equal.
             if value is not None and isinstance(value, (Real, Decimal)) and value == value:
                 return float(value)
         return _agg_or(agg, snapshot_col, default)
@@ -352,14 +278,7 @@ def _side_values(
 
 
 def _profile_values(pid: str, as_of_date: date, agg: dict[str, float]) -> dict[str, float]:
-    """Fetch one side's profile-derived values from gold.player_profiles.
-
-    Keys: "is_left_handed", "years_pro". A missing profile (or a NULL
-    turned_pro/handedness cell) falls back to the on-demand pool aggregates, so
-    two unknown players get identical defaults (every profile differential
-    collapses to 0) and the row stays NaN-free. years_pro is time-aware: as-of
-    year minus turned_pro, not the raw year.
-    """
+    """Return profile values, using pool defaults for missing cells."""
     df = execute_df(_PROFILE_SQL, [pid])
     if df.empty:
         return {
@@ -373,9 +292,7 @@ def _profile_values(pid: str, as_of_date: date, agg: dict[str, float]) -> dict[s
         if not pd.isna(turned_pro)
         else _agg_or(agg, "avg_years_pro", _DEFAULT_YEARS_PRO)
     )
-    # Missing/unknown handedness (NULL or any value other than L/R) uses the
-    # pool left-handed rate, mirroring the SQL side where non-L/R handedness
-    # stays NULL for train-time imputation. Never hardcode 0 here.
+    # Non-L/R handedness uses the pool rate, matching train-time imputation.
     handedness = row["handedness"]
     is_left_handed = (
         float(handedness == "L")
@@ -400,25 +317,7 @@ def _build_inference_features_with_meta(
     round: str | None = None,
     is_indoor: int | None = None,
 ) -> tuple[pd.DataFrame, dict[str, object]]:
-    """Build ONE finalized canonical inference row.
-
-    Returns a 1-row DataFrame with columns exactly:
-        [*FEATURE_COLS, "player_id", "opponent_id"]
-    (in that order). The canonical lower-id player is always the player_*
-    side, matching gold.match_features' orientation. No NaNs in any cell.
-
-    `tournament_level` and `round_encoded` are the integer context features
-    (default 0), validated to the same value sets as the CASE expressions in
-    dbt/models/gold/match_features.sql.
-
-    `is_indoor` is 1 (indoor), 0 (outdoor), or None (unknown, defaults to 0
-    in the feature row).
-
-    Optional `tournament`/`round` string aliases are a convenience layer that
-    maps through `_TOURNAMENT_LEVELS`/`_ROUND_ENCODINGS` to those SAME integer
-    encodings; unknown strings map to 0 (the codebook's ELSE branch). Pass
-    either the int or the string for each, never both.
-    """
+    """Build one NaN-free canonical row in the FEATURE_COLS contract."""
     started_at = perf_counter()
 
     # ── Boundary validation ──
@@ -466,8 +365,6 @@ def _build_inference_features_with_meta(
     lower_id, higher_id = sorted([player_id.strip(), opponent_id.strip()])
 
     # ── On-demand global imputation pool (one set of aggregates) ──
-    # Pool reads are broad aggregate scans over silver.rolling_features /
-    # gold.player_profiles; they run through the regular execute_df path.
     as_of_iso = as_of_date.isoformat()
     agg = first_row_dict(execute_df(_POOL_AGG_SQL, [as_of_iso]))
     pool_counts = first_row_dict(execute_df(_POOL_COUNTS_SQL, [as_of_iso]))
@@ -502,11 +399,7 @@ def _build_inference_features_with_meta(
     player_side.update(_profile_values(lower_id, as_of_date, profile_agg))
     opponent_side.update(_profile_values(higher_id, as_of_date, profile_agg))
 
-    # ── Head-to-head: one query for the canonical pair (player side) ──
-    # The SQL returns the most recent 5 prior meetings (deduped to distinct
-    # match_ids, strictly before the as-of date) with a_won = 1 iff the
-    # canonical player side won. The final contract keeps only the canonical
-    # player side's counts (opponent = complement, derived on demand).
+    # ── Head-to-head: last five prior meetings for the canonical pair ──
     h2h_df = execute_df(_H2H_PRIOR_SQL, [lower_id, higher_id, lower_id, higher_id, as_of_iso])
     h2h_matches = len(h2h_df)
     h2h_player_wins = int(h2h_df["a_won"].sum()) if h2h_matches else 0

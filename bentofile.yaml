@@ -1,18 +1,5 @@
-# Bento build template for the stacked-ensemble serving image.
-#
-# This file is a TEMPLATE: `just deploy-bento` (src/flows/deploy.py) copies
-# it, replaces the `models:` list with the exact BentoML tags imported from
-# the pinned MLflow versions (resolved from the `ensemble_lr_model` source
-# run params), and runs the build against that generated
-# `data/processed/bentofile.pinned.yaml`. The `:latest` refs below are
-# placeholders only — the deploy target never builds from this file directly.
-#
-# v2 spec: image/requirements live in src/serving/service.py via
-# `bentoml.images.Image(...)` passed to @bentoml.service(image=...). This file
-# only carries the service pointer, file includes, and model deps. BentoML
-# generates the Dockerfile from the service Image spec. `nn_best` is
-# intentionally NOT in `models:` — it is served from the ONNX artifact under
-# `include:` instead.
+# Template copied and pinned by deploy.py; `latest` model refs are placeholders.
+# Image dependencies live in service.py; nn_best is included as an ONNX artifact.
 name: stacked_ensemble
 service: "src/serving/service.py:TennisPredictor"
 include:

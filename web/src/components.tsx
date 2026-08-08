@@ -89,8 +89,7 @@ export function ResultBadge({ won }: { won: boolean }) {
   )
 }
 
-// Compact W/L strip for recent form, oldest -> newest. Chips are immutable
-// display items; key by result + occurrence count rather than list index.
+// Oldest-to-newest result chips use stable result-occurrence keys.
 export function FormStrip({ results }: { results: ('won' | 'lost')[] }) {
   const label = results.map((r) => (r === 'won' ? 'W' : 'L')).join(' ')
   const seen: Record<string, number> = {}
@@ -109,9 +108,7 @@ export function FormStrip({ results }: { results: ('won' | 'lost')[] }) {
   )
 }
 
-// Closed-by-default, accessible combobox over the players list (sorted by
-// display_name upstream). Search is by display name only; the selected value
-// stays the player_id for state, query keys, routes and API calls.
+// Closed-by-default combobox searches names but stores player ids.
 export function PlayerPicker({
   players,
   value,
@@ -147,8 +144,7 @@ export function PlayerPicker({
     if (refocus) triggerRef.current?.focus()
   }
 
-  // While open, focus the search field and close on any pointer press outside
-  // the widget, so the list is never left permanently expanded.
+  // Focus on open and close on outside pointer presses.
   useEffect(() => {
     if (!open) return
     inputRef.current?.focus()

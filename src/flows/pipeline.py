@@ -26,8 +26,7 @@ NB_ORDER = [
     "05_evaluate.ipynb",
 ]
 
-# Load the env file in this parent process so papermill kernels (which inherit
-# os.environ) see it before their own load_env() cell runs.
+# Kernels inherit this environment before their own load_env() cell runs.
 load_env()
 
 
@@ -71,24 +70,20 @@ if __name__ == "__main__":
     LOGS.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = LOGS / f"pipeline_{timestamp}.log"
-    # Tee the whole run (per-notebook prints + Papermill kernel progress) to a
-    # log file under artifacts/logs while keeping console output streaming.
+    # Keep notebook output streaming while capturing it in the run log.
     with (
         log_path.open("w") as log,
         redirect_stdout(_Tee(sys.stdout, log)),
         redirect_stderr(_Tee(sys.stderr, log)),
     ):
-        # Refresh the atomic PostgreSQL -> DuckDB training snapshot before any
-        # notebook runs. Training fails (non-zero exit) rather than silently
-        # reading a stale snapshot when the refresh fails.
+        # Refresh first so training cannot read a stale snapshot.
         print("Refreshing training snapshot from PostgreSQL...")
         refresh_snapshot()
         print(f"  Snapshot refreshed: {SNAPSHOT_PATH}")
 
         print(f"Pipeline starting — {len(NB_ORDER)} notebooks")
         for name in NB_ORDER:
-            # Notebooks own their parameter defaults via their tagged parameter
-            # cells; nothing is injected.
+            # Tagged parameter cells own notebook defaults.
             run_notebook(name)
 
         print(f"\n{'=' * 60}")

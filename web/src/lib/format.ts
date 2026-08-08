@@ -1,8 +1,6 @@
 import type { MatchRound, TournamentTier } from '../api'
 
-// Label maps and derivations shared by pages. Pure data formatting — no
-// backend access, no invented values (fair odds are derived 1/p from the
-// model probability and labelled as implied odds).
+// Shared labels and client-side display derivations.
 
 export const TIER_LABEL: Record<TournamentTier, string> = {
   grand_slam: 'Grand Slam',
@@ -25,8 +23,7 @@ export const ROUND_LABEL: Record<MatchRound, string> = {
   f: 'F',
 }
 
-// Fair decimal odds implied by a probability (0% margin). Derived, not
-// sourced — presented as "fair odds" in the UI.
+// Fair decimal odds implied by a zero-margin probability.
 export function fairOdds(p: number): string {
   if (!(p > 0 && p < 1)) return '—'
   return (1 / p).toFixed(2)
@@ -34,10 +31,7 @@ export function fairOdds(p: number): string {
 
 const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
-// Scrub known player ids out of user-facing error text. Backend error strings
-// can echo the requested id (e.g. "unknown player_id: <id>"), and the UI
-// renders them in ErrorBox; ids the caller knows about are stripped and the
-// leftover punctuation/whitespace collapsed.
+// Remove requested ids from backend errors before rendering them.
 export function sanitizeErrorMessage(message: string, knownIds: readonly string[]): string {
   let out = message
   for (const id of knownIds) {

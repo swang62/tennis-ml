@@ -1,11 +1,4 @@
-"""Tests for the PostgreSQL -> DuckDB training snapshot.
-
-The pure-validation and atomicity behavior runs entirely on locally built
-DuckDB fixtures (no PostgreSQL required). The live copy path
-(``refresh_snapshot`` against the configured PostgreSQL) is exercised only
-when the ``postgres_ready`` session fixture is available and otherwise skips,
-mirroring the rest of the suite.
-"""
+"""Tests for PostgreSQL-to-DuckDB training snapshots."""
 
 import os
 
@@ -55,8 +48,7 @@ def _write_valid_snapshot(
 
 
 def test_meta_cols_precede_feature_cols() -> None:
-    """The snapshot contract is the 8 metadata columns, the 36 features, then
-    the 10 appended similarity-analysis serve/return columns."""
+    """Snapshot order is metadata, model features, then similarity columns."""
     assert META_COLS == _META
     assert len(META_COLS) == 8
     assert len(FEATURE_COLS) == 36

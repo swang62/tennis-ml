@@ -1,15 +1,4 @@
-"""Focused pytest tests for the ID-based inference feature builder.
-
-Target: `src.features.inference.build_inference_features`.
-
-Tests run against the shared seeded PostgreSQL DB built per session by the
-conftest fixture (`infra/postgres/init.sql` + `src/flows/seed.py` + the dbt
-gold models), never a DuckDB file. The module is gated on the `gold_ready`
-fixture and skips cleanly until dbt has built the gold/silver layers over
-PostgreSQL. All date-dependent tests pass an explicit `as_of_date` for
-determinism, except the default-today test, which monkeypatches `date.today`
-to a fixed date.
-"""
+"""Integration tests for the PostgreSQL-backed ID inference builder."""
 
 import math
 from datetime import date
@@ -36,15 +25,7 @@ def _require_gold(gold_ready):
 
 @pytest.fixture(autouse=True)
 def _cleanup_h2h_rows(_require_gold):
-    """Remove synthetic H2H rows from the shared dev PostgreSQL after each test.
-
-    _insert_prior_meetings writes straight into silver.player_matches; those
-    rows have NULL columns (player_match_number, rates, ...), so they would
-    break dbt's uniqueness and 30-day regression tests on the next dbt run.
-    The dev DB is shared across pytest and dbt, so cleanup is mandatory.
-    Depends on the module skip-gate so an unreachable PostgreSQL still skips
-    the module cleanly instead of erroring in teardown.
-    """
+    """Remove synthetic rows that would violate later dbt tests."""
     yield
     with get_conn().cursor() as cur:
         cur.execute(
@@ -91,12 +72,7 @@ def test_reversed_ids_canonical_identical():
 
 
 def test_repeated_identical_inputs_are_deterministic():
-    """Determinism contract: the same request (identical ids, surface, context,
-    as_of_date) yields a byte-identical canonical row on every call while the
-    underlying data/artifacts are unchanged. This is the model-free half of the
-    prediction-determinism guarantee — the ensemble head is deterministic on a
-    fixed feature row, so identical rows imply identical predictions until the
-    data or model artifacts change."""
+    """Identical requests produce identical canonical rows."""
     a = build_inference_features("S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
     b = build_inference_features("S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
     c = build_inference_features("S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
@@ -105,13 +81,7 @@ def test_repeated_identical_inputs_are_deterministic():
 
 
 def test_known_players_profile_features():
-    """Profile-derived features for two known players, in canonical order.
-
-    S0AG (Sinner): right-handed, turned pro 2018. Z355 (Zverev): right-handed,
-    turned pro 2013. Canonical order puts S0AG on the player_* side; years_pro
-    is years-pro AT the as-of date (2026 - year). Height is NOT a model feature
-    (Task 6) — only is_left_handed and years_pro remain.
-    """
+    """Known profile features use canonical order and as-of years_pro."""
     out = build_inference_features("S0AG", "Z355", "clay", as_of_date=AS_OF_AFTER_ALL_MATCHES)
     row = out.iloc[0]
     assert row["player_is_left_handed"] == 0.0
@@ -138,16 +108,7 @@ def test_years_pro_time_aware_and_cold_start():
 
 
 def test_pool_aggregates_return_expected_values():
-    """The six broad aggregate reads return their expected single-row results
-    over the seeded pool, and the builder imputes exactly those values for a
-    cold-start player.
-
-    These are the pool queries the inference builder routes through the plain
-    parameterized `execute_df` path; this locks the "aggregates match the pool
-    they impute from" contract on standard PostgreSQL, with no extension path.
-    The seeded pool is non-empty at the fixed as-of date, so every aggregate
-    is non-NULL and finite.
-    """
+    """Pool queries return finite aggregates used for cold-start imputation."""
     as_of = "2026-09-01"
     cases = [
         (
@@ -221,19 +182,7 @@ def test_pool_aggregates_return_expected_values():
 
 
 def test_historical_as_of_excludes_later_snapshots():
-    """Regression: the as-of lookup must use the newest snapshot strictly before
-    the date, not the first or the overall latest.
-
-    S0AG's seeded snapshot sequence: #1 = 2026-04-12 (Monte Carlo, won),
-    #2..#3 won, #4 = 2026-05-28 (Roland Garros, loss), #5 = 2026-06-29
-    (Wimbledon R128, won). At as_of 2026-06-30 the newest strictly-before
-    snapshot is #5 with win_rate_10 = 4/5 = 0.8; snapshot #6 (2026-07-01) is
-    one-match stale (5/6 = 0.833). A builder that used snapshot #1 (win_rate
-    1.0) or the overall latest (0.9) fails loudly. The per-side win_rate_10 is
-    not a model column, so the selection is verified via player_weighted_form_10
-    (exponentially-decayed, changes per snapshot) and the direct gold-table
-    cross-check.
-    """
+    """Use the newest snapshot strictly before the as-of date."""
     out = build_inference_features("S0AG", "Z355", "hard", as_of_date=date(2026, 6, 30))
     # Cross-check the expected snapshot directly in the gold table.
     snapshot = execute_df(
@@ -261,15 +210,7 @@ class _FixedTodayDate(date):
 
 
 def test_default_today_fecha(monkeypatch):
-    """Default as_of_date (date.today) builds the same row as an explicit date.
-
-    `date.today` cannot be monkeypatched on the immutable datetime.date C type,
-    so the module-level `date` name in src.features.inference is swapped for a
-    subclass with a fixed `today()` (monkeypatch restores it afterwards). The
-    explicit-date row is built BEFORE the patch so its isinstance checks see
-    the real date class; the default branch (`as_of_date is None`) is the code
-    path under test.
-    """
+    """Default date.today matches an explicit as-of date."""
     out_explicit = build_inference_features("S0AG", "Z355", "clay", as_of_date=date(2026, 9, 1))
     monkeypatch.setattr("src.features.inference.date", _FixedTodayDate)
     out_default = build_inference_features("S0AG", "Z355", "clay")
@@ -288,13 +229,7 @@ def test_default_today_fecha(monkeypatch):
     ids=["known-first", "reversed"],
 )
 def test_one_missing_player_imputed_no_nans(args):
-    """One unknown player is imputed from the global pool; canonical ids hold.
-
-    In the reversed order 'UNKNOWN_ID' would be the raw lower id only if it
-    sorted below 'S0AG' — it does not, so the canonical lower id 'S0AG' still
-    wins the player_* side and the unknown gets the opponent side (Bento's bio
-    lookup then misses -> zero bio vector, preserved by id passthrough).
-    """
+    """One unknown player is pool-imputed without changing canonical ids."""
     player_id, opponent_id = args
     out = build_inference_features(
         player_id, opponent_id, "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES
@@ -306,10 +241,7 @@ def test_one_missing_player_imputed_no_nans(args):
         assert math.isfinite(row[col]), f"{col} is not finite: {row[col]!r}"
     # The known player's form differs from the pool default (diff exists).
     assert row["win_rate_diff"] != 0
-    # The unknown opponent side equals the on-demand global pool aggregates
-    # (MEDIAN for streak, MEAN for rates), same SQL as the builder. Ranking/
-    # per-side win_rate_10 are not model columns, so the per-side values that
-    # ARE exposed (weighted_form_10, surface_win_rate_10) are checked directly.
+    # Check exposed values that use the same pool as the builder.
     pool = execute_df(
         "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY streak) AS streak, "
         "AVG(weighted_form_10) AS weighted_form_10, "
@@ -613,20 +545,11 @@ def test_null_handedness_falls_back_to_pool_rate(monkeypatch):
 
 # ── Head-to-head (perspective-explicit, last-5 recency) ──
 #
-# The seeded miniset has no pair that meets twice, so prior-meeting behavior
-# is exercised with synthetic silver.player_matches rows for dedicated pairs
-# (one row per player perspective per match, exactly like the real table).
-# Each test uses its own pair so no test depends on another's inserts, and the
-# ids never collide with any other test's players.
+# Seed data has no repeated pair, so H2H tests use isolated synthetic rows.
 
 
 def _insert_prior_meetings(pair_a: str, pair_b: str, meetings: list[tuple[str, str, int]]) -> None:
-    """Insert prior meetings between a canonical pair into silver.player_matches.
-
-    Each meeting is two rows (A's perspective, B's perspective) with
-    complementary match_won, mirroring the real table. `a_won` is 1 iff
-    `pair_a` (the canonical lower id) won. Dates are ISO strings.
-    """
+    """Insert canonical prior meetings as two complementary player perspectives."""
     rows = []
     match_ids = []
     for match_id, date_iso, a_won in meetings:
@@ -634,10 +557,7 @@ def _insert_prior_meetings(pair_a: str, pair_b: str, meetings: list[tuple[str, s
         rows.append((match_id, date_iso, pair_a, pair_b, a_won))
         rows.append((match_id, date_iso, pair_b, pair_a, 1 - a_won))
     with get_conn().cursor() as cur:
-        # The seeded DB is session-scoped and shared across pytest runs, so a
-        # re-run must not collide with rows this pair inserted before: delete
-        # this batch's own match_ids first (distinct ids keep the inserts
-        # within one test accumulating).
+        # Make reruns idempotent without disturbing other synthetic pairs.
         cur.executemany(
             "DELETE FROM silver.player_matches WHERE match_id = %s",
             [(mid,) for mid in match_ids],
@@ -754,22 +674,8 @@ def test_h2h_reversed_raw_ids_identical():
 
 # ── Train/inference parity (strongest train/serve agreement check) ──
 #
-# A gold.match_features row pairs each player with their N-1 post-match
-# snapshot; build_inference_features at the same match date can only see
-# snapshots strictly before it (which is also N-1). The two must agree on
-# every feature that has an as-of-date source.
-#
-# Known intentional asymmetries (documented; both sides are pre-match
-# information, so neither leaks the current match's outcome or raw stats):
-#   * Match-day values: gold records the CURRENT match's ranking / rank
-#     points / age (from silver.player_matches); the inference builder can
-#     only know the newest snapshot's values (last observed strictly before
-#     the as-of date). They differ whenever a ranking changed or age advanced
-#     between the N-1 match and the current one. rank_trend_* and the
-#     ranking/age differentials inherit the same gap.
-#   * Gold NULLs: gold keeps NULLs (no zero-fill; the train pipeline imputes
-#     them); inference imputes on-demand pool aggregates, so a NULL gold cell
-#     has no inference counterpart to compare against.
+# Gold and inference share N-1 snapshots. Match-day fields and gold NULLs are
+# intentionally asymmetric: inference only knows prior values and imputes NULLs.
 ASYM_MATCH_DAY_COLS = {
     "player_ranking",
     "opponent_ranking",
@@ -783,10 +689,7 @@ ASYM_MATCH_DAY_COLS = {
     "age_diff",
 }
 
-# A match where both players have at least one strictly-prior snapshot (no
-# cold-start imputation on either side) and no same-date prior snapshot, so
-# the inference lookup at the match date resolves to exactly the same N-1
-# snapshots the gold row used.
+# Select a match whose both sides resolve to the same N-1 snapshots.
 _PARITY_MATCH_SQL = """
 SELECT mf.*
 FROM gold.match_features mf

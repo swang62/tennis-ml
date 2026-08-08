@@ -1,9 +1,4 @@
-"""Shared small helpers for the tennis-ml repo.
-
-Environment loading is explicit only: call load_env() at process entry points
-(pipeline runner, notebooks). Nothing is loaded on import. Also hosts the
-repo-local kernelspec registration used by the notebook pipeline runner.
-"""
+"""Environment loading and repository-local Jupyter kernel helpers."""
 
 import json
 import os
@@ -17,13 +12,7 @@ KERNEL_DIR: Path | None = None
 
 
 def ensure_kernel() -> str:
-    """Register a repo-local kernelspec for the running interpreter; return its name.
-
-    Notebook metadata kernelspecs are machine-specific: 'python3' resolves to a
-    pyenv interpreter without project deps, and a stale user spec points at a
-    removed venv. A repo-local spec for sys.executable (the interpreter actually
-    running this pipeline) executes deterministically on any machine.
-    """
+    """Register a kernel for this interpreter, avoiding stale machine-specific specs."""
     global KERNEL_DIR
     name = IMAGE_NAME
     if not name:
@@ -41,8 +30,7 @@ def ensure_kernel() -> str:
             indent=2,
         )
     )
-    # JUPYTER_PATH entries are searched before user kernel dirs, so the
-    # repo-local spec wins over any stale machine-specific spec of the same name.
+    # Prefer the repository kernel over a stale user kernel of the same name.
     repo_path = str(KERNEL_DIR.parents[1])
     existing = os.environ.get("JUPYTER_PATH", "")
     os.environ["JUPYTER_PATH"] = repo_path if not existing else f"{repo_path}{os.pathsep}{existing}"
