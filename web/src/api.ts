@@ -119,6 +119,17 @@ export interface H2HResponse {
   summary: H2HSummary
 }
 
+export interface SimilarPlayer {
+  player_id: string
+  display_name: string
+  score: string
+}
+
+export interface SimilarPlayersResponse {
+  player_id: string
+  similar_players: SimilarPlayer[]
+}
+
 export interface PredictResponse {
   player_id: string
   opponent_id: string
@@ -176,6 +187,10 @@ export function getHeadToHead(a: string, b: string): Promise<H2HResponse> {
   )
 }
 
+export function getSimilarPlayers(playerId: string, limit = 3): Promise<SimilarPlayersResponse> {
+  return get(`/similar_players?player_id=${encodeURIComponent(playerId)}&limit=${limit}`)
+}
+
 export interface PredictInput {
   player_id: string
   opponent_id: string
@@ -187,7 +202,7 @@ export interface PredictInput {
 }
 
 // Raw (unwrapped) response — the backend returns the flat dict directly.
-export async function predictFromIds(input: PredictInput): Promise<PredictResponse> {
+async function doPredictFromIds(input: PredictInput): Promise<PredictResponse> {
   const res = await fetch(BASE + '/predict_from_ids', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -203,4 +218,25 @@ export async function predictFromIds(input: PredictInput): Promise<PredictRespon
     throw new ApiError(res.status, body?.error ?? `HTTP ${res.status}`)
   }
   return body as unknown as PredictResponse
+}
+
+// Dedupe identical prediction POSTs: repeated identical inputs share one
+// in-flight/completed request keyed by the canonical JSON payload, so the
+// predictor makes exactly one network request per distinct input. The Bento
+// is deterministic for identical inputs, so a resolved response is safe to
+// reuse; failures are dropped from the cache so an identical retry re-hits
+// the network.
+const predictCache = new Map<string, Promise<PredictResponse>>()
+
+export function predictFromIds(input: PredictInput): Promise<PredictResponse> {
+  const key = JSON.stringify(input)
+  const hit = predictCache.get(key)
+  if (hit) return hit
+  const pending = doPredictFromIds(input)
+  predictCache.set(key, pending)
+  pending.then(
+    () => {},
+    () => predictCache.delete(key),
+  )
+  return pending
 }

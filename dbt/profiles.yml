@@ -1,19 +1,23 @@
-# dbt runs against the same PostgreSQL the pipeline uses (the local dev
-# database configured through the POSTGRES_* contract in .env). Credentials
-# come from the shared POSTGRES_* contract in .env; POSTGRES_PASSWORD is a
-# required runtime secret (never defaulted, never committed). The profile
+# dbt runs against the same PostgreSQL the pipeline uses: the single
+# DATABASE_URL connection contract in .env — passwordless for the local
+# Homebrew instance (trust auth), password-bearing for the Compose stack
+# (fixed local-dev credential in compose.yaml). dbt-postgres needs discrete
+# fields, so entry points that spawn dbt (`just db-dbt`, the ETL flow) export
+# POSTGRES_HOST/PORT/USER/PASSWORD/DB parsed from that one URL
+# (src/db/conninfo.py). The env_var defaults here only shape error messages
+# when an export is missing; they never point at another database. The profile
 # itself contains no secrets. dbt does not load .env itself, so export it
-# first (`just db-dbt` sources .env before invoking dbt; `just db-etl`
-# inherits it via load_env).
+# first (`just db-dbt` sources .env and derives the fields; `just db-etl`
+# inherits them via load_env).
 tennis_ml:
   target: dev
   outputs:
     dev:
       type: postgres
       host: "{{ env_var('POSTGRES_HOST', '127.0.0.1') }}"
-      port: "{{ env_var('POSTGRES_PORT', '6543') | as_number }}"
+      port: "{{ env_var('POSTGRES_PORT', '5432') | as_number }}"
       user: "{{ env_var('POSTGRES_USER', 'postgres') }}"
-      password: "{{ env_var('POSTGRES_PASSWORD') }}"
+      password: "{{ env_var('POSTGRES_PASSWORD', '') }}"
       dbname: "{{ env_var('POSTGRES_DB', 'tennis') }}"
       schema: gold
       threads: 1

@@ -7,57 +7,16 @@ training table). Also enriches player bios (first `Playing style` paragraph,
 lead fallback) once the gold layer exists.
 """
 
-import subprocess
-import sys
 from datetime import datetime
 from pathlib import Path
-from typing import TextIO
 
 from prefect import flow, task
 
-from src.constants import GOLD_TABLE, LOGS, ROOT
+from src.constants import GOLD_TABLE, LOGS
 from src.db.client import get_conn
+from src.db.dbt import run_dbt_build
 from src.flows.ingest import enrich_missing as _enrich_missing
 from src.utils import load_env
-
-# --- ETL-specific dbt gold build (only used by this flow) ---
-DBT_BUILD_CMD = ["uv", "run", "dbt", "build", "--project-dir", "dbt", "--profiles-dir", "dbt"]
-
-
-def run_dbt_build(
-    profiles_dir: str | Path = "dbt", log_file: Path | None = None
-) -> subprocess.CompletedProcess:
-    """Run `dbt build` (gold layer) from the repo root; raise on failure.
-
-    `profiles_dir` overrides the profiles directory (the repo default `dbt/`).
-    Tests pass a temp dir containing a profiles.yml that points dbt at a
-    throwaway PostgreSQL. When `log_file` is given, dbt's output is teed to it
-    while still streaming to the console.
-    """
-    cmd = DBT_BUILD_CMD
-    if str(profiles_dir) != "dbt":
-        cmd = [*DBT_BUILD_CMD[:-2], "--profiles-dir", str(profiles_dir)]
-    if log_file is None:
-        return subprocess.run(cmd, cwd=ROOT, check=True)
-    log_file.parent.mkdir(parents=True, exist_ok=True)
-    with log_file.open("w") as log:
-        return _run_streamed(cmd, log)
-
-
-def _run_streamed(cmd: list[str], log: TextIO) -> subprocess.CompletedProcess:
-    """Run a command, streaming its output to the console AND a log file."""
-    proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        text = line.decode(errors="replace")
-        sys.stdout.write(text)
-        sys.stdout.flush()
-        log.write(text)
-        log.flush()
-    returncode = proc.wait()
-    if returncode != 0:
-        raise subprocess.CalledProcessError(returncode, cmd)
-    return subprocess.CompletedProcess(cmd, returncode)
 
 
 def _etl_log_file() -> Path:

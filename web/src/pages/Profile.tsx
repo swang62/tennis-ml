@@ -1,8 +1,9 @@
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable } from '@tanstack/react-table'
 import { useQuery } from '@tanstack/react-query'
+import { Link } from '@tanstack/react-router'
 import ReactECharts from 'echarts-for-react'
 import type { EChartsOption } from 'echarts'
-import { getMatchHistory, getPlayerProfile, getRankHistory, type MatchRow } from '../api'
+import { getMatchHistory, getPlayerProfile, getRankHistory, getSimilarPlayers, type MatchRow } from '../api'
 import { Card, Empty, ErrorBox, FormStrip, Kicker, Loading, ResultBadge, StatBar, pct } from '../components'
 import { profileRoute } from '../router'
 import { useTheme } from '../theme'
@@ -68,6 +69,11 @@ export default function Profile() {
     queryKey: ['match_history', playerId, 20],
     queryFn: () => getMatchHistory(playerId, 20),
   })
+  const similarQ = useQuery({
+    queryKey: ['similar_players', playerId],
+    queryFn: () => getSimilarPlayers(playerId, 3),
+    enabled: !!playerId,
+  })
 
   const matches = matchesQ.data?.matches ?? []
   const sortedMatches = [...matches].sort((a, b) => b.match_date.localeCompare(a.match_date))
@@ -78,7 +84,8 @@ export default function Profile() {
   })
 
   if (profileQ.isLoading) return <Loading label="Loading profile" />
-  if (profileQ.isError) return <ErrorBox error={profileQ.error} onRetry={() => profileQ.refetch()} />
+  if (profileQ.isError)
+    return <ErrorBox error={profileQ.error} onRetry={() => profileQ.refetch()} knownIds={[playerId]} />
 
   const profile = profileQ.data
   if (!profile) return <Loading label="Loading profile" />
@@ -174,7 +181,6 @@ export default function Profile() {
         <Kicker>Player profile</Kicker>
         <div className="profile-head">
           <h1 className="page-title">{profile.display_name}</h1>
-          <span className="profile-id mono">{profile.player_id}</span>
           {trendBadge}
         </div>
       </section>
@@ -194,6 +200,34 @@ export default function Profile() {
 
       {/* Form / career / surfaces — vertical editorial sequence */}
       <div className="space-y-5">
+        <Card title="Similar players">
+          {similarQ.isLoading ? (
+            <Loading label="Loading similar players" />
+          ) : similarQ.isError ? (
+            <ErrorBox error={similarQ.error} onRetry={() => similarQ.refetch()} knownIds={[playerId]} />
+          ) : (similarQ.data?.similar_players ?? []).length === 0 ? (
+            <Empty message="No similar players found" />
+          ) : (
+            <ol className="similar-list">
+              {(similarQ.data?.similar_players ?? []).map((sp) => (
+                <li key={sp.player_id}>
+                  <Link
+                    to="/players/$playerId"
+                    params={{ playerId: sp.player_id }}
+                    className="similar-row"
+                    aria-label={`View profile of ${sp.display_name}`}
+                  >
+                    <span className="similar-name">{sp.display_name}</span>
+                    <span className="similar-score num">
+                      {Number(sp.score).toFixed(3)}
+                    </span>
+                  </Link>
+                </li>
+              ))}
+            </ol>
+          )}
+        </Card>
+
         <Card title="Form">
           {profile.recent_form ? (
             <div className="space-y-4">
@@ -275,7 +309,7 @@ export default function Profile() {
         {rankQ.isLoading ? (
           <Loading label="Loading rank history" />
         ) : rankQ.isError ? (
-          <ErrorBox error={rankQ.error} onRetry={() => rankQ.refetch()} />
+          <ErrorBox error={rankQ.error} onRetry={() => rankQ.refetch()} knownIds={[playerId]} />
         ) : rankPoints.length === 0 ? (
           <Empty message="No rank history for this player" />
         ) : (
@@ -294,7 +328,7 @@ export default function Profile() {
         {matchesQ.isLoading ? (
           <Loading label="Loading matches" />
         ) : matchesQ.isError ? (
-          <ErrorBox error={matchesQ.error} onRetry={() => matchesQ.refetch()} />
+          <ErrorBox error={matchesQ.error} onRetry={() => matchesQ.refetch()} knownIds={[playerId]} />
         ) : matches.length === 0 ? (
           <Empty message="No match history for this player" />
         ) : (

@@ -14,7 +14,7 @@ import pytest
 
 from src.db import snapshot, training
 from src.db.snapshot import EXPECTED_FEATURE_ORDER, META_COLS, SNAPSHOT_TABLES
-from src.features.columns import FEATURE_COLS
+from src.features.columns import FEATURE_COLS, SIMILARITY_COLS
 
 # The one expected match_features metadata column that is not in FEATURE_COLS.
 _META = (
@@ -55,12 +55,16 @@ def _write_valid_snapshot(
 
 
 def test_meta_cols_precede_feature_cols() -> None:
-    """The snapshot contract is exactly the 8 metadata columns then 36 features."""
+    """The snapshot contract is the 8 metadata columns, the 36 features, then
+    the 10 appended similarity-analysis serve/return columns."""
     assert META_COLS == _META
     assert len(META_COLS) == 8
     assert len(FEATURE_COLS) == 36
-    assert len(EXPECTED_FEATURE_ORDER) == 44
+    assert len(SIMILARITY_COLS) == 10
+    assert len(EXPECTED_FEATURE_ORDER) == 54
     assert EXPECTED_FEATURE_ORDER[:8] == _META
+    assert EXPECTED_FEATURE_ORDER[8:44] == tuple(FEATURE_COLS)
+    assert EXPECTED_FEATURE_ORDER[44:] == tuple(SIMILARITY_COLS)
 
 
 def test_validate_accepts_valid_snapshot(tmp_path) -> None:

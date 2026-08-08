@@ -28,6 +28,12 @@ tests/___db/
 *.joblib
 *.json
 
+# Package manifests (repository-owned; not hidden by *.json above)
+!/web/package.json
+
+# Node
+node_modules/
+
 # Python
 .pytest_cache/
 .ruff_cache/

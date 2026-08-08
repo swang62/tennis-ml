@@ -9,10 +9,17 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react(), tailwindcss()],
     server: {
+      // Fixed local-dev ports: strictPort fails fast instead of silently
+      // moving, so an occupied port is reported clearly. 127.0.0.1 keeps the
+      // dashboard on the IPv4 loopback, matching the Bento bind host.
+      host: '127.0.0.1',
+      port: 5173,
+      strictPort: true,
       proxy: {
         // Strip /api — Bento mounts routes at the root, not under /api.
+        // 127.0.0.1 matches the Bento bind host in scripts/dev.sh.
         '/api': {
-          target: env.VITE_BENTO_URL || 'http://localhost:3000',
+          target: env.VITE_BENTO_URL || 'http://127.0.0.1:3000',
           rewrite: (path) => path.replace(/^\/api/, ''),
         },
       },

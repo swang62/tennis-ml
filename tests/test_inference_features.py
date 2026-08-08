@@ -90,6 +90,20 @@ def test_reversed_ids_canonical_identical():
     pd.testing.assert_frame_equal(row_ab, row_ba, check_exact=True)
 
 
+def test_repeated_identical_inputs_are_deterministic():
+    """Determinism contract: the same request (identical ids, surface, context,
+    as_of_date) yields a byte-identical canonical row on every call while the
+    underlying data/artifacts are unchanged. This is the model-free half of the
+    prediction-determinism guarantee — the ensemble head is deterministic on a
+    fixed feature row, so identical rows imply identical predictions until the
+    data or model artifacts change."""
+    a = build_inference_features("S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
+    b = build_inference_features("S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
+    c = build_inference_features("S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
+    pd.testing.assert_frame_equal(a, b, check_exact=True)
+    pd.testing.assert_frame_equal(b, c, check_exact=True)
+
+
 def test_known_players_profile_features():
     """Profile-derived features for two known players, in canonical order.
 

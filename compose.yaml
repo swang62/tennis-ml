@@ -1,61 +1,8 @@
 services:
-  postgres:
-    image: postgres:18.4
-    restart: unless-stopped
-    ports:
-      - "6543:5432"
-    volumes:
-      # PostgreSQL 18 image layout: PGDATA lives at
-      # /var/lib/postgresql/18/docker under the image-managed parent, so the
-      # named volume mounts the parent. The old PostgreSQL 17 data volume
-      # (postgres-data) is never mounted here; its data was logically migrated
-      # into postgres-data-18 and the old volume is retained for deletion
-      # approval.
-      - postgres-data-18:/var/lib/postgresql
-      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
-      POSTGRES_DB: ${POSTGRES_DB:-tennis}
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          'pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-tennis}',
-        ]
-      interval: 60s
-      timeout: 5s
-      retries: 6
-      start_period: 30s
-
-  bento:
-    image: ${DOCKER_IMAGE:-${DOCKER_REPO}/${IMAGE_NAME}}:latest
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    ports:
-      - "3000:3000"
-    environment:
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: "5432"
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
-      POSTGRES_DB: ${POSTGRES_DB:-tennis}
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          'python -c "import os,psycopg;c=psycopg.connect(host=''postgres'',port=5432,user=os.environ[''POSTGRES_USER''],password=os.environ[''POSTGRES_PASSWORD''],dbname=os.environ[''POSTGRES_DB'']);assert c.execute(''SELECT 1'').fetchone()==(1,)"',
-        ]
-      interval: 60s
-      timeout: 5s
-      retries: 3
-      start_period: 60s
-    pull_policy: always
-
   web:
-    build: ./web
+    build:
+      context: ./web
+      dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
       bento:
@@ -68,6 +15,45 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  postgres:
+    image: postgres:18.4
+    restart: unless-stopped
+    ports:
+      - "6543:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: tennis
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d tennis"]
+      interval: 60s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    volumes:
+      - postgres-data-18:/var/lib/postgresql
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+  bento:
+    image: ${DOCKER_REPO}/${IMAGE_NAME}:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/tennis
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'python -c "import os,psycopg;c=psycopg.connect(os.environ[''DATABASE_URL'']);assert c.execute(''SELECT 1'').fetchone()==(1,)"',
+        ]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    pull_policy: always
 
 volumes:
   postgres-data-18:

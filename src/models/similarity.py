@@ -9,7 +9,6 @@ from typing import NotRequired, TypedDict
 import faiss
 import numpy as np
 import pandas as pd
-from fastembed import TextEmbedding
 
 from src.constants import GOLD_TABLE, PROFILES_TABLE, ROOT
 from src.db.client import to_dataframe
@@ -25,26 +24,52 @@ BIO_COL_PREFIX = "bio_"
 # training snapshot boundary; the operational per-match tables are never
 # queried here). Each canonical match row appears twice — once per side — and
 # is unioned into player-oriented rows; the latest pre-match absolute values
-# are retained: weighted form from the player's most recent match, surface win
-# rates from the most recent match on each surface. ROW_NUMBER + CASE/MAX keep
-# the query portable to both PostgreSQL and DuckDB (QUALIFY is DuckDB-only, so
-# it has no place here), so the same SQL drives live and offline builds.
+# are retained: weighted form, serve/return percentages from the player's most
+# recent match, surface win rates from the most recent match on each surface.
+# ROW_NUMBER + CASE/MAX keep the query portable to both PostgreSQL and DuckDB
+# (QUALIFY is DuckDB-only, so it has no place here), so the same SQL drives
+# live and offline builds.
+#
+# The feature vector is deliberately STYLE-ONLY: bio embedding + surface win
+# rates + serve/return percentages + handedness + backhand. Physical and
+# résumé attributes — age, height, turned_pro/pro tenure, birthplace, rankings,
+# career totals/lifetime achievements — are never selected here, so they can
+# never enter the similarity signal. The return percentage is a genuine
+# return-points-won rate (opponent serve points not won / opponent serve
+# points); the player's break-point SAVE rate is a serving stat and is never
+# used as a similarity signal.
 _PLAYER_STATE_SQL = f"""
 WITH player_side AS (
     SELECT match_id, match_date, surface, player_id AS pid,
            player_weighted_form_10 AS weighted_form_10,
+           player_first_serve_pct_10 AS first_serve_pct_10,
+           player_first_serve_win_pct_10 AS first_serve_win_pct_10,
+           player_second_serve_win_pct_10 AS second_serve_win_pct_10,
+           player_serve_win_pct_10 AS serve_win_pct_10,
+           player_return_points_won_pct_10 AS return_points_won_pct_10,
            player_surface_win_rate_10 AS surface_win_rate_10
     FROM {GOLD_TABLE}
     UNION ALL
     SELECT match_id, match_date, surface, opponent_id AS pid,
            opponent_weighted_form_10 AS weighted_form_10,
+           opponent_first_serve_pct_10 AS first_serve_pct_10,
+           opponent_first_serve_win_pct_10 AS first_serve_win_pct_10,
+           opponent_second_serve_win_pct_10 AS second_serve_win_pct_10,
+           opponent_serve_win_pct_10 AS serve_win_pct_10,
+           opponent_return_points_won_pct_10 AS return_points_won_pct_10,
            opponent_surface_win_rate_10 AS surface_win_rate_10
     FROM {GOLD_TABLE}
 ),
 latest_state AS (
-    SELECT pid, weighted_form_10
+    SELECT pid, weighted_form_10,
+           first_serve_pct_10, first_serve_win_pct_10,
+           second_serve_win_pct_10, serve_win_pct_10,
+           return_points_won_pct_10
     FROM (
         SELECT pid, weighted_form_10,
+               first_serve_pct_10, first_serve_win_pct_10,
+               second_serve_win_pct_10, serve_win_pct_10,
+               return_points_won_pct_10,
                ROW_NUMBER() OVER (
                    PARTITION BY pid ORDER BY match_date DESC, match_id DESC
                ) AS rn
@@ -66,6 +91,11 @@ latest_surface AS (
 SELECT
     st.pid AS player_id,
     st.weighted_form_10,
+    st.first_serve_pct_10,
+    st.first_serve_win_pct_10,
+    st.second_serve_win_pct_10,
+    st.serve_win_pct_10,
+    st.return_points_won_pct_10,
     MAX(CASE WHEN ls.surface = 'clay' THEN ls.surface_win_rate_10 END)
         AS clay_win_rate_10,
     MAX(CASE WHEN ls.surface = 'grass' THEN ls.surface_win_rate_10 END)
@@ -74,8 +104,31 @@ SELECT
         AS hard_win_rate_10
 FROM latest_state st
 LEFT JOIN latest_surface ls ON ls.pid = st.pid
-GROUP BY st.pid, st.weighted_form_10
+GROUP BY st.pid, st.weighted_form_10,
+         st.first_serve_pct_10, st.first_serve_win_pct_10,
+         st.second_serve_win_pct_10, st.serve_win_pct_10,
+         st.return_points_won_pct_10
 """
+
+# Style signals stacked between the one-hot block and the bio embedding:
+# surface-preference win rates, serve percentages, and the return-side
+# return-points-won rate (opponent serve points not won / opponent serve
+# points), all 10-match rolling values from the player's most recent match.
+# A player's break-point SAVE rate is a serving stat and is deliberately not a
+# similarity signal. Excluded by design (never selected above): age, height,
+# turned-pro/pro tenure, birthplace, rankings, and career totals/lifetime
+# achievements.
+STYLE_COLS: list[str] = [
+    "weighted_form_10",
+    "clay_win_rate_10",
+    "grass_win_rate_10",
+    "hard_win_rate_10",
+    "first_serve_pct_10",
+    "first_serve_win_pct_10",
+    "second_serve_win_pct_10",
+    "serve_win_pct_10",
+    "return_points_won_pct_10",
+]
 
 
 def embed_bio_summaries(profiles: pd.DataFrame, model_name: str = MODEL_NAME) -> pd.DataFrame:
@@ -84,8 +137,14 @@ def embed_bio_summaries(profiles: pd.DataFrame, model_name: str = MODEL_NAME) ->
     Pure function of the input frame: no DB access, no disk writes. Empty or
     missing summaries embed as the empty-string vector so every player stays
     joinable. Shared by the FAISS similarity index and the NN static pathway.
+
+    fastembed is imported lazily inside the function: the serving image ships
+    faiss (for the packaged similarity index) but not fastembed, so loading the
+    module there must not require it.
     """
-    model = TextEmbedding(model_name)
+    import fastembed
+
+    model = fastembed.TextEmbedding(model_name)
     texts = [s if isinstance(s, str) and s else "" for s in profiles["summary"]]
     embeddings = np.array(list(model.embed(texts)), dtype=np.float32)
     out = pd.DataFrame(embeddings)
@@ -126,6 +185,11 @@ class PlayerSimilarity:
         ``query`` is a callable ``query(sql) -> DataFrame`` used for both table
         reads. It defaults to the live PostgreSQL client; pass the training
         snapshot helper (``src.db.training.to_dataframe``) for offline builds.
+
+        Each player's vector stacks one-hot handedness/backhand, style stats
+        (STYLE_COLS: surface win rates + serve/return percentages), and the bio
+        embedding. Physical and résumé attributes are excluded — see the
+        ``_PLAYER_STATE_SQL`` header.
         """
         query = query or to_dataframe
         profiles = query(
@@ -136,19 +200,14 @@ class PlayerSimilarity:
             return
 
         # Latest pre-match absolute state per player from gold.match_features:
-        # weighted form from the most recent match and clay/grass/hard win
-        # rates from the most recent match on each surface.
+        # weighted form + serve/return percentages from the most recent match
+        # and clay/grass/hard win rates from the most recent match on each
+        # surface.
         state = query(_PLAYER_STATE_SQL)
-        style_cols = [
-            "weighted_form_10",
-            "clay_win_rate_10",
-            "grass_win_rate_10",
-            "hard_win_rate_10",
-        ]
         df = profiles.merge(state, on="player_id", how="left")
         # Style cells are NULL for players without a match, or without a match
         # on a surface; impute 0.0 so every profiled player is still indexed.
-        df[style_cols] = df[style_cols].fillna(0.0).astype(np.float32)
+        df[STYLE_COLS] = df[STYLE_COLS].fillna(0.0).astype(np.float32)
 
         # One-hot encode categoricals, then stack with style stats and embeddings
         encoded = pd.get_dummies(df[["backhand", "handedness"]]).astype(np.float32)
@@ -161,7 +220,7 @@ class PlayerSimilarity:
             pd.concat(
                 [
                     encoded,
-                    df[style_cols],
+                    df[STYLE_COLS],
                     embeddings[bio_cols],
                 ],
                 axis=1,

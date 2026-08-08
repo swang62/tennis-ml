@@ -1,8 +1,10 @@
-"""Build and deploy the production Bento serving image.
+"""Build the promoted Bento serving image and push it to Docker Hub.
 
-Deploy is host-executed and independent of k3d: build_bento_image() builds in
-the local Docker engine, then deploy_bento() pushes the latest image to
-Docker Hub and boots it via Docker Compose.
+Deploy is host-executed and independent of k3d: build_bento_image() builds the
+Bento into the local Docker engine as `${IMAGE_NAME}:latest`, then
+deploy_bento() pushes it to Docker Hub as `${DOCKER_REPO}/${IMAGE_NAME}:latest`.
+Docker Compose is NOT part of the deploy flow; the Compose stack is a separate
+manual/test workflow (`pnpm docker`).
 
 Usage:
     uv run python src/flows/deploy.py
@@ -38,10 +40,10 @@ STATE_FILE = DATA_PROCESSED / "bento_build_state.json"
 load_env()
 
 assert IMAGE_NAME is not None, "IMAGE_NAME not set in env; load_env() must be called first"
-# Docker Hub repo: DOCKER_REPO/IMAGE_NAME. Only the moving `latest` tag is
-# pushed; Compose pulls `${DOCKER_IMAGE:-${DOCKER_REPO}/${IMAGE_NAME}}:latest`.
+# Docker Hub repo: DOCKER_REPO/IMAGE_NAME. Only the moving `latest` Docker
+# image tag is ever built or pushed; MLflow version numbers and Bento tags
+# stay in state for internal cache/production tracking only.
 DOCKER_REPO = os.getenv("DOCKER_REPO", "swang62")
-COMPOSE_FILE = ROOT / "compose.yaml"
 
 # The BentoML model name each pinned MLflow registered model maps to —
 # exactly the names the service references via `bentoml.models.BentoModel`.
@@ -50,16 +52,23 @@ COMPOSE_FILE = ROOT / "compose.yaml"
 # service consumes it via the onnx artifact under `include:` instead.
 BASE_BENTO_NAMES = {"linear": "linear_best", "gbdt": "gbdt_best", "nn": "nn_best"}
 
-# Serving artifacts packaged into the Bento (written by pipeline notebooks or
-# materialized by this flow); content changes trigger a rebuild. The database
-# is NOT packaged here — production serving reads PostgreSQL live through
-# psycopg; training data never enters the image.
+# Serving artifacts packaged into the Bento (written by pipeline notebooks,
+# materialized by this flow, or built by the similarity EDA notebook); content
+# changes trigger a rebuild. The database is NOT packaged here — production
+# serving reads PostgreSQL live through psycopg; training data never enters
+# the image.
 NN_ONNX_FILE = DATA_PROCESSED / "nn_best.onnx"
+# Similarity index + metadata (built by notebooks/eda/01_player_similarity.ipynb),
+# packaged so the /similar_players endpoint serves the same index offline.
+SIMILARITY_INDEX = DATA_PROCESSED / "player_similarity.index"
+SIMILARITY_METADATA = DATA_PROCESSED / "player_metadata.json"
 AUX_FILES = [
     DATA_PROCESSED / "linear_scaler.pkl",
     DATA_PROCESSED / "bio_embeddings.parquet",
     DATA_PROCESSED / "bio_feature_cols.json",
     NN_ONNX_FILE,
+    SIMILARITY_INDEX,
+    SIMILARITY_METADATA,
 ]
 
 # Files whose content changes should trigger a rebuild.
@@ -151,7 +160,8 @@ def _check_aux_files() -> None:
         raise RuntimeError(
             "required serving artifacts missing: "
             + ", ".join(missing)
-            + " — run the training pipeline (00/02 write these to data/processed)"
+            + " — run the training pipeline (00/02 write these to data/processed; "
+            "eda/01_player_similarity builds the similarity index)"
         )
 
 
@@ -378,10 +388,12 @@ def _run_teed(
 
 
 def build_bento_image(force: bool = False) -> tuple[str, int]:
-    """Build the promoted Bento into local Docker without requiring k3d.
+    """Build the promoted Bento into the local Docker image `${IMAGE_NAME}:latest`.
 
     force=True skips the fingerprint and image cache checks so the Bento and
-    local image are always rebuilt.
+    local image are always rebuilt. Only the moving `latest` Docker image tag
+    is produced; the Bento's own tag and the MLflow production version stay in
+    state (and BENTO_TAG_FILE) for cache invalidation.
     """
     import bentoml
     from mlflow.tracking.client import MlflowClient
@@ -402,7 +414,8 @@ def build_bento_image(force: bool = False) -> tuple[str, int]:
         tag = None
     else:
         tag = _cached_tag(state, fingerprint)
-    if tag is None:
+    rebuilt = tag is None
+    if rebuilt:
         tags = _import_models(pins)
         pinned = _write_pinned_bentofile(tags)
         bento = bentoml.bentos.build_bentofile(bentofile=str(pinned), build_ctx=str(ROOT))
@@ -413,44 +426,28 @@ def build_bento_image(force: bool = False) -> tuple[str, int]:
     else:
         print(f"No Bento rebuild needed — reusing {tag}.")
 
-    image = f"{IMAGE_NAME}:{tag.split(':', 1)[1]}"
-    if force:
-        print(f"Force: containerizing {tag} -> {image} regardless of cache.")
-        containerize = True
-    else:
-        containerize = not _image_exists(image)
+    image = f"{IMAGE_NAME}:latest"
+    containerize = force or rebuilt or not _image_exists(image)
     if containerize:
         print(f"Containerizing {tag} -> {image} with BentoML...")
         bentoml.container.build(tag, backend="docker", image_tag=(image,))
     else:
         print(f"Local image already exists — reusing {image}.")
-    subprocess.run(["docker", "tag", image, f"{IMAGE_NAME}:latest"], check=True)
     return image, int(production.version)
 
 
 def deploy_bento(force: bool = False) -> None:
-    """Build locally, then push to Docker Hub and boot via Docker Compose.
+    """Build the promoted Bento image locally, then push it to Docker Hub.
 
-    Builds the Bento into the local Docker engine, tags it as the Docker Hub
-    `latest` image, pushes it, builds the webapp image, then runs
-    `docker compose -f compose.yaml up -d --pull always` so the stack boots
-    with the freshly pushed image. Docker Hub authentication: if DOCKER_TOKEN
-    is set, log in via `docker login --password-stdin` (token never touches
-    argv/logs) using DOCKER_USERNAME or the DOCKER_REPO owner; otherwise rely
-    on an already-authenticated Docker CLI. force=True rebuilds the Bento and
-    image and the webapp image (no build cache) even when cached.
+    Builds the Bento into the local Docker engine tagged `${IMAGE_NAME}:latest`
+    and pushes it as `${DOCKER_REPO}/${IMAGE_NAME}:latest`. Docker Hub
+    authentication: if DOCKER_TOKEN is set, log in via `docker login
+    --password-stdin` (token never touches argv/logs) using DOCKER_USERNAME or
+    the DOCKER_REPO owner; otherwise rely on an already-authenticated Docker
+    CLI. force=True rebuilds the Bento and image (no cache) even when cached.
+    No Compose stack is started or stopped.
     """
     local_image, production_version = build_bento_image(force=force)
-
-    # The shared PostgreSQL credential flows through to Compose (postgres +
-    # bento) so the served DB and the Bento authenticate with the same
-    # operator secret. Fail fast before any Docker work; the password travels
-    # via the environment only, never in logs or argv.
-    if not os.getenv("POSTGRES_PASSWORD"):
-        raise RuntimeError(
-            "POSTGRES_PASSWORD is required for production deploy; "
-            "set it in the environment before running deploy"
-        )
 
     latest = f"{DOCKER_REPO}/{IMAGE_NAME}:latest"
     _docker_login()
@@ -458,35 +455,14 @@ def deploy_bento(force: bool = False) -> None:
     deploy_log = LOGS / f"deploy_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     try:
         with deploy_log.open("w") as log:
-            subprocess.run(["docker", "tag", local_image, latest], cwd=ROOT, check=True)
             _run_teed(["docker", "push", latest], log)
-            compose_env = {
-                **os.environ,
-                "DOCKER_IMAGE": f"{DOCKER_REPO}/{IMAGE_NAME}",
-            }
-            # Build the web (nginx + SPA) image. force rebuilds from scratch
-            # (no docker build cache); the Bento image is not built here —
-            # build_bento_image() already did that above.
-            web_build = ["docker", "compose", "-f", str(COMPOSE_FILE), "build"]
-            if force:
-                web_build.append("--no-cache")
-            web_build.append("web")
-            _run_teed(web_build, log, env=compose_env)
-            _run_teed(
-                ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", "--pull", "always"],
-                log,
-                env=compose_env,
-            )
     except subprocess.CalledProcessError as exc:
-        print(
-            f"Deploy step failed ({exc}) — skipping remaining deployment; "
-            f"local image is ready: {local_image}"
-        )
+        print(f"Deploy step failed ({exc}) — skipping publish; local image is ready: {local_image}")
         return
 
     state = _read_state()
     _write_state({**state, "deployed_version": production_version, "deployed_image": latest})
-    print(f"Deployed {latest} via Docker Compose")
+    print(f"Published {latest} to Docker Hub")
 
 
 if __name__ == "__main__":

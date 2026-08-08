@@ -21,6 +21,7 @@ from src.features.columns import (
     MATCH_STATS_COLS,
     PROFILE_COLS,
     SILVER_ROLLING_COLS,
+    SIMILARITY_COLS,
 )
 
 FINAL_DIFFS = [
@@ -60,6 +61,7 @@ def test_gold_rolling_cols_exact_order():
         "first_serve_win_pct_10",
         "second_serve_win_pct_10",
         "serve_win_pct_10",
+        "return_points_won_pct_10",
         "df_rate_10",
         "aces_per_svc_game_10",
         "streak",
@@ -218,6 +220,34 @@ def test_no_duplicate_names_across_the_38_column_row():
 
 def test_naming_conventions():
     assert all(c.endswith("_diff") for c in DIFF_COLS)
+
+
+def test_similarity_cols_exact_order_and_not_model_features():
+    """The similarity-analysis serve/return percentages are appended to
+    gold.match_features purely for the PlayerSimilarity index; they are never
+    model features and never leak into FEATURE_COLS or any diff/context slot.
+    The return side is a genuine return-points-won rate — not the serving-side
+    break-point save rate, which stays only as break_points_saved_pct_diff."""
+    assert SIMILARITY_COLS == [
+        "player_first_serve_pct_10",
+        "opponent_first_serve_pct_10",
+        "player_first_serve_win_pct_10",
+        "opponent_first_serve_win_pct_10",
+        "player_second_serve_win_pct_10",
+        "opponent_second_serve_win_pct_10",
+        "player_serve_win_pct_10",
+        "opponent_serve_win_pct_10",
+        "player_return_points_won_pct_10",
+        "opponent_return_points_won_pct_10",
+    ]
+    for col in SIMILARITY_COLS:
+        assert col not in FEATURE_COLS
+        assert col not in DIFF_COLS
+        assert col not in CONTEXT_COLS
+        assert col not in SILVER_ROLLING_COLS
+    # The serving-side save rate is no longer a similarity column.
+    assert "player_break_points_saved_pct_10" not in SIMILARITY_COLS
+    assert "opponent_break_points_saved_pct_10" not in SIMILARITY_COLS
 
 
 def test_bronze_column_order_and_uniqueness():

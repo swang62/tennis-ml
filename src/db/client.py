@@ -1,9 +1,10 @@
 """PostgreSQL client for the tennis-ml pipeline.
 
 PostgreSQL (via psycopg) is the only operational backend, configured from the
-shared POSTGRES_* contract in `src.constants` (DATABASE_URL or component
-variables). Every query uses psycopg's `%s` placeholders — request data is
-never concatenated into SQL — and results come back as pandas DataFrames.
+single DATABASE_URL contract in `src.constants` (passwordless for the local
+Homebrew trust path, password-bearing for the Compose stack). Every query uses
+psycopg's `%s` placeholders — request data is never concatenated into SQL —
+and results come back as pandas DataFrames.
 
 Multi-step writes run inside an explicit `transaction()` context manager that
 commits on success and rolls back on error, so Prefect tasks and Bento workers
@@ -29,17 +30,12 @@ _conn: psycopg.Connection[Any] | None = None
 
 
 def _connect() -> psycopg.Connection[Any]:
-    """Open a PostgreSQL connection from the shared credential contract.
+    """Open a PostgreSQL connection from the single DATABASE_URL contract.
 
-    Fails fast when the required configuration is missing; there is no other
-    backend to fall back to.
+    Fails fast when the URL is missing (build_database_url raises); there is
+    no other backend to fall back to. The URL is used verbatim — passwordless
+    for the local Homebrew trust path, password-bearing for the Compose stack.
     """
-    if not constants.DATABASE_URL and not constants.POSTGRES_PASSWORD:
-        raise RuntimeError(
-            "missing PostgreSQL configuration: set DATABASE_URL or POSTGRES_PASSWORD "
-            "(with POSTGRES_USER/POSTGRES_DB/POSTGRES_HOST/POSTGRES_PORT); refusing to "
-            "fall back to any other database"
-        )
     return psycopg.connect(constants.build_database_url(), autocommit=True)
 
 

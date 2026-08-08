@@ -25,7 +25,7 @@ from pathlib import Path
 import duckdb
 
 from src.constants import DATA_PROCESSED, build_database_url
-from src.features.columns import FEATURE_COLS
+from src.features.columns import FEATURE_COLS, SIMILARITY_COLS
 
 # The one file the training pipeline is allowed to read. Git-ignored and
 # atomically replaced on every refresh; no retention or archives.
@@ -50,8 +50,10 @@ META_COLS = (
     "match_won",
 )
 
-# The exact ordered contract every snapshot must match.
-EXPECTED_FEATURE_ORDER = (*META_COLS, *FEATURE_COLS)
+# The exact ordered contract every snapshot must match: the 8 metadata
+# columns, the 36 FEATURE_COLS, then the appended similarity-analysis serve/
+# return columns (which are NOT model features — see columns.py).
+EXPECTED_FEATURE_ORDER = (*META_COLS, *FEATURE_COLS, *SIMILARITY_COLS)
 
 
 class SnapshotError(RuntimeError):

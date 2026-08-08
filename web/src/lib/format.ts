@@ -31,3 +31,22 @@ export function fairOdds(p: number): string {
   if (!(p > 0 && p < 1)) return '—'
   return (1 / p).toFixed(2)
 }
+
+const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+// Scrub known player ids out of user-facing error text. Backend error strings
+// can echo the requested id (e.g. "unknown player_id: <id>"), and the UI
+// renders them in ErrorBox; ids the caller knows about are stripped and the
+// leftover punctuation/whitespace collapsed.
+export function sanitizeErrorMessage(message: string, knownIds: readonly string[]): string {
+  let out = message
+  for (const id of knownIds) {
+    if (!id) continue
+    out = out.replace(new RegExp(`\\b${escapeRegExp(id)}\\b`, 'gi'), '')
+  }
+  return out
+    .replace(/\s+/g, ' ')
+    .replace(/\s+([,.;:])/g, '$1')
+    .replace(/[:,]\s*$/, '')
+    .trim()
+}

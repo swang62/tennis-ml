@@ -1,5 +1,4 @@
-import { useState } from 'react'
-import { createRootRoute, createRoute, createRouter, Link, Outlet } from '@tanstack/react-router'
+import { createRootRoute, createRoute, createRouter, Link, Outlet, useLocation } from '@tanstack/react-router'
 import Home from './pages/Home'
 import Profile from './pages/Profile'
 import H2H from './pages/H2H'
@@ -43,18 +42,6 @@ function MoonIcon() {
   )
 }
 
-function MenuIcon({ open }: { open: boolean }) {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      {open ? (
-        <path d="M3 3l10 10M13 3L3 13" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-      ) : (
-        <path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-      )}
-    </svg>
-  )
-}
-
 function ThemeToggle({ theme, onToggle }: { theme: ThemeName; onToggle: () => void }) {
   const dark = theme === 'dark'
   return (
@@ -72,15 +59,16 @@ function ThemeToggle({ theme, onToggle }: { theme: ThemeName; onToggle: () => vo
 }
 
 function Layout() {
-  const [menuOpen, setMenuOpen] = useState(false)
   const { theme, toggle } = useTheme()
-  const closeMenu = () => setMenuOpen(false)
+  const { pathname } = useLocation()
+  const profilesActive = pathname === '/' || pathname.startsWith('/players/')
+  const h2hActive = pathname === '/h2h'
 
   return (
     <div className="app">
       <header className="topnav">
         <div className="container nav-inner">
-          <Link to="/" className="brand" onClick={closeMenu}>
+          <Link to="/" className="brand" aria-label="Courtside home">
             <CourtMark />
             <span className="brand-text">
               Courtside
@@ -90,43 +78,23 @@ function Layout() {
           <nav className="nav-links" aria-label="Primary">
             <Link
               to="/"
-              className="navlink"
-              activeProps={{ className: 'navlink active' }}
-              onClick={closeMenu}
+              className={`navlink${profilesActive ? ' active' : ''}`}
+              aria-current={profilesActive ? 'page' : undefined}
             >
-              Players
+              Player Profiles
             </Link>
             <Link
               to="/h2h"
-              className="navlink"
-              activeProps={{ className: 'navlink active' }}
-              onClick={closeMenu}
+              className={`navlink${h2hActive ? ' active' : ''}`}
+              aria-current={h2hActive ? 'page' : undefined}
             >
-              Head-to-Head
+              Matchup Predictions
             </Link>
           </nav>
           <div className="nav-actions">
             <ThemeToggle theme={theme} onToggle={toggle} />
-            <button
-              type="button"
-              className="nav-toggle"
-              aria-expanded={menuOpen}
-              aria-controls="mobile-menu"
-              aria-label="Toggle navigation menu"
-              onClick={() => setMenuOpen((o) => !o)}
-            >
-              <MenuIcon open={menuOpen} />
-            </button>
           </div>
         </div>
-        <nav id="mobile-menu" className={`mobile-nav ${menuOpen ? 'is-open' : ''}`} aria-label="Mobile">
-          <Link to="/" className="navlink" activeProps={{ className: 'navlink active' }} onClick={closeMenu}>
-            Players
-          </Link>
-          <Link to="/h2h" className="navlink" activeProps={{ className: 'navlink active' }} onClick={closeMenu}>
-            Head-to-Head
-          </Link>
-        </nav>
       </header>
       <main className="container page">
         <Outlet />

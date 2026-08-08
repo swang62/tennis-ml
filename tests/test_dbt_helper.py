@@ -2,8 +2,11 @@ import subprocess
 
 import pytest
 
+import src.db.dbt as dbt
+import src.flows.etl as etl
 from src.constants import ROOT
-from src.flows.etl import DBT_BUILD_CMD, etl_flow, run_dbt_build
+from src.db.dbt import DBT_BUILD_CMD, run_dbt_build
+from src.flows.etl import etl_flow
 
 # Used by etl_flow to build gold; patched so the flow test never runs dbt.
 FAKE_GOLD_COUNT = 1
@@ -16,11 +19,24 @@ def test_run_dbt_build_invokes_dbt_build_with_exact_args(monkeypatch):
         calls.append((args, kwargs))
         return "fake-result"
 
-    monkeypatch.setattr("src.flows.etl.subprocess.run", fake_run)
+    monkeypatch.setattr("src.db.dbt.subprocess.run", fake_run)
+    monkeypatch.setattr(dbt.constants, "DATABASE_URL", "postgresql://u:p@db:5432/tennis")
 
     result = run_dbt_build()
 
-    assert calls == [((DBT_BUILD_CMD,), {"cwd": ROOT, "check": True})]
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args == (DBT_BUILD_CMD,)
+    assert kwargs["cwd"] == ROOT
+    assert kwargs["check"] is True
+    # dbt gets the discrete connection fields derived from the single
+    # DATABASE_URL (password-bearing here, matching the Compose stack).
+    env = kwargs["env"]
+    assert env["POSTGRES_HOST"] == "db"
+    assert env["POSTGRES_PORT"] == "5432"
+    assert env["POSTGRES_USER"] == "u"
+    assert env["POSTGRES_PASSWORD"] == "p"
+    assert env["POSTGRES_DB"] == "tennis"
     assert result == "fake-result"
 
 
@@ -28,7 +44,7 @@ def test_run_dbt_build_propagates_called_process_error(monkeypatch):
     def fail_run(*_args, **_kwargs):
         raise subprocess.CalledProcessError(returncode=1, cmd=DBT_BUILD_CMD)
 
-    monkeypatch.setattr("src.flows.etl.subprocess.run", fail_run)
+    monkeypatch.setattr("src.db.dbt.subprocess.run", fail_run)
 
     with pytest.raises(subprocess.CalledProcessError) as excinfo:
         run_dbt_build()

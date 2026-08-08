@@ -327,8 +327,9 @@ class _TargetConn:
 @pytest.fixture
 def reset_env(monkeypatch):
     """Pin the expected dev target so tests only vary the ACTUAL target."""
-    monkeypatch.setattr(init_db.constants, "POSTGRES_PORT", "6543")
-    monkeypatch.setattr(init_db.constants, "POSTGRES_DB", "tennis")
+    monkeypatch.setattr(
+        init_db.constants, "DATABASE_URL", "postgresql://steve@127.0.0.1:6543/tennis"
+    )
 
 
 def test_reset_refuses_non_local_target(monkeypatch, reset_env):  # noqa: ARG001

@@ -23,7 +23,7 @@ import pytest
 from src.constants import BRONZE_TABLE, GOLD_TABLE, PROFILES_TABLE, ROOT, SILVER_ROLLING_FEATURES
 from src.db import client
 from src.db.client import execute_df
-from src.features.columns import FEATURE_COLS
+from src.features.columns import FEATURE_COLS, SIMILARITY_COLS
 from src.flows import ingest, seed
 
 RAW_CSV = ROOT / "data" / "raw" / "2026.csv"
@@ -143,15 +143,15 @@ def test_gold_layers_populated(gold_ready):  # noqa: ARG001 — skip-gate fixtur
 
 def test_gold_match_features_schema_matches_python_contract(gold_ready):  # noqa: ARG001 — skip-gate fixture, unused in body
     """The dbt-built training table's live schema == metadata cols + FEATURE_COLS
-    — the parity check that SQL-text tests and inference-builder tests can't see.
-    Current-match serve/break analysis rates are no longer part of the gold
-    contract (Task 6)."""
+    + the appended similarity serve/return columns — the parity check that
+    SQL-text tests and inference-builder tests can't see. Current-match
+    serve/break analysis rates are no longer part of the gold contract (Task 6)."""
     cols = execute_df(
         "SELECT column_name FROM information_schema.columns "
         "WHERE table_name = 'match_features' AND table_schema = 'gold' "
         "ORDER BY ordinal_position"
     )["column_name"].tolist()
-    assert cols == [*META_COLS, *FEATURE_COLS]
+    assert cols == [*META_COLS, *FEATURE_COLS, *SIMILARITY_COLS]
 
 
 def test_gold_has_no_current_match_enrichment_columns(gold_ready):  # noqa: ARG001 — skip-gate fixture, unused in body

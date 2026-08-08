@@ -38,6 +38,14 @@
 -- its own player_rank_points / player_age, so the collapse in
 -- gold.match_features still has both sides' rank points and age via the two
 -- perspective rows.
+--
+-- Return-side derivation: a player's return performance is the complement of
+-- the OPPONENT's serve performance in the same match, so each row also carries
+-- return_points_available (= the opponent's total serve points) and
+-- return_points_won (= opponent serve points NOT won: opponent total serve
+-- points minus the opponent's first + second serve points won). Both derive
+-- from the bronze raw serve counts already on the match row; rolling_features
+-- rolls them into return_points_won_pct_10 for the similarity index.
 
 WITH expanded AS (
     SELECT
@@ -57,6 +65,10 @@ WITH expanded AS (
         player1_service_games AS service_games,
         player1_break_points_saved AS break_points_saved,
         player1_break_points_faced AS break_points_faced,
+        player2_total_serve_points
+            - (player2_first_serve_points_won + player2_second_serve_points_won)
+            AS return_points_won,
+        player2_total_serve_points AS return_points_available,
         CASE WHEN winner_id = player1_id THEN 1 ELSE 0 END AS match_won
     FROM {{ source('bronze', 'match_events') }}
 
@@ -79,6 +91,10 @@ WITH expanded AS (
         player2_service_games AS service_games,
         player2_break_points_saved AS break_points_saved,
         player2_break_points_faced AS break_points_faced,
+        player1_total_serve_points
+            - (player1_first_serve_points_won + player1_second_serve_points_won)
+            AS return_points_won,
+        player1_total_serve_points AS return_points_available,
         CASE WHEN winner_id = player2_id THEN 1 ELSE 0 END AS match_won
     FROM {{ source('bronze', 'match_events') }}
 )
@@ -102,6 +118,8 @@ SELECT
     service_games,
     break_points_saved,
     break_points_faced,
+    return_points_won,
+    return_points_available,
     ROW_NUMBER() OVER (
         PARTITION BY player_id ORDER BY match_date, match_id
     ) AS player_match_number,

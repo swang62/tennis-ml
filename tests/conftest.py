@@ -47,7 +47,7 @@ def seeded_test_db():
 def postgres_ready(seeded_test_db):  # noqa: ARG001 — dependency ordering only
     """Skip the test when the seeded PostgreSQL is not usable."""
     if not _postgres_reachable():
-        pytest.skip("configured PostgreSQL is not reachable (POSTGRES_* contract)")
+        pytest.skip("configured PostgreSQL is not reachable (DATABASE_URL contract)")
     if _SEED_FAILURE:
         pytest.skip(f"seeded PostgreSQL unavailable: {_SEED_FAILURE}")
     yield

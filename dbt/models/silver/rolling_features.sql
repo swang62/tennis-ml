@@ -14,7 +14,8 @@
 -- the window (the first snapshot's win_rate_10 is that match's own match_won).
 -- There is NO zero-filling anywhere — ratio rates (ace_rate_10,
 -- first_serve_pct_10, break_points_saved_pct_10, first_serve_win_pct_10,
--- second_serve_win_pct_10, serve_win_pct_10, df_rate_10, aces_per_svc_game_10)
+-- second_serve_win_pct_10, serve_win_pct_10, return_points_won_pct_10,
+-- df_rate_10, aces_per_svc_game_10)
 -- are NULL when the window's denominator sum is 0, and surface rates are NULL
 -- until the player has played on that surface. Honest averages over partial
 -- windows are not zero-fills, so the plan's "no silent zero filling in the
@@ -137,6 +138,8 @@ snapshots AS (
         pm.service_games,
         pm.break_points_saved,
         pm.break_points_faced,
+        pm.return_points_won,
+        pm.return_points_available,
         sc.clay_last_match_number,
         sc.grass_last_match_number,
         sc.hard_last_match_number
@@ -196,6 +199,16 @@ SELECT
     -- Serve win rate: (first + second serve points won) / total serve points, 10
     CAST(SUM(s.first_serve_points_won + s.second_serve_points_won) OVER w10 AS DOUBLE PRECISION)
         / NULLIF(SUM(s.total_serve_points) OVER w10, 0) AS serve_win_pct_10,
+
+    -- Return-points-won rate: opponent serve points NOT won / opponent serve
+    -- points, last 10 incl. this one. The opponent's serve points not won are
+    -- exactly this player's return points won (return_points_won in
+    -- player_matches); the denominator is the opponent's total serve points
+    -- (return_points_available). Same NULLIF zero-denominator convention as
+    -- the other rates.
+    CAST(SUM(s.return_points_won) OVER w10 AS DOUBLE PRECISION)
+        / NULLIF(SUM(s.return_points_available) OVER w10, 0)
+        AS return_points_won_pct_10,
 
     -- Double-fault rate: double faults / total serve points, 10 (same
     -- NULLIF convention as the other serve rates — NULL when the window has

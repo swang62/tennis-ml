@@ -69,8 +69,8 @@ export default function Home() {
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search by name or id..."
-            aria-label="Search players by name or id"
+            placeholder="Search players..."
+            aria-label="Search players"
             className="input"
           />
         </div>
@@ -100,7 +100,6 @@ export default function Home() {
                 <span className="roster-index num">{String(i + 1).padStart(2, '0')}</span>
                 <span className="roster-main">
                   <span className="roster-name">{p.display_name}</span>
-                  <span className="roster-id">{p.player_id}</span>
                 </span>
                 <span className="roster-matches">
                   <span className="roster-bar">

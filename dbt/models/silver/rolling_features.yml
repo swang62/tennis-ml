@@ -21,11 +21,11 @@ models:
       in the window (the first snapshot's win_rate_10 is that match's own
       match_won); there is no zero-filling. Ratio rates (ace_rate_10,
       first_serve_pct_10, break_points_saved_pct_10, first_serve_win_pct_10,
-      second_serve_win_pct_10, serve_win_pct_10, df_rate_10,
-      aces_per_svc_game_10) are NULL when the window's denominator sums to 0;
-      clay/grass/hard_win_rate_10 are NULL until the player has played on that
-      surface. Every rate is either NULL or in [0, 1] except aces_per_svc_game_10
-      (per-game count, no upper bound).
+      second_serve_win_pct_10, serve_win_pct_10, return_points_won_pct_10,
+      df_rate_10, aces_per_svc_game_10) are NULL when the window's denominator
+      sums to 0; clay/grass/hard_win_rate_10 are NULL until the player has
+      played on that surface. Every rate is either NULL or in [0, 1] except
+      aces_per_svc_game_10 (per-game count, no upper bound).
 
       Task 6: every `_5`/`_20` output, the separate win/loss streaks (replaced
       by a single signed `streak`), last_match_date, and intermediate/source
@@ -93,6 +93,15 @@ models:
         description: Sum(second_serve_points_won) / sum(total_serve_points - first_serves_made) over the last 10 matches including this one; NULL when the window has no second serves.
       - name: serve_win_pct_10
         description: Sum(first_serve_points_won + second_serve_points_won) / sum(total_serve_points) over the last 10 matches including this one; NULL when the window has no serve points.
+      - name: return_points_won_pct_10
+        description: >
+          Sum(return_points_won) / sum(return_points_available) over the last
+          10 matches including this one — the player's genuine return
+          percentage: opponent serve points NOT won divided by opponent serve
+          points. return_points_won/available are derived per match in
+          silver.player_matches from the opponent's raw serve counts. NULL when
+          the window has no opponent serve points. Consumed only by the
+          PlayerSimilarity style index (not a model feature).
       - name: aces_per_svc_game_10
         description: Sum(aces) / sum(service_games) over the last 10 matches including this one; NULL when the window has no service games.
       - name: df_rate_10

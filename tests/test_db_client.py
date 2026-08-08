@@ -120,29 +120,52 @@ def test_execute_df_with_tuple_params(fake_conn):
 # --- Connection lifecycle & configuration guardrails ---
 
 
-def test_get_conn_uses_shared_contract(monkeypatch):
-    monkeypatch.setattr(db_client.constants, "DATABASE_URL", None)
-    monkeypatch.setattr(db_client.constants, "POSTGRES_PASSWORD", "secret")
-    monkeypatch.setattr(db_client.constants, "POSTGRES_USER", "postgres")
-    monkeypatch.setattr(db_client.constants, "POSTGRES_DB", "tennis")
-    monkeypatch.setattr(db_client.constants, "POSTGRES_HOST", "127.0.0.1")
-    monkeypatch.setattr(db_client.constants, "POSTGRES_PORT", "6543")
+def test_get_conn_uses_passwordless_local_database_url(monkeypatch):
+    """The host Homebrew trust path: the active local DATABASE_URL carries no
+    password and is used verbatim."""
+    monkeypatch.setattr(
+        db_client.constants, "DATABASE_URL", "postgresql://steve@127.0.0.1:5432/postgres"
+    )
     monkeypatch.setattr(db_client, "_conn", None)
 
     fake = FakeConn()
-    monkeypatch.setattr(db_client.psycopg, "connect", lambda _url, **_kwargs: fake)
+    urls = []
+    monkeypatch.setattr(
+        db_client.psycopg, "connect", lambda url, **_kwargs: urls.append(url) or fake
+    )
     conn = db_client.get_conn()
 
     assert conn is fake
+    assert urls == ["postgresql://steve@127.0.0.1:5432/postgres"]
 
 
 def test_missing_config_fails_before_any_fallback(monkeypatch):
     monkeypatch.setattr(db_client.constants, "DATABASE_URL", None)
-    monkeypatch.setattr(db_client.constants, "POSTGRES_PASSWORD", None)
     monkeypatch.setattr(db_client, "_conn", None)
 
     with pytest.raises(RuntimeError, match="missing PostgreSQL configuration"):
         db_client.get_conn()
+
+
+def test_get_conn_uses_password_bearing_database_url(monkeypatch):
+    """The Compose/Bento path: the password-bearing DATABASE_URL is used
+    verbatim — the container authenticates with it."""
+    monkeypatch.setattr(
+        db_client.constants,
+        "DATABASE_URL",
+        "postgresql://postgres:password@postgres:5432/tennis",
+    )
+    monkeypatch.setattr(db_client, "_conn", None)
+
+    fake = FakeConn()
+    urls = []
+    monkeypatch.setattr(
+        db_client.psycopg, "connect", lambda url, **_kwargs: urls.append(url) or fake
+    )
+    conn = db_client.get_conn()
+
+    assert conn is fake
+    assert urls == ["postgresql://postgres:password@postgres:5432/tennis"]
 
 
 def test_close_resets_connection(monkeypatch):

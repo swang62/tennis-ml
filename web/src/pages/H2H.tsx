@@ -4,11 +4,10 @@ import ReactECharts from 'echarts-for-react'
 import type { EChartsOption } from 'echarts'
 import {
   getHeadToHead,
-  getMatchHistory,
   getPlayers,
   getRankHistory,
   predictFromIds,
-  type MatchHistory,
+  type H2HMeeting,
   type MatchRound,
   type RankHistory,
   type Surface,
@@ -18,15 +17,13 @@ import {
   Card,
   Empty,
   ErrorBox,
-  FormStrip,
   Kicker,
   Loading,
   PlayerPicker,
-  StatBar,
   pct,
 } from '../components'
-import { axisOption, baseChartOption, chartTokens, surfaceColor } from '../lib/charts'
-import { ROUND_LABEL, TIER_LABEL, fairOdds } from '../lib/format'
+import { axisOption, baseChartOption, chartTokens } from '../lib/charts'
+import { ROUND_LABEL, TIER_LABEL, fairOdds, sanitizeErrorMessage } from '../lib/format'
 import { useTheme } from '../theme'
 
 const SURFACES: Surface[] = ['clay', 'grass', 'hard', 'carpet']
@@ -49,9 +46,20 @@ const ROUNDS: { value: MatchRound; label: string }[] = [
   { value: 'sf', label: 'Semifinal' },
   { value: 'f', label: 'Final' },
 ]
-const FORM_LIMIT = 10
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
+
+// Meeting metadata line: tournament, surface and round, joined by middots.
+// A missing segment is dropped rather than replaced with a placeholder; an
+// unknown value falls back to its raw label text (functional, never an id).
+function meetingMeta(m: H2HMeeting): string {
+  const parts = [
+    m.tournament ? (TIER_LABEL[m.tournament as keyof typeof TIER_LABEL] ?? m.tournament) : '',
+    m.surface ? cap(m.surface) : '',
+    m.round ? (ROUND_LABEL[m.round as keyof typeof ROUND_LABEL] ?? m.round) : '',
+  ]
+  return parts.filter(Boolean).join(' · ')
+}
 
 // Latest known rank: the last non-null point of the rank history. The rank
 // graph is gone; the current rank is the only rank signal this page shows.
@@ -61,21 +69,6 @@ function lastRank(history: RankHistory | undefined): { rank: number; date: strin
   const sorted = [...pts].sort((a, b) => a.rank_date.localeCompare(b.rank_date))
   const latest = sorted[sorted.length - 1]
   return { rank: latest.rank as number, date: latest.rank_date }
-}
-
-// Recent-form summary from the last FORM_LIMIT matches. The strip is the 8
-// most recent results, oldest first (same convention as the profile page);
-// the win rate is derived over every returned match.
-function formOf(history: MatchHistory | undefined) {
-  const sorted = [...(history?.matches ?? [])].sort((a, b) => b.match_date.localeCompare(a.match_date))
-  const results = sorted.slice(0, 8).map((m) => m.result).reverse()
-  const won = sorted.filter((m) => m.result === 'won').length
-  return {
-    results,
-    won,
-    total: sorted.length,
-    lastDate: sorted.length > 0 ? sorted[0].match_date : null,
-  }
 }
 
 // One diverging row of the mirrored comparison: both halves measured against
@@ -90,11 +83,14 @@ interface MirrorRow {
   invert?: boolean
 }
 
-function shareOfA(row: MirrorRow): number {
-  if (row.a == null || row.b == null) return row.a == null ? 0 : 1
+// Fill widths per side, as fractions of the row. A zero total (no direct
+// meetings) leaves both sides empty; a null side (unranked) leaves that side
+// empty while the other side fills.
+function mirrorWidths(row: MirrorRow): [number, number] {
+  if (row.a == null || row.b == null) return row.a == null ? [0, 1] : [1, 0]
   const total = row.a + row.b
-  if (total <= 0) return 0
-  return row.invert ? row.b / total : row.a / total
+  if (total <= 0) return [0, 0]
+  return row.invert ? [row.b / total, row.a / total] : [row.a / total, row.b / total]
 }
 
 export default function H2H() {
@@ -125,30 +121,21 @@ export default function H2H() {
     queryFn: () => getRankHistory(playerB!),
     enabled: ready,
   })
-  const formAQ = useQuery({
-    queryKey: ['match_history', playerA, FORM_LIMIT],
-    queryFn: () => getMatchHistory(playerA!, FORM_LIMIT),
-    enabled: ready,
-  })
-  const formBQ = useQuery({
-    queryKey: ['match_history', playerB, FORM_LIMIT],
-    queryFn: () => getMatchHistory(playerB!, FORM_LIMIT),
-    enabled: ready,
-  })
 
   const predict = useMutation({ mutationFn: predictFromIds })
-  const selectA = (id: string) => {
+  const selectA = (id: string | null) => {
     setPlayerA(id)
     predict.reset()
   }
-  const selectB = (id: string) => {
+  const selectB = (id: string | null) => {
     setPlayerB(id)
     predict.reset()
   }
 
   const players = playersQ.data?.players ?? []
   const nameById = new Map(players.map((p) => [p.player_id, p.display_name]))
-  const name = (id: string) => nameById.get(id) ?? id
+  // Display names only; an unknown player gets a neutral label, never the raw id.
+  const name = (id: string) => nameById.get(id) ?? 'Unknown player'
 
   if (playersQ.isLoading) return <Loading label="Loading players" />
   if (playersQ.isError) return <ErrorBox error={playersQ.error} onRetry={() => playersQ.refetch()} />
@@ -157,11 +144,6 @@ export default function H2H() {
   const meetings = h2h?.meetings ?? []
   const summary = h2h?.summary
   const sortedMeetings = [...meetings].sort((a, b) => b.match_date.localeCompare(a.match_date))
-
-  const surfaceCounts = new Map<string, number>()
-  for (const m of meetings) {
-    surfaceCounts.set(m.surface, (surfaceCounts.get(m.surface) ?? 0) + 1)
-  }
 
   // Canonical orientation: the model and the h2h summary are computed for the
   // lower-id player. `orient` maps a canonical probability onto Player A so
@@ -176,63 +158,9 @@ export default function H2H() {
     : 0
 
   const rankOf = (id: string) => lastRank(id === playerA ? rankAQ.data : rankBQ.data)
-  const rankText = (q: { isLoading: boolean; isError: boolean; data?: RankHistory }) => {
-    if (q.isLoading) return ['—', 'loading rank history'] as const
-    if (q.isError) return ['n/a', 'rank history unavailable'] as const
-    const latest = lastRank(q.data)
-    return latest
-      ? ([`#${latest.rank}`, `as of ${latest.date}`] as const)
-      : (['n/a', 'no rank history (unranked)'] as const)
-  }
-  const [rankAText, rankACaption] = rankText(rankAQ)
-  const [rankBText, rankBCaption] = rankText(rankBQ)
-
-  const formA = formOf(formAQ.data)
-  const formB = formOf(formBQ.data)
 
   const t = chartTokens()
   const ax = axisOption(t)
-
-  const surfaceOption: EChartsOption = {
-    ...baseChartOption(t),
-    title: {
-      text: String(meetings.length),
-      subtext: 'meetings',
-      left: 'center',
-      top: '34%',
-      textStyle: { color: t.text, fontSize: 28, fontWeight: 800 },
-      subtextStyle: { color: t.faint, fontSize: 10 },
-    },
-    tooltip: {
-      ...baseChartOption(t).tooltip,
-      trigger: 'item',
-      formatter: '{b}: {c} meetings ({d}%)',
-    },
-    legend: {
-      ...baseChartOption(t).legend,
-      bottom: 0,
-      left: 'center',
-      icon: 'circle',
-      itemWidth: 8,
-      itemHeight: 8,
-    },
-    series: [
-      {
-        type: 'pie',
-        radius: ['55%', '78%'],
-        center: ['50%', '42%'],
-        avoidLabelOverlap: true,
-        itemStyle: { borderColor: t.raised, borderWidth: 2 },
-        label: { show: false },
-        emphasis: { scaleSize: 6 },
-        data: SURFACES.filter((s) => (surfaceCounts.get(s) ?? 0) > 0).map((s) => ({
-          name: cap(s),
-          value: surfaceCounts.get(s) ?? 0,
-          itemStyle: { color: surfaceColor(s, t) },
-        })),
-      },
-    ],
-  }
 
   const compOption: EChartsOption | null = pred
     ? {
@@ -281,9 +209,9 @@ export default function H2H() {
     : null
 
   // Mirrored comparison rows: every row splits at the center line, the left
-  // player's bar grows left and the right player's bar grows right. Rows are
-  // derived purely from the h2h summary, the meetings, the rank histories and
-  // the prediction — nothing invented.
+  // player's bar grows left and the right player's bar grows right. Every row
+  // is derived purely from direct meetings (all-time and per-surface) or the
+  // labeled current rank — nothing invented.
   const p1 = h2h ? name(h2h.player1_id) : ''
   const p2 = h2h ? name(h2h.player2_id) : ''
   const mirrorRows: MirrorRow[] = []
@@ -296,26 +224,6 @@ export default function H2H() {
       aText: String(summary.player1_wins),
       bText: String(summary.player2_wins),
     })
-    if (summary.meetings > 0 && summary.last5_player1_win_rate != null) {
-      mirrorRows.push({
-        label: 'Last 5 meetings',
-        a: summary.last5_player1_win_rate,
-        b: 1 - summary.last5_player1_win_rate,
-        aText: pct(summary.last5_player1_win_rate),
-        bText: pct(1 - summary.last5_player1_win_rate),
-      })
-    }
-    for (const s of [...new Set(meetings.map((m) => m.surface))].sort()) {
-      const list = meetings.filter((m) => m.surface === s)
-      const w1 = list.filter((m) => m.player1_won).length
-      mirrorRows.push({
-        label: `On ${cap(s)}`,
-        a: w1,
-        b: list.length - w1,
-        aText: String(w1),
-        bText: String(list.length - w1),
-      })
-    }
     const r1 = rankOf(h2h.player1_id)
     const r2 = rankOf(h2h.player2_id)
     if (r1 || r2) {
@@ -329,31 +237,29 @@ export default function H2H() {
       })
       mirrorNotes.push('Current-rank bars are inverted — the lower rank gets the longer bar.')
     }
-    if (pred) {
+    for (const s of [...new Set(meetings.map((m) => m.surface))].sort()) {
+      const list = meetings.filter((m) => m.surface === s)
+      const w1 = list.filter((m) => m.player1_won).length
       mirrorRows.push({
-        label: 'Model win prob',
-        a: pred.p_win,
-        b: 1 - pred.p_win,
-        aText: pct(pred.p_win),
-        bText: pct(1 - pred.p_win),
+        label: `On ${cap(s)}`,
+        a: w1,
+        b: list.length - w1,
+        aText: String(w1),
+        bText: String(list.length - w1),
       })
-      mirrorNotes.push(`Model probability is for ${p1}.`)
     }
   }
   const mirrorSummary = mirrorRows
     .map((r) => `${r.label}: ${p1} ${r.aText} — ${p2} ${r.bText}`)
     .join('. ')
 
-  const leadClass = (a: number, b: number) => (a > b ? 'is-grass' : a < b ? 'is-ice' : '')
-
   return (
     <div className="space-y-5">
       <section className="page-head">
-        <Kicker>Match lab</Kicker>
-        <h1 className="page-title">Head-to-Head</h1>
+        <h1 className="page-title">Matchup Predictions</h1>
         <p className="page-sub">
-          Pick two players for a model prediction and implied fair odds, then compare their
-          head-to-head history, current rank, and recent form.
+          Pick two players for a model prediction and implied fair odds, then compare their direct
+          head-to-head record and current rank.
         </p>
       </section>
 
@@ -365,40 +271,22 @@ export default function H2H() {
             value={playerA}
             onChange={selectA}
             placeholder="Player A"
+            exclude={playerB}
           />
           <PlayerPicker
             players={players}
             value={playerB}
             onChange={selectB}
             placeholder="Player B"
+            exclude={playerA}
           />
         </div>
-
-        {ready && (
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="card">
-              <div className="stat">
-                <span className="stat-label">Current rank · {name(playerA!)}</span>
-                <span className="stat-num num">{rankAText}</span>
-                <span className="mono text-xs text-[var(--text-faint)]">{rankACaption}</span>
-              </div>
-            </div>
-            <div className="card">
-              <div className="stat">
-                <span className="stat-label">Current rank · {name(playerB!)}</span>
-                <span className="stat-num num">{rankBText}</span>
-                <span className="mono text-xs text-[var(--text-faint)]">{rankBCaption}</span>
-              </div>
-            </div>
-          </div>
-        )}
       </section>
 
       {/* Match predictor */}
       <section className="card pred-card">
         <div className="pred-head">
           <Kicker>Match predictor</Kicker>
-          <span className="badge badge-clay">Betting signal</span>
         </div>
         {!ready ? (
           <Empty message="Select two different players to predict" />
@@ -499,7 +387,10 @@ export default function H2H() {
               <div className="mt-4 error-box">
                 <p className="error-title">Prediction failed</p>
                 <p className="error-msg">
-                  {predict.error instanceof Error ? predict.error.message : String(predict.error)}
+                  {sanitizeErrorMessage(
+                    predict.error instanceof Error ? predict.error.message : String(predict.error),
+                    [playerA!, playerB!],
+                  )}
                 </p>
               </div>
             )}
@@ -549,7 +440,7 @@ export default function H2H() {
 
       {ready && h2hQ.isLoading && <Loading label="Loading head-to-head" />}
       {ready && h2hQ.isError && (
-        <ErrorBox error={h2hQ.error} onRetry={() => h2hQ.refetch()} />
+        <ErrorBox error={h2hQ.error} onRetry={() => h2hQ.refetch()} knownIds={[playerA!, playerB!]} />
       )}
 
       {ready && h2h && summary && (
@@ -562,173 +453,71 @@ export default function H2H() {
                 <span className="mirror-vs">vs</span>
                 <span className="mirror-name">{p2}</span>
               </div>
-              {mirrorRows.map((row) => (
-                <div className="mirror-row" key={row.label}>
-                  <div className="mirror-half is-left">
-                    <span className="mirror-value num">{row.aText}</span>
-                    <div className="mirror-bar-wrap">
-                      <div
-                        className="mirror-fill is-p1"
-                        style={{ width: `${shareOfA(row) * 100}%` }}
-                        aria-hidden="true"
-                      />
+              {mirrorRows.map((row) => {
+                const [widthA, widthB] = mirrorWidths(row)
+                return (
+                  <div className="mirror-row" key={row.label}>
+                    <div className="mirror-half is-left">
+                      <span className="mirror-value num">{row.aText}</span>
+                      <div className="mirror-bar-wrap">
+                        <div
+                          className="mirror-fill is-p1"
+                          style={{ width: `${widthA * 100}%` }}
+                          aria-hidden="true"
+                        />
+                      </div>
+                    </div>
+                    <span className="mirror-label">{row.label}</span>
+                    <div className="mirror-half is-right">
+                      <div className="mirror-bar-wrap">
+                        <div
+                          className="mirror-fill is-p2"
+                          style={{ width: `${widthB * 100}%` }}
+                          aria-hidden="true"
+                        />
+                      </div>
+                      <span className="mirror-value num">{row.bText}</span>
                     </div>
                   </div>
-                  <span className="mirror-label">{row.label}</span>
-                  <div className="mirror-half is-right">
-                    <div className="mirror-bar-wrap">
-                      <div
-                        className="mirror-fill is-p2"
-                        style={{ width: `${(1 - shareOfA(row)) * 100}%` }}
-                        aria-hidden="true"
-                      />
-                    </div>
-                    <span className="mirror-value num">{row.bText}</span>
-                  </div>
-                </div>
-              ))}
+                )
+              })}
               <p className="sr-only">{mirrorSummary}</p>
               {mirrorNotes.length > 0 && <p className="mirror-note">{mirrorNotes.join(' ')}</p>}
             </div>
           </Card>
 
-          {/* Historical head-to-head */}
-          <section className="space-y-5" aria-label="Historical head-to-head">
-            <section className="card">
-              <Kicker>All-time series</Kicker>
-              <div className="h2h-score">
-                <div className="h2h-side">
-                  <span className="h2h-name">{name(h2h.player1_id)}</span>
-                  <span className="h2h-id mono">{h2h.player1_id}</span>
-                  <span
-                    className={`h2h-wins num ${leadClass(summary.player1_wins, summary.player2_wins)}`}
-                  >
-                    {summary.player1_wins}
-                  </span>
-                </div>
-                <div className="h2h-middle">
-                  <span className="h2h-vs">all-time</span>
-                  <span className="h2h-total num">{summary.meetings}</span>
-                  <span className="h2h-vs">meetings</span>
-                </div>
-                <div className="h2h-side">
-                  <span className="h2h-name">{name(h2h.player2_id)}</span>
-                  <span className="h2h-id mono">{h2h.player2_id}</span>
-                  <span
-                    className={`h2h-wins num ${leadClass(summary.player2_wins, summary.player1_wins)}`}
-                  >
-                    {summary.player2_wins}
-                  </span>
-                </div>
-              </div>
-              <div className="mt-5 grid gap-4 sm:grid-cols-2">
-                <StatBar
-                  label={`All-time win rate · ${name(h2h.player1_id)}`}
-                  value={summary.player1_win_rate}
-                />
-                <StatBar
-                  label={`Last 5 meetings · ${name(h2h.player1_id)}`}
-                  value={summary.last5_player1_win_rate}
-                />
-              </div>
-            </section>
-
-            <div className="grid gap-5 lg:grid-cols-2">
-              <Card title="Meeting surface mix">
-                {meetings.length === 0 ? (
-                  <Empty message="These players have never met" />
-                ) : (
-                  <ReactECharts
-                    key={theme}
-                    option={surfaceOption}
-                    style={{ height: 260, width: '100%' }}
-                    className="chart-frame"
-                  />
-                )}
-              </Card>
-              <Card title="Meetings">
-                {meetings.length === 0 ? (
-                  <Empty message="No prior meetings" />
-                ) : (
-                  <div className="meetings-list">
-                    {sortedMeetings.map((m) => (
-                      <div key={`${m.match_date}-${m.winner_id}`} className="meeting">
-                        <span className="meeting-date mono">{m.match_date}</span>
-                        <span className="meeting-meta">
-                          {TIER_LABEL[m.tournament as keyof typeof TIER_LABEL] ?? m.tournament} ·{' '}
-                          {cap(m.surface)} ·{' '}
-                          {ROUND_LABEL[m.round as keyof typeof ROUND_LABEL] ?? m.round}
+          {/* Direct meetings */}
+          <Card title="Meetings">
+            {meetings.length === 0 ? (
+              <Empty message="No prior meetings" />
+            ) : (
+              <div className="meetings-list">
+                {sortedMeetings.map((m) => {
+                  // Left/right mirrors the picker order; player1_won is
+                  // canonical (lower id), so flip it when Player A is the
+                  // canonical second side.
+                  const aWon = m.player1_won === (playerA === h2h.player1_id)
+                  return (
+                    <div key={`${m.match_date}-${m.winner_id}`} className="meeting">
+                      <span className="meeting-date mono">{m.match_date}</span>
+                      <span className="meeting-players">
+                        <span className={`meeting-name${aWon ? ' is-winner' : ''}`}>
+                          {name(playerA!)}
                         </span>
-                        <span className="meeting-result">{name(m.winner_id)} won</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </Card>
-            </div>
-          </section>
+                        <span className="meeting-vs">beat</span>
+                        <span className={`meeting-name${aWon ? '' : ' is-winner'}`}>
+                          {name(playerB!)}
+                        </span>
+                      </span>
+                      <span className="meeting-meta">{meetingMeta(m)}</span>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </Card>
         </>
       )}
-
-      {/* Recent form */}
-      <section aria-label="Recent form">
-        <Card title="Recent form">
-          {!ready ? (
-            <Empty message="Select two players to compare form" />
-          ) : formAQ.isLoading || formBQ.isLoading ? (
-            <Loading label="Loading recent form" />
-          ) : formAQ.isError || formBQ.isError ? (
-            <ErrorBox
-              error={formAQ.error ?? formBQ.error}
-              onRetry={() => {
-                formAQ.refetch()
-                formBQ.refetch()
-              }}
-            />
-          ) : formA.total === 0 && formB.total === 0 ? (
-            <Empty message="No match history for either player" />
-          ) : (
-            <div className="grid gap-5 sm:grid-cols-2">
-              <div className="space-y-2">
-                <div className="flex items-baseline justify-between gap-3">
-                  <span className="font-bold">{name(playerA!)}</span>
-                  <span className="num text-sm font-semibold">
-                    {formA.total > 0 ? pct(formA.won / formA.total) : '—'}
-                  </span>
-                </div>
-                {formA.results.length > 0 ? (
-                  <FormStrip results={formA.results} />
-                ) : (
-                  <p className="text-xs text-[var(--text-faint)]">No recent results</p>
-                )}
-                <p className="text-xs text-[var(--text-faint)]">
-                  {formA.total > 0
-                    ? `Win rate over last ${formA.total} ${formA.total === 1 ? 'match' : 'matches'}${formA.lastDate ? ` · last on ${formA.lastDate}` : ''}`
-                    : 'No match history'}
-                </p>
-              </div>
-              <div className="space-y-2">
-                <div className="flex items-baseline justify-between gap-3">
-                  <span className="font-bold">{name(playerB!)}</span>
-                  <span className="num text-sm font-semibold">
-                    {formB.total > 0 ? pct(formB.won / formB.total) : '—'}
-                  </span>
-                </div>
-                {formB.results.length > 0 ? (
-                  <FormStrip results={formB.results} />
-                ) : (
-                  <p className="text-xs text-[var(--text-faint)]">No recent results</p>
-                )}
-                <p className="text-xs text-[var(--text-faint)]">
-                  {formB.total > 0
-                    ? `Win rate over last ${formB.total} ${formB.total === 1 ? 'match' : 'matches'}${formB.lastDate ? ` · last on ${formB.lastDate}` : ''}`
-                    : 'No match history'}
-                </p>
-              </div>
-            </div>
-          )}
-        </Card>
-      </section>
     </div>
   )
 }

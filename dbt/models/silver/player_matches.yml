@@ -69,6 +69,18 @@ models:
         description: This player's break points saved in this match (raw w/l_bpSaved).
       - name: break_points_faced
         description: This player's break points faced in this match (raw w/l_bpFaced).
+      - name: return_points_won
+        description: >
+          Return points this player won while returning: the OPPONENT's serve
+          points not won (opponent total serve points minus the opponent's
+          first + second serve points won). Derived from the bronze raw serve
+          counts of the opposing side; input to rolling_features'
+          return_points_won_pct_10.
+      - name: return_points_available
+        description: >
+          Return points available to this player while returning: the
+          OPPONENT's total serve points in this match. Denominator of
+          rolling_features' return_points_won_pct_10.
       - name: player_match_number
         description: >
           1-based ordinal of this player's matches ordered by match_date,

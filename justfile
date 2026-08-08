@@ -1,83 +1,89 @@
-setup: deps create setup-base db-init
-
-deps:
-    uv sync
-
+# Create the local k3d cluster.
 create:
     ./infra/k3d/start.sh
 
-setup-base: validate
-    kubectl apply -f infra/manifests/default/
+# Build silver and gold dbt models.
+db-dbt:
+    uv run python src/db/dbt.py
 
-# The Prefect server runs in the cluster; the worker must run on the host
-worker:
-    uv run python infra/prefect/worker.py
-
-# PostgreSQL bootstrap: schemas + base tables (structure only, idempotent).
-# All db commands connect via the .env PostgreSQL contract (DATABASE_URL or
-# POSTGRES_* components). Data loading is the explicit `just db-seed` /
-# `just db-seed --all` step.
-db-init:
-    uv run python -m src.flows.init_db init
-
-db-seed *args:
-    uv run python -m src.flows.seed {{args}}
-
-# Pass args (e.g. --enrich) directly: just db-etl --enrich
+# Run bronze-to-gold ETL; pass --enrich to fetch bios.
 db-etl *args:
     uv run python src/flows/etl.py {{args}}
 
-# dbt ETL over PostgreSQL: sources .env so dbt sees the shared POSTGRES_*
-# credential contract (dbt does not load .env itself). silver/gold tables are
-# dbt-owned and rebuilt in dependency order by `dbt build`.
-db-dbt:
-    set -a && source .env && set +a && uv run dbt build --project-dir dbt --profiles-dir dbt
+# Create PostgreSQL schemas and tables.
+db-init:
+    uv run python src/flows/init_db.py init
 
-# Pull an atomic PostgreSQL -> DuckDB training snapshot (gold.match_features +
-# gold.player_profiles only, validated). Training (`just train`) refreshes it
-# first; use this to inspect the snapshot ahead of a run.
-db-snapshot:
-    uv run python -m src.db.snapshot
-
-# Destructive: drops the bronze/silver/gold schemas, then recreates structure.
-# init_db refuses unless the ACTUAL connection target is a local host
-# (127.0.0.1/localhost/::1) with the configured POSTGRES_PORT and POSTGRES_DB —
-# an ENVIRONMENT value alone can never authorize resetting a non-local database.
+# Drop and recreate PostgreSQL schemas.
 db-reset:
-    uv run python -m src.flows.init_db reset
+    uv run python src/flows/init_db.py reset
 
-# Local frontend dev dashboard with HMR
-dashboard-local:
-    npm --prefix web run dev
+# Seed deterministic raw matches.
+db-seed *args:
+    uv run python src/flows/seed.py {{args}}
 
-# Local backend API server on :3000
+# Export an atomic PostgreSQL training snapshot.
+db-snapshot:
+    uv run python src/db/snapshot.py
+
+# Build and push the production Bento image.
+deploy-bento *args:
+    uv run python src/flows/deploy.py {{args}}
+
+# Serve Bento locally on port 3000.
 deploy-local:
     docker compose down
     uv run bentoml serve src/serving/service.py:TennisPredictor --host 0.0.0.0 --port 3000
 
-# Build docker image locally, push to Docker Hub
-deploy-bento *args:
-    uv run python src/flows/deploy.py {{args}}
+# Install Python dependencies.
+deps:
+    uv sync
 
+# Delete the local k3d cluster.
+destroy:
+    k3d cluster delete tennis-ml
+
+# Run Bento and Vite with local preflight checks.
+dev:
+    ./scripts/dev.sh
+
+# Start the Compose production stack.
+docker-up:
+    docker compose up -d --build
+
+# Run all configured linters.
+lint:
+    uv run pre-commit run --all-files
+
+# Restart Kubernetes workloads.
 restart:
     kubectl rollout restart deployment
     kubectl rollout restart daemonset
     kubectl rollout restart statefulset
 
-train:
-    uv run python src/flows/pipeline.py
+# Create the cluster, manifests, and database.
+setup: deps create setup-base db-init
 
-lint:
-    uv run pre-commit run --all-files
+# Apply Kubernetes manifests.
+setup-base: validate
+    kubectl apply -f infra/manifests/default/
 
-test:
-    uv run pytest
-
-validate:
-    kubeconform -ignore-missing-schemas -summary infra/manifests/
-
+# Stop the local k3d cluster.
 stop:
     k3d cluster stop tennis-ml
 
-destroy:
-    k3d cluster delete tennis-ml
+# Run the Python test suite.
+test:
+    uv run pytest
+
+# Run the notebook training pipeline.
+train:
+    uv run python src/flows/pipeline.py
+
+# Validate Kubernetes manifests.
+validate:
+    kubeconform -ignore-missing-schemas -summary infra/manifests/
+
+# Start the host Prefect worker.
+worker:
+    uv run python infra/prefect/worker.py

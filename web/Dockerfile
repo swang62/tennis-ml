@@ -1,12 +1,18 @@
 # Build stage: install deps and produce the static SPA bundle.
 FROM node:22-alpine AS build
 WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci
+# Enable Corepack (bundled with Node.js) so `pnpm` resolves to the version
+# pinned in package.json's `packageManager` field.
+RUN corepack enable
+# The dashboard is self-contained, so the build context is web/.
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+# Copy the source, then build the dashboard.
 COPY . .
-RUN npm run build
+RUN pnpm build
 
-# Runtime stage: serve the built SPA with nginx; /api is proxied to the Bento.
+# Runtime stage: serve the built SPA with nginx; only allowlisted API routes
+# are proxied to the Bento.
 FROM nginx:alpine
 # One nginx worker: the static SPA needs no concurrency, and the image default
 # `worker_processes auto` would start one worker per visible CPU (10 here).

@@ -94,6 +94,7 @@ SILVER_ROLLING_COLS: list[str] = [
     "first_serve_win_pct_10",
     "second_serve_win_pct_10",
     "serve_win_pct_10",
+    "return_points_won_pct_10",
     "df_rate_10",
     "aces_per_svc_game_10",
     "streak",
@@ -129,6 +130,32 @@ PROFILE_COLS: list[str] = [
 H2H_COLS: list[str] = [
     "h2h_matches",
     "h2h_wins",
+]
+
+
+# ── Similarity-analysis serve/return percentages (NOT model features) ──
+#
+# Absolute per-side 10-match serve/return rates appended to gold.match_features
+# after the FEATURE_COLS contract, consumed by the PlayerSimilarity style index
+# (bio embedding + surface win rates + serve/return percentages + handedness +
+# backhand). The return side is a genuine return-points-won rate (opponent
+# serve points not won / opponent serve points); break_points_saved_pct_10 is a
+# SERVING stat and is deliberately NOT a similarity signal (it remains a model
+# feature only as break_points_saved_pct_diff). Deliberately NEVER in
+# FEATURE_COLS: not fed to training or serving prediction. Single source of
+# truth for the snapshot column contract; the names match the appended dbt
+# SELECT in match_features.sql.
+SIMILARITY_COLS: list[str] = [
+    "player_first_serve_pct_10",
+    "opponent_first_serve_pct_10",
+    "player_first_serve_win_pct_10",
+    "opponent_first_serve_win_pct_10",
+    "player_second_serve_win_pct_10",
+    "opponent_second_serve_win_pct_10",
+    "player_serve_win_pct_10",
+    "opponent_serve_win_pct_10",
+    "player_return_points_won_pct_10",
+    "opponent_return_points_won_pct_10",
 ]
 
 

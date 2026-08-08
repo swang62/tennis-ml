@@ -12,6 +12,7 @@ database is reachable.
 """
 
 import re
+import sys
 from pathlib import Path
 
 import duckdb
@@ -22,7 +23,7 @@ import pytest
 
 from src.db import client, snapshot, training
 from src.models import similarity
-from src.models.similarity import PlayerData, PlayerSimilarity, embed_bio_summaries
+from src.models.similarity import STYLE_COLS, PlayerData, PlayerSimilarity, embed_bio_summaries
 
 
 class FakeTextEmbedding:
@@ -36,19 +37,32 @@ class FakeTextEmbedding:
         return np.ones((len(texts), 4), dtype=np.float32)
 
 
+class _FakeFastembed:
+    """Stand-in fastembed module whose TextEmbedding factory returns the fake."""
+
+    def __init__(self, factory) -> None:
+        self.TextEmbedding = factory
+
+
 def _patch_embedding(monkeypatch: pytest.MonkeyPatch) -> FakeTextEmbedding:
+    # embed_bio_summaries imports fastembed lazily inside the function, so the
+    # fake module is injected into sys.modules (never by patching a similarity
+    # module attribute, which the lazy import would clobber).
     fake = FakeTextEmbedding()
-    monkeypatch.setattr(similarity, "TextEmbedding", lambda _model_name: fake)
+    monkeypatch.setitem(sys.modules, "fastembed", _FakeFastembed(lambda _model_name: fake))
     return fake
 
 
 def _create_two_table_fixture(con: duckdb.DuckDBPyConnection) -> None:
     """Create the gold.match_features + gold.player_profiles fixture tables.
 
-    match_features declares only the columns the builder's state query reads
-    (the full 44-column contract is exercised by the live parity test). Rows:
+    match_features declares the columns the builder's state query reads (the
+    full 44-column contract is exercised by the live parity test) plus a set
+    of physical/résumé columns the builder must NEVER read (age, rankings) so
+    the exclusion test can prove they do not affect the vectors. Rows:
       m1 clay  P1 vs P4   m2 grass P1 vs P2   m3 hard  P2 vs P4
-      m4 clay  P1 vs P2 (later than m1: latest weighted form / clay rate win)
+      m4 clay  P1 vs P2 (later than m1: latest weighted form / clay rate win
+                         and the latest serve/return percentages for P1/P2)
     P4 appears only on the opponent side; P3 has a profile but no matches.
     """
     con.execute("CREATE SCHEMA gold")
@@ -63,7 +77,21 @@ def _create_two_table_fixture(con: duckdb.DuckDBPyConnection) -> None:
             player_weighted_form_10 DOUBLE,
             player_surface_win_rate_10 DOUBLE,
             opponent_weighted_form_10 DOUBLE,
-            opponent_surface_win_rate_10 DOUBLE
+            opponent_surface_win_rate_10 DOUBLE,
+            player_first_serve_pct_10 DOUBLE,
+            player_first_serve_win_pct_10 DOUBLE,
+            player_second_serve_win_pct_10 DOUBLE,
+            player_serve_win_pct_10 DOUBLE,
+            player_return_points_won_pct_10 DOUBLE,
+            opponent_first_serve_pct_10 DOUBLE,
+            opponent_first_serve_win_pct_10 DOUBLE,
+            opponent_second_serve_win_pct_10 DOUBLE,
+            opponent_serve_win_pct_10 DOUBLE,
+            opponent_return_points_won_pct_10 DOUBLE,
+            player_age DOUBLE,
+            player_ranking DOUBLE,
+            opponent_age DOUBLE,
+            opponent_ranking DOUBLE
         )
         """
     )
@@ -74,27 +102,137 @@ def _create_two_table_fixture(con: duckdb.DuckDBPyConnection) -> None:
             display_name VARCHAR,
             backhand VARCHAR,
             handedness VARCHAR,
-            summary VARCHAR
+            summary VARCHAR,
+            height DOUBLE,
+            turned_pro INTEGER,
+            birthplace VARCHAR,
+            matches_played INTEGER,
+            career_win_rate DOUBLE
         )
         """
     )
+    # Column order: match_id, match_date, surface, player_id, opponent_id,
+    # pw, ps, ow, os, then per-side serve/return (player then opponent):
+    # first_serve_pct, first_serve_win, second_serve_win, serve_win,
+    # return_points_won; then excluded age/ranking (player then opponent).
     con.executemany(
-        "INSERT INTO gold.match_features VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO gold.match_features VALUES "
+        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
-            ("m1", "2026-05-01", "clay", "P1", "P4", 0.80, 0.55, 0.60, 0.30),
-            ("m2", "2026-06-01", "grass", "P1", "P2", 0.78, 0.60, 0.40, 0.52),
-            ("m3", "2026-07-01", "hard", "P2", "P4", 0.41, 0.52, 0.36, 0.45),
-            ("m4", "2026-07-15", "clay", "P1", "P2", 0.90, 0.58, 0.44, 0.48),
+            # m1 P1 vs P4 clay
+            (
+                "m1",
+                "2026-05-01",
+                "clay",
+                "P1",
+                "P4",
+                0.80,
+                0.55,
+                0.60,
+                0.30,
+                0.61,
+                0.71,
+                0.49,
+                0.63,
+                0.54,
+                0.56,
+                0.65,
+                0.43,
+                0.57,
+                0.48,
+                30.0,
+                5.0,
+                33.0,
+                20.0,
+            ),
+            # m2 P1 vs P2 grass
+            (
+                "m2",
+                "2026-06-01",
+                "grass",
+                "P1",
+                "P2",
+                0.78,
+                0.60,
+                0.40,
+                0.52,
+                0.60,
+                0.69,
+                0.47,
+                0.61,
+                0.52,
+                0.59,
+                0.68,
+                0.46,
+                0.60,
+                0.51,
+                30.0,
+                5.0,
+                25.0,
+                8.0,
+            ),
+            # m3 P2 vs P4 hard
+            (
+                "m3",
+                "2026-07-01",
+                "hard",
+                "P2",
+                "P4",
+                0.41,
+                0.52,
+                0.36,
+                0.45,
+                0.58,
+                0.67,
+                0.45,
+                0.59,
+                0.50,
+                0.57,
+                0.66,
+                0.44,
+                0.58,
+                0.49,
+                25.0,
+                8.0,
+                33.0,
+                20.0,
+            ),
+            # m4 P1 vs P2 clay (latest for P1 and P2)
+            (
+                "m4",
+                "2026-07-15",
+                "clay",
+                "P1",
+                "P2",
+                0.90,
+                0.58,
+                0.44,
+                0.48,
+                0.62,
+                0.72,
+                0.50,
+                0.64,
+                0.55,
+                0.60,
+                0.70,
+                0.48,
+                0.62,
+                0.53,
+                30.0,
+                5.0,
+                25.0,
+                8.0,
+            ),
         ],
     )
     con.executemany(
-        "INSERT INTO gold.player_profiles VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO gold.player_profiles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
-            ("P1", "Alice", "one", "right", "Great server"),
-            ("P2", "Bob", "two", "left", ""),
-            ("P3", "Carol", "one", "right", "Solid returner"),
-            ("P4", "Dave", "two", "right", None),
-            ("", "Ghost", "one", "right", "No id"),
+            ("P1", "Alice", "one", "right", "Great server", 185.0, 2010, "Spain", 400, 0.72),
+            ("P2", "Bob", "two", "left", "", 190.0, 2015, "Italy", 300, 0.68),
+            ("P3", "Carol", "one", "right", "Solid returner", 178.0, 2020, "USA", 100, 0.55),
+            ("P4", "Dave", "two", "right", None, 195.0, 2012, "France", 350, 0.70),
+            ("", "Ghost", "one", "right", "No id", 180.0, 2018, "UK", 50, 0.50),
         ],
     )
 
@@ -123,9 +261,11 @@ def _build_with_fixture(tmp_path: Path, monkeypatch) -> PlayerSimilarity:
     return finder
 
 
-# One-hot block (backhand x2, handedness x2) precedes the 4 style stats.
+# One-hot block (backhand x2, handedness x2) precedes the style stats; the bio
+# block trails them. STYLE_COLS is imported so the layout stays in sync with
+# the builder's vector contract.
 ONE_HOT = 4
-STYLE = ["weighted_form_10", "clay_win_rate_10", "grass_win_rate_10", "hard_win_rate_10"]
+STYLE = STYLE_COLS
 
 
 def _style_block(vector: object) -> np.ndarray:
@@ -138,27 +278,35 @@ def test_build_uses_latest_pre_match_absolute_state(tmp_path: Path, monkeypatch)
     finder = _build_with_fixture(tmp_path, monkeypatch)
     index = finder.index
     assert index is not None
-    # 4 one-hot + 4 style stats + 4 bio dims; ace/first-serve/break-point
-    # serve inputs are gone.
+    # 4 one-hot + 9 style stats + 4 bio dims.
     assert index.d == ONE_HOT + len(STYLE) + 4
 
     p1 = index.reconstruct(finder.player_ids.index("P1"))
     p1_style = _style_block(p1)
-    # P1's latest match (m4) supplies weighted form 0.90 and clay rate 0.58,
-    # not the older clay match's 0.80/0.55; grass comes from the only grass
+    # P1's latest match (m4) supplies weighted form 0.90, clay rate 0.58 and
+    # the serve/return percentages (fp .62 fw .72 sw .50 sv .64 rp .55), not
+    # the older clay match's 0.80/0.55/...; grass comes from the only grass
     # match; hard was never played and stays 0.0. L2 normalization scales all
     # components by one factor, so within-vector ratios survive.
     assert np.isclose(p1_style[0] / p1_style[1], 0.90 / 0.58)
     assert np.isclose(p1_style[2], p1_style[1] * (0.60 / 0.58))
     assert p1_style[3] == 0.0
+    assert np.isclose(p1_style[4] / p1_style[1], 0.62 / 0.58)
+    assert np.isclose(p1_style[5] / p1_style[1], 0.72 / 0.58)
+    assert np.isclose(p1_style[6] / p1_style[1], 0.50 / 0.58)
+    assert np.isclose(p1_style[7] / p1_style[1], 0.64 / 0.58)
+    assert np.isclose(p1_style[8] / p1_style[1], 0.55 / 0.58)
 
     p4 = index.reconstruct(finder.player_ids.index("P4"))
     p4_style = _style_block(p4)
     # P4 appears only on the opponent side: latest overall is the hard match
-    # (weighted 0.36, hard 0.45) while clay comes from the only clay match.
+    # (weighted 0.36, hard 0.45, serve fp .57 fw .66 sw .44 sv .58 rp .49)
+    # while clay comes from the only clay match (m1).
     assert np.isclose(p4_style[0] / p4_style[1], 0.36 / 0.30)
     assert np.isclose(p4_style[3], p4_style[1] * (0.45 / 0.30))
     assert p4_style[2] == 0.0
+    assert np.isclose(p4_style[4] / p4_style[1], 0.57 / 0.30)
+    assert np.isclose(p4_style[8] / p4_style[1], 0.49 / 0.30)
 
 
 def test_build_players_on_either_side_included_exactly_once(tmp_path: Path, monkeypatch):
@@ -203,6 +351,63 @@ def test_build_embeds_bio_and_one_hot_identity(tmp_path: Path, monkeypatch):
     # Bio block is ones (normalized); style stats are non-zero and present.
     assert np.all(p2[ONE_HOT + len(STYLE) :] > 0.0)
     assert np.all(_style_block(p2) > 0.0)
+
+
+def test_build_excludes_physical_and_resume_metrics(tmp_path: Path, monkeypatch):
+    """Age, height, turned_pro, birthplace, rankings and career totals never
+    enter the similarity signal: mutating them across the tables leaves every
+    vector bit-identical, while mutating a serve percentage changes it."""
+    _patch_embedding(monkeypatch)
+    monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
+    monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
+    con = duckdb.connect()
+    try:
+        _create_two_table_fixture(con)
+        finder = PlayerSimilarity()
+        finder.build(query=_duck_query(con))
+        assert finder.index is not None
+        base = [np.array(finder.index.reconstruct(i)) for i in range(finder.index.ntotal)]
+
+        # Mutate only excluded signals: physical (age, height, birthplace),
+        # résumé (turned_pro), rankings, and career totals/lifetime stats.
+        con.execute(
+            "UPDATE gold.match_features SET player_age = player_age + 10, "
+            "opponent_age = opponent_age + 10, player_ranking = player_ranking + 50, "
+            "opponent_ranking = opponent_ranking + 50"
+        )
+        con.execute(
+            "UPDATE gold.player_profiles SET height = height + 5, "
+            "turned_pro = turned_pro - 3, birthplace = 'X', "
+            "matches_played = matches_played + 999, career_win_rate = 0.99"
+        )
+        finder2 = PlayerSimilarity()
+        finder2.build(query=_duck_query(con))
+        assert finder2.index is not None
+        for i in range(finder2.index.ntotal):
+            assert np.array_equal(base[i], finder2.index.reconstruct(i))
+
+        # A real style signal (serve pct) must change the vectors.
+        con.execute(
+            "UPDATE gold.match_features SET player_first_serve_pct_10 = 0.99 WHERE match_id = 'm4'"
+        )
+        finder3 = PlayerSimilarity()
+        finder3.build(query=_duck_query(con))
+        assert finder3.index is not None
+        assert any(
+            not np.array_equal(base[i], finder3.index.reconstruct(i))
+            for i in range(finder3.index.ntotal)
+        )
+    finally:
+        con.close()
+
+
+def test_search_returns_sorted_top_k_from_built_index(tmp_path: Path, monkeypatch):
+    finder = _build_with_fixture(tmp_path, monkeypatch)
+    results = finder.search("P1", top_k=3)
+    assert len(results) <= 3
+    assert all(r["player_id"] != "P1" for r in results)
+    scores = [float(r["score"]) for r in results]
+    assert scores == sorted(scores, reverse=True)
 
 
 def test_find_by_name_exact_case_insensitive_and_unknown():

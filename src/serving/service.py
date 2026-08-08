@@ -47,6 +47,7 @@ from src.constants import (
 from src.db.client import execute_df, first_row_dict
 from src.features.columns import FEATURE_COLS
 from src.features.inference import _build_inference_features_with_meta
+from src.models.similarity import PlayerSimilarity
 from src.utils import load_env
 
 AUX_DIR = ROOT / "data" / "processed"
@@ -77,6 +78,7 @@ SERVING_IMAGE = Image(
     "numpy==2.4.6",
     "scipy==1.17.1",
     "onnxruntime==1.27.0",
+    "faiss-cpu==1.14.3",  # loads the packaged player-similarity index for /similar_players
 )
 
 
@@ -499,6 +501,40 @@ def _head_to_head(request: Request) -> JSONResponse:
     )
 
 
+# Similarity index + metadata are packaged into the Bento (bentofile include);
+# loaded lazily on the first /similar_players request so the healthcheck and
+# the rest of the dashboard never pay the load cost when it isn't used.
+_similarity_finder: PlayerSimilarity | None = None
+
+
+def _get_similarity_finder() -> PlayerSimilarity:
+    global _similarity_finder
+    if _similarity_finder is None:
+        finder = PlayerSimilarity()
+        finder.load()
+        _similarity_finder = finder
+    return _similarity_finder
+
+
+def _similar_players(request: Request) -> JSONResponse:
+    player_id = _require_id(request, "player_id")
+    if player_id is None:
+        return _err(400, "missing required query parameter: player_id")
+    raw_limit = request.query_params.get("limit", "3")
+    try:
+        limit = int(raw_limit)
+    except ValueError:
+        return _err(400, "limit must be an integer")
+    limit = max(1, min(limit, 3))  # bounded: a profile never shows more than 3
+    try:
+        similar = _get_similarity_finder().search(player_id, top_k=limit)
+    except Exception as exc:
+        return _err(500, f"similar players query failed: {exc}")
+    # Entries carry player_id + display_name (score is a number, not an id);
+    # the id is used only for the profile link, never rendered.
+    return _ok({"player_id": player_id, "similar_players": similar})
+
+
 # Mounted at the service root; coexists with the POST-only @bentoml.api routes
 # (the SDK's server checks its own routes first, then falls through to mounts).
 DATA_APP = Starlette(
@@ -508,6 +544,7 @@ DATA_APP = Starlette(
         Route("/rank_history", _rank_history, methods=["GET"]),
         Route("/match_history", _match_history, methods=["GET"]),
         Route("/head_to_head", _head_to_head, methods=["GET"]),
+        Route("/similar_players", _similar_players, methods=["GET"]),
     ]
 )
 

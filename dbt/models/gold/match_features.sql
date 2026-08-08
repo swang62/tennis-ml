@@ -37,7 +37,10 @@
 -- for the profile API); only is_left_handed and years_pro are model profile
 -- features. The output columns are exactly FEATURE_COLS (36) plus the metadata
 -- (match_id, match_date, player_id, opponent_id, tournament, round, surface,
--- match_won), in that order.
+-- match_won), in that order, followed by 10 appended similarity-analysis
+-- columns (per-side absolute serve/return percentages — the return side being
+-- a genuine return-points-won rate) consumed by the PlayerSimilarity index;
+-- these are NOT model features.
 
 WITH player_match_enriched AS (
     SELECT
@@ -76,6 +79,7 @@ WITH player_match_enriched AS (
         pr.first_serve_win_pct_10,
         pr.second_serve_win_pct_10,
         pr.serve_win_pct_10,
+        pr.return_points_won_pct_10,
         pr.df_rate_10,
         pr.aces_per_svc_game_10,
 
@@ -230,7 +234,26 @@ SELECT
     CAST(CASE p.round
         WHEN 'r128' THEN 1 WHEN 'r64' THEN 2 WHEN 'r32' THEN 3 WHEN 'r16' THEN 4
         WHEN 'qf' THEN 5 WHEN 'sf' THEN 6 WHEN 'f' THEN 7 ELSE 0
-    END AS SMALLINT) AS round_encoded
+    END AS SMALLINT) AS round_encoded,
+
+    -- ── Similarity-analysis serve/return percentages (NOT model features) ──
+    -- Absolute per-side 10-match serve/return rates, consumed by the
+    -- PlayerSimilarity index as a style signal. Appended after the feature
+    -- contract so the leading columns stay in FEATURE_COLS order; they are
+    -- never part of FEATURE_COLS. The return side is a genuine return-points-
+    -- won rate (opponent serve points not won / opponent serve points); a
+    -- player's break-point save rate is a SERVING stat and is deliberately
+    -- absent here (it stays only as the model's break_points_saved_pct_diff).
+    p.first_serve_pct_10        AS player_first_serve_pct_10,
+    o.first_serve_pct_10        AS opponent_first_serve_pct_10,
+    p.first_serve_win_pct_10    AS player_first_serve_win_pct_10,
+    o.first_serve_win_pct_10    AS opponent_first_serve_win_pct_10,
+    p.second_serve_win_pct_10   AS player_second_serve_win_pct_10,
+    o.second_serve_win_pct_10   AS opponent_second_serve_win_pct_10,
+    p.serve_win_pct_10          AS player_serve_win_pct_10,
+    o.serve_win_pct_10          AS opponent_serve_win_pct_10,
+    p.return_points_won_pct_10  AS player_return_points_won_pct_10,
+    o.return_points_won_pct_10  AS opponent_return_points_won_pct_10
 FROM player_match_enriched p
 JOIN player_match_enriched o
     ON o.match_id = p.match_id

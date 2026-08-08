@@ -7,8 +7,8 @@ seeding is the explicit `just db-seed` / `just db-seed --all` step.
 `reset` drops and recreates the bronze/silver/gold schemas, but only after
 checking the ACTUAL connection target (server address, port, and database
 name, read from the live connection). It refuses to run against anything other
-than the expected local development database (the configured POSTGRES_HOST /
-POSTGRES_PORT / POSTGRES_DB), so a stray environment name can never reset a
+than the expected local development database (the host/port/db of the single
+DATABASE_URL contract), so a stray environment name can never reset a
 non-local database.
 """
 
@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import sys
 from typing import LiteralString, cast
+
+from psycopg.conninfo import conninfo_to_dict
 
 from src import constants
 from src.constants import ROOT
@@ -56,16 +58,20 @@ def reset() -> None:
     """Drop and recreate the schemas, refusing non-local targets.
 
     The check is against the live connection target, not an environment name:
-    if the database is not reachable at the expected local host/port/database,
-    nothing is dropped. On success the schemas are recreated from init.sql
-    (structure only — data is restored by `just db-seed`).
+    if the database is not reachable at the expected local host/port/database
+    (parsed from the DATABASE_URL contract), nothing is dropped. On success
+    the schemas are recreated from init.sql (structure only — data is restored
+    by `just db-seed`).
     """
+    expected = conninfo_to_dict(constants.DATABASE_URL or "")
+    expected_host = str(expected["host"] or "127.0.0.1")
+    expected_port = int(expected["port"] or "5432")
+    expected_db = str(expected["dbname"] or "tennis")
     host, port, database = actual_target()
-    expected_port = int(constants.POSTGRES_PORT or "6543")
-    if host not in LOCAL_HOSTS or port != expected_port or database != constants.POSTGRES_DB:
+    if host not in LOCAL_HOSTS or port != expected_port or database != expected_db:
         raise RuntimeError(
             f"refusing to reset non-local target {host}:{port}/{database}; "
-            f"expected local {constants.POSTGRES_HOST}:{expected_port}/{constants.POSTGRES_DB}"
+            f"expected local {expected_host}:{expected_port}/{expected_db}"
         )
     conn = get_conn()
     with conn.transaction(), conn.cursor() as cur:

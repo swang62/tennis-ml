@@ -21,6 +21,8 @@ include:
   - "data/processed/bio_embeddings.parquet"
   - "data/processed/bio_feature_cols.json"
   - "data/processed/nn_best.onnx"
+  - "data/processed/player_similarity.index"
+  - "data/processed/player_metadata.json"
 models:
   - "linear_best:latest"
   - "gbdt_best:latest"
