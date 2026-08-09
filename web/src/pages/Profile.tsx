@@ -52,7 +52,7 @@ export default function ProfileContent({
   const bioRows: Array<[string, string]> = [
     ['Turned pro', profile.turned_pro ? String(profile.turned_pro) : '-'],
     ['Birthplace', profile.birthplace ?? '-'],
-    ['Height', profile.height ? `${profile.height} cm` : '-'],
+    ['Height', profile.height ? `${(profile.height / 100).toFixed(2)} m` : '-'],
     ['Handedness', handednessLabel],
     ['Backhand', profile.backhand ?? '-'],
   ]
@@ -185,11 +185,13 @@ export default function ProfileContent({
     yAxis: {
       type: 'value',
       inverse: true,
+      min: 1,
+      minInterval: 1,
       name: 'Rank',
       nameLocation: 'middle',
       nameGap: 36,
       nameTextStyle: { color: t.dim, fontSize: 11 },
-      axisLabel: { ...ax.axisLabel, margin: 8 },
+      axisLabel: { ...ax.axisLabel, margin: 8, formatter: (value: number) => String(Math.round(value)) },
       splitLine: { ...ax.splitLine, lineStyle: { ...ax.splitLine.lineStyle, type: 'dashed' } },
     },
     series: [
@@ -242,11 +244,9 @@ export default function ProfileContent({
         </div>
         <div className="profile-main">
           <div className="profile-bio">
-            <h3 className="field-label section-label">Stats</h3>
             {bioFacts}
           </div>
           <div className="profile-summary">
-            <h3 className="field-label section-label">Description</h3>
             {profile.summary && (
               <p className="highlights-summary">{profile.summary}</p>
             )}

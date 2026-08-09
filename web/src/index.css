@@ -501,7 +501,7 @@ html.light {
     border: 1px solid var(--line);
     border-radius: var(--radius);
     background: var(--bg-raised);
-    padding: clamp(1rem, 2.5vw, 1.375rem);
+    padding: clamp(1.125rem, 2.5vw, 1.5rem);
     box-shadow:
       inset 0 1px 0 rgba(255, 255, 255, 0.03),
       0 18px 40px -24px rgba(0, 0, 0, 0.65);
@@ -1134,6 +1134,11 @@ html.light {
     margin-left: auto;
   }
 
+  .profile-head-stats .stat {
+    align-items: center;
+    text-align: center;
+  }
+
   @media (min-width: 640px) {
     .profile-head-stats {
       flex-direction: row;
@@ -1145,7 +1150,6 @@ html.light {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 0.9rem 1.5rem;
-    margin-top: 1.25rem;
   }
 
   @media (min-width: 720px) {
@@ -1188,11 +1192,6 @@ html.light {
     min-width: 0;
   }
 
-  .section-label {
-    margin-bottom: 0.75rem;
-    color: var(--text-dim);
-  }
-
   .profile-summary {
     min-width: 0;
   }
@@ -1205,8 +1204,12 @@ html.light {
 
   .career-stats-col {
     display: flex;
-    flex-direction: column;
+    justify-content: space-between;
     gap: 1rem;
+  }
+
+  .career-stats-col .stat:last-child {
+    text-align: right;
   }
 
   .highlights-summary {
