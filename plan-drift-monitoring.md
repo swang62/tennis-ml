@@ -625,7 +625,7 @@ enter `just check-drift` or its MLflow reports.
   unrelated Bento/Docker/MLflow/Kubernetes resources. Do not run training
   against a partially reset database or unhealthy MLflow server.
 
-### [ ] Task 7: Add `just check-drift`
+### [x] Task 7: Add `just check-drift`
 
 - **Description**: Add a no-argument recipe that invokes the existing dbt build
   path and then runs `src/flows/check_drift.py`. The script resolves MLflow
@@ -667,7 +667,7 @@ enter `just check-drift` or its MLflow reports.
   ONNX Runtime, torch, scaler files, embeddings, or ensemble code.
   It must not log the API key or include it in MLflow params/tags/artifacts.
 
-### [ ] Task 8: Compute drift and labeled performance
+### [x] Task 8: Compute drift and labeled performance
 
 - **Description**: Compare pre/post-cutoff feature populations, Bento reference
   and current probability distributions, and current labeled metrics against
@@ -709,7 +709,7 @@ enter `just check-drift` or its MLflow reports.
   not report their in-sample accuracy as champion baseline. Do not call
   prediction movement “accuracy” or claim proven concept drift.
 
-### [ ] Task 9: Log idempotent aggregate results to MLflow
+### [x] Task 9: Log idempotent aggregate results to MLflow
 
 - **Description**: Use `drift_baselines` for immutable references and
   `drift_checks` for cumulative monitoring results. Build a stable check key from

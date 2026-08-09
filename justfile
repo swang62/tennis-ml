@@ -82,3 +82,7 @@ validate:
 # Start the host Prefect worker.
 worker:
     uv run python infra/prefect/worker.py
+
+# Run production drift monitoring.
+check-drift:
+    uv run python src/flows/check_drift.py
