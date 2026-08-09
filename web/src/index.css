@@ -579,6 +579,14 @@ html.light {
     font-variant-numeric: tabular-nums;
   }
 
+  .stat-delta {
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-dim);
+  }
+
   .is-grass {
     color: var(--grass);
   }
@@ -936,7 +944,7 @@ html.light {
 
   @media (min-width: 768px) {
     .toolbar-picker {
-      flex: 0 1 50%;
+      flex: 0 1 30%;
     }
   }
 
@@ -1551,21 +1559,7 @@ html.light {
     min-width: 0;
   }
 
-  /* mirrored matchup comparison — rows split at the center, bars grow outward */
-
-  .mirror {
-    position: relative;
-  }
-
-  .mirror::before {
-    content: "";
-    position: absolute;
-    top: 1.9rem;
-    bottom: 1.4rem;
-    left: 50%;
-    width: 1px;
-    background: var(--line);
-  }
+  /* centered matchup comparison */
 
   .mirror-head {
     display: grid;
@@ -1601,7 +1595,6 @@ html.light {
     gap: 0.75rem;
     align-items: center;
     padding: 0.55rem 0;
-    border-top: 1px solid var(--line);
   }
 
   .mirror-half {
@@ -1616,38 +1609,10 @@ html.light {
   }
 
   .mirror-value {
-    font-size: 0.8125rem;
+    font-size: 1.25rem;
     font-weight: 800;
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
-  }
-
-  .mirror-bar-wrap {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .mirror-fill {
-    height: 0.8rem;
-  }
-
-  .mirror-fill.is-p1 {
-    margin-left: auto;
-    border-radius: 3px 999px 999px 3px;
-    background: linear-gradient(
-      90deg,
-      color-mix(in srgb, var(--grass) 40%, transparent),
-      var(--grass)
-    );
-  }
-
-  .mirror-fill.is-p2 {
-    border-radius: 999px 3px 3px 999px;
-    background: linear-gradient(
-      90deg,
-      var(--ice),
-      color-mix(in srgb, var(--ice) 40%, transparent)
-    );
   }
 
   .mirror-label {
@@ -1659,11 +1624,4 @@ html.light {
     white-space: nowrap;
   }
 
-  .mirror-note {
-    margin-top: 0.6rem;
-    padding-top: 0.6rem;
-    border-top: 1px solid var(--line);
-    font-size: 0.6875rem;
-    color: var(--text-faint);
-  }
 }

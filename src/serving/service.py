@@ -10,9 +10,11 @@ import logging
 import math
 import os
 import pickle
+from collections.abc import Callable
 from datetime import date, datetime
 from decimal import Decimal
 from time import perf_counter
+from typing import cast
 
 import bentoml
 import numpy as np
@@ -23,7 +25,6 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
-from typing import Callable, cast
 
 from src.constants import (
     BRONZE_TABLE,
@@ -40,6 +41,7 @@ from src.features.inference import (
     _to_date,
     build_inference_features_bulk,
 )
+from src.features.tour_averages import load_tour_averages
 from src.models.similarity import PlayerSimilarity
 from src.utils import load_env
 
@@ -323,6 +325,17 @@ def _player_profile(request: Request) -> JSONResponse:
     except Exception as exc:
         return _err(500, f"profile query failed: {exc}")
 
+    # Weighted tour benchmarks from the gold.tour_averages singleton (never an
+    # aggregate computed in the request path). NULL denominators -> null.
+    try:
+        ta = load_tour_averages()
+    except RuntimeError as exc:
+        return _err(500, f"tour_averages lookup failed: {exc}")
+    tour_averages_out = {
+        "first_serve_win_pct": _iso(ta.get("tour_first_serve_win_pct")),
+        "second_serve_win_pct": _iso(ta.get("tour_second_serve_win_pct")),
+    }
+
     bio = first_row_dict(bio_df)
     career = first_row_dict(career_df)
     career_out: dict[str, object] = {
@@ -382,6 +395,7 @@ def _player_profile(request: Request) -> JSONResponse:
             "surface_rates": surface_rates,
             "recent_form": recent_form,
             "rank_points_trend": rank_points_trend,
+            "tour_averages": tour_averages_out,
         }
     )
 

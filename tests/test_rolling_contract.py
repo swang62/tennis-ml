@@ -1,10 +1,7 @@
 """Database-free contract tests for feature columns."""
 
-import json
-
 import pytest
 
-from src.constants import ROOT
 from src.features.columns import (
     BRONZE_COLUMNS,
     BRONZE_COLUMNS_FLOAT,
@@ -282,14 +279,6 @@ def test_bronze_int_column_sets():
     assert set(BRONZE_COLUMNS_FLOAT) == {"player1_age", "player2_age"}
     for col in (*BRONZE_COLUMNS_INT32, *BRONZE_COLUMNS_FLOAT):
         assert col in BRONZE_COLUMNS
-
-
-def test_feature_cols_json_matches_columns_py():
-    path = ROOT / "data" / "processed" / "feature_cols.json"
-    if not path.exists():
-        pytest.skip("feature_cols.json not present")
-    with open(path, encoding="utf-8") as fh:
-        assert json.load(fh) == FEATURE_COLS
 
 
 def test_old_99_column_shape_rejected():

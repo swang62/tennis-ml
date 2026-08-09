@@ -12,8 +12,9 @@
 -- Creates structure only: the three schemas and the two non-dbt-owned base
 -- tables (bronze.match_events and gold.player_profiles). No data is loaded
 -- here — dbt owns silver.player_matches / silver.rolling_features /
--- gold.match_features, and data is written later by just db-seed / db-etl.
--- Nothing is baked into an image; the Compose named volume persists everything.
+-- gold.match_features / gold.tour_averages, and data is written later by
+-- just db-seed / db-etl. Nothing is baked into an image; the Compose named
+-- volume persists everything.
 
 CREATE SCHEMA IF NOT EXISTS bronze;
 CREATE SCHEMA IF NOT EXISTS silver;

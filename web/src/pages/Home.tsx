@@ -165,7 +165,7 @@ export default function Home() {
           aria-disabled={!selectedId}
           tabIndex={selectedId ? 0 : -1}
         >
-          Compare
+          Predict H2H
         </Link>
       </div>
 

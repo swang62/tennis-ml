@@ -1,8 +1,8 @@
 """Build canonical, as-of-dated inference rows from PostgreSQL.
 
 Rolling values use snapshots strictly before the requested date. Missing values
-use the materialized gold.feature_defaults row at or before the as-of date
-(never on-demand AVG/PERCENTILE); SQL values are always passed as parameters.
+use the materialized gold.tour_averages singleton (never on-demand
+AVG/PERCENTILE); SQL values are always passed as parameters.
 """
 
 from __future__ import annotations
@@ -17,13 +17,14 @@ from typing import Any, NamedTuple, cast
 import pandas as pd
 
 from src.constants import (
-    FEATURE_DEFAULTS_TABLE,
     PROFILES_TABLE,
     SILVER_PLAYER_MATCHES,
     SILVER_ROLLING_FEATURES,
+    TOUR_AVERAGES_TABLE,
 )
 from src.db.client import execute_df, first_row_dict
-from src.features.columns import FEATURE_COLS, FEATURE_DEFAULTS_COLS
+from src.features.columns import FEATURE_COLS, TOUR_AVERAGES_FALLBACK_COLS
+from src.features.tour_averages import load_tour_averages
 
 # "0" is the explicit unknown surface marker used by gold; it maps to all-zero
 # surface indicator columns and the fixed rate default, matching match_features.
@@ -60,25 +61,6 @@ _SURFACE_TO_SNAPSHOT_COL = {
     "grass": "grass_win_rate_10",
     "hard": "hard_win_rate_10",
 }
-
-_DEFAULTS_COLUMNS_SQL = ", ".join(FEATURE_DEFAULTS_COLS)
-
-# Newest materialized defaults row at or before the as-of date (future dates
-# resolve to the dbt run-date row); pre-history dates fall back to the oldest
-# row, whose empty-pool constants are the correct prior state. This replaces
-# on-demand AVG/PERCENTILE imputation queries.
-_DEFAULTS_AT_OR_BEFORE_SQL = f"""
-SELECT as_of_date, {_DEFAULTS_COLUMNS_SQL} FROM {FEATURE_DEFAULTS_TABLE}
-WHERE as_of_date <= %s::date
-ORDER BY as_of_date DESC
-LIMIT 1
-"""
-
-_DEFAULTS_FIRST_SQL = f"""
-SELECT as_of_date, {_DEFAULTS_COLUMNS_SQL} FROM {FEATURE_DEFAULTS_TABLE}
-ORDER BY as_of_date ASC
-LIMIT 1
-"""
 
 # Latest snapshot per player strictly before the as-of date. Point lookup.
 _LATEST_SNAPSHOT_SQL = f"""
@@ -130,17 +112,6 @@ WHERE player_id = %s
 # Every query resolves all requested rows in one round trip (unnest + LATERAL
 # or ANY), so cost stays flat as the batch grows. Values are always bound via
 # `%s`; the pairs below mirror the scalar query semantics exactly.
-
-_DEFAULTS_BULK_SQL = f"""
-SELECT req.as_of_iso, d.*
-FROM unnest(%s::date[]) AS req(as_of_iso)
-LEFT JOIN LATERAL (
-    SELECT * FROM {FEATURE_DEFAULTS_TABLE}
-    WHERE as_of_date <= req.as_of_iso
-    ORDER BY as_of_date DESC
-    LIMIT 1
-) d ON true
-"""
 
 _SNAPSHOTS_BULK_SQL = f"""
 SELECT req.player_id AS req_player_id, req.as_of_iso, s.*
@@ -207,54 +178,6 @@ def _to_date(value: object) -> date:
     raise TypeError(f"cannot coerce {value!r} to a date")
 
 
-def _load_defaults_oldest() -> dict[str, float]:
-    """Return the oldest materialized defaults row (pre-history fallback).
-
-    Its empty-pool constants are the correct prior state for dates before the
-    first defaults row.
-    """
-    df = execute_df(_DEFAULTS_FIRST_SQL)
-    if df.empty:
-        raise RuntimeError(f"{FEATURE_DEFAULTS_TABLE} is empty: run dbt build (just db-dbt) first")
-    return cast(dict[str, float], first_row_dict(df))
-
-
-def _load_defaults(as_of_iso: str) -> dict[str, float]:
-    """Return the materialized defaults row for the as-of date.
-
-    Uses the newest row at or before the date (the dbt run-date row covers
-    future dates) and the oldest row — whose empty-pool constants are the
-    correct prior state — for pre-history dates. One lookup, no aggregates.
-    """
-    df = execute_df(_DEFAULTS_AT_OR_BEFORE_SQL, [as_of_iso])
-    if df.empty:
-        return _load_defaults_oldest()
-    return first_row_dict(df)
-
-
-def _load_defaults_bulk(as_of_isos: list[str]) -> dict[str, dict[str, float]]:
-    """Return date-keyed defaults rows for many as-of dates in one query.
-
-    Mirrors `_load_defaults` per date (newest row at or before, oldest-row
-    fallback for pre-history dates) using a LATERAL join over the distinct
-    dates; the oldest-row fallback is fetched once, only when needed.
-    """
-    distinct = list(dict.fromkeys(as_of_isos))
-    out: dict[str, dict[str, float]] = {}
-    missing: list[str] = []
-    for rec in execute_df(_DEFAULTS_BULK_SQL, [distinct]).to_dict("records"):
-        iso = _to_date(rec["as_of_iso"]).isoformat()
-        if rec["as_of_date"] is None:
-            missing.append(iso)
-        else:
-            out[iso] = cast(dict[str, float], {k: v for k, v in rec.items() if k != "as_of_iso"})
-    if missing:
-        oldest = _load_defaults_oldest()
-        for iso in missing:
-            out[iso] = oldest
-    return out
-
-
 def _side_values(
     row: dict[str, object] | None,
     as_of_date: date,
@@ -262,7 +185,8 @@ def _side_values(
     defaults: dict[str, float],
     matches_30d: int | None = None,
 ) -> dict[str, int | float]:
-    """Build one side's values from its latest snapshot or date-keyed defaults.
+    """Build one side's values from its latest snapshot or the tour-averages
+    singleton fallbacks.
 
     `matches_30d` supplies the pre-match activity count when the caller already
     looked it up (bulk path); when omitted, the scalar path queries it on
@@ -356,7 +280,7 @@ def _profile_values_from_row(
 
 
 def _profile_values(pid: str, as_of_date: date, defaults: dict[str, float]) -> dict[str, float]:
-    """Return profile values, using date-keyed defaults for missing cells."""
+    """Return profile values, using singleton fallbacks for missing cells."""
     df = execute_df(_PROFILE_SQL, [pid])
     return _profile_values_from_row(
         first_row_dict(df) if not df.empty else None, as_of_date, defaults
@@ -558,8 +482,9 @@ def _build_inference_features_with_meta(
         is_indoor=is_indoor,
     )
 
-    # ── Materialized date-keyed defaults (no on-demand aggregates) ──
-    defaults = _load_defaults(ctx.as_of_iso)
+    # ── Materialized tour-averages singleton (no on-demand aggregates) ──
+    ta = load_tour_averages()
+    defaults = cast(dict[str, float], ta)
 
     def _latest_snapshot(pid: str) -> dict[str, object] | None:
         df = execute_df(_LATEST_SNAPSHOT_SQL, [pid, ctx.as_of_iso])
@@ -600,9 +525,11 @@ def _build_inference_features_with_meta(
         "tournament_level": ctx.tournament_level,
         "round_encoded": ctx.round_encoded,
         "feature_count": len(FEATURE_COLS),
-        "snapshot_pool_rows": int(float(defaults["snapshot_pool_rows"] or 0)),
-        "snapshot_pool_players": int(float(defaults["snapshot_pool_players"] or 0)),
-        "profile_rows": int(float(defaults["profile_rows"] or 0)),
+        "pool_as_of_date": _to_date(ta["pool_as_of_date"]).isoformat(),
+        "snapshot_pool_rows": int(float(cast(Real, ta["snapshot_pool_rows"] or 0))),
+        "snapshot_pool_players": int(float(cast(Real, ta["snapshot_pool_players"] or 0))),
+        "profile_rows": int(float(cast(Real, ta["profile_rows"] or 0))),
+        "player_match_rows": int(float(cast(Real, ta["player_match_rows"] or 0))),
         "median_days_since": float(defaults["days_since_default"]),
         "median_matches_30d": float(defaults["matches_30d_default"]),
         "player_snapshot_found": player_snapshot is not None,
@@ -660,11 +587,12 @@ def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame
 
     Each row accepts the same fields and validation as
     `build_inference_features` (including its own historical `as_of_date`).
-    Snapshots, defaults, 30-day activity, profiles, and H2H history are
-    resolved with unnest/LATERAL/ANY queries — a constant number of round
-    trips regardless of the batch size — then every row is assembled with the
-    exact same per-side value and row logic as the scalar builder, so output
-    matches repeated scalar calls. Input order is preserved.
+    The tour-averages singleton is loaded once per batch; snapshots, 30-day
+    activity, profiles, and H2H history are resolved with unnest/LATERAL/ANY
+    queries — a constant number of round trips regardless of the batch size —
+    then every row is assembled with the exact same per-side value and row
+    logic as the scalar builder, so output matches repeated scalar calls.
+    Input order is preserved.
     """
     if not isinstance(rows, list) or not rows:
         raise ValueError("rows must be a non-empty list of match contexts")
@@ -672,7 +600,8 @@ def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame
         raise ValueError(f"bulk inference accepts at most {BULK_MAX_ROWS} rows, got {len(rows)}")
 
     ctxs = [_normalize_inputs(**cast(dict[str, Any], row)) for row in rows]
-    defaults_by_date = _load_defaults_bulk([c.as_of_iso for c in ctxs])
+    ta = load_tour_averages()
+    defaults = cast(dict[str, float], ta)
 
     # Distinct (player, as-of) pairs drive the set-oriented snapshot queries.
     pairs = list({(pid, c.as_of_date) for c in ctxs for pid in (c.lower_id, c.higher_id)})
@@ -717,7 +646,6 @@ def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame
 
     out_rows: list[dict[str, int | float | str]] = []
     for ctx in ctxs:
-        defaults = defaults_by_date[ctx.as_of_iso]
         player_snapshot = snapshots.get((ctx.lower_id, ctx.as_of_date))
         opponent_snapshot = snapshots.get((ctx.higher_id, ctx.as_of_date))
         player_side = _side_values(

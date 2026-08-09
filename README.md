@@ -125,5 +125,5 @@ The `/predict_from_ids` endpoint accepts a JSON object with the following fields
 
 - **Canonicalization** — balanced symmetric features, the lower lexicographic player id becomes the `player_*` side
 - **Rolling form lookup** — live inference reads each player's newest snapshot strictly before `as_of_date`
-- **Cold-start imputation** — missing players get on-demand global aggregates.
+- **Cold-start imputation** — missing players use the materialized `gold.tour_averages` singleton (pre-computed full-pool defaults + weighted tour benchmarks), never on-demand aggregates.
 - **Bento image data sources** — Bento loads 4 artifacts from the MLflow registry pinned to the champion's exact lineage tags (no base aliases), ensemble model uses promoted `[p_linear, p_gbdt, p_nn]` → `p_win`. Production serving reads PostgreSQL live through sidecar.

@@ -64,16 +64,22 @@ AUX_FILES = [
 ]
 
 # Files whose content is a build input but is NOT pinned in champion lineage.
-# Lineage-pinned artifacts (bases, scaler, embeddings, feature contract) enter
-# the fingerprint through the champion's exact tags instead of their mutable
-# data/processed copies. nn_best.onnx is a deploy-time export of the pinned nn
-# version and model_info.json is generated from the fingerprint itself, so both
-# are excluded too.
+# Lineage-pinned artifacts (bases, scaler, embeddings) enter the fingerprint
+# through the champion's exact tags instead of their mutable data/processed
+# copies. nn_best.onnx is a deploy-time export of the pinned nn version and
+# model_info.json is generated from the fingerprint itself, so both are excluded
+# too. The packaged runtime feature inputs below can change predictions without
+# changing service.py, so they are fingerprinted directly.
 SOURCE_FINGERPRINT_FILES = [
     TEMPLATE_BENTOFILE,
     SERVICE_FILE,
     SIMILARITY_INDEX,
     SIMILARITY_METADATA,
+    # Added: these packaged runtime inputs can change predictions without changing service.py.
+    ROOT / "src" / "features" / "columns.py",
+    ROOT / "src" / "features" / "inference.py",
+    ROOT / "src" / "features" / "tour_averages.py",
+    ROOT / "src" / "constants.py",
 ]
 
 
@@ -109,7 +115,7 @@ def _lineage_pins(client: Any, production: Any) -> dict[str, dict[str, str]]:
 
     05_evaluate tags the promoted ensemble version with the exact registered
     name, version, run ID, and model URI of every base model, plus immutable
-    scaler/embedding/feature artifact URIs and content hashes. Base models
+    scaler/embedding artifact URIs and content hashes. Base models
     carry no aliases — these tags are the only resolution authority.
     """
     version = client.get_model_version(PRODUCTION_MODEL, production.version)
@@ -152,9 +158,9 @@ def _write_model_info(
 
     Built directly from the champion's exact lineage tags (Task 2) plus the
     non-circular build-input fingerprint: champion identity and creation time,
-    exact base and auxiliary-artifact pins, the feature-contract version/schema
-    hash, and the fingerprint. It never contains the Bento tag, Docker identity,
-    or any hash that includes the generated manifest itself.
+    exact base and auxiliary-artifact pins, and the fingerprint. It never
+    contains the Bento tag, Docker identity, or any hash that includes the
+    generated manifest itself.
     """
     version = client.get_model_version(PRODUCTION_MODEL, production.version)
     tags = version.tags
@@ -168,10 +174,6 @@ def _write_model_info(
         },
         "bases": {cls: pins[cls] for cls in BASE_BENTO_NAMES},
         "aux_artifacts": {key: tags[f"aux_{key}"] for key in _AUX_TAG_KEYS},
-        "feature_contract": {
-            "version": tags["aux_features_uri"],
-            "schema_hash": tags["aux_feature_cols_hash"],
-        },
         "build_input_fingerprint": fingerprint,
     }
     MODEL_INFO_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -286,7 +288,7 @@ def build_input_fingerprint(client: Any, production: Any) -> str:
     """Canonical, non-circular fingerprint of every Bento build input.
 
     Includes the champion's exact lineage tags (base versions, run IDs, model
-    URIs, and scaler/embedding/feature artifact URIs + content hashes) and
+    URIs, and scaler/embedding artifact URIs + content hashes) and
     hashes of on-disk source/artifact build inputs. Excludes everything the
     build generates or records after the fact — the pinned bentofile, the
     nn_best.onnx export, the Bento tag, the Docker image identity,

@@ -42,9 +42,12 @@ def postgres_ready(seeded_test_db):  # noqa: ARG001 — dependency ordering only
     yield
 
 
+# The physical gold.feature_defaults table may still exist in PostgreSQL after
+# this migration. It is safe to drop manually after verifying tour_averages
+# with: DROP TABLE IF EXISTS gold.feature_defaults. Normal dbt runs do not drop it.
 @pytest.fixture(scope="session")
 def gold_ready(postgres_ready):  # noqa: ARG001 — skip-gate fixture, unused in body
-    """Skip when dbt has not built gold.match_features over PostgreSQL."""
+    """Skip when dbt has not built gold.match_features and gold.tour_averages over PostgreSQL."""
     with client.get_conn().cursor() as cur:
         cur.execute(
             "SELECT 1 FROM information_schema.tables "
@@ -52,4 +55,10 @@ def gold_ready(postgres_ready):  # noqa: ARG001 — skip-gate fixture, unused in
         )
         if cur.fetchone() is None:
             pytest.skip("gold.match_features not built (dbt ETL over PostgreSQL); skipping")
+        cur.execute(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'gold' AND table_name = 'tour_averages'"
+        )
+        if cur.fetchone() is None:
+            pytest.skip("gold.tour_averages not built (dbt ETL over PostgreSQL); skipping")
     yield

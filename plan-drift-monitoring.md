@@ -1,5 +1,10 @@
 # Plan: Production Bento drift check
 
+> **Note:** The feature-pins / `feature_cols.json` / `aux_features_uri` lineage described
+> in this plan's Task 2 (ensemble lineage) was removed in plan-tour-averages.md Task 8.
+> `FEATURE_COLS` is now the single internal feature-order contract; deploy fingerprints
+> include `src/features/columns.py` (and other inference sources) directly instead.
+
 ## Goal
 
 Add a no-argument `just check-drift` recipe that refreshes dbt, resolves the

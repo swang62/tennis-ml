@@ -1,21 +1,30 @@
 -- gold.match_features: canonical match-level training table.
 --
 -- One row per match. Every side-level value (ranking, rank points, age,
--- rolling state, profile, activity) is imputed from gold.feature_defaults at
--- the match date BEFORE matchup differences are calculated, so every
--- FEATURE_COLS cell is non-null and finite. Rolling values use the prior
--- snapshot (player_match_number - 1); ranking/rank points/age also come from
--- the prior snapshot, never a same-day one. The lower ATP id is canonical
--- `player_*`, making raw player order irrelevant.
+-- rolling state, profile, activity) is imputed BEFORE matchup differences are
+-- calculated, so every FEATURE_COLS cell is non-null and finite. Rolling
+-- values use the player's PRIOR snapshot (player_match_number - 1) from
+-- silver.rolling_features; ranking/rank points/age also come from the prior
+-- snapshot, never a same-day one. Missing or NULL prior cells fall back to
+-- the single-row gold.tour_averages singleton (CROSS JOIN), not a date-keyed
+-- defaults row. The lower ATP id is canonical `player_*`, making raw player
+-- order irrelevant.
 --
 -- match_won = 1 iff the canonical player_* side won, else 0. It is the LABEL,
 -- not a feature.
 --
 -- H2H uses the five most recent distinct, strictly-prior canonical meetings.
 --
--- Defaults are strictly-prior and date-keyed: multiple matches on one date
--- intentionally share the same pre-day state. An empty prior pool falls back
--- to the explicit constants materialized in feature_defaults.
+-- Player snapshot state stays strictly prior (no current-match leakage);
+-- fallback values are intentionally global: the same full-pool singleton is
+-- used for old cold-start and currently missing cells, so limited historical
+-- leakage into fallback-consuming rows is accepted and reported.
+--
+-- Verification: run
+--   SELECT COUNT(*) AS rows_affected,
+--          COUNT(*) FILTER (WHERE ...) AS fallback_cells FROM ...
+-- to count how many cells used the singleton fallback (this will be
+-- implemented more concretely later).
 --
 -- Similarity-analysis serve/return columns are appended for PlayerSimilarity
 -- only; they are never FEATURE_COLS model features.
@@ -37,7 +46,7 @@ WITH player_match_enriched AS (
         pm.match_won,
 
         -- Strictly-prior ranking/rank points/age (no same-day snapshot),
-        -- imputed from the date-keyed defaults pool.
+        -- imputed from the singleton defaults row.
         COALESCE(pr.latest_player_ranking, fd.latest_player_ranking) AS player_ranking,
         COALESCE(pr.latest_player_rank_points, fd.latest_player_rank_points)
             AS player_rank_points,
@@ -109,8 +118,7 @@ WITH player_match_enriched AS (
     LEFT JOIN {{ ref('rolling_features') }} pr
         ON pr.player_id = pm.player_id
        AND pr.player_match_number = pm.player_match_number - 1
-    LEFT JOIN {{ ref('feature_defaults') }} fd
-        ON fd.as_of_date = pm.match_date
+    CROSS JOIN {{ ref('tour_averages') }} fd
     LEFT JOIN {{ source('bronze', 'match_events') }} bron
         ON bron.match_id = pm.match_id
     LEFT JOIN gold.player_profiles prof

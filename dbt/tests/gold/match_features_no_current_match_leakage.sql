@@ -1,19 +1,20 @@
 -- Assert every snapshot-backed feature of each match_features row comes from
 -- the player's PRIOR snapshot only (player_match_number = current match
 -- number - 1) — or, when that prior state is missing (cold start), from the
--- strictly-prior date-keyed defaults pool. This holds for both the canonical
+-- single-row gold.tour_averages singleton. This holds for both the canonical
 -- player and the opponent side. Any mismatch means the row used a current-match
 -- snapshot (leakage), its current-match raw stats, a wrong snapshot, or the
 -- wrong default.
 --
 -- The finalized 36-col contract keeps most rolling values as DIFFS (canonical
 -- minus opponent), so the strongest leakage check re-derives each diff from the
--- two prior snapshots (COALESCE'd to the defaults row) and compares it with the
--- stored value. Per-side absolute values (weighted_form_10, surface_win_rate_10,
--- days_since_last_match, matches_30d) are compared directly against the prior
--- snapshot / current silver row, again COALESCE'd to the defaults for cold
--- starts. As-of-date values (ranking, rank_points, age, rank_trend) come from
--- the PRIOR snapshot (pre-match known, never from current-match raw stats).
+-- two prior snapshots (COALESCE'd to the singleton defaults row) and compares
+-- it with the stored value. Per-side absolute values (weighted_form_10,
+-- surface_win_rate_10, days_since_last_match, matches_30d) are compared
+-- directly against the prior snapshot / current silver row, again COALESCE'd
+-- to the singleton for cold starts. As-of-date values (ranking, rank_points,
+-- age, rank_trend) come from the PRIOR snapshot (pre-match known, never from
+-- current-match raw stats).
 --
 -- Covered snapshot-backed fields:
 --   diff form:      win_rate_diff, streak_diff, surface (via per-side)
@@ -65,7 +66,7 @@ WITH prior_snapshot AS (
         mf.player_surface_win_rate_10, mf.opponent_surface_win_rate_10,
         mf.player_days_since_last_match, mf.opponent_days_since_last_match,
         mf.player_matches_30d, mf.opponent_matches_30d,
-        -- Prior snapshot inputs (N-1), COALESCE'd to the date-keyed defaults so
+        -- Prior snapshot inputs (N-1), COALESCE'd to the singleton defaults so
         -- cold-start rows and NULL cells impute exactly as match_features does.
         {% for c in diff_cols %}
         COALESCE(prp.{{ c }}, fd.{{ c }}) AS player_prior_{{ c }},
@@ -124,8 +125,7 @@ WITH prior_snapshot AS (
     LEFT JOIN {{ ref('rolling_features') }} pro
       ON pro.player_id = mf.opponent_id
      AND pro.player_match_number = po.player_match_number - 1
-    LEFT JOIN {{ ref('feature_defaults') }} fd
-      ON fd.as_of_date = mf.match_date
+    CROSS JOIN {{ ref('tour_averages') }} fd
 ),
 comparisons AS (
     {% for c in diff_cols %}

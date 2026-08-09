@@ -29,6 +29,11 @@ export interface RankPointsTrend {
   delta: number
 }
 
+export interface TourAverages {
+  first_serve_win_pct: number | null
+  second_serve_win_pct: number | null
+}
+
 export type Surface = 'clay' | 'grass' | 'hard' | 'carpet'
 export type TournamentTier = 'grand_slam' | 'masters' | 'atp_500' | 'atp_250' | 'davis_cup' | 'atp_finals' | 'olympics' | 'professional'
 export type MatchRound = 'r128' | 'r64' | 'r32' | 'r16' | 'qf' | 'sf' | 'f'
@@ -52,6 +57,7 @@ export interface PlayerProfile {
   surface_rates: SurfaceRate[]
   recent_form: RecentForm | null
   rank_points_trend: RankPointsTrend | null
+  tour_averages: TourAverages
 }
 
 export interface RankPoint {

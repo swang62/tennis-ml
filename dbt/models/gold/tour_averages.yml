@@ -1,0 +1,182 @@
+version: 2
+
+models:
+  - name: tour_averages
+    description: >
+      SINGLE-ROW (singleton_id = 1) relation that replaces the date-keyed
+      gold.feature_defaults table and adds weighted tour benchmarks. It is the
+      only shared source for (1) difficult model-feature fallbacks used by
+      gold.match_features and inference, and (2) weighted tour-wide rates used
+      for player-profile comparisons. Fallback values aggregate ALL
+      silver.rolling_features snapshots (no as_of_date rows, no date-expansion
+      joins): rank/rank-points/streak-like values use the rounded median,
+      continuous rates, age, years-pro, and handedness rate use the mean, and
+      an empty pool falls back to explicit deterministic constants so every
+      fallback column is finite and non-null. Weighted tour comparison columns
+      are SUM(numerator) / SUM(denominator) ratios from silver.player_matches
+      and may be NULL only when their source denominator is zero. Rate columns
+      are bounded to [0, 1] by the singular test tour_averages_rate_bounds.
+      Limited historical leakage is intentional: old cold-start or otherwise
+      missing cells use the same full-pool singleton as current rows, and a
+      verification query reports the affected row/cell count.
+
+    columns:
+      # Singleton identity and observability.
+      - name: singleton_id
+        description: Constant 1; the single-row identity of this relation.
+        tests:
+          - not_null
+          - unique
+          - accepted_values:
+              arguments:
+                values: [1]
+      - name: pool_as_of_date
+        description: One day after the latest rolling snapshot; CURRENT_DATE metadata fallback when the snapshot pool is empty.
+        tests:
+          - not_null
+      - name: snapshot_pool_rows
+        description: Count of silver.rolling_features rows used by the fallback aggregates.
+        tests:
+          - not_null
+      - name: snapshot_pool_players
+        description: Distinct players represented in the snapshot pool.
+        tests:
+          - not_null
+      - name: profile_rows
+        description: Number of rows in gold.player_profiles used by profile aggregates.
+        tests:
+          - not_null
+      - name: player_match_rows
+        description: Player-perspective rows from silver.player_matches used by the weighted tour rates.
+        tests:
+          - not_null
+
+      # Rank / streak-like medians (rounded) with empty-pool constants.
+      - name: latest_player_ranking
+        description: Median latest_player_ranking over the full snapshot pool; 100 when the pool is empty.
+        tests:
+          - not_null
+      - name: latest_player_rank_points
+        description: Median latest_player_rank_points over the full snapshot pool; 500 when empty.
+        tests:
+          - not_null
+      - name: streak
+        description: Median streak over the full snapshot pool; 0 when empty.
+        tests:
+          - not_null
+      - name: avg_player_rank_10
+        description: Median avg_player_rank_10 over the full snapshot pool; 100 when empty.
+        tests:
+          - not_null
+      - name: avg_rank_faced_10
+        description: Median avg_rank_faced_10 over the full snapshot pool; 100 when empty.
+        tests:
+          - not_null
+
+      # Continuous means over the full snapshot pool (constants when empty).
+      - name: latest_player_age
+        description: Mean latest_player_age over the full snapshot pool; 26.0 when empty.
+        tests:
+          - not_null
+      - name: weighted_form_10
+        description: Mean weighted_form_10 over the full snapshot pool; 0.0 when empty.
+        tests:
+          - not_null
+      - name: win_rate_10
+        description: Mean win_rate_10 over the full snapshot pool; 0.0 when empty.
+        tests:
+          - not_null
+      - name: ace_rate_10
+        description: Mean ace_rate_10 over the full snapshot pool; 0.0 when empty.
+        tests:
+          - not_null
+      - name: first_serve_pct_10
+        description: Mean first_serve_pct_10 over the full snapshot pool; 0.0 when empty.
+        tests:
+          - not_null
+      - name: break_points_saved_pct_10
+        description: Mean break_points_saved_pct_10 over the full snapshot pool; 0.0 when empty.
+        tests:
+          - not_null
+      - name: first_serve_win_pct_10
+        description: Mean first_serve_win_pct_10 over the full snapshot pool; 0.0 when empty.
+        tests:
+          - not_null
+      - name: second_serve_win_pct_10
+        description: Mean second_serve_win_pct_10 over the full snapshot pool; 0.0 when empty.
+        tests:
+          - not_null
+      - name: serve_win_pct_10
+        description: Mean serve_win_pct_10 over the full snapshot pool; 0.0 when empty.
+        tests:
+          - not_null
+      - name: return_points_won_pct_10
+        description: Mean return_points_won_pct_10 over the full snapshot pool; 0.0 when empty (similarity-only input).
+        tests:
+          - not_null
+      - name: df_rate_10
+        description: Mean df_rate_10 over the full snapshot pool; 0.0 when empty.
+        tests:
+          - not_null
+      - name: aces_per_svc_game_10
+        description: Mean aces_per_svc_game_10 over the full snapshot pool; 0.0 when empty.
+        tests:
+          - not_null
+      - name: clay_win_rate_10
+        description: Mean clay_win_rate_10 over the full snapshot pool; 0.0 when empty.
+        tests:
+          - not_null
+      - name: grass_win_rate_10
+        description: Mean grass_win_rate_10 over the full snapshot pool; 0.0 when empty.
+        tests:
+          - not_null
+      - name: hard_win_rate_10
+        description: Mean hard_win_rate_10 over the full snapshot pool; 0.0 when empty.
+        tests:
+          - not_null
+
+      # Cold-start activity defaults (median, rounded to a whole value).
+      - name: days_since_default
+        description: Median days since each player's latest snapshot (pool_as_of_date - latest_snapshot_date); 365 when the pool is empty.
+        tests:
+          - not_null
+      - name: matches_30d_default
+        description: Median per-player match count in the 30 days before pool_as_of_date; 0 when the pool is empty.
+        tests:
+          - not_null
+
+      # Explicit fixed constants and static profile-pool means.
+      - name: rate_default
+        description: Fixed rate constant (0.0) used for the unknown/0 surface win rate and empty-pool rates.
+        tests:
+          - not_null
+      - name: left_handed_rate
+        description: Mean left-handed rate over profiles with known L/R handedness; 0.0 when none exist.
+        tests:
+          - not_null
+      - name: avg_years_pro
+        description: Mean years-pro across profiles at pool_as_of_date (pool year - turned_pro); 8.0 when no profiles exist.
+        tests:
+          - not_null
+
+      # Weighted tour benchmarks (SUM/SUM from silver.player_matches; NULL only
+      # when the denominator is zero). [0, 1] bounds are enforced by the
+      # singular test tour_averages_rate_bounds.
+      - name: tour_ace_rate
+        description: Tour-wide aces per first serve (SUM(aces) / SUM(first_serves_made)).
+      - name: tour_first_serve_pct
+        description: Tour-wide first-serve percentage (SUM(first_serves_made) / SUM(total_serve_points)).
+      - name: tour_break_points_saved_pct
+        description: Tour-wide break-point save rate (SUM(break_points_saved) / SUM(break_points_faced)).
+      - name: tour_first_serve_win_pct
+        description: Tour-wide first-serve win rate (SUM(first_serve_points_won) / SUM(first_serves_made)).
+      - name: tour_second_serve_win_pct
+        description: Tour-wide second-serve win rate (SUM(second_serve_points_won) / SUM(total_serve_points - first_serves_made)).
+      - name: tour_serve_win_pct
+        description: Tour-wide serve win rate (SUM(first_serve_points_won + second_serve_points_won) / SUM(total_serve_points)).
+      - name: tour_return_points_won_pct
+        description: Tour-wide return-points-won rate (SUM(return_points_won) / SUM(return_points_available)).
+      - name: tour_df_rate
+        description: Tour-wide double-fault rate (SUM(double_faults) / SUM(total_serve_points)).
+      - name: tour_aces_per_svc_game
+        description: Tour-wide aces per service game (SUM(aces) / SUM(service_games)); non-negative when present.

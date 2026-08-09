@@ -6,8 +6,8 @@ from typing import cast
 import pandas as pd
 import pytest
 
-from src.constants import FEATURE_DEFAULTS_TABLE
-from src.features.columns import FEATURE_DEFAULTS_COLS
+from src.constants import TOUR_AVERAGES_TABLE
+from src.features.columns import TOUR_AVERAGES_FALLBACK_COLS
 from src.features.inference import _to_date, build_inference_features
 
 # ── _to_date ──
@@ -117,19 +117,26 @@ def test_round_int_and_alias_conflict_raises():
 
 @pytest.fixture
 def empty_pool(monkeypatch):
-    """Patch the DB so every player lookup is a cold start: the materialized
-    defaults lookup returns one (all-constant) row, and every snapshot/profile
+    """Patch the DB so every player lookup is a cold start: the tour-averages
+    singleton lookup returns one (all-constant) row, and every snapshot/profile
     query returns nothing."""
-    defaults_row: dict[str, object] = {col: 0.0 for col in FEATURE_DEFAULTS_COLS}
-    defaults_row["as_of_date"] = date(2026, 8, 9)
-    defaults_df = pd.DataFrame([defaults_row])
+    singleton_row: dict[str, object] = dict.fromkeys(TOUR_AVERAGES_FALLBACK_COLS, 0.0)
+    singleton_row["singleton_id"] = 1
+    singleton_row["pool_as_of_date"] = date(2026, 8, 9)
+    singleton_row["snapshot_pool_rows"] = 0
+    singleton_row["snapshot_pool_players"] = 0
+    singleton_row["profile_rows"] = 0
+    singleton_row["player_match_rows"] = 0
+    singleton_df = pd.DataFrame([singleton_row])
 
     def fake_execute_df(sql, params=None):  # noqa: ARG001 — generic DB stand-in
-        if FEATURE_DEFAULTS_TABLE in sql:
-            return defaults_df
         return pd.DataFrame()
 
     monkeypatch.setattr("src.features.inference.execute_df", fake_execute_df)
+    monkeypatch.setattr(
+        "src.features.tour_averages.execute_df",
+        lambda _sql, _params=None: singleton_df,
+    )
 
 
 def test_valid_string_aliases_map_and_build_with_empty_pool(empty_pool):  # noqa: ARG001 — fixture applied for its side effects only

@@ -7,9 +7,9 @@ models:
       player_match row with that player's immediately preceding post-match
       snapshot (player_match_number - 1) from silver.rolling_features,
       then collapsing the two perspectives into one canonical row. Every
-      side-level value is imputed from gold.feature_defaults at the match date
-      (strictly-prior snapshot pool) BEFORE matchup differences are calculated,
-      so every FEATURE_COLS cell is non-null and finite; dbt fails when the
+      side-level value is imputed from the single-row gold.tour_averages
+      singleton (CROSS JOIN) BEFORE matchup differences are calculated, so
+      every FEATURE_COLS cell is non-null and finite; dbt fails when the
       contract is violated (match_features_no_null_model_features).
       Ranking, rank points, and age come from the PRIOR snapshot, never a
       same-day one. `match_won` = 1 iff the canonical player_* side won.

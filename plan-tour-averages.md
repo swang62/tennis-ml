@@ -126,7 +126,7 @@ tests for profile-exposed benchmarks.
 
 ## Tasks
 
-### [ ] Task 1: Consolidate the dbt singleton model
+### [x] Task 1: Consolidate the dbt singleton model
 
 - **Description**:
   - Rewrite the existing `tour_averages.sql` draft as the canonical singleton.
@@ -162,7 +162,7 @@ tests for profile-exposed benchmarks.
   - Do not add speculative benchmarks without an existing numerator/denominator
     contract in `silver.player_matches`.
 
-### [ ] Task 2: Keep all finalized training imputation in dbt gold
+### [x] Task 2: Keep all finalized training imputation in dbt gold
 
 - **Description**:
   - Replace the date equality join to `feature_defaults` with one explicit
@@ -204,7 +204,7 @@ tests for profile-exposed benchmarks.
   - Do not impute raw nullable biography values inside `gold.player_profiles`.
   - Do not weaken the strict-prior snapshot or finite-feature tests.
 
-### [ ] Task 3: Centralize validated singleton loading for Bento
+### [x] Task 3: Centralize validated singleton loading for Bento
 
 - **Description**:
   - Add one shared loader for `gold.tour_averages`, used by inference and profile
@@ -230,7 +230,7 @@ tests for profile-exposed benchmarks.
   - No TTL, background refresh, process cache, or request-time aggregation.
   - Do not duplicate singleton query or validation logic across consumers.
 
-### [ ] Task 4: Simplify scalar and bulk inference around the singleton
+### [x] Task 4: Simplify scalar and bulk inference around the singleton
 
 - **Description**:
   - Remove date-keyed default SQL, oldest-row fallback, and per-date bulk default
@@ -269,7 +269,7 @@ tests for profile-exposed benchmarks.
     first snapshot; the singleton remains the cold-start fallback.
   - Do not add AVG/PERCENTILE queries to inference.
 
-### [ ] Task 5: Expose tour benchmarks in player profiles
+### [x] Task 5: Expose tour benchmarks in player profiles
 
 - **Description**:
   - Keep per-player career rates computed by the indexed player-specific query.
@@ -296,7 +296,7 @@ tests for profile-exposed benchmarks.
   - Do not calculate deltas in the backend; return source rates and let the UI
     format them.
 
-### [ ] Task 6: Render signed percentage-point comparisons
+### [x] Task 6: Render signed percentage-point comparisons
 
 - **Description**:
   - For each displayed profile rate with a tour counterpart, calculate
@@ -326,7 +326,7 @@ tests for profile-exposed benchmarks.
   - Do not add a frontend test framework for this change; verify the four render
     states manually plus existing TypeScript/build checks.
 
-### [ ] Task 7: Add singleton and migration regression coverage
+### [x] Task 7: Add singleton and migration regression coverage
 
 - **Description**:
   - Add one dbt singular contract test for exactly one row, identity, required
@@ -360,7 +360,7 @@ tests for profile-exposed benchmarks.
   - Do not automatically drop PostgreSQL relations from normal dbt runs.
   - Do not add `tour_averages` to `SNAPSHOT_TABLES`.
 
-### [ ] Task 8: Remove redundant MLflow feature-column lineage
+### [x] Task 8: Remove redundant MLflow feature-column lineage
 
 - **Description**:
   - Stop creating `train_test_split` MLflow experiment runs; the notebook
@@ -418,7 +418,7 @@ tests for profile-exposed benchmarks.
     historical MLflow experiments/runs; any MLflow cleanup is a separate
     destructive operation requiring explicit approval.
 
-### [ ] Task 9: Align current architecture documentation
+### [x] Task 9: Align current architecture documentation
 
 - **Description**:
   - Update current docs to describe the singleton and the division of labor:

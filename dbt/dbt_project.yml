@@ -35,9 +35,9 @@ models:
       +schema: gold
 
       # Reapply keys and indexes after materialization replaces the table.
-      feature_defaults:
+      tour_averages:
         +post-hook:
-          - "{{ ensure_primary_key_sql(this, 'pk_feature_defaults', 'as_of_date') }}"
+          - "{{ ensure_primary_key_sql(this, 'pk_tour_averages', 'singleton_id') }}"
 
       match_features:
         +post-hook:

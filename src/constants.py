@@ -65,13 +65,12 @@ INCUMBENT_BATCH_MAX_ROWS = 1000
 # base pins. Base models carry no aliases — exact version is the contract.
 
 
-def build_lineage_tags(base_pins: dict, aux_pins: dict, feature_pins: dict) -> dict[str, str]:
-    """Flatten base/aux/feature pins into champion model version tags.
+def build_lineage_tags(base_pins: dict, aux_pins: dict) -> dict[str, str]:
+    """Flatten base/aux pins into champion model version tags.
 
     base_pins is the {name: pin} map consolidated by 03 (registered_model_name,
     version, run_id, model_uri, plus scaler_uri/scaler_hash for linear).
-    aux_pins comes from 00 (embeddings/bio_feature_cols URIs + hashes) and
-    feature_pins from 01 (features.txt run URI + feature_cols.json hash).
+    aux_pins comes from 00 (embeddings/bio_feature_cols URIs + hashes).
     """
     tags: dict[str, str] = {}
     for name, pin in base_pins.items():
@@ -87,8 +86,6 @@ def build_lineage_tags(base_pins: dict, aux_pins: dict, feature_pins: dict) -> d
         "bio_feature_cols_hash",
     ):
         tags[f"aux_{key}"] = str(aux_pins[key])
-    tags["aux_features_uri"] = str(feature_pins["features_uri"])
-    tags["aux_feature_cols_hash"] = str(feature_pins["feature_cols_hash"])
     return tags
 
 
@@ -97,5 +94,5 @@ BRONZE_TABLE = "bronze.match_events"
 SILVER_PLAYER_MATCHES = "silver.player_matches"
 SILVER_ROLLING_FEATURES = "silver.rolling_features"
 GOLD_TABLE = "gold.match_features"
-FEATURE_DEFAULTS_TABLE = "gold.feature_defaults"
+TOUR_AVERAGES_TABLE = "gold.tour_averages"
 PROFILES_TABLE = "gold.player_profiles"

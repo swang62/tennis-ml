@@ -2,7 +2,7 @@
 
 import math
 from datetime import date
-from typing import override
+from typing import cast, override
 
 import pandas as pd
 import pytest
@@ -10,8 +10,9 @@ import pytest
 from src.constants import SILVER_ROLLING_FEATURES
 from src.db.client import execute_df, get_conn
 from src.features import inference
-from src.features.columns import DIFF_COLS, FEATURE_COLS, FEATURE_DEFAULTS_COLS
+from src.features.columns import DIFF_COLS, FEATURE_COLS, TOUR_AVERAGES_FALLBACK_COLS
 from src.features.inference import build_inference_features
+from src.features.tour_averages import load_tour_averages
 
 # All seeded matches are in 2026 (2026-03-15 .. 2026-07-15); a fixed as-of date
 # after the last match exercises the full snapshot history deterministically.
@@ -108,27 +109,26 @@ def test_years_pro_time_aware_and_cold_start():
 
 
 def test_materialized_defaults_return_expected_values():
-    """The materialized gold.feature_defaults row drives cold-start imputation.
+    """The materialized gold.tour_averages singleton drives cold-start imputation.
 
     Scalar inference performs no on-demand AVG/PERCENTILE queries: it reads the
-    newest defaults row at or before the as-of date (here the dbt run-date row,
-    since 2026-09-01 is after every seeded match). Every default cell is
-    finite, re-reads are deterministic, and a cold-start pair imputes exactly
-    those materialized values on both sides (so every diff stays neutral).
+    single full-pool singleton row regardless of the as-of date. Every default
+    cell is finite, re-reads are deterministic, and a cold-start pair imputes
+    exactly those materialized values on both sides (so every diff stays
+    neutral).
     """
-    as_of = date(2026, 9, 1)
-    defaults = inference._load_defaults(as_of.isoformat())
-    assert set(FEATURE_DEFAULTS_COLS).issubset(defaults.keys())
-    for col in FEATURE_DEFAULTS_COLS:
-        assert not pd.isna(defaults[col]), f"{col} is NULL for the defaults row"
-        assert math.isfinite(float(defaults[col])), f"{col} not finite for the defaults row"
+    defaults = cast(dict[str, float], load_tour_averages())
+    assert set(TOUR_AVERAGES_FALLBACK_COLS).issubset(defaults.keys())
+    for col in TOUR_AVERAGES_FALLBACK_COLS:
+        assert not pd.isna(defaults[col]), f"{col} is NULL for the singleton row"
+        assert math.isfinite(float(defaults[col])), f"{col} not finite for the singleton row"
 
-    # Deterministic: re-reading the same as-of date returns identical defaults.
-    assert defaults == inference._load_defaults(as_of.isoformat())
+    # Deterministic: re-reading the singleton returns identical values.
+    assert defaults == load_tour_averages()
 
     # The builder imputes exactly these materialized defaults for two unknown
     # players (cold-start sides equal the defaults; every diff stays neutral).
-    out = build_inference_features("ZZZZ", "YYYY", "hard", as_of_date=as_of)
+    out = build_inference_features("ZZZZ", "YYYY", "hard", as_of_date=date(2026, 9, 1))
     row = out.iloc[0]
     for col in DIFF_COLS:
         assert row[col] == 0, f"{col} should be neutral for two unknowns: {row[col]!r}"
@@ -218,9 +218,9 @@ def test_one_missing_player_imputed_no_nans(args):
     assert row["opponent_weighted_form_10"] == pytest.approx(float(pool["weighted_form_10"]))
     assert row["opponent_surface_win_rate_10"] == pytest.approx(float(pool["hard_win_rate_10"]))
     # Profile-derived features for the unknown player are pool-imputed from
-    # gold.feature_defaults. They must be finite, non-NaN, and within valid ranges
-    # (the exact value shifts with data — the contract is "plausible float," not
-    # a specific compute).
+    # the gold.tour_averages singleton. They must be finite, non-NaN, and
+    # within valid ranges (the exact value shifts with data — the contract is
+    # "plausible float," not a specific compute).
     assert 0.0 <= row["opponent_is_left_handed"] <= 1.0, (
         f"left_handed_rate out of bounds: {row['opponent_is_left_handed']}"
     )

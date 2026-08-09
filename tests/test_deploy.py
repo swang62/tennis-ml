@@ -547,8 +547,6 @@ def _lineage_tags():
         "aux_embeddings_hash": "bbb",
         "aux_bio_feature_cols_uri": "runs:/run-aux/bio_feature_cols.json",
         "aux_bio_feature_cols_hash": "ccc",
-        "aux_features_uri": "runs:/run-split/features.txt",
-        "aux_feature_cols_hash": "ddd",
     }
 
 
@@ -672,7 +670,7 @@ def test_build_input_fingerprint_ignores_generated_outputs(monkeypatch, tmp_path
 
 
 def test_build_lineage_tags_flattens_exact_pins():
-    """build_lineage_tags turns base/aux/feature pins into the champion tag set."""
+    """build_lineage_tags turns base/aux pins into the champion tag set."""
     import src.constants as c
 
     base_pins = {
@@ -703,9 +701,7 @@ def test_build_lineage_tags_flattens_exact_pins():
         "bio_feature_cols_uri": "runs:/run-aux/bio_feature_cols.json",
         "bio_feature_cols_hash": "ccc",
     }
-    feature_pins = {"features_uri": "runs:/run-split/features.txt", "feature_cols_hash": "ddd"}
-
-    tags = c.build_lineage_tags(base_pins, aux_pins, feature_pins)
+    tags = c.build_lineage_tags(base_pins, aux_pins)
 
     assert tags["base_linear_version"] == "3"
     assert tags["base_linear_scaler_uri"] == "runs:/run-linear/linear_scaler.pkl"
@@ -714,8 +710,6 @@ def test_build_lineage_tags_flattens_exact_pins():
     assert tags["base_nn_model_uri"] == "runs:/run-nn/nn_model"
     assert tags["aux_embeddings_hash"] == "bbb"
     assert tags["aux_bio_feature_cols_uri"] == "runs:/run-aux/bio_feature_cols.json"
-    assert tags["aux_features_uri"] == "runs:/run-split/features.txt"
-    assert tags["aux_feature_cols_hash"] == "ddd"
 
 
 # --- Task 2: static notebook/deploy contracts ---

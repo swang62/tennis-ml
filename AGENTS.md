@@ -19,7 +19,7 @@ End-to-end MLOps pipeline for tennis match prediction. Data flows CSV → Postgr
 infra/           — k3d config, static K8s manifests, PostgreSQL init SQL
 notebooks/       — EDA + parameterized Papermill notebooks (00–05)
 src/
-  features/      — shared feature column definitions + PostgreSQL-backed inference builder
+  features/      — shared feature column definitions, inference builder, and tour_averages singleton loader
   flows/         — ETL (Prefect), standalone training runner, deploy flow
   models/        — Player similarity index (FAISS), NN architecture
   serving/       — BentoML service (model-only — no feature derivation)
@@ -30,7 +30,7 @@ dbt/             — silver→gold SQL models + tests (bronze is the PostgreSQL 
 
 ## Big gotchas & unique aspects
 
-**PostgreSQL is the feature single source of truth.** Per-match player rolling snapshots (`silver.rolling_features`) drive both the canonical training rows (`gold.match_features`) and the on-demand inference feature builder. There is no materialized "latest" table — inference queries the snapshots directly, as-of-dated. Rolling data is always synced to match data with dbt and is always up-to-date.
+**PostgreSQL is the feature single source of truth.** Per-match player rolling snapshots (`silver.rolling_features`) drive both the canonical training rows (`gold.match_features`) and the as-of-dated inference feature builder. Cold-start fallbacks and tour-wide comparisons come from the materialized `gold.tour_averages` singleton (always exactly one row), never on-demand AVG/PERCENTILE queries. Rolling data is always synced to match data with dbt and is always up-to-date.
 
 **Canonical orientation by lower ATP id.** Every match row (training and inference) puts the lexicographically-lower player id on the `player_*` side so `(A, B)` and `(B, A)` produce identical rows. Predicted `p_win` is P(canonical player wins) exactly as the row is sent.
 

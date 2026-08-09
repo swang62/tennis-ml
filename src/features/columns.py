@@ -195,19 +195,19 @@ FEATURE_COLS: list[str] = [
     "round_encoded",
 ]
 
-# ── Materialized imputation defaults (gold.feature_defaults) ──
+# ── Tour averages singleton (gold.tour_averages) ──
 #
-# One row per as-of date (every historical match date plus the dbt run date);
-# every value is computed only from silver.rolling_features snapshots strictly
-# before that date, plus the static profile pool. Gold.match_features and
-# scalar/bulk inference impute missing side values from the newest row at or
-# before the as-of date (falling back to the latest row for future dates)
-# instead of computing AVG/PERCENTILE on demand.
+# Single full-pool row (singleton_id = 1) materialized by dbt; gold.match_features
+# and scalar/bulk inference impute missing side values from it instead of
+# computing AVG/PERCENTILE on demand.
 #
 # Median is used for rank/rank-points/streak-like values, mean for rates, age,
 # years-pro, and handedness rate; `rate_default` is the fixed constant for
-# unknown/0 surface and empty-pool rates; counts are meta-only.
-FEATURE_DEFAULTS_COLS: list[str] = [
+# unknown/0 surface and empty-pool rates. Observability counts
+# (snapshot_pool_rows, snapshot_pool_players, profile_rows, player_match_rows),
+# `pool_as_of_date`, and the tour_* benchmarks live in the same singleton row
+# but are not model fallbacks.
+TOUR_AVERAGES_FALLBACK_COLS: list[str] = [
     "latest_player_ranking",
     "latest_player_rank_points",
     "latest_player_age",
@@ -233,7 +233,18 @@ FEATURE_DEFAULTS_COLS: list[str] = [
     "rate_default",
     "left_handed_rate",
     "avg_years_pro",
-    "snapshot_pool_rows",
-    "snapshot_pool_players",
-    "profile_rows",
+]
+
+# Weighted tour-wide benchmarks (SUM / SUM from silver.player_matches), used
+# for player-profile comparisons; may be NULL only when the denominator is 0.
+TOUR_BENCHMARK_COLS: list[str] = [
+    "tour_ace_rate",
+    "tour_first_serve_pct",
+    "tour_break_points_saved_pct",
+    "tour_first_serve_win_pct",
+    "tour_second_serve_win_pct",
+    "tour_serve_win_pct",
+    "tour_return_points_won_pct",
+    "tour_df_rate",
+    "tour_aces_per_svc_game",
 ]
