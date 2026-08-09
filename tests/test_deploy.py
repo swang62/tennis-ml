@@ -399,18 +399,16 @@ def test_compose_bento_depends_on_postgres_healthy():
     assert deps["postgres"]["condition"] == "service_healthy"
 
 
-def test_compose_bento_readiness_runs_authenticated_postgres_query():
-    """Bento readiness runs an authenticated SELECT 1 over DATABASE_URL."""
+def test_compose_bento_readiness_hits_readyz_endpoint():
+    """Bento readiness hits the built-in /readyz HTTP endpoint."""
     cfg = _compose()
     assert "healthcheck" in cfg["services"]["bento"]
     test = cfg["services"]["bento"]["healthcheck"]["test"]
     assert test[0] == "CMD-SHELL"
     cmd = test[-1]
-    assert "psycopg" in cmd  # the driver is in the serving image
-    assert "connect(" in cmd
-    assert "DATABASE_URL" in cmd  # connects via the single URL (postgres:5432, password)
-    assert "POSTGRES_PASSWORD" not in cmd  # no separate auth variable
-    assert "SELECT 1" in cmd  # executes an actual query, not a bare URL read
+    assert "urllib.request" in cmd
+    assert "readyz" in cmd
+    assert "localhost:3000" in cmd
 
 
 def test_web_image_uses_exactly_one_nginx_worker():

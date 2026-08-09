@@ -26,6 +26,10 @@ def ensure_kernel() -> str:
                 "argv": [sys.executable, "-m", "ipykernel_launcher", "-f", "{connection_file}"],
                 "display_name": name,
                 "language": "python",
+                "env": {
+                    "MLFLOW_TRACKING_INSECURE_TLS": "true",
+                    "MLFLOW_TRACKING_URI": os.environ.get("MLFLOW_TRACKING_URI", ""),
+                },
             },
             indent=2,
         )

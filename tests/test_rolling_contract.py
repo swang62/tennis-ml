@@ -244,6 +244,7 @@ def test_bronze_column_order_and_uniqueness():
         "player1_id",
         "player2_id",
         "tournament",
+        "tournament_name",
         "round",
         "surface",
         "is_indoor",

@@ -16,7 +16,7 @@ from src.features.columns import (
 )
 
 # Unknown indoor status is valid at ingest.
-BRONZE_COLUMNS_NULLABLE: tuple[str, ...] = ("is_indoor",)
+BRONZE_COLUMNS_NULLABLE: tuple[str, ...] = ("is_indoor", "tournament_name")
 
 
 class IngestionCheckReport(TypedDict):

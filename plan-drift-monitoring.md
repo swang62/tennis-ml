@@ -570,8 +570,8 @@ enter `just check-drift` or its MLflow reports.
   candidate to become the first champion, then force-build and push the clean
   Bento image. The operator manually pulls/restarts production.
 - **Files**: `infra/manifests/default/mlflow.yaml` (reference for reset target),
-  `infra/postgres/init.sql`, `compose.yaml`, `src/flows/init_db.py`,
-  `src/flows/seed.py`, `src/flows/pipeline.py`, `src/flows/deploy.py`,
+  `infra/postgres/init.sql`, `compose.yaml`, `src/db/init_db.py`,
+  `src/db/seed.py`, `src/flows/pipeline.py`, `src/flows/deploy.py`,
   `README.md` (one-time clean-reset runbook), generated MLflow/PVC/database/local
   output state (destructive operational step only).
 - **Acceptance Criteria**:

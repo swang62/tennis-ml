@@ -141,6 +141,40 @@ trap 'STOPPED_BY_SIGNAL=1; cleanup' INT TERM
 trap cleanup EXIT
 
 echo "preflight ok: PostgreSQL at ${DB_HOST:-localhost}:$DB_PORT (database $DB_NAME), tables present, ports free"
+
+# --- Import MLflow models into BentoML local store (idempotent) ----------------
+echo "importing MLflow models into BentoML local store..."
+uv run python -c '
+from pathlib import Path
+from src.constants import DATA_PROCESSED, load_env
+from src.flows.deploy import (
+    _lineage_pins, _import_or_reuse, _materialize_nn_onnx, _latest_production_version,
+)
+from mlflow.tracking.client import MlflowClient
+
+load_env()
+
+client = MlflowClient()
+production = _latest_production_version(client)
+if production is None:
+    raise SystemExit("no champion found")
+pins = _lineage_pins(client, production)
+
+for key in ("production", "linear", "gbdt"):
+    _import_or_reuse(pins[key])
+
+nn_onnx = DATA_PROCESSED / "nn_best.onnx"
+if nn_onnx.exists():
+    print(f"[nn_best] ONNX already exists: {nn_onnx}")
+else:
+    _materialize_nn_onnx(pins["nn"])
+
+print("dev import complete")
+' || {
+    echo "error: model import failed — are models registered in MLflow? Run 'just train' first." >&2
+    exit 1
+}
+
 echo "starting Bento on http://127.0.0.1:3000 (--reload) and Vite on http://127.0.0.1:5173; Ctrl-C stops both"
 (
     cd "$ROOT" && exec uv run bentoml serve src/serving/service.py:TennisPredictor --host 127.0.0.1 --port 3000 --reload

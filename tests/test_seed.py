@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.flows import init_db, seed
+from src.db import init_db, seed
 
 TOP_PLAYERS = seed.TOP_PLAYERS
 RECENT = seed.RECENT
@@ -146,6 +146,7 @@ def test_load_all_raw_atp_rows_sorts_chronologically(tmp_path):
         "loser_rank_points",
         "loser_age",
         "tourney_level",
+        "tourney_name",
         "round",
         "surface",
         "indoor",

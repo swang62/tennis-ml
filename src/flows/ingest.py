@@ -42,6 +42,7 @@ ATP_PROFILE_COLUMNS = [
 # Columns every raw ATP match row carries (see data/column_glossary.md).
 RAW_ATP_COLUMNS = [
     "tourney_id",
+    "tourney_name",
     "tourney_date",
     "match_num",
     "winner_id",
@@ -100,7 +101,7 @@ SUMMARY_MAX_CHARS = 2000
 
 load_env()
 
-# ── Raw ATP → Bronze transform (shared with src/flows/seed.py) ──────────────
+# ── Raw ATP → Bronze transform (shared with seed.py) ──────────────
 
 
 def _stat(row: dict[str, Any], key: str) -> int:
@@ -183,6 +184,7 @@ def atp_rows_to_bronze(
                 "player1_id": m["winner_id"],
                 "player2_id": m["loser_id"],
                 "tournament": level,
+                "tournament_name": str(m["tourney_name"]),
                 "round": str(m["round"]).lower(),
                 "surface": str(m["surface"]).lower(),
                 "is_indoor": _normalize_indoor(m.get("indoor")),

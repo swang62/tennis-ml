@@ -68,6 +68,7 @@ export interface MatchRow {
   match_id: string
   match_date: string
   tournament: string
+  tournament_name: string | null
   surface: string
   round: string
   opponent_id: string

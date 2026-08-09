@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS bronze.match_events (
     player1_id                 VARCHAR NOT NULL,
     player2_id                 VARCHAR NOT NULL,
     tournament                 VARCHAR NOT NULL,
+    tournament_name            VARCHAR,
     round                      VARCHAR,
     surface                    VARCHAR NOT NULL,
     is_indoor                  SMALLINT,

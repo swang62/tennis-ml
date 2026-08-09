@@ -12,15 +12,15 @@ db-etl *args:
 
 # Create PostgreSQL schemas and tables.
 db-init:
-    uv run python src/flows/init_db.py init
+    uv run python src/db/init_db.py init
 
 # Drop and recreate PostgreSQL schemas.
 db-reset:
-    uv run python src/flows/init_db.py reset
+    uv run python src/db/init_db.py reset
 
 # Seed deterministic raw matches.
 db-seed *args:
-    uv run python src/flows/seed.py {{args}}
+    uv run python src/db/seed.py {{args}}
 
 # Export an atomic PostgreSQL training snapshot.
 db-snapshot:

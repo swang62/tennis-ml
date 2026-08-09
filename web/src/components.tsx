@@ -85,7 +85,7 @@ export function StatBar({
 
 export function ResultBadge({ won }: { won: boolean }) {
   return (
-    <span className={`badge ${won ? 'badge-grass' : 'badge-ice'}`}>{won ? 'Won' : 'Lost'}</span>
+    <span className={`badge ${won ? 'badge-grass' : 'badge-clay'}`}>{won ? 'Won' : 'Lost'}</span>
   )
 }
 

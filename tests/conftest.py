@@ -2,9 +2,8 @@
 
 import pytest
 
-from src.db import client
-from src.flows import init_db
-from src.flows import seed as seed_flow
+from src.db import client, init_db
+from src.db import seed as seed_flow
 
 _SEED_FAILURE: str | None = None
 

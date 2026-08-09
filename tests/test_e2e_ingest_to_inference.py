@@ -7,10 +7,10 @@ import pandas as pd
 import pytest
 
 from src.constants import BRONZE_TABLE, GOLD_TABLE, PROFILES_TABLE, ROOT, SILVER_ROLLING_FEATURES
-from src.db import client
+from src.db import client, seed
 from src.db.client import execute_df
 from src.features.columns import FEATURE_COLS, SIMILARITY_COLS
-from src.flows import ingest, seed
+from src.flows import ingest
 
 RAW_CSV = ROOT / "data" / "raw" / "2026.csv"
 AS_OF = date(2026, 9, 1)  # after every seeded match, like test_inference_features

@@ -171,6 +171,7 @@ def _raw_row(match_num=1, tourney_date="20260105", level="G") -> dict[str, objec
         "loser_rank_points": 3000,
         "loser_age": "28.75",
         "tourney_level": level,
+        "tourney_name": "Test Open",
         "round": "QF",
         "surface": "Hard",
         "indoor": "O",
@@ -203,6 +204,7 @@ def test_atp_rows_to_bronze_maps_raw_columns():
     assert row["match_id"] == "20260105-2026-9900-001"
     assert row["match_date"] == "2026-01-05"
     assert row["tournament"] == "grand_slam"
+    assert row["tournament_name"] == "Test Open"
     assert row["round"] == "qf"
     assert row["surface"] == "hard"
     assert row["winner_id"] == row["player1_id"]
@@ -273,6 +275,7 @@ def _raw_atp_df() -> pd.DataFrame:
                 "loser_rank_points": 3000,
                 "loser_age": "28.75",
                 "tourney_level": "G",
+                "tourney_name": "Test Open",
                 "round": "QF",
                 "surface": "Hard",
                 "indoor": "O",

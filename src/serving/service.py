@@ -6,6 +6,7 @@ ids in-service (scalar and bulk) against the live PostgreSQL gold tables.
 
 import builtins
 import json
+import logging
 import math
 import os
 import pickle
@@ -49,6 +50,12 @@ AUX_DIR = ROOT / "data" / "processed"
 MODEL_INFO_FILE = AUX_DIR / "model_info.json"
 
 load_env()
+
+# Set LOG_LEVEL=DEBUG to enable per-request observability prints.
+_log = logging.getLogger("tennis_ml.serving")
+_log.setLevel(getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO))
+if not _log.handlers:
+    _log.addHandler(logging.StreamHandler())
 
 # Serving dependencies stay here. Model packages are pinned because models are pickled.
 SERVING_IMAGE = Image(
@@ -137,7 +144,7 @@ def _predict_from_ids_bulk_impl(
     out = feature_df.copy()
     for col in ("p_linear", "p_gbdt", "p_nn", "p_win"):
         out[col] = proba_df[col].to_numpy()
-    print(
+    _log.debug(
         "predict_from_ids_bulk_observability"
         f" rows={len(out)}"
         f" feature_count={len(FEATURE_COLS)}"
@@ -234,24 +241,23 @@ ORDER BY match_date
 _MATCH_HISTORY_SQL = f"""
 WITH per_match AS (
     SELECT
-        pm.match_id, pm.match_date, br.tournament, pm.surface, br.round,
+        pm.match_id, pm.match_date, br.tournament, br.tournament_name, pm.surface, br.round,
         pm.opponent_id, pr.display_name AS opponent_name,
         pm.player_ranking, pm.match_won,
         pm.aces, pm.double_faults,
         pm.first_serve_points_won, pm.second_serve_points_won,
         pm.total_serve_points, pm.service_games,
         pm.break_points_saved, pm.break_points_faced,
-        regexp_replace(pm.match_id, '-[0-9]{{3}}$', '') AS tourney_key,
         CASE br.round
-            WHEN 'R128' THEN 1
-            WHEN 'R64' THEN 2
-            WHEN 'R32' THEN 3
-            WHEN 'R16' THEN 4
-            WHEN 'QF' THEN 5
-            WHEN 'SF' THEN 6
-            WHEN 'F' THEN 7
+            WHEN 'r128' THEN 7
+            WHEN 'r64'  THEN 6
+            WHEN 'r32'  THEN 5
+            WHEN 'r16'  THEN 4
+            WHEN 'qf'   THEN 3
+            WHEN 'sf'   THEN 2
+            WHEN 'f'    THEN 1
             ELSE 0
-        END AS round_encoded
+        END AS round_depth
     FROM {SILVER_PLAYER_MATCHES} pm
     LEFT JOIN {BRONZE_TABLE} br ON br.match_id = pm.match_id
     LEFT JOIN {PROFILES_TABLE} pr ON pr.player_id = pm.opponent_id
@@ -260,12 +266,12 @@ WITH per_match AS (
 ranked AS (
     SELECT per_match.*,
         ROW_NUMBER() OVER (
-            PARTITION BY tourney_key
-            ORDER BY round_encoded DESC, match_date DESC, match_id DESC
+            PARTITION BY tournament_name
+            ORDER BY round_depth ASC, match_date DESC
         ) AS rn
     FROM per_match
 )
-SELECT match_id, match_date, tournament, surface, round,
+SELECT match_id, match_date, tournament, tournament_name, surface, round,
        opponent_id, opponent_name, player_ranking, match_won,
        aces, double_faults, first_serve_points_won, second_serve_points_won,
        total_serve_points, service_games, break_points_saved, break_points_faced
@@ -413,6 +419,7 @@ def _match_history(request: Request) -> JSONResponse:
                 "match_id": r["match_id"],
                 "match_date": r["match_date"],
                 "tournament": r["tournament"],
+                "tournament_name": r["tournament_name"] or None,
                 "surface": r["surface"],
                 "round": r["round"],
                 "opponent_id": r["opponent_id"],
@@ -491,11 +498,15 @@ def _head_to_head(request: Request) -> JSONResponse:
 _similarity_finder: PlayerSimilarity | None = None
 
 
-def _get_similarity_finder() -> PlayerSimilarity:
+def _get_similarity_finder() -> PlayerSimilarity | None:
     global _similarity_finder
     if _similarity_finder is None:
         finder = PlayerSimilarity()
-        finder.load()
+        try:
+            finder.load()
+        except FileNotFoundError:
+            _log.warning("similarity index not found — /similar_players returns empty")
+            return None
         _similarity_finder = finder
     return _similarity_finder
 
@@ -511,7 +522,8 @@ def _similar_players(request: Request) -> JSONResponse:
         return _err(400, "limit must be an integer")
     limit = max(1, min(limit, 3))  # bounded: a profile never shows more than 3
     try:
-        similar = _get_similarity_finder().search(player_id, top_k=limit)
+        finder = _get_similarity_finder()
+        similar = finder.search(player_id, top_k=limit) if finder is not None else []
     except Exception as exc:
         return _err(500, f"similar players query failed: {exc}")
     # Entries carry player_id + display_name (score is a number, not an id);
@@ -648,7 +660,7 @@ class TennisPredictor:
             if first is not None and len(input) == 1
             else ""
         )
-        print(
+        _log.debug(
             "predict_observability"
             f" rows={len(input)}"
             f" feature_count={len(FEATURE_COLS)}"
@@ -717,7 +729,7 @@ class TennisPredictor:
             rec["player_id"] if float(rec["p_win"]) >= 0.5 else rec["opponent_id"]
         )
         rec["response_ms"] = (perf_counter() - started_at) * 1000
-        print(
+        _log.debug(
             "predict_from_ids_observability"
             f" raw_player_id={meta['raw_player_id']}"
             f" raw_opponent_id={meta['raw_opponent_id']}"

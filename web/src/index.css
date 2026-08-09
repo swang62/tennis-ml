@@ -1036,7 +1036,7 @@ html.light {
   .profile-head {
     display: flex;
     flex-wrap: wrap;
-    align-items: baseline;
+    align-items: center;
     gap: 0.75rem 1rem;
   }
 
@@ -1068,27 +1068,37 @@ html.light {
     font-variant-numeric: tabular-nums;
   }
 
-  .highlights {
+  /* Profile main: two-column layout — summary + stats left, bio right */
+
+  .profile-main {
     display: grid;
-    gap: 1.5rem 2rem;
-  }
-
-  .highlights > * {
-    min-width: 0;
-  }
-
-  .highlights .bio-grid {
-    margin-top: 0;
+    gap: 1.25rem 2rem;
+    margin-top: 1.25rem;
   }
 
   @media (min-width: 880px) {
-    .highlights {
+    .profile-main {
       grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
       align-items: start;
     }
-    .highlights .bio-grid {
-      grid-template-columns: repeat(2, 1fr);
-    }
+  }
+
+  .profile-summary {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    min-width: 0;
+  }
+
+  .profile-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem 2rem;
+  }
+
+  .profile-main .bio-grid {
+    grid-template-columns: 1fr;
+    margin-top: 0;
   }
 
   .highlights-summary {
@@ -1102,6 +1112,131 @@ html.light {
     border-left: 3px solid var(--clay);
     border-radius: var(--radius-sm);
     padding: 1rem 1.1rem;
+  }
+
+  /* ---------- profile footer (similar players inline) ---------- */
+
+  .profile-footer {
+    margin-top: 1.5rem;
+    padding-top: 0.9rem;
+    border-top: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+
+  .similar-inline {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex-wrap: wrap;
+    font-size: 0.8125rem;
+  }
+
+  .similar-inline > span {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+
+  .similar-link {
+    font-weight: 600;
+    color: var(--text-dim);
+    transition: color 0.15s var(--ease);
+  }
+
+  .similar-link:hover {
+    color: var(--clay);
+  }
+
+  /* ---------- stats row (rank history + all-time side by side) ---------- */
+
+  .stats-row {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+
+  .stats-row > .card {
+    flex: 1;
+    min-width: 0;
+  }
+
+  @media (min-width: 880px) {
+    .stats-row {
+      flex-direction: row;
+      align-items: stretch;
+    }
+  }
+
+  /* ---------- tournament table ---------- */
+
+  .tourney-table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .tourney-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8125rem;
+  }
+
+  .tourney-table thead {
+    border-bottom: 2px solid var(--line);
+  }
+
+  .tourney-table th {
+    text-align: left;
+    font-size: 0.625rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    padding: 0.65rem 0.5rem 0.5rem 0;
+  }
+
+  .tourney-table tbody tr {
+    border-bottom: 1px solid var(--line);
+  }
+
+  .tourney-table tbody tr:last-child {
+    border-bottom: 0;
+  }
+
+  .tourney-table td {
+    padding: 0.65rem 0.5rem 0.65rem 0;
+    white-space: nowrap;
+  }
+
+  .tourney-th-r,
+  .tourney-td-r {
+    text-align: right !important;
+    padding-right: 0 !important;
+  }
+
+  .tourney-name {
+    font-weight: 700;
+    max-width: 14ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .tourney-round {
+    font-weight: 600;
+    color: var(--text-dim);
+  }
+
+  .surface-pill {
+    display: inline-flex;
+    align-items: center;
+    font-size: 0.6875rem;
+    font-weight: 700;
+    text-transform: capitalize;
+    border: 1px solid;
+    border-radius: 100px;
+    padding: 0.1rem 0.55rem;
   }
 
   /* prediction panel — the clay betting signal */

@@ -25,4 +25,5 @@ COPY nginx.conf.template /etc/nginx/templates/default.conf.template
 # rendered auth comparison would be against an empty key.
 COPY entrypoint.sh /usr/local/bin/nginx-entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/nginx-entrypoint.sh"]
+CMD ["nginx", "-g", "daemon off;"]
 EXPOSE 80

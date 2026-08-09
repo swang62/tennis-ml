@@ -12,6 +12,7 @@ import papermill as pm
 
 from src.constants import LOGS, OUTPUTS, PARAMS
 from src.db.snapshot import SNAPSHOT_PATH, refresh_snapshot
+from src.db import training
 from src.utils import ensure_kernel, load_env
 
 # Training notebooks (00-05), run in order.
@@ -80,6 +81,14 @@ if __name__ == "__main__":
         print("Refreshing training snapshot from PostgreSQL...")
         refresh_snapshot()
         print(f"  Snapshot refreshed: {SNAPSHOT_PATH}")
+
+        # Build the player similarity index from the DuckDB snapshot so it is
+        # always fresh and never depends on a running PostgreSQL.
+        print("\nBuilding player similarity index (snapshot)...")
+        from src.models.similarity import PlayerSimilarity
+
+        PlayerSimilarity().build(query=training.to_dataframe)
+        print("  Similarity index built.")
 
         print(f"Pipeline starting — {len(NB_ORDER)} notebooks")
         for name in NB_ORDER:
