@@ -1,86 +1,116 @@
 -- gold.match_features: canonical match-level training table.
 --
--- One row per match. Rolling values use the prior snapshot; current rankings,
--- rank points, age, and 30-day activity come from player_matches. The lower
--- ATP id is canonical `player_*`, making raw player order irrelevant.
+-- One row per match. Every side-level value (ranking, rank points, age,
+-- rolling state, profile, activity) is imputed from gold.feature_defaults at
+-- the match date BEFORE matchup differences are calculated, so every
+-- FEATURE_COLS cell is non-null and finite. Rolling values use the prior
+-- snapshot (player_match_number - 1); ranking/rank points/age also come from
+-- the prior snapshot, never a same-day one. The lower ATP id is canonical
+-- `player_*`, making raw player order irrelevant.
 --
 -- match_won = 1 iff the canonical player_* side won, else 0. It is the LABEL,
 -- not a feature.
 --
 -- H2H uses the five most recent distinct, strictly-prior canonical meetings.
 --
--- Cold starts retain NULL rolling values; days_since_last_match defaults to 365.
+-- Defaults are strictly-prior and date-keyed: multiple matches on one date
+-- intentionally share the same pre-day state. An empty prior pool falls back
+-- to the explicit constants materialized in feature_defaults.
 --
--- Unranked players are retained; training imputes NULL ranking values.
+-- Similarity-analysis serve/return columns are appended for PlayerSimilarity
+-- only; they are never FEATURE_COLS model features.
 --
--- Model columns are metadata plus FEATURE_COLS; appended serve/return columns
--- are for similarity only. Height and current-match rates are not model features.
+-- Model columns are metadata plus FEATURE_COLS. Height and current-match
+-- rates are not model features.
 
 WITH player_match_enriched AS (
     SELECT
         pm.match_id,
         pm.match_date,
-        bron.match_date       AS bronze_date,
         bron.tournament,
         bron.round,
         pm.surface,
-        bron.is_indoor,
+        -- Indoor context defaults to 0 (outdoor) when unknown.
+        COALESCE(bron.is_indoor, 0) AS is_indoor,
         pm.player_id,
         pm.opponent_id,
         pm.match_won,
-        -- CURRENT event rankings/rank points/age, not the prior snapshot's
-        pm.player_ranking,
-        pm.opponent_ranking,
-        pm.player_rank_points,
-        pm.player_age,
-        pm.player_match_number,
 
-        -- Correct pre-match activity count (0 on first match; it is a COUNT)
-        CAST(pm.matches_30d_before AS INTEGER) AS matches_30d,
+        -- Strictly-prior ranking/rank points/age (no same-day snapshot),
+        -- imputed from the date-keyed defaults pool.
+        COALESCE(pr.latest_player_ranking, fd.latest_player_ranking) AS player_ranking,
+        COALESCE(pr.latest_player_rank_points, fd.latest_player_rank_points)
+            AS player_rank_points,
+        COALESCE(pr.latest_player_age, fd.latest_player_age) AS player_age,
 
-        -- 365 on a first match.
-        CAST(COALESCE(pm.match_date - pr.snapshot_date, 365)
-            AS INTEGER) AS days_since_last_match,
+        -- Correct pre-match activity count; cold-start players use the pool
+        -- median instead of a hardcoded 0.
+        CASE WHEN pr.player_id IS NULL THEN fd.matches_30d_default
+             ELSE CAST(pm.matches_30d_before AS INTEGER)
+        END AS matches_30d,
 
-        -- Prior rolling snapshot; NULL on cold start.
-        pr.weighted_form_10,
-        pr.win_rate_10,
-        pr.ace_rate_10,
-        pr.first_serve_pct_10,
-        pr.break_points_saved_pct_10,
-        pr.first_serve_win_pct_10,
-        pr.second_serve_win_pct_10,
-        pr.serve_win_pct_10,
-        pr.return_points_won_pct_10,
-        pr.df_rate_10,
-        pr.aces_per_svc_game_10,
+        -- Days since the player's latest prior snapshot; cold-start players
+        -- use the pool median instead of a hardcoded 365.
+        CASE WHEN pr.player_id IS NULL THEN fd.days_since_default
+             ELSE CAST(pm.match_date - pr.snapshot_date AS INTEGER)
+        END AS days_since_last_match,
 
-        -- Rank trend: prior rolling avg ranking minus CURRENT event ranking
-        pr.avg_player_rank_10 - pm.player_ranking AS rank_trend_10,
+        -- Prior rolling snapshot, imputed from the defaults pool.
+        COALESCE(pr.weighted_form_10, fd.weighted_form_10) AS weighted_form_10,
+        COALESCE(pr.win_rate_10, fd.win_rate_10) AS win_rate_10,
+        COALESCE(pr.ace_rate_10, fd.ace_rate_10) AS ace_rate_10,
+        COALESCE(pr.first_serve_pct_10, fd.first_serve_pct_10) AS first_serve_pct_10,
+        COALESCE(pr.break_points_saved_pct_10, fd.break_points_saved_pct_10)
+            AS break_points_saved_pct_10,
+        COALESCE(pr.first_serve_win_pct_10, fd.first_serve_win_pct_10)
+            AS first_serve_win_pct_10,
+        COALESCE(pr.second_serve_win_pct_10, fd.second_serve_win_pct_10)
+            AS second_serve_win_pct_10,
+        COALESCE(pr.serve_win_pct_10, fd.serve_win_pct_10) AS serve_win_pct_10,
+        COALESCE(pr.return_points_won_pct_10, fd.return_points_won_pct_10)
+            AS return_points_won_pct_10,
+        COALESCE(pr.df_rate_10, fd.df_rate_10) AS df_rate_10,
+        COALESCE(pr.aces_per_svc_game_10, fd.aces_per_svc_game_10)
+            AS aces_per_svc_game_10,
 
-        -- Strength of schedule: prior snapshot's rolling average opponent rank
-        pr.avg_rank_faced_10,
+        -- Rank trend: prior rolling avg ranking minus prior latest ranking.
+        COALESCE(pr.avg_player_rank_10, fd.avg_player_rank_10)
+            - COALESCE(pr.latest_player_ranking, fd.latest_player_ranking)
+            AS rank_trend_10,
 
-        CAST(pr.streak AS INTEGER) AS streak,
+        -- Strength of schedule: prior snapshot's rolling average opponent rank.
+        COALESCE(pr.avg_rank_faced_10, fd.avg_rank_faced_10) AS avg_rank_faced_10,
 
-        -- Surface-specific form: prior snapshot's rate on the current surface
+        COALESCE(pr.streak, fd.streak) AS streak,
+
+        -- Surface-specific form: prior snapshot's rate on the current surface;
+        -- carpet and unknown/0 surface use the fixed rate default.
         CASE pm.surface
-            WHEN 'clay'  THEN pr.clay_win_rate_10
-            WHEN 'grass' THEN pr.grass_win_rate_10
-            WHEN 'hard'  THEN pr.hard_win_rate_10
+            WHEN 'clay'  THEN COALESCE(pr.clay_win_rate_10, fd.clay_win_rate_10)
+            WHEN 'grass' THEN COALESCE(pr.grass_win_rate_10, fd.grass_win_rate_10)
+            WHEN 'hard'  THEN COALESCE(pr.hard_win_rate_10, fd.hard_win_rate_10)
+            ELSE fd.rate_default
         END AS surface_win_rate_10,
 
-        -- Missing or non-L/R handedness stays NULL for train-time imputation.
-        CAST(CASE WHEN prof.handedness = 'L' THEN 1
-                  WHEN prof.handedness = 'R' THEN 0 END AS SMALLINT)
-            AS is_left_handed,
-        -- Time-aware years pro.
-        CAST(EXTRACT(YEAR FROM pm.match_date) - prof.turned_pro AS INTEGER) AS years_pro
+        -- Missing or non-L/R handedness uses the pool left-handed rate.
+        COALESCE(
+            CAST(CASE WHEN prof.handedness = 'L' THEN 1
+                      WHEN prof.handedness = 'R' THEN 0 END AS DOUBLE PRECISION),
+            fd.left_handed_rate
+        ) AS is_left_handed,
+
+        -- Time-aware years pro; missing turned_pro uses the pool mean.
+        COALESCE(
+            CAST(EXTRACT(YEAR FROM pm.match_date) - prof.turned_pro AS DOUBLE PRECISION),
+            fd.avg_years_pro
+        ) AS years_pro
 
     FROM {{ ref('player_matches') }} pm
     LEFT JOIN {{ ref('rolling_features') }} pr
         ON pr.player_id = pm.player_id
        AND pr.player_match_number = pm.player_match_number - 1
+    LEFT JOIN {{ ref('feature_defaults') }} fd
+        ON fd.as_of_date = pm.match_date
     LEFT JOIN {{ source('bronze', 'match_events') }} bron
         ON bron.match_id = pm.match_id
     LEFT JOIN gold.player_profiles prof
@@ -133,7 +163,7 @@ SELECT
     p.surface,
     p.match_won,
 
-    -- ── Matchup differences (canonical side minus opponent) ──
+    -- ── Matchup differences (imputed canonical side minus imputed opponent) ──
     p.player_ranking - o.player_ranking AS rank_diff,
     p.player_rank_points - o.player_rank_points AS rank_points_diff,
     p.player_age - o.player_age AS age_diff,
@@ -176,7 +206,7 @@ SELECT
     CAST(CASE WHEN p.surface = 'grass' THEN 1 ELSE 0 END AS SMALLINT) AS is_grass,
     CAST(CASE WHEN p.surface = 'hard'  THEN 1 ELSE 0 END AS SMALLINT) AS is_hard,
     CAST(CASE WHEN p.surface = 'carpet' THEN 1 ELSE 0 END AS SMALLINT) AS is_carpet,
-    b.is_indoor,
+    p.is_indoor,
     CAST(CASE p.tournament
         WHEN 'grand_slam' THEN 4 WHEN 'masters' THEN 3
         WHEN 'atp_500' THEN 2 WHEN 'atp_250' THEN 1 ELSE 0
@@ -187,7 +217,8 @@ SELECT
     END AS SMALLINT) AS round_encoded,
 
     -- ── Similarity-analysis serve/return percentages (NOT model features) ──
-    -- Appended style signals for PlayerSimilarity, never FEATURE_COLS.
+    -- Appended style signals for PlayerSimilarity, never FEATURE_COLS. They
+    -- share the same defaults imputation but are documented as non-model.
     p.first_serve_pct_10        AS player_first_serve_pct_10,
     o.first_serve_pct_10        AS opponent_first_serve_pct_10,
     p.first_serve_win_pct_10    AS player_first_serve_win_pct_10,
@@ -202,8 +233,6 @@ FROM player_match_enriched p
 JOIN player_match_enriched o
     ON o.match_id = p.match_id
    AND o.player_id = p.opponent_id
-LEFT JOIN bronze.match_events b
-    ON b.match_id = p.match_id
 LEFT JOIN prior_h2h h
     ON h.match_id = p.match_id
 WHERE p.player_id < o.player_id

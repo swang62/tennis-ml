@@ -10,6 +10,7 @@ include:
   - "data/processed/nn_best.onnx"
   - "data/processed/player_similarity.index"
   - "data/processed/player_metadata.json"
+  - "data/processed/model_info.json"
 models:
   - "linear_best:latest"
   - "gbdt_best:latest"

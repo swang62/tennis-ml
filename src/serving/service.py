@@ -1,11 +1,13 @@
 """BentoML service for the stacked ensemble and read-only dashboard data.
 
-The NN uses the deploy-time ONNX artifact; finalized features are built upstream.
+The NN uses the deploy-time ONNX artifact; finalized features are built from
+ids in-service (scalar and bulk) against the live PostgreSQL gold tables.
 """
 
 import builtins
 import json
 import math
+import os
 import pickle
 from datetime import date, datetime
 from decimal import Decimal
@@ -20,6 +22,7 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
+from typing import Callable, cast
 
 from src.constants import (
     BRONZE_TABLE,
@@ -31,11 +34,19 @@ from src.constants import (
 )
 from src.db.client import execute_df, first_row_dict
 from src.features.columns import FEATURE_COLS
-from src.features.inference import _build_inference_features_with_meta
+from src.features.inference import (
+    _build_inference_features_with_meta,
+    _to_date,
+    build_inference_features_bulk,
+)
 from src.models.similarity import PlayerSimilarity
 from src.utils import load_env
 
 AUX_DIR = ROOT / "data" / "processed"
+
+# Canonical champion manifest baked at deploy time (written by deploy.py from
+# the champion's exact lineage tags; packaged via bentofile.yaml).
+MODEL_INFO_FILE = AUX_DIR / "model_info.json"
 
 load_env()
 
@@ -100,6 +111,40 @@ def _require_id(request: Request, name: str) -> str | None:
     if raw is None or not raw.strip():
         return None
     return raw.strip()
+
+
+def _predict_from_ids_bulk_impl(
+    rows: list[dict[str, object]], predict_proba: object
+) -> pd.DataFrame:
+    """Build + predict a batch; `predict_proba` is the service's shared ensemble.
+
+    Each row accepts the same fields as `predict_from_ids` (including its own
+    historical `as_of_date`); the endpoint's `indoor` field maps to the
+    builder's `is_indoor`. Returns a DataFrame with the finalized FEATURE_COLS
+    plus ids and the four probability columns, in input order.
+    """
+    started_at = perf_counter()
+    normalized: list[dict[str, object]] = []
+    for row in rows:
+        r = dict(row)
+        if "indoor" in r:  # scalar endpoint field -> builder field
+            r["is_indoor"] = r.pop("indoor")
+        if r.get("as_of_date") is not None:
+            r["as_of_date"] = _to_date(r["as_of_date"])
+        normalized.append(r)
+    feature_df = build_inference_features_bulk(normalized)
+    proba_df = cast(Callable[[pd.DataFrame], pd.DataFrame], predict_proba)(feature_df)
+    out = feature_df.copy()
+    for col in ("p_linear", "p_gbdt", "p_nn", "p_win"):
+        out[col] = proba_df[col].to_numpy()
+    print(
+        "predict_from_ids_bulk_observability"
+        f" rows={len(out)}"
+        f" feature_count={len(FEATURE_COLS)}"
+        f" build_ms={(perf_counter() - started_at) * 1000:.3f}"
+        f" mean_p_win={float(out['p_win'].mean()):.6f}"
+    )
+    return out
 
 
 # ── SQL (table names interpolated from constants; values always via `%s`) ──
@@ -474,6 +519,48 @@ def _similar_players(request: Request) -> JSONResponse:
     return _ok({"player_id": player_id, "similar_players": similar})
 
 
+def _non_secret_database_meta() -> dict[str, object]:
+    """Non-secret connection metadata parsed from DATABASE_URL.
+
+    Reports server address, port, and database name only — never credentials or
+    the connection URL itself.
+    """
+    from urllib.parse import unquote, urlsplit
+
+    raw = os.environ.get("DATABASE_URL") or ""
+    if not raw:
+        return {"server_address": None, "server_port": None, "database_name": None}
+    parts = urlsplit(raw)
+    db_name = unquote(parts.path.lstrip("/")) if parts.path else None
+    return {
+        "server_address": parts.hostname,
+        "server_port": parts.port,
+        "database_name": db_name or None,
+    }
+
+
+def _model_info(_request: Request) -> JSONResponse:
+    """Baked champion manifest, deployment mode, and non-secret DB metadata.
+
+    Production mode is claimed only when the image runs with SERVING_MODE=production
+    AND the baked manifest is present; source-mode local serving always reports
+    development.
+    """
+    manifest: dict[str, object] | None = None
+    try:
+        manifest = json.loads(MODEL_INFO_FILE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        manifest = None
+    production = os.environ.get("SERVING_MODE") == "production" and manifest is not None
+    return _ok(
+        {
+            "mode": "production" if production else "development",
+            "manifest": manifest,
+            "database": _non_secret_database_meta(),
+        }
+    )
+
+
 # Mounted at the service root; coexists with the POST-only @bentoml.api routes
 # (the SDK's server checks its own routes first, then falls through to mounts).
 DATA_APP = Starlette(
@@ -484,13 +571,16 @@ DATA_APP = Starlette(
         Route("/match_history", _match_history, methods=["GET"]),
         Route("/head_to_head", _head_to_head, methods=["GET"]),
         Route("/similar_players", _similar_players, methods=["GET"]),
+        Route("/model_info", _model_info, methods=["GET"]),
     ]
 )
 
 
 @bentoml.service(
     image=SERVING_IMAGE,
-    traffic={"timeout": 10},
+    # Aligned with Nginx's 120s operational batch window so a large
+    # (<=1,000 row) batch is not killed by the serving layer first.
+    traffic={"timeout": 120},
     resources={"cpu": "500m"},
 )
 @bentoml.asgi_app(DATA_APP, path="/")
@@ -514,15 +604,6 @@ class TennisPredictor:
             self.bio_feature_cols = json.load(f)
         self.bio_by_player = {pid: i for i, pid in enumerate(bio_df["player_id"])}
         self.bio_array = bio_df[self.bio_feature_cols].to_numpy(np.float32)
-
-    # BentoML 1.4.39 mis-sizes DataFrame batches; this endpoint serves one match.
-    @bentoml.api
-    def predict(self, input: pd.DataFrame) -> pd.DataFrame:
-        required = [*FEATURE_COLS, "player_id", "opponent_id"]
-        missing = [c for c in required if c not in input.columns]
-        if missing:
-            raise MissingColumnsError(missing)
-        return self._predict_proba(input)
 
     def _predict_proba(self, input: pd.DataFrame) -> pd.DataFrame:
         """Run the stacked ensemble without recursively calling the HTTP endpoint."""
@@ -559,10 +640,16 @@ class TennisPredictor:
         p_win = self.production.predict_proba(stack)[:, 1]
         ensemble_ms = (perf_counter() - ensemble_started_at) * 1000
 
+        # Aggregate-only observability: means (no per-row dumps). A single row
+        # additionally logs its ids, preserving the scalar path's detail.
+        first = input.iloc[0] if not input.empty else None
+        first_ident = (
+            f" player_id={first['player_id']} opponent_id={first['opponent_id']}"
+            if first is not None and len(input) == 1
+            else ""
+        )
         print(
             "predict_observability"
-            f" player_id={input.iloc[0]['player_id'] if not input.empty else None}"
-            f" opponent_id={input.iloc[0]['opponent_id'] if not input.empty else None}"
             f" rows={len(input)}"
             f" feature_count={len(FEATURE_COLS)}"
             f" scale_ms={scale_ms:.3f}"
@@ -571,10 +658,11 @@ class TennisPredictor:
             f" nn_ms={nn_ms:.3f}"
             f" ensemble_ms={ensemble_ms:.3f}"
             f" total_ms={(perf_counter() - started_at) * 1000:.3f}"
-            f" p_win={float(p_win[0]) if len(p_win) else float('nan'):.6f}"
-            f" p_linear={float(p_linear[0]) if len(p_linear) else float('nan'):.6f}"
-            f" p_gbdt={float(p_gbdt[0]) if len(p_gbdt) else float('nan'):.6f}"
-            f" p_nn={float(p_nn[0]) if len(p_nn) else float('nan'):.6f}"
+            f" mean_p_win={float(p_win.mean()) if len(p_win) else float('nan'):.6f}"
+            f" mean_p_linear={float(p_linear.mean()) if len(p_linear) else float('nan'):.6f}"
+            f" mean_p_gbdt={float(p_gbdt.mean()) if len(p_gbdt) else float('nan'):.6f}"
+            f" mean_p_nn={float(p_nn.mean()) if len(p_nn) else float('nan'):.6f}"
+            f"{first_ident}"
         )
 
         return pd.DataFrame(
@@ -661,6 +749,21 @@ class TennisPredictor:
         )
         return rec
 
+    def _predict_from_ids_bulk(self, rows: list[dict[str, object]]) -> pd.DataFrame:
+        """Shared bulk path: normalize JSON rows, build features, predict once."""
+        return _predict_from_ids_bulk_impl(rows, self._predict_proba)
+
+    @bentoml.api
+    def predict_from_ids_bulk(self, rows: list[dict[str, object]]) -> list[dict[str, object]]:
+        """Bulk predictions from minimal per-row contexts (internal endpoint).
+
+        Each row accepts the same fields/defaults as `predict_from_ids`,
+        including a per-row historical `as_of_date`. The batch is capped at
+        1,000 rows and the ensemble runs once for the whole batch. This
+        endpoint is internal: Nginx does not expose it publicly.
+        """
+        return _records(self._predict_from_ids_bulk(rows))
+
     def _row_bio_np(self, ids: np.ndarray) -> np.ndarray:
         """Map player ids to bio vectors (np.float32), zero-filled for unknown players."""
         out = np.zeros((len(ids), len(self.bio_feature_cols)), dtype=np.float32)
@@ -669,8 +772,3 @@ class TennisPredictor:
             if j is not None:
                 out[i] = self.bio_array[j]
         return out
-
-
-class MissingColumnsError(ValueError):
-    def __init__(self, missing: list[str]) -> None:
-        super().__init__(f"Missing columns: {missing}")

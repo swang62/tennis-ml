@@ -193,3 +193,46 @@ FEATURE_COLS: list[str] = [
     "tournament_level",
     "round_encoded",
 ]
+
+# ── Materialized imputation defaults (gold.feature_defaults) ──
+#
+# One row per as-of date (every historical match date plus the dbt run date);
+# every value is computed only from silver.rolling_features snapshots strictly
+# before that date, plus the static profile pool. Gold.match_features and
+# scalar/bulk inference impute missing side values from the newest row at or
+# before the as-of date (falling back to the latest row for future dates)
+# instead of computing AVG/PERCENTILE on demand.
+#
+# Median is used for rank/rank-points/streak-like values, mean for rates, age,
+# years-pro, and handedness rate; `rate_default` is the fixed constant for
+# unknown/0 surface and empty-pool rates; counts are meta-only.
+FEATURE_DEFAULTS_COLS: list[str] = [
+    "latest_player_ranking",
+    "latest_player_rank_points",
+    "latest_player_age",
+    "streak",
+    "weighted_form_10",
+    "win_rate_10",
+    "ace_rate_10",
+    "first_serve_pct_10",
+    "break_points_saved_pct_10",
+    "first_serve_win_pct_10",
+    "second_serve_win_pct_10",
+    "serve_win_pct_10",
+    "return_points_won_pct_10",
+    "df_rate_10",
+    "aces_per_svc_game_10",
+    "avg_player_rank_10",
+    "avg_rank_faced_10",
+    "clay_win_rate_10",
+    "grass_win_rate_10",
+    "hard_win_rate_10",
+    "days_since_default",
+    "matches_30d_default",
+    "rate_default",
+    "left_handed_rate",
+    "avg_years_pro",
+    "snapshot_pool_rows",
+    "snapshot_pool_players",
+    "profile_rows",
+]

@@ -2,11 +2,9 @@ import subprocess
 
 import pytest
 
-import src.db.dbt as dbt
 import src.flows.etl as etl
 from src.constants import ROOT
-from src.db.dbt import DBT_BUILD_CMD, run_dbt_build
-from src.flows.etl import etl_flow
+from src.flows.etl import DBT_BUILD_CMD, etl_flow, run_dbt_build
 
 # Used by etl_flow to build gold; patched so the flow test never runs dbt.
 FAKE_GOLD_COUNT = 1
@@ -19,8 +17,8 @@ def test_run_dbt_build_invokes_dbt_build_with_exact_args(monkeypatch):
         calls.append((args, kwargs))
         return "fake-result"
 
-    monkeypatch.setattr("src.db.dbt.subprocess.run", fake_run)
-    monkeypatch.setattr(dbt.constants, "DATABASE_URL", "postgresql://u:p@db:5432/tennis")
+    monkeypatch.setattr("src.flows.etl.subprocess.run", fake_run)
+    monkeypatch.setattr(etl.constants, "DATABASE_URL", "postgresql://u:p@db:5432/tennis")
 
     result = run_dbt_build()
 
@@ -43,7 +41,7 @@ def test_run_dbt_build_propagates_called_process_error(monkeypatch):
     def fail_run(*_args, **_kwargs):
         raise subprocess.CalledProcessError(returncode=1, cmd=DBT_BUILD_CMD)
 
-    monkeypatch.setattr("src.db.dbt.subprocess.run", fail_run)
+    monkeypatch.setattr("src.flows.etl.subprocess.run", fail_run)
 
     with pytest.raises(subprocess.CalledProcessError) as excinfo:
         run_dbt_build()

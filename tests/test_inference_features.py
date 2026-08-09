@@ -10,7 +10,7 @@ import pytest
 from src.constants import PROFILES_TABLE, SILVER_ROLLING_FEATURES
 from src.db.client import execute_df, get_conn
 from src.features import inference
-from src.features.columns import DIFF_COLS, FEATURE_COLS
+from src.features.columns import DIFF_COLS, FEATURE_COLS, FEATURE_DEFAULTS_COLS
 from src.features.inference import build_inference_features
 
 # All seeded matches are in 2026 (2026-03-15 .. 2026-07-15); a fixed as-of date
@@ -107,78 +107,42 @@ def test_years_pro_time_aware_and_cold_start():
         assert math.isfinite(row[col]), f"{col} is not finite: {row[col]!r}"
 
 
-def test_pool_aggregates_return_expected_values():
-    """Pool queries return finite aggregates used for cold-start imputation."""
-    as_of = "2026-09-01"
-    cases = [
-        (
-            inference._POOL_AGG_SQL,
-            [as_of],
-            [
-                "latest_player_ranking",
-                "latest_player_rank_points",
-                "latest_player_age",
-                "streak",
-                "weighted_form_10",
-                "win_rate_10",
-                "ace_rate_10",
-                "first_serve_pct_10",
-                "break_points_saved_pct_10",
-                "first_serve_win_pct_10",
-                "second_serve_win_pct_10",
-                "serve_win_pct_10",
-                "df_rate_10",
-                "aces_per_svc_game_10",
-                "avg_player_rank_10",
-                "avg_rank_faced_10",
-                "clay_win_rate_10",
-                "grass_win_rate_10",
-                "hard_win_rate_10",
-            ],
-        ),
-        (inference._POOL_COUNTS_SQL, [as_of], ["snapshot_pool_rows", "snapshot_pool_players"]),
-        (inference._MEDIAN_DAYS_SQL, [as_of, as_of], ["median_days_since"]),
-        (inference._MEDIAN_MATCHES_30D_SQL, [as_of, as_of, as_of], ["median_matches_30d"]),
-        (inference._PROFILE_POOL_AGG_SQL, [2026], ["left_handed_rate", "avg_years_pro"]),
-        (inference._PROFILE_COUNTS_SQL, [], ["profile_rows"]),
-    ]
-    for sql, params, expected_cols in cases:
-        df = execute_df(sql, params)
-        assert df.shape == (1, len(expected_cols)), sql[:60]
-        assert df.columns.tolist() == expected_cols, sql[:60]
-        for col in expected_cols:
-            assert not pd.isna(df.iloc[0][col]), f"{col} is NULL for {sql[:60]}"
-            assert math.isfinite(float(df.iloc[0][col])), f"{col} not finite for {sql[:60]}"
+def test_materialized_defaults_return_expected_values():
+    """The materialized gold.feature_defaults row drives cold-start imputation.
 
-    # Deterministic: re-running a pool read returns identical aggregates.
-    first = execute_df(inference._POOL_AGG_SQL, [as_of])
-    pd.testing.assert_frame_equal(first, execute_df(inference._POOL_AGG_SQL, [as_of]))
+    Scalar inference performs no on-demand AVG/PERCENTILE queries: it reads the
+    newest defaults row at or before the as-of date (here the dbt run-date row,
+    since 2026-09-01 is after every seeded match). Every default cell is
+    finite, re-reads are deterministic, and a cold-start pair imputes exactly
+    those materialized values on both sides (so every diff stays neutral).
+    """
+    as_of = date(2026, 9, 1)
+    defaults = inference._load_defaults(as_of.isoformat())
+    assert set(FEATURE_DEFAULTS_COLS).issubset(defaults.keys())
+    for col in FEATURE_DEFAULTS_COLS:
+        assert not pd.isna(defaults[col]), f"{col} is NULL for the defaults row"
+        assert math.isfinite(float(defaults[col])), f"{col} not finite for the defaults row"
 
-    # The builder imputes exactly these aggregates for two unknown players
-    # (cold-start sides equal the pool aggregates; every diff stays neutral).
-    out = build_inference_features("ZZZZ", "YYYY", "hard", as_of_date=date(2026, 9, 1))
+    # Deterministic: re-reading the same as-of date returns identical defaults.
+    assert defaults == inference._load_defaults(as_of.isoformat())
+
+    # The builder imputes exactly these materialized defaults for two unknown
+    # players (cold-start sides equal the defaults; every diff stays neutral).
+    out = build_inference_features("ZZZZ", "YYYY", "hard", as_of_date=as_of)
     row = out.iloc[0]
-    agg = execute_df(inference._POOL_AGG_SQL, [as_of]).iloc[0]
-    profile_agg = execute_df(inference._PROFILE_POOL_AGG_SQL, [2026]).iloc[0]
-    median_days = float(
-        execute_df(inference._MEDIAN_DAYS_SQL, [as_of, as_of]).iloc[0]["median_days_since"]
-    )
-    median_matches = float(
-        execute_df(inference._MEDIAN_MATCHES_30D_SQL, [as_of, as_of, as_of]).iloc[0][
-            "median_matches_30d"
-        ]
-    )
-    assert row["player_weighted_form_10"] == pytest.approx(float(agg["weighted_form_10"]))
-    assert row["player_surface_win_rate_10"] == pytest.approx(float(agg["hard_win_rate_10"]))
+    for col in DIFF_COLS:
+        assert row[col] == 0, f"{col} should be neutral for two unknowns: {row[col]!r}"
+    assert row["player_weighted_form_10"] == pytest.approx(float(defaults["weighted_form_10"]))
+    assert row["player_surface_win_rate_10"] == pytest.approx(float(defaults["hard_win_rate_10"]))
     # win_rate_10 / ace_rate_10 are only exposed as canonical-minus-opponent
-    # diffs; two unknowns impute the same pool value on both sides, so the
-    # diffs collapse to exactly 0 and lock the imputed pool values.
+    # diffs; two unknowns impute the same default on both sides, so the diffs
+    # collapse to exactly 0 and lock the imputed default values.
     assert row["win_rate_diff"] == 0
     assert row["ace_rate_diff"] == 0
-    assert row["player_days_since_last_match"] == pytest.approx(round(median_days))
-    assert row["player_matches_30d"] == pytest.approx(round(median_matches))
-    assert row["player_is_left_handed"] == pytest.approx(float(profile_agg["left_handed_rate"]))
-    assert row["player_years_pro"] == pytest.approx(float(profile_agg["avg_years_pro"]))
+    assert row["player_days_since_last_match"] == int(defaults["days_since_default"])
+    assert row["player_matches_30d"] == int(defaults["matches_30d_default"])
+    assert row["player_is_left_handed"] == pytest.approx(float(defaults["left_handed_rate"]))
+    assert row["player_years_pro"] == pytest.approx(float(defaults["avg_years_pro"]))
 
 
 def test_historical_as_of_excludes_later_snapshots():
@@ -674,20 +638,9 @@ def test_h2h_reversed_raw_ids_identical():
 
 # ── Train/inference parity (strongest train/serve agreement check) ──
 #
-# Gold and inference share N-1 snapshots. Match-day fields and gold NULLs are
-# intentionally asymmetric: inference only knows prior values and imputes NULLs.
-ASYM_MATCH_DAY_COLS = {
-    "player_ranking",
-    "opponent_ranking",
-    "rank_diff",
-    "player_rank_trend_10",
-    "opponent_rank_trend_10",
-    "rank_trend_diff",
-    "rank_points_diff",
-    "player_age",
-    "opponent_age",
-    "age_diff",
-}
+# Gold and inference share N-1 snapshots. Under the finalized contract both
+# read ranking, rank points, age, and rolling state from the strictly-prior
+# snapshot (never a same-day one), so every FEATURE_COL is comparable.
 
 # Select a match whose both sides resolve to the same N-1 snapshots.
 _PARITY_MATCH_SQL = """
@@ -714,8 +667,10 @@ LIMIT 1
 
 def test_train_inference_parity_on_historical_match():
     """The gold row built from snapshot N-1 and an inference row built at that
-    match's date (from only strictly-earlier data) must agree on every
-    non-NULL, non-asymmetric feature: floats within 1e-6, ints exactly."""
+    match's date (from only strictly-earlier data) must agree on EVERY
+    FEATURE_COL within 1e-6. No column is skipped: the finalized contract
+    gives gold and inference identical strictly-prior date semantics for
+    ranking, rank points, age, and rolling state."""
     gold_row = execute_df(_PARITY_MATCH_SQL).iloc[0]
     out = build_inference_features(
         str(gold_row["player_id"]),
@@ -729,22 +684,12 @@ def test_train_inference_parity_on_historical_match():
     assert out.columns.tolist() == [*FEATURE_COLS, "player_id", "opponent_id"]
     compared = 0
     for col in FEATURE_COLS:
-        gold_val = gold_row[col]
-        if pd.isna(gold_val):
-            # Gold keeps NULLs (no zero-fill); inference imputes pool means.
-            continue
-        if col in ASYM_MATCH_DAY_COLS:
-            # Documented match-day vs last-observed asymmetry.
-            continue
-        infer_val = infer_row[col]
-        if isinstance(gold_val, float):
-            assert infer_val == pytest.approx(float(gold_val), abs=1e-6), col
-        else:
-            assert int(infer_val) == int(gold_val), col
+        gold_val = float(gold_row[col])
+        assert infer_row[col] == pytest.approx(gold_val, abs=1e-6), col
         compared += 1
-    # The fixture must actually compare most of the contract, so it cannot
+    # The fixture must actually compare the whole contract, so it cannot
     # silently degenerate to a handful of columns.
-    assert compared >= 20
+    assert compared == len(FEATURE_COLS)
 
 
 # ── is_indoor context feature ────────────────────────────────────

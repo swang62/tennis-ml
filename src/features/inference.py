@@ -1,7 +1,8 @@
 """Build canonical, as-of-dated inference rows from PostgreSQL.
 
 Rolling values use snapshots strictly before the requested date. Missing values
-use pool aggregates; SQL values are always passed as parameters.
+use the materialized gold.feature_defaults row at or before the as-of date
+(never on-demand AVG/PERCENTILE); SQL values are always passed as parameters.
 """
 
 from __future__ import annotations
@@ -11,21 +12,27 @@ from datetime import date, datetime
 from decimal import Decimal
 from numbers import Real
 from time import perf_counter
-from typing import cast
+from typing import Any, NamedTuple, cast
 
 import pandas as pd
 
 from src.constants import (
+    FEATURE_DEFAULTS_TABLE,
     PROFILES_TABLE,
     SILVER_PLAYER_MATCHES,
     SILVER_ROLLING_FEATURES,
 )
 from src.db.client import execute_df, first_row_dict
-from src.features.columns import FEATURE_COLS
+from src.features.columns import FEATURE_COLS, FEATURE_DEFAULTS_COLS
 
-VALID_SURFACES = {"clay", "grass", "hard", "carpet"}
+# "0" is the explicit unknown surface marker used by gold; it maps to all-zero
+# surface indicator columns and the fixed rate default, matching match_features.
+VALID_SURFACES = {"clay", "grass", "hard", "carpet", "0"}
 VALID_TOURNAMENT_LEVELS = {0, 1, 2, 3, 4}
 VALID_ROUND_ENCODINGS = {0, 1, 2, 3, 4, 5, 6, 7}
+
+# Upper bound for a single bulk inference request (Nginx chunks below this).
+BULK_MAX_ROWS = 1000
 
 # String aliases mirror the dbt context codebook; unknown values map to 0.
 _TOURNAMENT_LEVELS = {
@@ -48,22 +55,30 @@ _ROUND_ENCODINGS = {
     "f": 7,
 }
 
-# Empty-pool cold-start fallbacks mirror gold.match_features.
-_DEFAULT_RANKING = 100
-_DEFAULT_RANK_POINTS = 500.0
-_DEFAULT_AGE = 26.0
-_DEFAULT_RATE = 0.0
-_DEFAULT_STREAK = 0
-_DEFAULT_DAYS_SINCE = 365
-_DEFAULT_MATCHES_30D = 0
-_DEFAULT_LEFT_HANDED_RATE = 0.0
-_DEFAULT_YEARS_PRO = 8.0
-
 _SURFACE_TO_SNAPSHOT_COL = {
     "clay": "clay_win_rate_10",
     "grass": "grass_win_rate_10",
     "hard": "hard_win_rate_10",
 }
+
+_DEFAULTS_COLUMNS_SQL = ", ".join(FEATURE_DEFAULTS_COLS)
+
+# Newest materialized defaults row at or before the as-of date (future dates
+# resolve to the dbt run-date row); pre-history dates fall back to the oldest
+# row, whose empty-pool constants are the correct prior state. This replaces
+# on-demand AVG/PERCENTILE imputation queries.
+_DEFAULTS_AT_OR_BEFORE_SQL = f"""
+SELECT as_of_date, {_DEFAULTS_COLUMNS_SQL} FROM {FEATURE_DEFAULTS_TABLE}
+WHERE as_of_date <= %s::date
+ORDER BY as_of_date DESC
+LIMIT 1
+"""
+
+_DEFAULTS_FIRST_SQL = f"""
+SELECT as_of_date, {_DEFAULTS_COLUMNS_SQL} FROM {FEATURE_DEFAULTS_TABLE}
+ORDER BY as_of_date ASC
+LIMIT 1
+"""
 
 # Latest snapshot per player strictly before the as-of date. Point lookup.
 _LATEST_SNAPSHOT_SQL = f"""
@@ -104,61 +119,6 @@ ORDER BY match_date DESC, match_id DESC
 LIMIT 5
 """
 
-# Snapshot imputation pool: medians for rank/streak values, means otherwise.
-_POOL_AGG_SQL = f"""
-SELECT
-    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY latest_player_ranking)     AS latest_player_ranking,
-    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY latest_player_rank_points) AS latest_player_rank_points,
-    AVG(latest_player_age)     AS latest_player_age,
-    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY streak)                      AS streak,
-    AVG(weighted_form_10)     AS weighted_form_10,
-    AVG(win_rate_10)          AS win_rate_10,
-    AVG(ace_rate_10)          AS ace_rate_10,
-    AVG(first_serve_pct_10)   AS first_serve_pct_10,
-    AVG(break_points_saved_pct_10) AS break_points_saved_pct_10,
-    AVG(first_serve_win_pct_10) AS first_serve_win_pct_10,
-    AVG(second_serve_win_pct_10) AS second_serve_win_pct_10,
-    AVG(serve_win_pct_10)     AS serve_win_pct_10,
-    AVG(df_rate_10)           AS df_rate_10,
-    AVG(aces_per_svc_game_10) AS aces_per_svc_game_10,
-    AVG(avg_player_rank_10)   AS avg_player_rank_10,
-    AVG(avg_rank_faced_10)    AS avg_rank_faced_10,
-    AVG(clay_win_rate_10)     AS clay_win_rate_10,
-    AVG(grass_win_rate_10)    AS grass_win_rate_10,
-    AVG(hard_win_rate_10)     AS hard_win_rate_10
-FROM {SILVER_ROLLING_FEATURES}
-WHERE snapshot_date < %s::date
-"""
-
-# Median per-player days since the latest eligible snapshot.
-_MEDIAN_DAYS_SQL = f"""
-SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY days_since) AS median_days_since
-FROM (
-    SELECT %s::date - MAX(snapshot_date) AS days_since
-    FROM {SILVER_ROLLING_FEATURES}
-    WHERE snapshot_date < %s::date
-    GROUP BY player_id
-)
-"""
-
-# Median 30-day count across players with eligible snapshots.
-_MEDIAN_MATCHES_30D_SQL = f"""
-SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY matches_30d) AS median_matches_30d
-FROM (
-    SELECT pr.player_id, COUNT(pm.match_id) AS matches_30d
-    FROM (
-        SELECT DISTINCT player_id
-        FROM {SILVER_ROLLING_FEATURES}
-        WHERE snapshot_date < %s::date
-    ) AS pr
-    LEFT JOIN {SILVER_PLAYER_MATCHES} pm
-        ON pm.player_id = pr.player_id
-       AND pm.match_date >= %s::date - INTERVAL '30 days'
-       AND pm.match_date < %s::date
-    GROUP BY pr.player_id
-)
-"""
-
 # Per-player static identity lookup.
 _PROFILE_SQL = f"""
 SELECT player_id, height, handedness, turned_pro
@@ -166,25 +126,66 @@ FROM {PROFILES_TABLE}
 WHERE player_id = %s
 """
 
-# Profile imputation pool; years_pro is calculated at the as-of year.
-_PROFILE_POOL_AGG_SQL = f"""
-SELECT
-    AVG(CASE WHEN handedness = 'L' THEN 1 ELSE 0 END) AS left_handed_rate,
-    AVG(%s::int - turned_pro) AS avg_years_pro
-FROM {PROFILES_TABLE}
+# ── Set-oriented bulk queries ─────────────────────────────────────────────
+# Every query resolves all requested rows in one round trip (unnest + LATERAL
+# or ANY), so cost stays flat as the batch grows. Values are always bound via
+# `%s`; the pairs below mirror the scalar query semantics exactly.
+
+_DEFAULTS_BULK_SQL = f"""
+SELECT req.as_of_iso, d.*
+FROM unnest(%s::date[]) AS req(as_of_iso)
+LEFT JOIN LATERAL (
+    SELECT * FROM {FEATURE_DEFAULTS_TABLE}
+    WHERE as_of_date <= req.as_of_iso
+    ORDER BY as_of_date DESC
+    LIMIT 1
+) d ON true
 """
 
-_POOL_COUNTS_SQL = f"""
-SELECT
-    COUNT(*) AS snapshot_pool_rows,
-    COUNT(DISTINCT player_id) AS snapshot_pool_players
-FROM {SILVER_ROLLING_FEATURES}
-WHERE snapshot_date < %s::date
+_SNAPSHOTS_BULK_SQL = f"""
+SELECT req.player_id AS req_player_id, req.as_of_iso, s.*
+FROM unnest(%s::text[], %s::date[]) AS req(player_id, as_of_iso)
+LEFT JOIN LATERAL (
+    SELECT * FROM {SILVER_ROLLING_FEATURES}
+    WHERE player_id = req.player_id
+      AND snapshot_date < req.as_of_iso
+    ORDER BY player_match_number DESC
+    LIMIT 1
+) s ON true
 """
 
-_PROFILE_COUNTS_SQL = f"""
-SELECT COUNT(*) AS profile_rows
+_MATCHES_30D_BULK_SQL = f"""
+SELECT req.player_id AS req_player_id, req.as_of_iso, COUNT(pm.player_id) AS n
+FROM unnest(%s::text[], %s::date[]) AS req(player_id, as_of_iso)
+LEFT JOIN {SILVER_PLAYER_MATCHES} pm
+  ON pm.player_id = req.player_id
+ AND pm.match_date >= req.as_of_iso::date - INTERVAL '30 days'
+ AND pm.match_date < req.as_of_iso::date
+GROUP BY req.player_id, req.as_of_iso
+"""
+
+_PROFILES_BULK_SQL = f"""
+SELECT player_id, height, handedness, turned_pro
 FROM {PROFILES_TABLE}
+WHERE player_id = ANY(%s::text[])
+"""
+
+_H2H_PRIOR_BULK_SQL = f"""
+SELECT req.a, req.b, req.as_of_iso, h.match_id, h.a_won
+FROM unnest(%s::text[], %s::text[], %s::date[]) AS req(a, b, as_of_iso)
+LEFT JOIN LATERAL (
+    SELECT match_id,
+        MAX(CASE WHEN player_id < opponent_id THEN match_won
+                 ELSE 1 - match_won END) AS a_won,
+        MAX(match_date) AS max_date
+    FROM {SILVER_PLAYER_MATCHES}
+    WHERE ((req.a = player_id AND req.b = opponent_id)
+        OR (req.b = player_id AND req.a = opponent_id))
+      AND match_date < req.as_of_iso::date
+    GROUP BY match_id
+    ORDER BY max_date DESC, match_id DESC
+    LIMIT 5
+) h ON true
 """
 
 
@@ -206,98 +207,147 @@ def _to_date(value: object) -> date:
     raise TypeError(f"cannot coerce {value!r} to a date")
 
 
-def _agg_or(agg: dict[str, float], col: str, default: float) -> float:
-    """Return the pool aggregate for `col`, or `default` if NULL/missing."""
-    value = agg.get(col)
-    if value is None or pd.isna(value):
-        return default
-    return float(value)
+def _load_defaults_oldest() -> dict[str, float]:
+    """Return the oldest materialized defaults row (pre-history fallback).
+
+    Its empty-pool constants are the correct prior state for dates before the
+    first defaults row.
+    """
+    df = execute_df(_DEFAULTS_FIRST_SQL)
+    if df.empty:
+        raise RuntimeError(f"{FEATURE_DEFAULTS_TABLE} is empty: run dbt build (just db-dbt) first")
+    return cast(dict[str, float], first_row_dict(df))
+
+
+def _load_defaults(as_of_iso: str) -> dict[str, float]:
+    """Return the materialized defaults row for the as-of date.
+
+    Uses the newest row at or before the date (the dbt run-date row covers
+    future dates) and the oldest row — whose empty-pool constants are the
+    correct prior state — for pre-history dates. One lookup, no aggregates.
+    """
+    df = execute_df(_DEFAULTS_AT_OR_BEFORE_SQL, [as_of_iso])
+    if df.empty:
+        return _load_defaults_oldest()
+    return first_row_dict(df)
+
+
+def _load_defaults_bulk(as_of_isos: list[str]) -> dict[str, dict[str, float]]:
+    """Return date-keyed defaults rows for many as-of dates in one query.
+
+    Mirrors `_load_defaults` per date (newest row at or before, oldest-row
+    fallback for pre-history dates) using a LATERAL join over the distinct
+    dates; the oldest-row fallback is fetched once, only when needed.
+    """
+    distinct = list(dict.fromkeys(as_of_isos))
+    out: dict[str, dict[str, float]] = {}
+    missing: list[str] = []
+    for rec in execute_df(_DEFAULTS_BULK_SQL, [distinct]).to_dict("records"):
+        iso = _to_date(rec["as_of_iso"]).isoformat()
+        if rec["as_of_date"] is None:
+            missing.append(iso)
+        else:
+            out[iso] = cast(dict[str, float], {k: v for k, v in rec.items() if k != "as_of_iso"})
+    if missing:
+        oldest = _load_defaults_oldest()
+        for iso in missing:
+            out[iso] = oldest
+    return out
 
 
 def _side_values(
     row: dict[str, object] | None,
     as_of_date: date,
     surface: str,
-    agg: dict[str, float],
-    median_days_since: float,
-    median_matches_30d: float,
+    defaults: dict[str, float],
+    matches_30d: int | None = None,
 ) -> dict[str, int | float]:
-    """Build one side's values from its latest snapshot or pool defaults."""
+    """Build one side's values from its latest snapshot or date-keyed defaults.
 
-    def cell(snapshot_col: str, default: float) -> float:
+    `matches_30d` supplies the pre-match activity count when the caller already
+    looked it up (bulk path); when omitted, the scalar path queries it on
+    demand for snapshot-bearing sides.
+    """
+
+    def cell(snapshot_col: str, default_col: str) -> float:
         if row is not None:
             value = row.get(snapshot_col)
             # NaN is the only supported numeric value that is not self-equal.
             if value is not None and isinstance(value, (Real, Decimal)) and value == value:
                 return float(value)
-        return _agg_or(agg, snapshot_col, default)
+        return float(defaults[default_col])
 
-    ranking = round(cell("latest_player_ranking", _DEFAULT_RANKING))
-    rank_points = round(cell("latest_player_rank_points", _DEFAULT_RANK_POINTS))
-    age = cell("latest_player_age", _DEFAULT_AGE)
-    avg_rank_10 = cell("avg_player_rank_10", _DEFAULT_RANKING)
+    ranking = cell("latest_player_ranking", "latest_player_ranking")
+    rank_points = cell("latest_player_rank_points", "latest_player_rank_points")
+    age = cell("latest_player_age", "latest_player_age")
+    avg_rank_10 = cell("avg_player_rank_10", "avg_player_rank_10")
 
     if row is not None:
         days_since = int((as_of_date - _to_date(row["snapshot_date"])).days)
-        matches_30d = int(
-            execute_df(
-                _MATCHES_30D_SQL,
-                [row["player_id"], as_of_date.isoformat(), as_of_date.isoformat()],
-            ).iloc[0]["n"]
-        )
+        if matches_30d is None:
+            matches_30d = int(
+                execute_df(
+                    _MATCHES_30D_SQL,
+                    [row["player_id"], as_of_date.isoformat(), as_of_date.isoformat()],
+                ).iloc[0]["n"]
+            )
     else:
-        days_since = round(median_days_since)
-        matches_30d = round(median_matches_30d)
+        # Defaults are pre-rounded whole values in the materialized table.
+        days_since = int(defaults["days_since_default"])
+        matches_30d = int(defaults["matches_30d_default"])
 
     surface_win_rate = (
-        cell(_SURFACE_TO_SNAPSHOT_COL[surface], _DEFAULT_RATE)
+        cell(_SURFACE_TO_SNAPSHOT_COL[surface], _SURFACE_TO_SNAPSHOT_COL[surface])
         if surface in _SURFACE_TO_SNAPSHOT_COL
-        else _DEFAULT_RATE
+        else float(defaults["rate_default"])
     )
     return {
         "ranking": ranking,
         "rank_points": rank_points,
         "age": age,
-        "weighted_form_10": cell("weighted_form_10", _DEFAULT_RATE),
-        "win_rate_10": cell("win_rate_10", _DEFAULT_RATE),
-        "ace_rate_10": cell("ace_rate_10", _DEFAULT_RATE),
-        "first_serve_pct_10": cell("first_serve_pct_10", _DEFAULT_RATE),
-        "break_points_saved_pct_10": cell("break_points_saved_pct_10", _DEFAULT_RATE),
-        "first_serve_win_pct_10": cell("first_serve_win_pct_10", _DEFAULT_RATE),
-        "second_serve_win_pct_10": cell("second_serve_win_pct_10", _DEFAULT_RATE),
-        "serve_win_pct_10": cell("serve_win_pct_10", _DEFAULT_RATE),
-        "df_rate_10": cell("df_rate_10", _DEFAULT_RATE),
-        "aces_per_svc_game_10": cell("aces_per_svc_game_10", _DEFAULT_RATE),
+        "weighted_form_10": cell("weighted_form_10", "weighted_form_10"),
+        "win_rate_10": cell("win_rate_10", "win_rate_10"),
+        "ace_rate_10": cell("ace_rate_10", "ace_rate_10"),
+        "first_serve_pct_10": cell("first_serve_pct_10", "first_serve_pct_10"),
+        "break_points_saved_pct_10": cell("break_points_saved_pct_10", "break_points_saved_pct_10"),
+        "first_serve_win_pct_10": cell("first_serve_win_pct_10", "first_serve_win_pct_10"),
+        "second_serve_win_pct_10": cell("second_serve_win_pct_10", "second_serve_win_pct_10"),
+        "serve_win_pct_10": cell("serve_win_pct_10", "serve_win_pct_10"),
+        "df_rate_10": cell("df_rate_10", "df_rate_10"),
+        "aces_per_svc_game_10": cell("aces_per_svc_game_10", "aces_per_svc_game_10"),
         "rank_trend_10": avg_rank_10 - ranking,
-        "avg_rank_faced_10": cell("avg_rank_faced_10", _DEFAULT_RANKING),
-        "streak": int(cell("streak", _DEFAULT_STREAK)),
+        "avg_rank_faced_10": cell("avg_rank_faced_10", "avg_rank_faced_10"),
+        "streak": int(cell("streak", "streak")),
         "days_since_last_match": days_since,
         "matches_30d": matches_30d,
         "surface_win_rate_10": surface_win_rate,
     }
 
 
-def _profile_values(pid: str, as_of_date: date, agg: dict[str, float]) -> dict[str, float]:
-    """Return profile values, using pool defaults for missing cells."""
-    df = execute_df(_PROFILE_SQL, [pid])
-    if df.empty:
+def _profile_values_from_row(
+    row: dict[str, object] | None,
+    as_of_date: date,
+    defaults: dict[str, float],
+) -> dict[str, float]:
+    """Profile values from one profile row (None for a missing player)."""
+    if row is None:
         return {
-            "is_left_handed": _agg_or(agg, "left_handed_rate", _DEFAULT_LEFT_HANDED_RATE),
-            "years_pro": _agg_or(agg, "avg_years_pro", _DEFAULT_YEARS_PRO),
+            "is_left_handed": float(defaults["left_handed_rate"]),
+            "years_pro": float(defaults["avg_years_pro"]),
         }
-    row = df.iloc[0]
-    turned_pro = row["turned_pro"]
+    row_any = cast(dict[str, Any], row)
+    turned_pro = row_any["turned_pro"]
     years_pro = (
-        float(as_of_date.year - int(turned_pro))
+        float(as_of_date.year - int(cast(Any, turned_pro)))
         if not pd.isna(turned_pro)
-        else _agg_or(agg, "avg_years_pro", _DEFAULT_YEARS_PRO)
+        else float(defaults["avg_years_pro"])
     )
-    # Non-L/R handedness uses the pool rate, matching train-time imputation.
-    handedness = row["handedness"]
+    # Non-L/R handedness uses the pool rate, matching gold imputation.
+    handedness = row_any["handedness"]
     is_left_handed = (
         float(handedness == "L")
         if isinstance(handedness, str) and handedness in ("L", "R")
-        else _agg_or(agg, "left_handed_rate", _DEFAULT_LEFT_HANDED_RATE)
+        else float(defaults["left_handed_rate"])
     )
     return {
         "is_left_handed": is_left_handed,
@@ -305,7 +355,30 @@ def _profile_values(pid: str, as_of_date: date, agg: dict[str, float]) -> dict[s
     }
 
 
-def _build_inference_features_with_meta(
+def _profile_values(pid: str, as_of_date: date, defaults: dict[str, float]) -> dict[str, float]:
+    """Return profile values, using date-keyed defaults for missing cells."""
+    df = execute_df(_PROFILE_SQL, [pid])
+    return _profile_values_from_row(
+        first_row_dict(df) if not df.empty else None, as_of_date, defaults
+    )
+
+
+class _RowContext(NamedTuple):
+    """Validated + canonicalized inputs shared by the scalar and bulk builders."""
+
+    raw_player_id: str
+    raw_opponent_id: str
+    surface: str
+    as_of_date: date
+    as_of_iso: str
+    tournament_level: int
+    round_encoded: int
+    is_indoor: int
+    lower_id: str
+    higher_id: str
+
+
+def _normalize_inputs(
     player_id: str,
     opponent_id: str,
     surface: str,
@@ -316,9 +389,8 @@ def _build_inference_features_with_meta(
     tournament: str | None = None,
     round: str | None = None,
     is_indoor: int | None = None,
-) -> tuple[pd.DataFrame, dict[str, object]]:
-    """Build one NaN-free canonical row in the FEATURE_COLS contract."""
-    started_at = perf_counter()
+) -> _RowContext:
+    """Validate and canonicalize one request; shared by both builders."""
 
     # ── Boundary validation ──
     if surface not in VALID_SURFACES:
@@ -363,48 +435,28 @@ def _build_inference_features_with_meta(
 
     # ── Canonicalization: lower id is the player_* side ──
     lower_id, higher_id = sorted([player_id.strip(), opponent_id.strip()])
-
-    # ── On-demand global imputation pool (one set of aggregates) ──
-    as_of_iso = as_of_date.isoformat()
-    agg = first_row_dict(execute_df(_POOL_AGG_SQL, [as_of_iso]))
-    pool_counts = first_row_dict(execute_df(_POOL_COUNTS_SQL, [as_of_iso]))
-    median_days = _agg_or(
-        first_row_dict(execute_df(_MEDIAN_DAYS_SQL, [as_of_iso, as_of_iso])),
-        "median_days_since",
-        _DEFAULT_DAYS_SINCE,
+    return _RowContext(
+        raw_player_id=player_id.strip(),
+        raw_opponent_id=opponent_id.strip(),
+        surface=surface,
+        as_of_date=as_of_date,
+        as_of_iso=as_of_date.isoformat(),
+        tournament_level=tournament_level,
+        round_encoded=round_encoded,
+        is_indoor=is_indoor if is_indoor is not None else 0,
+        lower_id=lower_id,
+        higher_id=higher_id,
     )
-    median_matches = _agg_or(
-        first_row_dict(execute_df(_MEDIAN_MATCHES_30D_SQL, [as_of_iso, as_of_iso, as_of_iso])),
-        "median_matches_30d",
-        _DEFAULT_MATCHES_30D,
-    )
-    profile_agg = first_row_dict(execute_df(_PROFILE_POOL_AGG_SQL, [as_of_date.year]))
-    profile_counts = first_row_dict(execute_df(_PROFILE_COUNTS_SQL))
 
-    def _latest_snapshot(pid: str) -> dict[str, object] | None:
-        df = execute_df(_LATEST_SNAPSHOT_SQL, [pid, as_of_iso])
-        if df.empty:
-            return None
-        return first_row_dict(df)
 
-    player_snapshot = _latest_snapshot(lower_id)
-    opponent_snapshot = _latest_snapshot(higher_id)
-
-    player_side = _side_values(
-        player_snapshot, as_of_date, surface, agg, median_days, median_matches
-    )
-    opponent_side = _side_values(
-        opponent_snapshot, as_of_date, surface, agg, median_days, median_matches
-    )
-    player_side.update(_profile_values(lower_id, as_of_date, profile_agg))
-    opponent_side.update(_profile_values(higher_id, as_of_date, profile_agg))
-
-    # ── Head-to-head: last five prior meetings for the canonical pair ──
-    h2h_df = execute_df(_H2H_PRIOR_SQL, [lower_id, higher_id, lower_id, higher_id, as_of_iso])
-    h2h_matches = len(h2h_df)
-    h2h_player_wins = int(h2h_df["a_won"].sum()) if h2h_matches else 0
-
-    # ── Assemble the canonical row in FEATURE_COLS order ──
+def _assemble_row(
+    ctx: _RowContext,
+    player_side: dict[str, int | float],
+    opponent_side: dict[str, int | float],
+    h2h_matches: int,
+    h2h_player_wins: int,
+) -> dict[str, int | float | str]:
+    """Assemble one canonical row in FEATURE_COLS order (shared by builders)."""
     row: dict[str, int | float | str] = {}
 
     def side(name: str, p: dict[str, int | float], o: dict[str, int | float]) -> int | float:
@@ -466,37 +518,93 @@ def _build_inference_features_with_meta(
     row["player_h2h_wins"] = h2h_player_wins
 
     # Numeric match context (one-hot surface).
-    row["is_clay"] = int(surface == "clay")
-    row["is_grass"] = int(surface == "grass")
-    row["is_hard"] = int(surface == "hard")
-    row["is_carpet"] = int(surface == "carpet")
-    row["is_indoor"] = is_indoor if is_indoor is not None else 0
-    row["tournament_level"] = tournament_level
-    row["round_encoded"] = round_encoded
+    row["is_clay"] = int(ctx.surface == "clay")
+    row["is_grass"] = int(ctx.surface == "grass")
+    row["is_hard"] = int(ctx.surface == "hard")
+    row["is_carpet"] = int(ctx.surface == "carpet")
+    row["is_indoor"] = ctx.is_indoor
+    row["tournament_level"] = ctx.tournament_level
+    row["round_encoded"] = ctx.round_encoded
 
     # Preserve the canonical ids, not the raw input order.
-    row["player_id"] = lower_id
-    row["opponent_id"] = higher_id
+    row["player_id"] = ctx.lower_id
+    row["opponent_id"] = ctx.higher_id
+    return row
+
+
+def _build_inference_features_with_meta(
+    player_id: str,
+    opponent_id: str,
+    surface: str,
+    *,
+    as_of_date: date | None = None,
+    tournament_level: int = 0,
+    round_encoded: int = 0,
+    tournament: str | None = None,
+    round: str | None = None,
+    is_indoor: int | None = None,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    """Build one NaN-free canonical row in the FEATURE_COLS contract."""
+    started_at = perf_counter()
+    ctx = _normalize_inputs(
+        player_id,
+        opponent_id,
+        surface,
+        as_of_date=as_of_date,
+        tournament_level=tournament_level,
+        round_encoded=round_encoded,
+        tournament=tournament,
+        round=round,
+        is_indoor=is_indoor,
+    )
+
+    # ── Materialized date-keyed defaults (no on-demand aggregates) ──
+    defaults = _load_defaults(ctx.as_of_iso)
+
+    def _latest_snapshot(pid: str) -> dict[str, object] | None:
+        df = execute_df(_LATEST_SNAPSHOT_SQL, [pid, ctx.as_of_iso])
+        if df.empty:
+            return None
+        return first_row_dict(df)
+
+    player_snapshot = _latest_snapshot(ctx.lower_id)
+    opponent_snapshot = _latest_snapshot(ctx.higher_id)
+
+    player_side = _side_values(player_snapshot, ctx.as_of_date, ctx.surface, defaults)
+    opponent_side = _side_values(opponent_snapshot, ctx.as_of_date, ctx.surface, defaults)
+    player_side.update(_profile_values(ctx.lower_id, ctx.as_of_date, defaults))
+    opponent_side.update(_profile_values(ctx.higher_id, ctx.as_of_date, defaults))
+
+    # ── Head-to-head: last five prior meetings for the canonical pair ──
+    h2h_df = execute_df(
+        _H2H_PRIOR_SQL,
+        [ctx.lower_id, ctx.higher_id, ctx.lower_id, ctx.higher_id, ctx.as_of_iso],
+    )
+    h2h_matches = len(h2h_df)
+    h2h_player_wins = int(h2h_df["a_won"].sum()) if h2h_matches else 0
+
+    # ── Assemble the canonical row in FEATURE_COLS order ──
+    row = _assemble_row(ctx, player_side, opponent_side, h2h_matches, h2h_player_wins)
 
     final_cols = [*FEATURE_COLS, "player_id", "opponent_id"]
     out = pd.DataFrame({col: [row[col]] for col in final_cols})
     assert not out.isnull().to_numpy().any(), "inference row contains NaN"
 
     meta: dict[str, object] = {
-        "raw_player_id": player_id.strip(),
-        "raw_opponent_id": opponent_id.strip(),
-        "canonical_player_id": lower_id,
-        "canonical_opponent_id": higher_id,
-        "surface": surface,
-        "as_of_date": as_of_iso,
-        "tournament_level": tournament_level,
-        "round_encoded": round_encoded,
+        "raw_player_id": ctx.raw_player_id,
+        "raw_opponent_id": ctx.raw_opponent_id,
+        "canonical_player_id": ctx.lower_id,
+        "canonical_opponent_id": ctx.higher_id,
+        "surface": ctx.surface,
+        "as_of_date": ctx.as_of_iso,
+        "tournament_level": ctx.tournament_level,
+        "round_encoded": ctx.round_encoded,
         "feature_count": len(FEATURE_COLS),
-        "snapshot_pool_rows": int(float(pool_counts["snapshot_pool_rows"] or 0)),
-        "snapshot_pool_players": int(float(pool_counts["snapshot_pool_players"] or 0)),
-        "profile_rows": int(float(profile_counts["profile_rows"] or 0)),
-        "median_days_since": float(median_days),
-        "median_matches_30d": float(median_matches),
+        "snapshot_pool_rows": int(float(defaults["snapshot_pool_rows"] or 0)),
+        "snapshot_pool_players": int(float(defaults["snapshot_pool_players"] or 0)),
+        "profile_rows": int(float(defaults["profile_rows"] or 0)),
+        "median_days_since": float(defaults["days_since_default"]),
+        "median_matches_30d": float(defaults["matches_30d_default"]),
         "player_snapshot_found": player_snapshot is not None,
         "opponent_snapshot_found": opponent_snapshot is not None,
         "player_snapshot_date": None
@@ -544,4 +652,105 @@ def build_inference_features(
         round=round,
         is_indoor=is_indoor,
     )
+    return out
+
+
+def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame:
+    """Build canonical rows for many matches in one set-oriented pass.
+
+    Each row accepts the same fields and validation as
+    `build_inference_features` (including its own historical `as_of_date`).
+    Snapshots, defaults, 30-day activity, profiles, and H2H history are
+    resolved with unnest/LATERAL/ANY queries — a constant number of round
+    trips regardless of the batch size — then every row is assembled with the
+    exact same per-side value and row logic as the scalar builder, so output
+    matches repeated scalar calls. Input order is preserved.
+    """
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("rows must be a non-empty list of match contexts")
+    if len(rows) > BULK_MAX_ROWS:
+        raise ValueError(f"bulk inference accepts at most {BULK_MAX_ROWS} rows, got {len(rows)}")
+
+    ctxs = [_normalize_inputs(**cast(dict[str, Any], row)) for row in rows]
+    defaults_by_date = _load_defaults_bulk([c.as_of_iso for c in ctxs])
+
+    # Distinct (player, as-of) pairs drive the set-oriented snapshot queries.
+    pairs = list({(pid, c.as_of_date) for c in ctxs for pid in (c.lower_id, c.higher_id)})
+    pair_pids = [p for p, _ in pairs]
+    pair_dates = [d for _, d in pairs]
+
+    snapshots: dict[tuple[str, date], dict[str, object] | None] = {}
+    for rec in execute_df(_SNAPSHOTS_BULK_SQL, [pair_pids, pair_dates]).to_dict("records"):
+        key = (rec["req_player_id"], _to_date(rec["as_of_iso"]))
+        if rec["player_id"] is None:
+            snapshots[key] = None
+        else:
+            snapshots[key] = cast(
+                dict[str, object],
+                {k: v for k, v in rec.items() if k not in ("req_player_id", "as_of_iso")},
+            )
+
+    matches_30d: dict[tuple[str, date], int] = {}
+    for rec in execute_df(_MATCHES_30D_BULK_SQL, [pair_pids, pair_dates]).to_dict("records"):
+        matches_30d[(rec["req_player_id"], _to_date(rec["as_of_iso"]))] = int(rec["n"])
+
+    profiles: dict[str, dict[str, object]] = {}
+    players = sorted({p for c in ctxs for p in (c.lower_id, c.higher_id)})
+    for rec in execute_df(_PROFILES_BULK_SQL, [players]).to_dict("records"):
+        profiles[str(rec["player_id"])] = cast(dict[str, object], rec)
+
+    h2h: dict[tuple[str, str, str], list[tuple[str, int]]] = {}
+    h2h_triples = list({(c.lower_id, c.higher_id, c.as_of_iso) for c in ctxs})
+    h2h_rows = execute_df(
+        _H2H_PRIOR_BULK_SQL,
+        [
+            [t[0] for t in h2h_triples],
+            [t[1] for t in h2h_triples],
+            [_to_date(t[2]) for t in h2h_triples],
+        ],
+    )
+    for rec in h2h_rows.to_dict("records"):
+        if rec["match_id"] is None:  # pair with no prior meetings
+            continue
+        key = (rec["a"], rec["b"], _to_date(rec["as_of_iso"]).isoformat())
+        h2h.setdefault(key, []).append((str(rec["match_id"]), int(rec["a_won"])))
+
+    out_rows: list[dict[str, int | float | str]] = []
+    for ctx in ctxs:
+        defaults = defaults_by_date[ctx.as_of_iso]
+        player_snapshot = snapshots.get((ctx.lower_id, ctx.as_of_date))
+        opponent_snapshot = snapshots.get((ctx.higher_id, ctx.as_of_date))
+        player_side = _side_values(
+            player_snapshot,
+            ctx.as_of_date,
+            ctx.surface,
+            defaults,
+            matches_30d.get((ctx.lower_id, ctx.as_of_date)),
+        )
+        opponent_side = _side_values(
+            opponent_snapshot,
+            ctx.as_of_date,
+            ctx.surface,
+            defaults,
+            matches_30d.get((ctx.higher_id, ctx.as_of_date)),
+        )
+        player_side.update(
+            _profile_values_from_row(profiles.get(ctx.lower_id), ctx.as_of_date, defaults)
+        )
+        opponent_side.update(
+            _profile_values_from_row(profiles.get(ctx.higher_id), ctx.as_of_date, defaults)
+        )
+        meetings = h2h.get((ctx.lower_id, ctx.higher_id, ctx.as_of_iso), [])
+        out_rows.append(
+            _assemble_row(
+                ctx,
+                player_side,
+                opponent_side,
+                len(meetings),
+                sum(a_won for _, a_won in meetings),
+            )
+        )
+
+    out = pd.DataFrame(out_rows, columns=[*FEATURE_COLS, "player_id", "opponent_id"])
+    assert not out.isnull().to_numpy().any(), "bulk inference rows contain NaN"
     return out

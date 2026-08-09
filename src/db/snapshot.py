@@ -98,6 +98,21 @@ def validate_snapshot(path: Path) -> None:
                 raise SnapshotError(
                     f'snapshot table "{schema}"."{table}" has {dupes_row[0]} duplicate "{key}" rows'
                 )
+
+        # Contract: every FEATURE_COLS cell is non-null and finite. dbt already
+        # enforces this in gold; the snapshot re-checks it so training can never
+        # read NULL/NaN/Infinity model features (similarity columns excluded).
+        col_checks = " OR ".join(
+            f'"{c}" IS NULL OR isnan("{c}") OR isinf("{c}")' for c in FEATURE_COLS
+        )
+        bad_row = con.execute(
+            f"SELECT COUNT(*) FROM gold.match_features WHERE {col_checks}"
+        ).fetchone()
+        assert bad_row is not None
+        if bad_row[0]:
+            raise SnapshotError(
+                f"gold.match_features has {bad_row[0]} NULL or non-finite model feature cells"
+            )
     finally:
         con.close()
 

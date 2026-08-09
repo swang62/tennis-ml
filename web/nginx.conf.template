@@ -1,10 +1,15 @@
 # Production SPA config; Bento is reachable only through allowlisted /api routes.
-# conf.d is included from nginx's http block, so zone directives are valid here.
+# Rendered at container start by the official nginx image's envsubst template
+# mechanism (/etc/nginx/templates/*.template). Substitution is allowlisted to
+# DRIFT_API_KEY via NGINX_ENVSUBST_FILTER in the Dockerfile, so all native
+# nginx $variables below are preserved verbatim.
 
 # Per-IP rate limit: 30 req/s burstable to 10.
 limit_req_zone $binary_remote_addr zone=api_req:10m rate=30r/s;
 # Per-IP connection limit: 10 concurrent connections.
 limit_conn_zone $binary_remote_addr zone=api_conn:10m;
+# Authenticated operational routes: at most one active batch per client.
+limit_conn_zone $binary_remote_addr zone=op_conn:10m;
 
 server {
     listen 80;
@@ -13,9 +18,11 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
-    # Global timeouts for all proxy requests.
+    # Global timeouts for all proxy requests. The upstream read window is sized
+    # for bulk predictions (up to 1,000 rows per request); the internal batch
+    # location scopes its own explicit 120s read timeout.
     proxy_connect_timeout 5s;
-    proxy_read_timeout 30s;
+    proxy_read_timeout 120s;
     proxy_send_timeout 10s;
 
     # Prediction payloads are tiny feature rows.
@@ -92,6 +99,53 @@ server {
         }
 
         proxy_pass http://bento:3000/predict_from_ids;
+        proxy_http_version 1.1;
+    }
+
+    # --- Authenticated operational routes (header X-Drift-API-Key) ---
+
+    location /api/internal/model-info {
+        limit_req zone=api_req burst=5 nodelay;
+        limit_conn api_conn 5;
+
+        # Only GET allowed.
+        limit_except GET {
+            deny all;
+        }
+
+        if ($http_x_drift_api_key != "${DRIFT_API_KEY}") {
+            return 401 '{"ok":false,"error":"unauthorized"}';
+        }
+
+        proxy_pass http://bento:3000/model_info;
+        proxy_http_version 1.1;
+    }
+
+    location /api/internal/predict-batch {
+        limit_req zone=api_req burst=1 nodelay;
+        # One active batch per client.
+        limit_conn op_conn 1;
+
+        # Only POST allowed.
+        limit_except POST {
+            deny all;
+        }
+
+        if ($http_x_drift_api_key != "${DRIFT_API_KEY}") {
+            return 401 '{"ok":false,"error":"unauthorized"}';
+        }
+
+        # The body must be JSON.
+        if ($content_type !~ ^application/json) {
+            return 415 '{"ok":false,"error":"content-type must be application/json"}';
+        }
+
+        # Operational limits override the public 10k body cap: 10 MiB body,
+        # explicit 120s upstream window. Bento itself rejects >1,000 rows.
+        client_max_body_size 10m;
+        proxy_read_timeout 120s;
+
+        proxy_pass http://bento:3000/predict_from_ids_bulk;
         proxy_http_version 1.1;
     }
 

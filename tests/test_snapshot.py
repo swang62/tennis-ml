@@ -91,6 +91,18 @@ def test_validate_rejects_duplicate_match_ids(tmp_path) -> None:
         snapshot.validate_snapshot(p)
 
 
+def test_validate_rejects_null_model_features(tmp_path) -> None:
+    """A NULL in any FEATURE_COLS cell fails the finalized contract (the exact
+    regression this model-ready gold contract prevents)."""
+    p = tmp_path / "snap.duckdb"
+    _write_valid_snapshot(p)
+    con = duckdb.connect(str(p))
+    con.execute("UPDATE gold.match_features SET rank_diff = NULL")
+    con.close()
+    with pytest.raises(snapshot.SnapshotError, match="NULL or non-finite model feature"):
+        snapshot.validate_snapshot(p)
+
+
 def test_refresh_failure_preserves_previous_snapshot(tmp_path, monkeypatch) -> None:
     """A failed refresh leaves the previous snapshot byte-for-byte intact."""
     p = tmp_path / "snap.duckdb"

@@ -16,5 +16,13 @@ FROM nginx:alpine
 RUN sed -i 's/^worker_processes.*/worker_processes  1;/' /etc/nginx/nginx.conf \
     && grep -q '^worker_processes  1;' /etc/nginx/nginx.conf
 COPY --from=build /app/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Official-image startup template: the entrypoint renders /etc/nginx/templates
+# via envsubst at container start. Substitution is allowlisted to DRIFT_API_KEY
+# so native nginx $variables in the template are preserved verbatim.
+ENV NGINX_ENVSUBST_FILTER='^DRIFT_API_KEY$'
+COPY nginx.conf.template /etc/nginx/templates/default.conf.template
+# Fail container start when the runtime API key is missing; otherwise the
+# rendered auth comparison would be against an empty key.
+COPY entrypoint.sh /usr/local/bin/nginx-entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/nginx-entrypoint.sh"]
 EXPOSE 80

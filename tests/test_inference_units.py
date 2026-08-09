@@ -6,7 +6,9 @@ from typing import cast
 import pandas as pd
 import pytest
 
-from src.features.inference import _agg_or, _to_date, build_inference_features
+from src.constants import FEATURE_DEFAULTS_TABLE
+from src.features.columns import FEATURE_DEFAULTS_COLS
+from src.features.inference import _to_date, build_inference_features
 
 # ── _to_date ──
 
@@ -36,22 +38,6 @@ def test_to_date_parses_iso_string():
 def test_to_date_rejects_non_coercible_value():
     with pytest.raises(TypeError):
         _to_date(123)
-
-
-# ── _agg_or ──
-
-
-def test_agg_or_returns_value_when_present():
-    assert _agg_or({"win_rate_10": 0.42}, "win_rate_10", 0.0) == 0.42
-
-
-def test_agg_or_returns_default_when_value_is_none():
-    agg = cast(dict[str, float], {"win_rate_10": None})
-    assert _agg_or(agg, "win_rate_10", 0.0) == 0.0
-
-
-def test_agg_or_returns_default_when_value_is_nan():
-    assert _agg_or({"win_rate_10": float("nan")}, "win_rate_10", 0.0) == 0.0
 
 
 # ── build_inference_features boundary validation (no DB access) ──
@@ -131,19 +117,19 @@ def test_round_int_and_alias_conflict_raises():
 
 @pytest.fixture
 def empty_pool(monkeypatch):
-    """Patch empty pool reads and their required count defaults."""
-    monkeypatch.setattr(
-        "src.features.inference.execute_df",
-        lambda _sql, _params=None: pd.DataFrame(),
-    )
-    monkeypatch.setattr(
-        "src.features.inference.first_row_dict",
-        lambda _df: {
-            "snapshot_pool_rows": None,
-            "snapshot_pool_players": None,
-            "profile_rows": None,
-        },
-    )
+    """Patch the DB so every player lookup is a cold start: the materialized
+    defaults lookup returns one (all-constant) row, and every snapshot/profile
+    query returns nothing."""
+    defaults_row: dict[str, object] = {col: 0.0 for col in FEATURE_DEFAULTS_COLS}
+    defaults_row["as_of_date"] = date(2026, 8, 9)
+    defaults_df = pd.DataFrame([defaults_row])
+
+    def fake_execute_df(sql, params=None):  # noqa: ARG001 — generic DB stand-in
+        if FEATURE_DEFAULTS_TABLE in sql:
+            return defaults_df
+        return pd.DataFrame()
+
+    monkeypatch.setattr("src.features.inference.execute_df", fake_execute_df)
 
 
 def test_valid_string_aliases_map_and_build_with_empty_pool(empty_pool):  # noqa: ARG001 — fixture applied for its side effects only

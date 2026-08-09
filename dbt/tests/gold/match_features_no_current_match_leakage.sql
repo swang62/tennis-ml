@@ -1,16 +1,19 @@
 -- Assert every snapshot-backed feature of each match_features row comes from
 -- the player's PRIOR snapshot only (player_match_number = current match
--- number - 1), for both the canonical player and the opponent side.
+-- number - 1) — or, when that prior state is missing (cold start), from the
+-- strictly-prior date-keyed defaults pool. This holds for both the canonical
+-- player and the opponent side. Any mismatch means the row used a current-match
+-- snapshot (leakage), its current-match raw stats, a wrong snapshot, or the
+-- wrong default.
 --
 -- The finalized 36-col contract keeps most rolling values as DIFFS (canonical
--- minus opponent), so the strongest leakage check re-derives each diff from
--- the two prior snapshots and compares it with the stored value. Any mismatch
--- means the row used a current-match snapshot (leakage), its current-match
--- raw stats, or a wrong snapshot. Per-side absolute values (weighted_form_10,
--- surface_win_rate_10, days_since_last_match, matches_30d) are compared
--- directly against the prior snapshot / current silver row. As-of-date values
--- (ranking, rank_points, age) come from the CURRENT silver row (pre-match
--- known, never from current-match raw stats).
+-- minus opponent), so the strongest leakage check re-derives each diff from the
+-- two prior snapshots (COALESCE'd to the defaults row) and compares it with the
+-- stored value. Per-side absolute values (weighted_form_10, surface_win_rate_10,
+-- days_since_last_match, matches_30d) are compared directly against the prior
+-- snapshot / current silver row, again COALESCE'd to the defaults for cold
+-- starts. As-of-date values (ranking, rank_points, age, rank_trend) come from
+-- the PRIOR snapshot (pre-match known, never from current-match raw stats).
 --
 -- Covered snapshot-backed fields:
 --   diff form:      win_rate_diff, streak_diff, surface (via per-side)
@@ -24,7 +27,7 @@
 --                    player/opponent_days_since_last_match,
 --                    player/opponent_matches_30d
 --   as-of-date:     player/opponent_ranking, player/opponent_age,
---                    rank_points_diff (current event, pre-match known)
+--                    rank_points_diff (prior snapshot)
 {% set diff_cols = [
     "win_rate_10", "ace_rate_10", "first_serve_pct_10",
     "break_points_saved_pct_10", "first_serve_win_pct_10",
@@ -62,34 +65,54 @@ WITH prior_snapshot AS (
         mf.player_surface_win_rate_10, mf.opponent_surface_win_rate_10,
         mf.player_days_since_last_match, mf.opponent_days_since_last_match,
         mf.player_matches_30d, mf.opponent_matches_30d,
-        -- Prior snapshot inputs (N-1)
+        -- Prior snapshot inputs (N-1), COALESCE'd to the date-keyed defaults so
+        -- cold-start rows and NULL cells impute exactly as match_features does.
         {% for c in diff_cols %}
-        prp.{{ c }} AS player_prior_{{ c }},
-        pro.{{ c }} AS opponent_prior_{{ c }},
+        COALESCE(prp.{{ c }}, fd.{{ c }}) AS player_prior_{{ c }},
+        COALESCE(pro.{{ c }}, fd.{{ c }}) AS opponent_prior_{{ c }},
         {% endfor %}
-        prp.streak AS player_prior_streak,
-        pro.streak AS opponent_prior_streak,
-        prp.weighted_form_10 AS player_prior_weighted_form_10,
-        pro.weighted_form_10 AS opponent_prior_weighted_form_10,
-        prp.avg_player_rank_10 AS player_prior_avg_rank_10,
-        pro.avg_player_rank_10 AS opponent_prior_avg_rank_10,
+        COALESCE(prp.streak, fd.streak) AS player_prior_streak,
+        COALESCE(pro.streak, fd.streak) AS opponent_prior_streak,
+        COALESCE(prp.weighted_form_10, fd.weighted_form_10)
+            AS player_prior_weighted_form_10,
+        COALESCE(pro.weighted_form_10, fd.weighted_form_10)
+            AS opponent_prior_weighted_form_10,
+        COALESCE(prp.avg_player_rank_10, fd.avg_player_rank_10)
+            AS player_prior_avg_rank_10,
+        COALESCE(pro.avg_player_rank_10, fd.avg_player_rank_10)
+            AS opponent_prior_avg_rank_10,
+        -- Strictly-prior as-of-date rankings/rank points/age (imputed).
+        COALESCE(prp.latest_player_ranking, fd.latest_player_ranking)
+            AS player_prior_ranking,
+        COALESCE(pro.latest_player_ranking, fd.latest_player_ranking)
+            AS opponent_prior_ranking,
+        COALESCE(prp.latest_player_rank_points, fd.latest_player_rank_points)
+            AS player_prior_rank_points,
+        COALESCE(pro.latest_player_rank_points, fd.latest_player_rank_points)
+            AS opponent_prior_rank_points,
+        COALESCE(prp.latest_player_age, fd.latest_player_age)
+            AS player_prior_age,
+        COALESCE(pro.latest_player_age, fd.latest_player_age)
+            AS opponent_prior_age,
         prp.snapshot_date AS player_prior_snapshot_date,
         pro.snapshot_date AS opponent_prior_snapshot_date,
-        prp.clay_win_rate_10 AS player_prior_clay_win_rate_10,
-        prp.grass_win_rate_10 AS player_prior_grass_win_rate_10,
-        prp.hard_win_rate_10 AS player_prior_hard_win_rate_10,
-        pro.clay_win_rate_10 AS opponent_prior_clay_win_rate_10,
-        pro.grass_win_rate_10 AS opponent_prior_grass_win_rate_10,
-        pro.hard_win_rate_10 AS opponent_prior_hard_win_rate_10,
-        -- Current-event as-of-date values (pre-match known, from silver)
-        pm.player_ranking AS player_cur_ranking,
-        po.player_ranking AS opponent_cur_ranking,
-        pm.player_age AS player_cur_age,
-        po.player_age AS opponent_cur_age,
-        pm.player_rank_points AS player_cur_rank_points,
-        po.player_rank_points AS opponent_cur_rank_points,
+        COALESCE(prp.clay_win_rate_10, fd.clay_win_rate_10)
+            AS player_prior_clay_win_rate_10,
+        COALESCE(prp.grass_win_rate_10, fd.grass_win_rate_10)
+            AS player_prior_grass_win_rate_10,
+        COALESCE(prp.hard_win_rate_10, fd.hard_win_rate_10)
+            AS player_prior_hard_win_rate_10,
+        COALESCE(pro.clay_win_rate_10, fd.clay_win_rate_10)
+            AS opponent_prior_clay_win_rate_10,
+        COALESCE(pro.grass_win_rate_10, fd.grass_win_rate_10)
+            AS opponent_prior_grass_win_rate_10,
+        COALESCE(pro.hard_win_rate_10, fd.hard_win_rate_10)
+            AS opponent_prior_hard_win_rate_10,
         pm.matches_30d_before AS player_cur_matches_30d,
-        po.matches_30d_before AS opponent_cur_matches_30d
+        po.matches_30d_before AS opponent_cur_matches_30d,
+        fd.days_since_default,
+        fd.matches_30d_default,
+        fd.rate_default
     FROM {{ ref('match_features') }} mf
     JOIN {{ ref('player_matches') }} pm
       ON pm.match_id = mf.match_id AND pm.player_id = mf.player_id
@@ -101,6 +124,8 @@ WITH prior_snapshot AS (
     LEFT JOIN {{ ref('rolling_features') }} pro
       ON pro.player_id = mf.opponent_id
      AND pro.player_match_number = po.player_match_number - 1
+    LEFT JOIN {{ ref('feature_defaults') }} fd
+      ON fd.as_of_date = mf.match_date
 ),
 comparisons AS (
     {% for c in diff_cols %}
@@ -114,8 +139,8 @@ comparisons AS (
     FROM prior_snapshot
     UNION ALL
     SELECT match_id, 'rank_trend_diff' AS feature, rank_trend_diff AS mf_val,
-           (player_prior_avg_rank_10 - player_cur_ranking)
-           - (opponent_prior_avg_rank_10 - opponent_cur_ranking) AS prior_val
+           (player_prior_avg_rank_10 - player_prior_ranking)
+           - (opponent_prior_avg_rank_10 - opponent_prior_ranking) AS prior_val
     FROM prior_snapshot
     UNION ALL
     SELECT match_id, 'player_weighted_form_10' AS feature,
@@ -128,22 +153,34 @@ comparisons AS (
     UNION ALL
     SELECT match_id, 'player_days_since_last_match' AS feature,
            player_days_since_last_match AS mf_val,
-           CAST(COALESCE(match_date - player_prior_snapshot_date, 365) AS INTEGER) AS prior_val
+           CASE WHEN player_prior_snapshot_date IS NULL
+                THEN days_since_default
+                ELSE CAST(match_date - player_prior_snapshot_date AS INTEGER)
+           END AS prior_val
     FROM prior_snapshot
     UNION ALL
     SELECT match_id, 'opponent_days_since_last_match' AS feature,
            opponent_days_since_last_match AS mf_val,
-           CAST(COALESCE(match_date - opponent_prior_snapshot_date, 365) AS INTEGER) AS prior_val
+           CASE WHEN opponent_prior_snapshot_date IS NULL
+                THEN days_since_default
+                ELSE CAST(match_date - opponent_prior_snapshot_date AS INTEGER)
+           END AS prior_val
     FROM prior_snapshot
     UNION ALL
     SELECT match_id, 'player_matches_30d' AS feature,
            player_matches_30d AS mf_val,
-           CAST(player_cur_matches_30d AS INTEGER) AS prior_val
+           CASE WHEN player_prior_snapshot_date IS NULL
+                THEN matches_30d_default
+                ELSE CAST(player_cur_matches_30d AS INTEGER)
+           END AS prior_val
     FROM prior_snapshot
     UNION ALL
     SELECT match_id, 'opponent_matches_30d' AS feature,
            opponent_matches_30d AS mf_val,
-           CAST(opponent_cur_matches_30d AS INTEGER) AS prior_val
+           CASE WHEN opponent_prior_snapshot_date IS NULL
+                THEN matches_30d_default
+                ELSE CAST(opponent_cur_matches_30d AS INTEGER)
+           END AS prior_val
     FROM prior_snapshot
     UNION ALL
     SELECT match_id, 'player_surface_win_rate_10' AS feature,
@@ -152,6 +189,7 @@ comparisons AS (
                WHEN 'clay'  THEN player_prior_clay_win_rate_10
                WHEN 'grass' THEN player_prior_grass_win_rate_10
                WHEN 'hard'  THEN player_prior_hard_win_rate_10
+               ELSE rate_default
            END AS prior_val
     FROM prior_snapshot
     UNION ALL
@@ -161,19 +199,20 @@ comparisons AS (
                WHEN 'clay'  THEN opponent_prior_clay_win_rate_10
                WHEN 'grass' THEN opponent_prior_grass_win_rate_10
                WHEN 'hard'  THEN opponent_prior_hard_win_rate_10
+               ELSE rate_default
            END AS prior_val
     FROM prior_snapshot
     UNION ALL
-    SELECT match_id, 'player_age' AS feature, age_diff AS mf_val,
-           player_cur_age - opponent_cur_age AS prior_val
+    SELECT match_id, 'age_diff' AS feature, age_diff AS mf_val,
+           player_prior_age - opponent_prior_age AS prior_val
     FROM prior_snapshot
     UNION ALL
     SELECT match_id, 'rank_diff' AS feature, rank_diff AS mf_val,
-           player_cur_ranking - opponent_cur_ranking AS prior_val
+           player_prior_ranking - opponent_prior_ranking AS prior_val
     FROM prior_snapshot
     UNION ALL
     SELECT match_id, 'rank_points_diff' AS feature, rank_points_diff AS mf_val,
-           player_cur_rank_points - opponent_cur_rank_points AS prior_val
+           player_prior_rank_points - opponent_prior_rank_points AS prior_val
     FROM prior_snapshot
 )
 SELECT

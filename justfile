@@ -4,7 +4,7 @@ create:
 
 # Build silver and gold dbt models.
 db-dbt:
-    uv run python src/db/dbt.py
+    uv run python -c "from src.flows.etl import run_dbt_build; run_dbt_build()"
 
 # Run bronze-to-gold ETL; pass --enrich to fetch bios.
 db-etl *args:
@@ -29,11 +29,6 @@ db-snapshot:
 # Build and push the production Bento image.
 deploy-bento *args:
     uv run python src/flows/deploy.py {{args}}
-
-# Serve Bento locally on port 3000.
-deploy-local:
-    docker compose down
-    uv run bentoml serve src/serving/service.py:TennisPredictor --host 0.0.0.0 --port 3000
 
 # Install Python dependencies.
 deps:

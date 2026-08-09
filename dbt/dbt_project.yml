@@ -35,6 +35,10 @@ models:
       +schema: gold
 
       # Reapply keys and indexes after materialization replaces the table.
+      feature_defaults:
+        +post-hook:
+          - "{{ ensure_primary_key_sql(this, 'pk_feature_defaults', 'as_of_date') }}"
+
       match_features:
         +post-hook:
           - "{{ ensure_primary_key_sql(this, 'pk_match_features', 'match_id') }}"

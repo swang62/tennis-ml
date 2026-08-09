@@ -11,6 +11,7 @@ from typing import Any, TextIO
 from prefect import flow
 
 from src.constants import (
+    CHAMPION_ALIAS,
     DATA_PROCESSED,
     IMAGE_NAME,
     LOGS,
@@ -36,11 +37,23 @@ DOCKER_REPO = os.getenv("DOCKER_REPO", "swang62")
 # nn_best is exported to ONNX and included as an artifact, not a BentoModel.
 BASE_BENTO_NAMES = {"linear": "linear_best", "gbdt": "gbdt_best", "nn": "nn_best"}
 
+# Auxiliary-artifact tag names (champion lineage, `aux_<key>` prefix) baked into
+# the canonical manifest.
+_AUX_TAG_KEYS = (
+    "embeddings_uri",
+    "embeddings_hash",
+    "bio_feature_cols_uri",
+    "bio_feature_cols_hash",
+)
+
 # Packaged artifacts; serving reads PostgreSQL live, never training data.
 NN_ONNX_FILE = DATA_PROCESSED / "nn_best.onnx"
 # Packaged index for offline /similar_players requests.
 SIMILARITY_INDEX = DATA_PROCESSED / "player_similarity.index"
 SIMILARITY_METADATA = DATA_PROCESSED / "player_metadata.json"
+# Baked into the image; written at build time from the champion's exact lineage
+# tags (see _write_model_info). Excluded from the build-input fingerprint.
+MODEL_INFO_FILE = DATA_PROCESSED / "model_info.json"
 AUX_FILES = [
     DATA_PROCESSED / "linear_scaler.pkl",
     DATA_PROCESSED / "bio_embeddings.parquet",
@@ -50,11 +63,17 @@ AUX_FILES = [
     SIMILARITY_METADATA,
 ]
 
-# Files whose content changes should trigger a rebuild.
-FINGERPRINT_FILES = [
+# Files whose content is a build input but is NOT pinned in champion lineage.
+# Lineage-pinned artifacts (bases, scaler, embeddings, feature contract) enter
+# the fingerprint through the champion's exact tags instead of their mutable
+# data/processed copies. nn_best.onnx is a deploy-time export of the pinned nn
+# version and model_info.json is generated from the fingerprint itself, so both
+# are excluded too.
+SOURCE_FINGERPRINT_FILES = [
     TEMPLATE_BENTOFILE,
     SERVICE_FILE,
-    *AUX_FILES,
+    SIMILARITY_INDEX,
+    SIMILARITY_METADATA,
 ]
 
 
@@ -69,7 +88,7 @@ def _latest_production_version(client: Any) -> Any:
     from mlflow.exceptions import MlflowException
 
     try:
-        return client.get_model_version_by_alias(PRODUCTION_MODEL, "champion")
+        return client.get_model_version_by_alias(PRODUCTION_MODEL, CHAMPION_ALIAS)
     except MlflowException:
         return None
 
@@ -85,30 +104,80 @@ def _write_state(state: dict[str, Any]) -> None:
     STATE_FILE.write_text(json.dumps(state) + "\n")
 
 
-def _resolve_pins(client: Any, production: Any) -> dict[str, dict[str, Any]]:
-    """Resolve model pins by version, since aliases can be repointed."""
-    run = client.get_run(production.run_id)
+def _lineage_pins(client: Any, production: Any) -> dict[str, dict[str, str]]:
+    """Resolve exact base pins from the champion model-version lineage tags.
 
-    def _pin(registered_name: str, alias: str) -> dict[str, Any]:
-        version = client.get_model_version_by_alias(registered_name, alias).version
-        return {
-            "registered_model_name": registered_name,
-            "alias": alias,
-            "version": int(version),
+    05_evaluate tags the promoted ensemble version with the exact registered
+    name, version, run ID, and model URI of every base model, plus immutable
+    scaler/embedding/feature artifact URIs and content hashes. Base models
+    carry no aliases — these tags are the only resolution authority.
+    """
+    version = client.get_model_version(PRODUCTION_MODEL, production.version)
+    tags = dict(version.tags)
+    missing = [
+        f"base_{cls}_{key}"
+        for cls in BASE_BENTO_NAMES
+        for key in ("registered_model_name", "version", "run_id", "model_uri")
+        if f"base_{cls}_{key}" not in tags
+    ]
+    if missing:
+        raise RuntimeError(
+            f"champion {PRODUCTION_MODEL} v{production.version} is missing lineage "
+            f"tags {sorted(missing)} — promote through 05_evaluate first. Nothing to build."
+        )
+    pins: dict[str, dict[str, str]] = {
+        "production": {
+            "registered_model_name": PRODUCTION_MODEL,
+            "version": str(production.version),
+            "run_id": production.run_id,
+            "model_uri": f"models:/{PRODUCTION_MODEL}/{production.version}",
         }
-
-    pins: dict[str, dict[str, Any]] = {"production": _pin(PRODUCTION_MODEL, "champion")}
+    }
     for cls in BASE_BENTO_NAMES:
-        registered_name = run.data.params.get(f"base_{cls}_registered_name")
-        alias = run.data.params.get(f"base_{cls}_alias")
-        if not registered_name or not alias:
-            raise RuntimeError(
-                f"production run {run.info.run_id} has no recorded "
-                f"base_{cls}_registered_name / base_{cls}_alias params — "
-                "run the training pipeline first. Nothing to build."
-            )
-        pins[cls] = _pin(registered_name, alias)
+        pins[cls] = {
+            key: tags[f"base_{cls}_{key}"]
+            for key in ("registered_model_name", "version", "run_id", "model_uri")
+        }
+        for key in ("scaler_uri", "scaler_hash"):
+            tag_key = f"base_{cls}_{key}"
+            if tag_key in tags:
+                pins[cls][key] = tags[tag_key]
     return pins
+
+
+def _write_model_info(
+    client: Any, production: Any, pins: dict[str, dict[str, str]], fingerprint: str
+) -> Path:
+    """Write the immutable canonical champion manifest baked into the Bento.
+
+    Built directly from the champion's exact lineage tags (Task 2) plus the
+    non-circular build-input fingerprint: champion identity and creation time,
+    exact base and auxiliary-artifact pins, the feature-contract version/schema
+    hash, and the fingerprint. It never contains the Bento tag, Docker identity,
+    or any hash that includes the generated manifest itself.
+    """
+    version = client.get_model_version(PRODUCTION_MODEL, production.version)
+    tags = version.tags
+    manifest = {
+        "champion": {
+            "registered_model_name": PRODUCTION_MODEL,
+            "version": str(production.version),
+            "run_id": production.run_id,
+            "model_uri": f"models:/{PRODUCTION_MODEL}/{production.version}",
+            "creation_timestamp_ms": int(version.creation_timestamp),
+        },
+        "bases": {cls: pins[cls] for cls in BASE_BENTO_NAMES},
+        "aux_artifacts": {key: tags[f"aux_{key}"] for key in _AUX_TAG_KEYS},
+        "feature_contract": {
+            "version": tags["aux_features_uri"],
+            "schema_hash": tags["aux_feature_cols_hash"],
+        },
+        "build_input_fingerprint": fingerprint,
+    }
+    MODEL_INFO_FILE.parent.mkdir(parents=True, exist_ok=True)
+    MODEL_INFO_FILE.write_text(json.dumps(manifest, indent=2) + "\n")
+    print(f"Wrote canonical manifest: {MODEL_INFO_FILE}")
+    return MODEL_INFO_FILE
 
 
 def _check_aux_files() -> None:
@@ -124,12 +193,12 @@ def _check_aux_files() -> None:
 
 
 def _import_or_reuse(pin: dict[str, Any]) -> Any:
-    """Import or reuse a pinned MLflow version; aliases alone are stale-prone."""
+    """Import or reuse a pinned MLflow version by exact version, never alias."""
     import bentoml
 
     registered_name = pin["registered_model_name"]
-    uri = f"models:/{registered_name}@{pin['alias']}"
-    version = pin["version"]
+    version = str(pin["version"])
+    uri = f"models:/{registered_name}/{version}"
     try:
         stored = bentoml.models.get(registered_name)
     except Exception:
@@ -140,7 +209,7 @@ def _import_or_reuse(pin: dict[str, Any]) -> Any:
     stored = bentoml.mlflow.import_model(
         registered_name, uri, metadata={"mlflow_uri": uri, "mlflow_version": version}
     )
-    print(f"Imported {uri} (MLflow v{version}) -> {stored.tag}")
+    print(f"Imported {uri} -> {stored.tag}")
     return stored
 
 
@@ -161,7 +230,8 @@ def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
     warnings.filterwarnings("ignore", category=FutureWarning, message=".*LeafSpec.*")
 
     print(
-        f"Materializing ONNX from models:/{nn_pin['registered_model_name']}@{nn_pin['alias']} (v{nn_pin['version']})"
+        f"Materializing ONNX from models:/{nn_pin['registered_model_name']}/{nn_pin['version']} "
+        f"(v{nn_pin['version']})"
     )
     stored = _import_or_reuse(nn_pin)
 
@@ -212,18 +282,34 @@ def _file_hash(path: Path) -> str:
     return h.hexdigest()
 
 
-def _state_fingerprint(production_version: int) -> str:
-    """Fingerprint the champion version and baked artifacts, not mutable aliases."""
-    parts = [f"ensemble_lr_model@champion=v{production_version}"]
-    parts.extend(f"{path.relative_to(ROOT)}:{_file_hash(path)}" for path in FINGERPRINT_FILES)
+def build_input_fingerprint(client: Any, production: Any) -> str:
+    """Canonical, non-circular fingerprint of every Bento build input.
+
+    Includes the champion's exact lineage tags (base versions, run IDs, model
+    URIs, and scaler/embedding/feature artifact URIs + content hashes) and
+    hashes of on-disk source/artifact build inputs. Excludes everything the
+    build generates or records after the fact — the pinned bentofile, the
+    nn_best.onnx export, the Bento tag, the Docker image identity,
+    timestamps, and deploy state — so the fingerprint never depends on its
+    own output.
+    """
+    version = client.get_model_version(PRODUCTION_MODEL, production.version)
+    parts = [f"{PRODUCTION_MODEL}@{CHAMPION_ALIAS}=v{production.version}"]
+    parts.append("lineage:")
+    parts.extend(f"  {key}={version.tags[key]}" for key in sorted(version.tags))
+    parts.append("sources:")
+    parts.extend(
+        f"  {path.relative_to(ROOT)}:{_file_hash(path)}" for path in SOURCE_FINGERPRINT_FILES
+    )
     return "\n".join(parts)
 
 
 def _import_models(pins: dict[str, dict[str, Any]]) -> dict[str, str]:
     """Import each pinned MLflow version into the BentoML store; return tags.
 
-    Reuse is version-keyed via `_import_or_reuse` — see its docstring for why
-    the alias URI string alone cannot gate reuse.
+    Reuse is version-keyed via `_import_or_reuse` — the BentoML store name
+    alone cannot gate reuse, so the pinned MLflow version is stored in the
+    imported model's metadata.
     """
     tags: dict[str, str] = {}
     for key, pin in pins.items():
@@ -327,10 +413,11 @@ def build_bento_image(force: bool = False) -> tuple[str, int]:
         raise RuntimeError("No promoted 'ensemble_lr_model' — nothing to build.")
 
     state = _read_state()
-    pins = _resolve_pins(client, production)
+    pins = _lineage_pins(client, production)
     _materialize_nn_onnx(pins["nn"])
     _check_aux_files()
-    fingerprint = _state_fingerprint(int(production.version))
+    fingerprint = build_input_fingerprint(client, production)
+    _write_model_info(client, production, pins, fingerprint)
 
     if force:
         print("Force: rebuilding Bento and image regardless of cache.")
