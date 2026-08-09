@@ -1,6 +1,5 @@
 import { createRootRoute, createRoute, createRouter, Link, Outlet, useLocation } from '@tanstack/react-router'
 import Home from './pages/Home'
-import Profile from './pages/Profile'
 import H2H from './pages/H2H'
 import { useTheme, type ThemeName } from './theme'
 
@@ -61,7 +60,7 @@ function ThemeToggle({ theme, onToggle }: { theme: ThemeName; onToggle: () => vo
 function Layout() {
   const { theme, toggle } = useTheme()
   const { pathname } = useLocation()
-  const profilesActive = pathname === '/' || pathname.startsWith('/players/')
+  const profilesActive = pathname === '/'
   const h2hActive = pathname === '/h2h'
 
   return (
@@ -85,6 +84,7 @@ function Layout() {
             </Link>
             <Link
               to="/h2h"
+              search={{ playerA: undefined }}
               className={`navlink${h2hActive ? ' active' : ''}`}
               aria-current={h2hActive ? 'page' : undefined}
             >
@@ -115,19 +115,16 @@ export const homeRoute = createRoute({
   component: Home,
 })
 
-export const profileRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/players/$playerId',
-  component: Profile,
-})
-
 export const h2hRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/h2h',
   component: H2H,
+  validateSearch: (search: Record<string, unknown>) => ({
+    playerA: typeof search.playerA === 'string' ? search.playerA : undefined as string | undefined,
+  }),
 })
 
-const routeTree = rootRoute.addChildren([homeRoute, profileRoute, h2hRoute])
+const routeTree = rootRoute.addChildren([homeRoute, h2hRoute])
 
 export const router = createRouter({ routeTree })
 

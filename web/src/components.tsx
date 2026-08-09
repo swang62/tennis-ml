@@ -115,12 +115,16 @@ export function PlayerPicker({
   onChange,
   placeholder,
   exclude,
+  searchFn,
+  loading,
 }: {
   players: Player[]
   value: string | null
   onChange: (playerId: string | null) => void
   placeholder: string
   exclude?: string | null
+  searchFn?: (query: string) => Player[]
+  loading?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -130,12 +134,15 @@ export function PlayerPicker({
   const inputRef = useRef<HTMLInputElement>(null)
   const uid = useId()
 
-  const selected = players.find((p) => p.player_id === value)
+  const selected = players.find((p) => p.player_id === value) ?? null
   const q = query.trim().toLowerCase()
-  const options = players.filter(
-    (p) => p.player_id !== exclude && p.display_name.toLowerCase().includes(q),
-  )
+  const options = searchFn
+    ? (q.length > 0 ? searchFn(q) : [])
+    : players.filter(
+        (p) => p.player_id !== exclude && p.display_name.toLowerCase().includes(q),
+      )
   const active = Math.min(activeIndex, Math.max(options.length - 1, 0))
+  const showLoading = loading && q.length > 0
 
   const close = (refocus: boolean) => {
     setOpen(false)
@@ -218,9 +225,6 @@ export function PlayerPicker({
             ×
           </button>
         )}
-        <span className="picker-caret" aria-hidden="true">
-          ▾
-        </span>
       </div>
       {open && (
         <div className="picker-popover">
@@ -243,7 +247,11 @@ export function PlayerPicker({
             className="input picker-input"
           />
           <div className="picker-list" role="listbox" id={listboxId}>
-            {options.length === 0 ? (
+            {showLoading ? (
+              <div className="picker-loading" role="status">
+                Loading players...
+              </div>
+            ) : options.length === 0 ? (
               <div className="picker-empty" role="status">
                 No matching players
               </div>

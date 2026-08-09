@@ -1,35 +1,128 @@
-import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
-import { Link } from '@tanstack/react-router'
-import { getPlayers } from '../api'
-import { Empty, ErrorBox, Kicker, Loading } from '../components'
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
+import MiniSearch from "minisearch";
+import {
+  getMatchHistory,
+  getPlayerProfile,
+  getPlayers,
+  getRankHistory,
+  getSimilarPlayers,
+  type Player,
+} from "../api";
+import { ErrorBox, Kicker, Loading, PlayerPicker } from "../components";
+import { useTheme } from "../theme";
+import ProfileContent from "./Profile";
 
-type SortMode = 'name' | 'matches'
+const PLAYERS_INDEX_KEY = "tm-player-index-v1";
+
+const MINISEARCH_OPTS = {
+  fields: ["display_name"],
+  idField: "player_id",
+  storeFields: ["display_name", "matches_played"],
+  searchOptions: { fuzzy: 0.2, prefix: true, boost: { display_name: 2 } },
+};
+
+function useMiniSearch() {
+  const indexRef = useRef<MiniSearch | null>(null);
+  const [ready, setReady] = useState(false);
+
+  const playersQ = useQuery({
+    queryKey: ["players"],
+    queryFn: getPlayers,
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
+
+  useEffect(() => {
+    try {
+      const cached = localStorage.getItem(PLAYERS_INDEX_KEY);
+      if (cached) {
+        indexRef.current = MiniSearch.loadJSON(cached, MINISEARCH_OPTS);
+        setReady(true);
+      }
+    } catch {
+      localStorage.removeItem(PLAYERS_INDEX_KEY);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!playersQ.data || indexRef.current) return;
+    const ms = new MiniSearch(MINISEARCH_OPTS);
+    ms.addAll(playersQ.data.players as any);
+    indexRef.current = ms;
+    setReady(true);
+    try {
+      localStorage.setItem(PLAYERS_INDEX_KEY, JSON.stringify(ms));
+    } catch {
+      // localStorage full, non-critical
+    }
+  }, [playersQ.data]);
+
+  const search = useCallback((query: string): Player[] => {
+    if (!indexRef.current || !query.trim()) return [];
+    return indexRef.current
+      .search(query.trim(), { fuzzy: 0.2, prefix: true })
+      .map((r) => ({
+        player_id: r.id,
+        display_name: r.display_name as string,
+        matches_played: r.matches_played as number,
+      }));
+  }, []);
+
+  return { search, ready, loading: playersQ.isLoading && !ready };
+}
 
 export default function Home() {
-  const [query, setQuery] = useState('')
-  const [sort, setSort] = useState<SortMode>('name')
-  const playersQ = useQuery({ queryKey: ['players'], queryFn: getPlayers })
+  const { theme } = useTheme();
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const { search, ready, loading } = useMiniSearch();
 
-  if (playersQ.isLoading) return <Loading label="Loading players" />
-  if (playersQ.isError)
-    return <ErrorBox error={playersQ.error} onRetry={() => playersQ.refetch()} />
+  const profileQ = useQuery({
+    queryKey: ["profile", selectedId],
+    queryFn: () => getPlayerProfile(selectedId!),
+    enabled: selectedId !== null,
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
+  const rankQ = useQuery({
+    queryKey: ["rank_history", selectedId],
+    queryFn: () => getRankHistory(selectedId!),
+    enabled: selectedId !== null,
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
+  const matchesQ = useQuery({
+    queryKey: ["match_history", selectedId, 20],
+    queryFn: () => getMatchHistory(selectedId!, 20),
+    enabled: selectedId !== null,
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
+  const similarQ = useQuery({
+    queryKey: ["similar_players", selectedId],
+    queryFn: () => getSimilarPlayers(selectedId!, 3),
+    enabled: selectedId !== null,
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
 
-  const players = playersQ.data?.players ?? []
-  const q = query.trim().toLowerCase()
-  const totalMatches = players.reduce((n, p) => n + p.matches_played, 0)
-  const maxMatches = Math.max(1, ...players.map((p) => p.matches_played))
+  const playersQ = useQuery({
+    queryKey: ["players"],
+    queryFn: getPlayers,
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
+  const players = playersQ.data?.players ?? [];
+  const totalMatches = players.reduce((n, p) => n + p.matches_played, 0);
 
-  const filtered = players
-    .filter(
-      (p) =>
-        p.display_name.toLowerCase().includes(q) || p.player_id.toLowerCase().includes(q),
-    )
-    .sort((a, b) =>
-      sort === 'matches'
-        ? b.matches_played - a.matches_played
-        : a.display_name.localeCompare(b.display_name),
-    )
+  const handleSelectPlayer = (playerId: string | null) => {
+    if (!document.startViewTransition) {
+      setSelectedId(playerId);
+      return;
+    }
+    document.startViewTransition(() => setSelectedId(playerId));
+  };
 
   return (
     <div>
@@ -37,86 +130,79 @@ export default function Home() {
         <Kicker>Player directory</Kicker>
         <h1 className="page-title">Players</h1>
         <p className="page-sub">
-          The roster of ATP players tracked in the training corpus. Open a player for
-          career form, surface splits, rank history and recent matches.
+          Search for an ATP player to view career stats, surface splits, rank
+          history and recent matches.
         </p>
-        <div className="mt-5 flex flex-wrap gap-x-10 gap-y-4">
-          <div className="stat">
-            <span className="stat-label">Players</span>
-            <span className="stat-num num">{players.length}</span>
+        {players.length > 0 && (
+          <div className="mt-5 flex flex-wrap gap-x-10 gap-y-4">
+            <div className="stat">
+              <span className="stat-label">Players</span>
+              <span className="stat-num num">{players.length}</span>
+            </div>
+            <div className="stat">
+              <span className="stat-label">Matches</span>
+              <span className="stat-num num">{totalMatches}</span>
+            </div>
           </div>
-          <div className="stat">
-            <span className="stat-label">Matches</span>
-            <span className="stat-num num">{totalMatches}</span>
-          </div>
-        </div>
+        )}
       </section>
 
       <div className="toolbar">
-        <div className="search">
-          <svg
-            className="search-icon"
-            width="15"
-            height="15"
-            viewBox="0 0 16 16"
-            fill="none"
-            aria-hidden="true"
-          >
-            <circle cx="7" cy="7" r="4.6" stroke="currentColor" strokeWidth="1.5" />
-            <path d="M10.5 10.5 14 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-          </svg>
-          <input
-            type="text"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search players..."
-            aria-label="Search players"
-            className="input"
+        <div className="toolbar-picker">
+          <PlayerPicker
+            players={players}
+            value={selectedId}
+            onChange={handleSelectPlayer}
+            placeholder="Player"
+            searchFn={ready ? search : undefined}
+            loading={loading}
           />
         </div>
-        <select
-          className="select"
-          style={{ maxWidth: '14rem' }}
-          value={sort}
-          onChange={(e) => setSort(e.target.value as SortMode)}
-          aria-label="Sort players"
+        <Link
+          to="/h2h"
+          search={{ playerA: selectedId ?? undefined } as any}
+          className={`toolbar-compare${selectedId ? "" : " disabled"}`}
+          aria-disabled={!selectedId}
+          tabIndex={selectedId ? 0 : -1}
         >
-          <option value="name">Sort: Name</option>
-          <option value="matches">Sort: Most matches</option>
-        </select>
+          Compare
+        </Link>
       </div>
 
-      {filtered.length === 0 ? (
-        <Empty message="No players match your search" />
-      ) : (
-        <ul className="roster">
-          {filtered.map((p, i) => (
-            <li key={p.player_id}>
-              <Link
-                to="/players/$playerId"
-                params={{ playerId: p.player_id }}
-                className="roster-row"
-              >
-                <span className="roster-index num">{String(i + 1).padStart(2, '0')}</span>
-                <span className="roster-main">
-                  <span className="roster-name">{p.display_name}</span>
-                </span>
-                <span className="roster-matches">
-                  <span className="roster-bar">
-                    <span
-                      className="roster-bar-fill"
-                      style={{ width: `${Math.max(4, (p.matches_played / maxMatches) * 100)}%` }}
-                    />
-                  </span>
-                  <span className="roster-count num">
-                    {p.matches_played} {p.matches_played === 1 ? 'match' : 'matches'}
-                  </span>
-                </span>
-              </Link>
-            </li>
-          ))}
-        </ul>
+      {selectedId === null && (
+        <div className="empty" style={{ marginTop: "1.25rem" }}>
+          Select a player to view their profile
+        </div>
+      )}
+
+      {selectedId !== null && (
+        <div
+          id="profile-anchor"
+          className="mt-8"
+          style={{ viewTransitionName: "profile-content" }}
+        >
+          {profileQ.isLoading && <Loading label="Loading profile" />}
+          {profileQ.isError && (
+            <ErrorBox
+              error={profileQ.error}
+              onRetry={() => profileQ.refetch()}
+              knownIds={[selectedId]}
+            />
+          )}
+          {profileQ.data && (
+            <ProfileContent
+              profile={profileQ.data}
+              rankHistory={rankQ.data}
+              rankLoading={rankQ.isLoading}
+              matchHistory={matchesQ.data}
+              matchesLoading={matchesQ.isLoading}
+              similarQ={similarQ}
+              theme={theme}
+              onSelectSimilar={handleSelectPlayer}
+            />
+          )}
+        </div>
       )}
     </div>
-  )
+  );
 }

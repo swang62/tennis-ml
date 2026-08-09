@@ -20,8 +20,9 @@ caches fallback aggregates.
 ### In scope
 
 - Consolidate the two current dbt models into one singleton relation.
-- Preserve all existing gold imputation behavior while intentionally replacing
-  date-keyed defaults with one full-pool row.
+- Preserve gold's imputation ownership, destinations, and `COALESCE` structure
+  while intentionally replacing date-keyed default values with one full-pool
+  row.
 - Make scalar and bulk inference share one database-backed singleton loader.
 - Add reusable weighted tour-rate benchmarks.
 - Return profile comparison values and render signed percentage-point deltas.
@@ -49,7 +50,7 @@ The model must always materialize exactly one row.
 | Column | Definition |
 |---|---|
 | `singleton_id` | Constant `1`; non-null, unique, accepted value `[1]`, primary key. |
-| `pool_as_of_date` | One day after the latest rolling snapshot; anchors activity and years-pro calculations to source data rather than wall-clock time. |
+| `pool_as_of_date` | One day after the latest rolling snapshot for non-empty data; `CURRENT_DATE` metadata fallback for an empty pool. |
 | `snapshot_pool_rows` | Count of rolling snapshot rows used by fallback aggregates. |
 | `snapshot_pool_players` | Distinct players represented in the snapshot pool. |
 | `profile_rows` | Player-profile rows represented in profile aggregates. |
@@ -73,14 +74,22 @@ existing `COALESCE` contract:
 
 Fallback semantics:
 
-- Aggregate all available `silver.rolling_features` rows, matching the current
-  latest date-keyed pool's player-match weighting as closely as possible.
+- Aggregate all available `silver.rolling_features` rows, preserving the current
+  player-match weighting in which players with more snapshots contribute more
+  observations to the fallback pool.
 - Use medians for rank/streak-like values and means for continuous rates.
-- Calculate `days_since_default` from each player's latest snapshot relative to
-  `pool_as_of_date`.
-- Calculate `matches_30d_default` from the 30-day window ending at
-  `pool_as_of_date`.
-- Calculate `avg_years_pro` using the year of `pool_as_of_date`.
+- For a non-empty pool, set `pool_as_of_date` to one day after
+  `MAX(snapshot_date)`. For an empty pool, use `CURRENT_DATE` only as metadata;
+  all fallback values still come from the explicit constants below.
+- Calculate `days_since_default` as the rounded median of
+  `pool_as_of_date - latest_snapshot_date` across one latest row per player.
+- Calculate `matches_30d_default` as the rounded median per-player match count
+  in `[pool_as_of_date - 30 days, pool_as_of_date)`.
+- Calculate `left_handed_rate` only across known `L`/`R` profiles so unknown
+  handedness does not count as right-handed.
+- Calculate `avg_years_pro` as the mean of
+  `EXTRACT(YEAR FROM pool_as_of_date) - turned_pro`; SQL `AVG` excludes NULL
+  `turned_pro` values.
 - Preserve current deterministic empty-pool constants so every fallback column
   is finite and non-null: ranking `100`, rank points `500`, age `26`, streak
   `0`, rolling rates/forms `0`, average ranks `100`, days since `365`, matches
@@ -88,6 +97,10 @@ Fallback semantics:
   `8`.
 - Limited historical leakage is intentional and documented: old cold-start or
   otherwise missing cells use the same full-pool singleton as current rows.
+  Retraining does not remove this leakage, so chronological validation/test
+  metrics are knowingly slightly optimistic for rows that consume a fallback.
+  Verification must report the affected row/cell count so the accepted bias is
+  visible without introducing another defaults table.
 
 ### Weighted tour comparison columns
 
@@ -118,7 +131,7 @@ tests for profile-exposed benchmarks.
 - **Description**:
   - Rewrite the existing `tour_averages.sql` draft as the canonical singleton.
   - Merge the fallback calculations from `feature_defaults.sql` into a single
-    source-anchored aggregate pipeline.
+    aggregate pipeline anchored to source dates when source data is non-empty.
   - Use internal CTEs only inside this model to calculate snapshot, latest-player
     activity, profile, and weighted player-match aggregates once.
   - Add `singleton_id`, `pool_as_of_date`, observability counts, all existing
@@ -130,14 +143,17 @@ tests for profile-exposed benchmarks.
   - `dbt/models/gold/tour_averages.yml`
   - `dbt/models/gold/feature_defaults.sql` (remove)
   - `dbt/models/gold/feature_defaults.yml` (remove)
+  - `dbt/models/sources.yml`
   - `dbt/dbt_project.yml`
 - **Acceptance Criteria**:
   - `gold.tour_averages` has exactly one row and the schema above.
   - Every fallback column is finite and non-null.
   - Weighted benchmark formulas match direct recomputation from
     `silver.player_matches`.
-  - The model depends only on dbt silver models and `gold.player_profiles`; no
-    runtime service computes the same aggregates.
+  - Declare init/ingest-managed `gold.player_profiles` as a dbt source so its
+    dependency is visible; the model otherwise depends only on dbt silver
+    models.
+  - No runtime service computes the same aggregates.
   - `singleton_id = 1` is enforced by dbt schema tests and a post-build primary
     key.
 - **Guardrails**:
@@ -151,7 +167,7 @@ tests for profile-exposed benchmarks.
 - **Description**:
   - Replace the date equality join to `feature_defaults` with one explicit
     `CROSS JOIN {{ ref('tour_averages') }}`.
-  - Preserve the existing `COALESCE` and `CASE` behavior for ranking, rank
+  - Preserve the existing `COALESCE` and `CASE` destinations for ranking, rank
     points, age, activity, rolling rates, unseen surfaces, handedness, and
     years-pro.
   - Preserve direct dbt handling for indoor context, H2H zero state, tournament
@@ -178,6 +194,11 @@ tests for profile-exposed benchmarks.
     without altering nullable source biography fields.
   - DuckDB receives already-imputed `gold.match_features`; no training notebook
     gains new imputation logic.
+  - A verification query reports how many historical rows/cells consume the
+    full-pool singleton so the explicitly accepted temporal leakage is visible.
+  - Because full-pool defaults intentionally change historical imputed cells,
+    refresh the DuckDB snapshot and retrain all base/ensemble models before any
+    newly built serving image is promoted.
 - **Guardrails**:
   - Do not replace observed non-null values with tour averages.
   - Do not impute raw nullable biography values inside `gold.player_profiles`.
@@ -190,8 +211,10 @@ tests for profile-exposed benchmarks.
     routes.
   - Read the one-row table through the existing PostgreSQL client; do not
     calculate or cache its values in Bento.
-  - Validate exactly one returned row and all required fallback columns; fail
-    clearly with a `run dbt build` message when absent or invalid.
+  - Validate exactly one returned row, `singleton_id == 1`, non-null
+    `pool_as_of_date`, finite numeric fallback values, non-negative integer
+    counts, and benchmark values that are either finite or NULL. Fail clearly
+    with a `run dbt build` message when absent or invalid.
 - **Files**:
   - `src/features/tour_averages.py` (new shared loader)
   - `src/constants.py`
@@ -200,8 +223,8 @@ tests for profile-exposed benchmarks.
   - `TOUR_AVERAGES_TABLE = "gold.tour_averages"` replaces
     `FEATURE_DEFAULTS_TABLE`.
   - Default-column and benchmark-column lists are clearly separated.
-  - Each scalar request, bulk request, or profile request performs at most one
-    one-row singleton lookup.
+  - Each successful scalar request, bulk request, or profile request performs
+    exactly one one-row singleton lookup.
   - Scalar and bulk inference share the same query and schema validation.
 - **Guardrails**:
   - No TTL, background refresh, process cache, or request-time aggregation.
@@ -226,15 +249,21 @@ tests for profile-exposed benchmarks.
   - `tests/test_inference_units.py`
   - `tests/test_inference_features.py`
   - `tests/test_e2e_ingest_to_inference.py`
+  - `tests/test_tour_averages.py` (new direct loader contract tests)
 - **Acceptance Criteria**:
   - `_load_defaults_oldest`, date-parameterized `_load_defaults`,
     `_load_defaults_bulk`, and their SQL constants are removed.
-  - Scalar and bulk paths use the same singleton contract and produce identical feature
-    contracts.
+  - Scalar and bulk paths use the same singleton contract and produce identical
+    feature contracts.
   - One-player and two-player cold-start tests remain finite; identical
     singleton fallbacks yield neutral difference features where appropriate.
   - Existing snapshot-backed inference values remain unchanged except where the
     old date-keyed fallback actually applied.
+  - A mixed-date bulk request is row-for-row equal to repeated scalar builds for
+    normal snapshots, missing snapshots, partial NULL metrics, unseen surfaces,
+    missing profile fields, activity, and H2H state.
+  - Two consecutive requests observing two mocked singleton rows prove there is
+    no process cache; query-count assertions prove one lookup per request/batch.
 - **Guardrails**:
   - Do not reject valid players solely because a request date precedes their
     first snapshot; the singleton remains the cold-start fallback.
@@ -247,20 +276,21 @@ tests for profile-exposed benchmarks.
   - Read tour comparison rates from the shared database singleton loader.
   - Add a dedicated `tour_averages` object to the profile response rather than
     mixing tour values into the player's `career` object.
-  - Initially expose the four rates matching the existing career contract:
-    first-serve win, second-serve win, overall serve win, and break-points saved.
-    The remaining benchmark columns stay available in PostgreSQL for future UI
-    use without changing the model again.
+  - Initially expose only the two rates currently displayed by the profile:
+    first-serve win and second-serve win. Remaining benchmark columns stay in
+    PostgreSQL until an actual API/UI consumer needs them.
 - **Files**:
   - `src/serving/service.py`
   - `web/src/api.ts`
-  - relevant service/profile API tests under `tests/`
+  - `tests/test_service_profile.py` (new focused route tests)
 - **Acceptance Criteria**:
   - Profile responses return player career values and matching tour values from
     the current materialized singleton row.
   - No profile request performs a full-table aggregate.
   - Missing/undefined tour denominators serialize as `null`, not a fabricated
     percentage.
+  - Route tests cover benchmark mapping, NULL serialization, exactly one
+    singleton lookup, and a clear error when the singleton is missing/invalid.
 - **Guardrails**:
   - Do not expose model fallback constants as profile benchmarks.
   - Do not calculate deltas in the backend; return source rates and let the UI
@@ -271,10 +301,11 @@ tests for profile-exposed benchmarks.
 - **Description**:
   - For each displayed profile rate with a tour counterpart, calculate
     `player_rate - tour_rate` in the frontend.
-  - Render two decimals and an explicit sign inside parentheses, e.g.
-    `65.2% (+5.13%)` or `58.6% (-3.45%)`.
-  - Use the existing grass/green theme above average, clay/red below average,
-    and neutral text at exactly zero.
+  - Render two decimals and an explicit sign inside parentheses, with a stock-like
+    direction symbol: `65.2% ▲ (+5.13%)` or `58.6% ▼ (-3.45%)`.
+  - Keep the player percentage and signed delta text neutral. Color only `▲`
+    with the existing grass/green token or `▼` with the existing clay/red token.
+    A delta that rounds to `0.00` is neutral and has no direction symbol.
   - Provide accessible text identifying the delta as percentage points above or
     below tour average.
 - **Files**:
@@ -285,17 +316,22 @@ tests for profile-exposed benchmarks.
   - Positive, negative, zero, and null benchmark states render correctly.
   - The main player percentage remains visually primary; comparison text is
     secondary but readable.
-  - Colors use existing theme tokens and remain distinguishable without relying
-    on color alone because the sign is always shown.
+  - Only the direction symbol is colored; the percentage and delta text do not
+    become red/green.
+  - Direction remains understandable without color because the triangle and
+    explicit numeric sign are always present together.
 - **Guardrails**:
   - Use percentage-point differences, not relative percentage change.
   - Do not add a charting or table dependency for two inline comparisons.
+  - Do not add a frontend test framework for this change; verify the four render
+    states manually plus existing TypeScript/build checks.
 
 ### [ ] Task 7: Add singleton and migration regression coverage
 
 - **Description**:
-  - Add dbt singular tests for exactly one row, required fallback finiteness,
-    rate bounds, non-negative counts, and weighted formula parity.
+  - Add one dbt singular contract test for exactly one row, identity, required
+    fallback finiteness, applicable rate bounds, and non-negative counts.
+  - Add one weighted-formula parity test for all `tour_*` ratios.
   - Update integration readiness checks so tests cannot run against stale gold
     outputs missing `tour_averages`.
   - Preserve exact DuckDB snapshot scope: only `match_features` and
@@ -304,8 +340,7 @@ tests for profile-exposed benchmarks.
     `gold.tour_averages`, update all consumers, then remove
     `gold.feature_defaults`. Do not leave a permanent legacy-drop hook.
 - **Files**:
-  - `dbt/tests/gold/tour_averages_singleton.sql` (new)
-  - `dbt/tests/gold/tour_averages_no_invalid_defaults.sql` (new)
+  - `dbt/tests/gold/tour_averages_contract.sql` (new)
   - `dbt/tests/gold/tour_averages_weighted_rates.sql` (new)
   - `tests/conftest.py`
   - `tests/test_snapshot.py`
@@ -318,6 +353,9 @@ tests for profile-exposed benchmarks.
   - Snapshot tests still enforce exactly two DuckDB tables.
   - All dbt and Python contracts fail loudly on missing/duplicate/invalid
     singleton rows.
+  - Percentage rates are bounded to `[0, 1]`; `tour_aces_per_svc_game` is only
+    required to be non-negative. Positive-denominator assertions apply to seeded
+    integration data, while an empty source may yield NULL benchmark rates.
 - **Guardrails**:
   - Do not automatically drop PostgreSQL relations from normal dbt runs.
   - Do not add `tour_averages` to `SNAPSHOT_TABLES`.
@@ -325,8 +363,8 @@ tests for profile-exposed benchmarks.
 ### [ ] Task 8: Remove redundant MLflow feature-column lineage
 
 - **Description**:
-  - Remove the `train_test_split` MLflow experiment run; it registers no model
-    and its split metadata is not consumed downstream.
+  - Stop creating `train_test_split` MLflow experiment runs; the notebook
+    registers no model and its split metadata is not consumed downstream.
   - Stop writing `feature_cols.json`, logging `features.txt`, and writing
     `feature_pins.json` in the split notebook.
   - Remove `feature_pins` from the ensemble candidate manifest, promotion tag
@@ -348,9 +386,11 @@ tests for profile-exposed benchmarks.
   - `tests/test_rolling_contract.py`
   - current lineage documentation in `AGENTS.md` and `README.md`
 - **Acceptance Criteria**:
-  - No repository reference remains to `features.txt`, `feature_cols.json`,
+  - No maintained source, parameter notebook, test, or current architecture
+    documentation reference remains to `features.txt`, `feature_cols.json`,
     `feature_pins.json`, `features_uri`, `feature_cols_hash`,
-    `aux_features_uri`, or `aux_feature_cols_hash`.
+    `aux_features_uri`, or `aux_feature_cols_hash`; migration/history notes may
+    name the removed contract explicitly.
   - `01_train_test_split` performs the chronological split and writes training
     datasets without contacting MLflow.
   - Candidate manifests and champion tags retain model, scaler, embedding, and
@@ -358,6 +398,10 @@ tests for profile-exposed benchmarks.
   - Add `src/features/columns.py` to `SOURCE_FINGERPRINT_FILES` so removing the
     MLflow feature hash does not allow a changed internal feature order to reuse
     an old Bento image.
+  - Also fingerprint `src/features/inference.py`,
+    `src/features/tour_averages.py`, and `src/constants.py`, because those
+    packaged runtime inputs can change predictions without changing
+    `service.py`.
   - Deploy fingerprints still change when the shared internal feature order
     changes, without an MLflow feature artifact.
   - Training, inference construction, snapshot validation, and `_predict_proba`
@@ -370,6 +414,9 @@ tests for profile-exposed benchmarks.
     by training and serving.
   - Do not delete existing generated files under `data/processed` without
     separate approval; stop producing and referencing them instead.
+  - Removing code that creates future `train_test_split` runs does not delete
+    historical MLflow experiments/runs; any MLflow cleanup is a separate
+    destructive operation requiring explicit approval.
 
 ### [ ] Task 9: Align current architecture documentation
 
@@ -378,8 +425,9 @@ tests for profile-exposed benchmarks.
     silver preserves NULLs, dbt gold finalizes training features, and Bento
     reads the materialized fallback/benchmark row without recomputing it.
   - Correct the README statement claiming cold starts use on-demand aggregates.
-  - Mark the old date-keyed-default section in the historical drift plan as
-    superseded rather than rewriting unrelated history.
+  - Mark the old date-keyed-default design as superseded and make targeted
+    replacements for every active feature-pin/hash requirement in the drift plan
+    so it no longer mandates the removed MLflow artifact chain.
 - **Files**:
   - `README.md`
   - `AGENTS.md`
@@ -405,10 +453,22 @@ tests for profile-exposed benchmarks.
    lineage/deploy verification.
 7. Task 9 follows the final verified behavior.
 
+### Rollout order
+
+1. Build and validate `gold.tour_averages` while retaining the old physical
+   `gold.feature_defaults` table for rollback.
+2. Switch dbt and runtime consumers to the singleton and pass all focused/full
+   tests.
+3. Refresh the DuckDB snapshot, retrain base and ensemble models, evaluate, and
+   promote the resulting lineage before deploying the changed serving image.
+4. After successful rollout, obtain explicit approval and remove the obsolete
+   physical `gold.feature_defaults` table. Normal dbt runs must not drop it.
+
 ## QA/Testing Scenarios
 
 1. **Singleton build**: dbt creates exactly one row with `singleton_id = 1`,
-   source-anchored metadata, finite defaults, and valid benchmark bounds.
+   source-anchored metadata for non-empty data, deterministic empty-pool
+   metadata/constants, finite defaults, and valid benchmark bounds.
 2. **Weighted-rate parity**: each `tour_*` rate equals a direct `SUM / SUM`
    recomputation from `silver.player_matches` within floating tolerance.
 3. **First-match training**: both player perspectives lacking a prior snapshot
@@ -422,9 +482,9 @@ tests for profile-exposed benchmarks.
    preserves as-of snapshot/H2H behavior, and uses fallbacks only where needed.
 7. **Bulk inference**: one batch performs one singleton lookup while retaining
    per-row snapshot and activity dates.
-8. **Profile comparison**: player above average displays `(+N.NN%)` in green;
-   below average displays `(-N.NN%)` in clay/red; equal is neutral; missing tour
-   rate displays no delta.
+8. **Profile comparison**: above average displays a green `▲` plus neutral
+   `(+N.NN%)` text; below average displays a clay/red `▼` plus neutral
+   `(-N.NN%)` text; equal has no triangle; missing tour rate displays no delta.
 9. **Freshness**: a completed dbt rebuild is visible to the next Bento request;
    no process restart or cache invalidation is required.
 10. **Training snapshot**: DuckDB still contains exactly `gold.match_features`
@@ -433,8 +493,10 @@ tests for profile-exposed benchmarks.
     `gold.feature_defaults` physical table is absent and no code or dbt reference
     remains.
 12. **Lineage simplification**: the training pipeline creates no split MLflow
-    run or feature-column artifacts, while every training/serving matrix still
-    selects columns using the shared internal `FEATURE_COLS` order.
+     run or feature-column artifacts, while every training/serving matrix still
+     selects columns using the shared internal `FEATURE_COLS` order.
+13. **Retraining gate**: no model trained against the prior date-keyed defaults
+    is promoted with the new singleton-imputed feature distribution.
 
 ## Final Verification Commands
 

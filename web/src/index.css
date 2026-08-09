@@ -38,10 +38,11 @@
   --court-line: rgba(148, 178, 235, 0.045);
 
   /* type */
-  --font-display: "Avenir Next", "Segoe UI Variable", "Segoe UI", system-ui,
-    -apple-system, "Helvetica Neue", Arial, sans-serif;
-  --font-data: "SF Mono", ui-monospace, "Cascadia Code", Menlo, Consolas,
-    monospace;
+  --font-display:
+    "Avenir Next", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-data:
+    "SF Mono", ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
 
   --radius: 14px;
   --radius-sm: 10px;
@@ -106,7 +107,8 @@ html.light {
     inset: 0;
     z-index: -1;
     pointer-events: none;
-    background-image: radial-gradient(
+    background-image:
+      radial-gradient(
         1100px 640px at 12% -12%,
         var(--bg-glow) 0%,
         transparent 62%
@@ -142,7 +144,15 @@ html.light {
     color: var(--text);
   }
 
-  :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  :where(
+    a,
+    button,
+    input,
+    select,
+    textarea,
+    summary,
+    [tabindex]
+  ):focus-visible {
     outline: 2px solid var(--clay);
     outline-offset: 2px;
     border-radius: 4px;
@@ -214,7 +224,7 @@ html.light {
   .page-sub {
     margin-top: 0.4rem;
     color: var(--text-dim);
-    max-width: 46ch;
+    max-width: 100%;
   }
 
   /* ---------- top navigation ---------- */
@@ -278,7 +288,9 @@ html.light {
     font-size: 0.875rem;
     font-weight: 600;
     color: var(--text-dim);
-    transition: color 0.15s var(--ease), background-color 0.15s var(--ease);
+    transition:
+      color 0.15s var(--ease),
+      background-color 0.15s var(--ease);
   }
 
   .navlink:hover {
@@ -310,7 +322,9 @@ html.light {
     background: var(--bg-raised);
     color: var(--text-dim);
     cursor: pointer;
-    transition: color 0.15s var(--ease), border-color 0.15s var(--ease),
+    transition:
+      color 0.15s var(--ease),
+      border-color 0.15s var(--ease),
       background-color 0.15s var(--ease);
   }
 
@@ -379,8 +393,11 @@ html.light {
     font-weight: 700;
     letter-spacing: 0.01em;
     cursor: pointer;
-    transition: transform 0.12s var(--ease), border-color 0.15s var(--ease),
-      background-color 0.15s var(--ease), color 0.15s var(--ease);
+    transition:
+      transform 0.12s var(--ease),
+      border-color 0.15s var(--ease),
+      background-color 0.15s var(--ease),
+      color 0.15s var(--ease);
   }
 
   .btn:hover {
@@ -448,7 +465,9 @@ html.light {
     color: var(--text);
     font-size: 0.875rem;
     font-family: inherit;
-    transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+    transition:
+      border-color 0.15s var(--ease),
+      box-shadow 0.15s var(--ease);
   }
 
   .input::placeholder {
@@ -483,7 +502,8 @@ html.light {
     border-radius: var(--radius);
     background: var(--bg-raised);
     padding: clamp(1rem, 2.5vw, 1.375rem);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03),
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.03),
       0 18px 40px -24px rgba(0, 0, 0, 0.65);
   }
 
@@ -586,13 +606,25 @@ html.light {
   }
 
   .bar-fill.is-grass {
-    background: linear-gradient(90deg, color-mix(in srgb, var(--grass) 55%, transparent), var(--grass));
+    background: linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--grass) 55%, transparent),
+      var(--grass)
+    );
   }
   .bar-fill.is-ice {
-    background: linear-gradient(90deg, color-mix(in srgb, var(--ice) 55%, transparent), var(--ice));
+    background: linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--ice) 55%, transparent),
+      var(--ice)
+    );
   }
   .bar-fill.is-clay {
-    background: linear-gradient(90deg, color-mix(in srgb, var(--clay) 55%, transparent), var(--clay));
+    background: linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--clay) 55%, transparent),
+      var(--clay)
+    );
   }
 
   /* ---------- tables ---------- */
@@ -732,16 +764,24 @@ html.light {
   .picker-trigger-row {
     display: flex;
     align-items: center;
+    min-height: 2.6rem;
     border: 1px solid var(--line-strong);
     border-radius: var(--radius-sm);
     background: var(--bg-raised);
     overflow: hidden;
-    transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+    transition:
+      border-color 0.15s var(--ease),
+      box-shadow 0.15s var(--ease);
   }
 
   .picker-trigger-row:hover,
   .picker-trigger-row[data-open] {
     border-color: var(--clay);
+  }
+
+  .picker-trigger-row:focus-within {
+    outline: 2px solid var(--clay);
+    outline-offset: 2px;
   }
 
   .picker-trigger {
@@ -760,6 +800,11 @@ html.light {
     white-space: nowrap;
   }
 
+  .picker-trigger:focus-visible,
+  .picker-clear:focus-visible {
+    outline: 0;
+  }
+
   .picker-trigger.is-empty {
     color: var(--text-faint);
     font-weight: 500;
@@ -770,26 +815,14 @@ html.light {
     border: 0;
     background: transparent;
     color: var(--text-faint);
-    font-size: 1rem;
+    font-size: 1.25rem;
     line-height: 1;
-    padding: 0.6rem 0.3rem;
+    padding: 0.4rem 0.4rem;
     cursor: pointer;
   }
 
   .picker-clear:hover {
     color: var(--clay);
-  }
-
-  .picker-caret {
-    flex: none;
-    padding: 0.6rem 0.7rem;
-    color: var(--text-faint);
-    font-size: 0.7rem;
-    transition: transform 0.15s var(--ease);
-  }
-
-  .picker-trigger-row[data-open] .picker-caret {
-    transform: rotate(180deg);
   }
 
   .picker-popover {
@@ -846,6 +879,13 @@ html.light {
     color: var(--text-faint);
   }
 
+  .picker-loading {
+    padding: 0.8rem;
+    font-size: 0.8125rem;
+    color: var(--text-faint);
+    text-align: center;
+  }
+
   /* ---------- form strip ---------- */
 
   .form-strip {
@@ -885,8 +925,50 @@ html.light {
     display: flex;
     flex-wrap: wrap;
     gap: 0.75rem;
-    align-items: center;
+    align-items: flex-end;
     margin-bottom: 1.25rem;
+  }
+
+  .toolbar-picker {
+    min-width: 0;
+    flex: 1;
+  }
+
+  @media (min-width: 768px) {
+    .toolbar-picker {
+      flex: 0 1 50%;
+    }
+  }
+
+  .toolbar-compare {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 1.25rem;
+    height: 2.6rem;
+    font-size: 0.8125rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: var(--text);
+    background: var(--bg-raised);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    text-decoration: none;
+    transition:
+      border-color 0.15s var(--ease),
+      color 0.15s var(--ease);
+  }
+
+  .toolbar-compare:hover {
+    border-color: var(--clay);
+    color: var(--clay);
+  }
+
+  .toolbar-compare.disabled {
+    opacity: 0.4;
+    pointer-events: none;
   }
 
   .search {
@@ -922,7 +1004,9 @@ html.light {
     border: 1px solid var(--line);
     border-radius: var(--radius-sm);
     background: var(--bg-raised);
-    transition: border-color 0.15s var(--ease), transform 0.15s var(--ease),
+    transition:
+      border-color 0.15s var(--ease),
+      transform 0.15s var(--ease),
       background-color 0.15s var(--ease);
   }
 
@@ -1009,7 +1093,9 @@ html.light {
     border: 1px solid var(--line);
     border-radius: var(--radius-sm);
     background: var(--bg-raised);
-    transition: border-color 0.15s var(--ease), transform 0.15s var(--ease),
+    transition:
+      border-color 0.15s var(--ease),
+      transform 0.15s var(--ease),
       background-color 0.15s var(--ease);
   }
 
@@ -1037,19 +1123,34 @@ html.light {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
+    justify-content: space-between;
     gap: 0.75rem 1rem;
+  }
+
+  .profile-head-stats {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-left: auto;
+  }
+
+  @media (min-width: 640px) {
+    .profile-head-stats {
+      flex-direction: row;
+      gap: 1rem 2rem;
+    }
   }
 
   .bio-grid {
     display: grid;
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 0.9rem 1.5rem;
     margin-top: 1.25rem;
   }
 
   @media (min-width: 720px) {
     .bio-grid {
-      grid-template-columns: repeat(5, 1fr);
+      grid-template-columns: 1fr;
     }
   }
 
@@ -1068,7 +1169,7 @@ html.light {
     font-variant-numeric: tabular-nums;
   }
 
-  /* Profile main: two-column layout — summary + stats left, bio right */
+  /* Profile main: two-column layout — bio (stats) left, summary (description) right */
 
   .profile-main {
     display: grid;
@@ -1078,15 +1179,21 @@ html.light {
 
   @media (min-width: 880px) {
     .profile-main {
-      grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+      grid-template-columns: minmax(0, 1fr) minmax(0, 5fr);
       align-items: start;
     }
   }
 
+  .profile-bio {
+    min-width: 0;
+  }
+
+  .section-label {
+    margin-bottom: 0.75rem;
+    color: var(--text-dim);
+  }
+
   .profile-summary {
-    display: flex;
-    flex-direction: column;
-    gap: 1.25rem;
     min-width: 0;
   }
 
@@ -1096,9 +1203,10 @@ html.light {
     gap: 1rem 2rem;
   }
 
-  .profile-main .bio-grid {
-    grid-template-columns: 1fr;
-    margin-top: 0;
+  .career-stats-col {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
   }
 
   .highlights-summary {
@@ -1144,6 +1252,12 @@ html.light {
     font-weight: 600;
     color: var(--text-dim);
     transition: color 0.15s var(--ease);
+    cursor: pointer;
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: inherit;
+    font-family: inherit;
   }
 
   .similar-link:hover {
@@ -1216,6 +1330,11 @@ html.light {
     padding-right: 0 !important;
   }
 
+  .tourney-th-c,
+  .tourney-td-c {
+    text-align: center !important;
+  }
+
   .tourney-name {
     font-weight: 700;
     max-width: 14ch;
@@ -1275,7 +1394,8 @@ html.light {
     padding: 0.85rem 2.25rem;
     font-size: 1rem;
     letter-spacing: 0.05em;
-    box-shadow: 0 14px 34px -14px color-mix(in srgb, var(--clay) 60%, transparent);
+    box-shadow: 0 14px 34px -14px
+      color-mix(in srgb, var(--clay) 60%, transparent);
   }
 
   @media (min-width: 640px) {

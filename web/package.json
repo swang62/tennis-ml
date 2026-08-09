@@ -15,6 +15,7 @@
     "@tanstack/react-table": "^8.21.3",
     "echarts": "^6.1.0",
     "echarts-for-react": "^3.0.6",
+    "minisearch": "^7.2.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },

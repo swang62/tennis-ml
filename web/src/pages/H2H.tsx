@@ -24,6 +24,7 @@ import {
 } from '../components'
 import { axisOption, baseChartOption, chartTokens } from '../lib/charts'
 import { ROUND_LABEL, TIER_LABEL, fairOdds, sanitizeErrorMessage } from '../lib/format'
+import { h2hRoute } from '../router'
 import { useTheme } from '../theme'
 
 const SURFACES: Surface[] = ['clay', 'grass', 'hard', 'carpet']
@@ -88,7 +89,8 @@ function mirrorWidths(row: MirrorRow): [number, number] {
 
 export default function H2H() {
   const { theme } = useTheme()
-  const [playerA, setPlayerA] = useState<string | null>(null)
+  const { playerA: searchPlayerA } = h2hRoute.useSearch()
+  const [playerA, setPlayerA] = useState<string | null>(searchPlayerA ?? null)
   const [playerB, setPlayerB] = useState<string | null>(null)
   const [surface, setSurface] = useState<Surface>('hard')
   const [tournament, setTournament] = useState<TournamentTier | ''>('')
