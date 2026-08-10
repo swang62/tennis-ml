@@ -221,6 +221,22 @@ html.light {
     margin-top: 0.35rem;
   }
 
+  /* Inline country flag (flagcdn w20); the span variant carries the
+     white-flag fallback glyph at a similar size. */
+  .player-flag {
+    display: inline-block;
+    width: 20px;
+    height: 15px;
+    margin-right: 0.4rem;
+    vertical-align: -0.2em;
+    border-radius: 2px;
+    overflow: hidden;
+    object-fit: contain;
+    font-size: 13px;
+    line-height: 15px;
+    text-align: center;
+  }
+
   .page-sub {
     margin-top: 0.4rem;
     color: var(--text-dim);

@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def load_env() -> None:
-    load_dotenv(ROOT / ".env", override=False)
+    load_dotenv(ROOT / ".env", override=True)
 
 
 load_env()
@@ -91,6 +91,7 @@ def build_lineage_tags(base_pins: dict, aux_pins: dict) -> dict[str, str]:
 
 # --- Table names ---
 BRONZE_TABLE = "bronze.match_events"
+RANKINGS_TABLE = "bronze.rankings"
 SILVER_PLAYER_MATCHES = "silver.player_matches"
 SILVER_ROLLING_FEATURES = "silver.rolling_features"
 GOLD_TABLE = "gold.match_features"

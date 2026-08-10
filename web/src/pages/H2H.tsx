@@ -17,6 +17,7 @@ import {
   ErrorBox,
   Kicker,
   Loading,
+  PlayerFlag,
   PlayerPicker,
   pct,
 } from "../components";
@@ -68,9 +69,9 @@ function meetingMeta(m: H2HMeeting): string {
 }
 
 // Latest non-null rank is this page's sole rank signal; the picker directory
-// carries the same materialized estimate as the profile view.
-function lastRank(player: { estimated_rank?: number | null } | undefined): number | null {
-  return player?.estimated_rank ?? null;
+// carries the same official rank as the profile view.
+function lastRank(player: { current_rank?: number | null } | undefined): number | null {
+  return player?.current_rank ?? null;
 }
 
 // Centered direct-comparison row.
@@ -114,9 +115,9 @@ export default function H2H() {
   };
 
   const players = playersQ.data?.players ?? [];
-  const nameById = new Map(players.map((p) => [p.player_id, p.display_name]));
+  const playerById = new Map(players.map((p) => [p.player_id, p]));
   // Display names only; an unknown player gets a neutral label, never the raw id.
-  const name = (id: string) => nameById.get(id) ?? "Unknown player";
+  const name = (id: string) => playerById.get(id)?.display_name ?? "Unknown player";
 
   if (playersQ.isLoading) return <Loading label="Loading players" />;
   if (playersQ.isError)
@@ -454,9 +455,21 @@ export default function H2H() {
           <Card title="Matchup comparison">
             <div className="mirror">
               <div className="mirror-head">
-                <span className="mirror-name">{p1}</span>
+                <span className="mirror-name">
+                  <PlayerFlag
+                    iso2={playerById.get(h2h.player1_id)?.iso2}
+                    countryName={playerById.get(h2h.player1_id)?.country_name}
+                  />
+                  {p1}
+                </span>
                 <span className="mirror-vs">vs</span>
-                <span className="mirror-name">{p2}</span>
+                <span className="mirror-name">
+                  <PlayerFlag
+                    iso2={playerById.get(h2h.player2_id)?.iso2}
+                    countryName={playerById.get(h2h.player2_id)?.country_name}
+                  />
+                  {p2}
+                </span>
               </div>
               {mirrorRows.map((row) => {
                 const aLeads =

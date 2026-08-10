@@ -1,8 +1,6 @@
 """PostgreSQL client for the tennis-ml pipeline.
 
-PostgreSQL (via psycopg) is the only operational backend, configured from the
-single DATABASE_URL contract in `src.constants` (passwordless for the local
-Homebrew trust path, password-bearing for the Compose stack). Every query uses
+PostgreSQL (via psycopg) is the only operational backend. Every query uses
 psycopg's `%s` placeholders — request data is never concatenated into SQL —
 and results come back as pandas DataFrames.
 
@@ -16,6 +14,7 @@ not part of the operational query path.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any, LiteralString, cast
@@ -24,19 +23,22 @@ import pandas as pd
 import psycopg
 from psycopg.rows import tuple_row
 
-from src import constants
-
 _conn: psycopg.Connection[Any] | None = None
 
 
 def _connect() -> psycopg.Connection[Any]:
-    """Open a PostgreSQL connection from the single DATABASE_URL contract.
+    """Open a PostgreSQL connection from the DATABASE_URL env var.
 
-    Fails fast when the URL is missing (build_database_url raises); there is
-    no other backend to fall back to. The URL is used verbatim — passwordless
-    for the local Homebrew trust path, password-bearing for the Compose stack.
+    Reads directly from os.environ so each process picks up its own
+    environment: compose sets postgres:5432 for the Bento container, the
+    host shell sets localhost:6543 for dev scripts.
     """
-    return psycopg.connect(constants.build_database_url(), autocommit=True)
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        raise RuntimeError(
+            "DATABASE_URL not set — set it to postgresql://user@host:port/db in your shell or .env"
+        )
+    return psycopg.connect(url, autocommit=True)
 
 
 def get_conn() -> psycopg.Connection[Any]:

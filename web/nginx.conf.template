@@ -1,8 +1,9 @@
 # Production SPA config; Bento is reachable only through allowlisted /api routes.
 # Rendered at container start by the official nginx image's envsubst template
 # mechanism (/etc/nginx/templates/*.template). Substitution is allowlisted to
-# DRIFT_API_KEY via NGINX_ENVSUBST_FILTER in the Dockerfile, so all native
-# nginx $variables below are preserved verbatim.
+# DRIFT_API_KEY and BENTO_API_URL via NGINX_ENVSUBST_FILTER in the Dockerfile,
+# so all native nginx $variables below are preserved verbatim.
+# BENTO_API_URL defaults to http://bento:3000 (see compose.yaml).
 
 # Per-IP rate limit: 30 req/s burstable to 10.
 limit_req_zone $binary_remote_addr zone=api_req:10m rate=30r/s;
@@ -10,6 +11,14 @@ limit_req_zone $binary_remote_addr zone=api_req:10m rate=30r/s;
 limit_conn_zone $binary_remote_addr zone=api_conn:10m;
 # Authenticated operational routes: at most one active batch per client.
 limit_conn_zone $binary_remote_addr zone=op_conn:10m;
+
+# Compress text assets. The SPA is served same-origin through this proxy, so no
+# CORS headers are needed: the browser only ever calls /api on its own origin.
+
+gzip on;
+gzip_comp_level 5;
+gzip_min_length 1024;
+gzip_types text/plain text/css application/json application/javascript application/xml image/svg+xml;
 
 server {
     listen 80;
@@ -42,42 +51,42 @@ server {
     location /api/players {
         limit_req zone=api_req burst=10 nodelay;
         limit_conn api_conn 10;
-        proxy_pass http://bento:3000/players;
+        proxy_pass ${BENTO_API_URL}/players;
         proxy_http_version 1.1;
     }
 
     location /api/player_profile {
         limit_req zone=api_req burst=10 nodelay;
         limit_conn api_conn 10;
-        proxy_pass http://bento:3000/player_profile;
+        proxy_pass ${BENTO_API_URL}/player_profile;
         proxy_http_version 1.1;
     }
 
     location /api/rank_history {
         limit_req zone=api_req burst=10 nodelay;
         limit_conn api_conn 10;
-        proxy_pass http://bento:3000/rank_history;
+        proxy_pass ${BENTO_API_URL}/rank_history;
         proxy_http_version 1.1;
     }
 
     location /api/match_history {
         limit_req zone=api_req burst=10 nodelay;
         limit_conn api_conn 10;
-        proxy_pass http://bento:3000/match_history;
+        proxy_pass ${BENTO_API_URL}/match_history;
         proxy_http_version 1.1;
     }
 
     location /api/head_to_head {
         limit_req zone=api_req burst=10 nodelay;
         limit_conn api_conn 10;
-        proxy_pass http://bento:3000/head_to_head;
+        proxy_pass ${BENTO_API_URL}/head_to_head;
         proxy_http_version 1.1;
     }
 
     location /api/similar_players {
         limit_req zone=api_req burst=10 nodelay;
         limit_conn api_conn 10;
-        proxy_pass http://bento:3000/similar_players;
+        proxy_pass ${BENTO_API_URL}/similar_players;
         proxy_http_version 1.1;
     }
 
@@ -98,7 +107,7 @@ server {
             return 415 '{"ok":false,"error":"content-type must be application/json"}';
         }
 
-        proxy_pass http://bento:3000/predict_from_ids;
+        proxy_pass ${BENTO_API_URL}/predict_from_ids;
         proxy_http_version 1.1;
     }
 
@@ -117,7 +126,7 @@ server {
             return 401 '{"ok":false,"error":"unauthorized"}';
         }
 
-        proxy_pass http://bento:3000/model_info;
+        proxy_pass ${BENTO_API_URL}/model_info;
         proxy_http_version 1.1;
     }
 
@@ -145,7 +154,7 @@ server {
         client_max_body_size 10m;
         proxy_read_timeout 120s;
 
-        proxy_pass http://bento:3000/predict_from_ids_bulk;
+        proxy_pass ${BENTO_API_URL}/predict_from_ids_bulk;
         proxy_http_version 1.1;
     }
 
@@ -157,6 +166,19 @@ server {
     # --- Catch-all for unknown API paths ---
     location /api/ {
         return 404 '{"ok":false,"error":"unknown api endpoint"}';
+    }
+
+    # --- Asset caching ---
+    # Vite emits content-hashed asset filenames, so they are safe to cache
+    # for a year; index.html itself is never cached so deploys roll out.
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+    }
+
+    location = /index.html {
+        add_header Cache-Control "no-store";
     }
 
     # --- SPA root ---

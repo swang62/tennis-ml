@@ -9,7 +9,7 @@ Production-grade MLOps pipeline for tennis match prediction. Prefect, PostgreSQL
 | Orchestration       | Prefect (retries, ETL triggers)           |
 | Experiment tracking | MLflow (model registry, trial comparison) |
 | Model serving       | BentoML                                   |
-| Data warehouse      | PostgreSQL                             |
+| Data warehouse      | PostgreSQL                                |
 | Development         | Jupyter + Papermill                       |
 
 ## Project Structure
@@ -67,36 +67,53 @@ just dev
                        ↓
 Training pipeline.py (features, tuning, evaluation, promotion)
                        ↓
-                MLflow registry 
+                MLflow registry
                        ↓
           BentoML production endpoints
 ```
 
 ## Trigger Model
 
-| Event          | Action                                 | Method                                                  |
-| -------------- | -------------------------------------- | ------------------------------------------------------- |
-| Manual ingest  | Load CSV → bronze                      | `just db-seed` (deterministic seed subset)              |
-| Manual trigger | Training pipeline                      | `just train`                                            |
-| Model promoted | Push promoted Bento image              | `just deploy-bento` (reads `@champion`)                 |
-| Force redeploy | Rebuild + push regardless of cache     | `just deploy-bento --force`                          |
+| Event          | Action                             | Method                                     |
+| -------------- | ---------------------------------- | ------------------------------------------ |
+| Manual ingest  | Load CSV → bronze                  | `just db-seed` (deterministic seed subset) |
+| Manual trigger | Training pipeline                  | `just train`                               |
+| Model promoted | Push promoted Bento image          | `just deploy-bento` (reads `@champion`)    |
+| Force redeploy | Rebuild + push regardless of cache | `just deploy-bento --force`                |
 
 ## Pipelines
 
 - `ingest.py` — validate raw ATP CSV → bronze
 - `seed.py` — the deterministic minimal seed from `data/raw/2026.csv`
-- `etl.py` — bronze → silver → gold: player_matches + rolling_features → match_features, plus feature enrichment and sanitization. 
+- `etl.py` — bronze → silver → gold: player_matches + rolling_features → match_features, plus feature enrichment and sanitization.
 - `pipeline.py` — training runner: features → tune 3 models → pick best → train final → evaluate → promote
 
 ## Serving & Inference
 
 ### Deployment
 
-| Service    | Image source                 | Host port | Healthcheck                                 |
-| ---------- | ---------------------------- | --------- | ------------------------------------------- |
-| `postgres` | `postgres:18.4`              | 6543      | `pg_isready` (database readiness)           |
-| `bento`    | Docker Hub `latest`          | none      | authenticated `SELECT 1` against PostgreSQL |
-| `web`      | built locally                | 8187      | `wget` of the SPA root inside the container |
+| Service    | Image source                | Host port | Healthcheck                                 |
+| ---------- | --------------------------- | --------- | ------------------------------------------- |
+| `postgres` | `postgres:18.4`             | 6543      | `pg_isready` (database readiness)           |
+| `bento`    | `swang62/tennis-ml:latest`  | none      | authenticated `SELECT 1` against PostgreSQL |
+| `web`      | `swang62/tennis-web:latest` | 8187      | `wget` of the SPA root inside the container |
+
+### Standalone Compose deployment
+
+The stack runs from published images only; the only host requirement is Docker:
+
+```bash
+cp .env.example .env   # or export the vars below
+docker compose pull
+docker compose up -d
+```
+
+Required env vars (compose reads them from `.env` or the shell):
+
+| Var                 | Used by         | Purpose                                                      |
+| ------------------- | --------------- | ------------------------------------------------------------ |
+| `POSTGRES_PASSWORD` | postgres, bento | PostgreSQL password; bento's `DATABASE_URL` derives from it  |
+| `DRIFT_API_KEY`     | web             | Authenticates the `/api/internal/*` nginx operational routes |
 
 ### Endpoints
 
@@ -105,21 +122,20 @@ Two BentoML endpoints exposed by `src/serving/service.py`:
 | Endpoint            | Method | Purpose                                                      |
 | ------------------- | ------ | ------------------------------------------------------------ |
 | `/healthz`          | GET    | Liveness probe (alias `/livez`, `/readyz`)                   |
-| `/predict`          | POST   | Stacked-ensemble prediction for one match                    |
 | `/predict_from_ids` | POST   | On-demand prediction from minimal inputs (two ids + surface) |
 
 ### Input schema for inference
 
 The `/predict_from_ids` endpoint accepts a JSON object with the following fields:
 
-| Input         | Required | Default | Valid values                                                   |
-| ------------- | -------- | ------- | -------------------------------------------------------------- |
-| `player_id`   | yes      | —       | non-empty str                                                  |
-| `opponent_id` | yes      | —       | non-empty str                                                  |
-| `surface`     | yes      | —       | `clay` / `grass` / `hard` / `carpet`                           |
-| `tournament`  | no       | 0       | `grand_slam` / `masters` / `atp_500` / `atp_250`               |
-| `round`       | no       | 0       | `r128` / `r64` / `r32` / `r16` / `qf` / `sf` / `f`             |
-| `as_of_date`  | no       | today   | `datetime.date`                                                |
+| Input         | Required | Default | Valid values                                       |
+| ------------- | -------- | ------- | -------------------------------------------------- |
+| `player_id`   | yes      | —       | non-empty str                                      |
+| `opponent_id` | yes      | —       | non-empty str                                      |
+| `surface`     | yes      | —       | `clay` / `grass` / `hard` / `carpet`               |
+| `tournament`  | no       | 0       | `grand_slam` / `masters` / `atp_500` / `atp_250`   |
+| `round`       | no       | 0       | `r128` / `r64` / `r32` / `r16` / `qf` / `sf` / `f` |
+| `as_of_date`  | no       | today   | `datetime.date`                                    |
 
 ## Extra Notes
 

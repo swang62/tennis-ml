@@ -7,7 +7,7 @@ import type {
   ServeMetrics,
   SimilarPlayersResponse,
 } from "../api";
-import { Card, Empty, Kicker, Loading, ResultBadge } from "../components";
+import { Card, Empty, Kicker, Loading, PlayerFlag, ResultBadge } from "../components";
 import {
   axisOption,
   baseChartOption,
@@ -91,7 +91,7 @@ const returnMetrics: { label: string; key: keyof ReturnMetrics; unit: MetricUnit
 
 export default function ProfileContent({
   profile,
-  estimatedRank,
+  directoryRank,
   rankHistory,
   rankLoading,
   matchHistory,
@@ -101,7 +101,7 @@ export default function ProfileContent({
   onSelectSimilar,
 }: {
   profile: PlayerProfile;
-  estimatedRank?: number | null;
+  directoryRank?: number | null;
   rankHistory: RankHistory | undefined;
   rankLoading: boolean;
   matchHistory: { matches: Array<any> } | undefined;
@@ -147,9 +147,9 @@ export default function ProfileContent({
   const rankPoints = (rankHistory?.rank_history ?? []).filter(
     (p) => p.rank != null,
   );
-  // Final label is the profile's materialized estimate; the directory estimate
-  // only backs it while the profile query is loading.
-  const currentRank = profile.rank.estimated_rank ?? estimatedRank ?? null;
+  // Final label is the profile's official rank; the directory rank only backs
+  // it while the profile query is loading.
+  const currentRank = profile.rank.current_rank ?? directoryRank ?? null;
 
   const bioFacts = (
     <dl className="bio-grid">
@@ -328,7 +328,10 @@ export default function ProfileContent({
       <section className="card">
         <Kicker>Player profile</Kicker>
         <div className="profile-head">
-          <h1 className="page-title">{profile.display_name}</h1>
+          <h1 className="page-title">
+            <PlayerFlag iso2={profile.iso2} countryName={profile.country_name} />
+            {profile.display_name}
+          </h1>
           {trendBadge}
           <div className="profile-head-stats">
             <div className="stat">

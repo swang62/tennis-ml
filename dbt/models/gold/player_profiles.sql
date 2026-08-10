@@ -1,6 +1,7 @@
 -- gold.player_profiles: one row per player with identity, biography,
 -- match counts, career service/return aggregates, surface counts,
--- recent rolling form, rank points, and estimated current rank.
+-- recent rolling form, rank points, and current rank (official ATP
+-- weekly ranking with match-time rank fallback for unranked players).
 --
 -- Every player from bronze.player_profiles is preserved, including
 -- zero-match players. Aggregates use weighted sums/denominators with
@@ -25,6 +26,10 @@ WITH player_agg AS (
             FILTER (WHERE pm.player_rank_points > 0))[1]                  AS earliest_positive_date,
         (ARRAY_AGG(pm.match_date ORDER BY pm.match_date DESC, pm.match_id DESC)
             FILTER (WHERE pm.player_rank_points > 0))[1]                  AS latest_positive_date,
+
+        -- last known match-time rank (fallback when official ranking is absent)
+        (ARRAY_AGG(pm.player_ranking ORDER BY pm.match_date DESC, pm.match_id DESC)
+            FILTER (WHERE pm.player_ranking IS NOT NULL))[1]              AS last_match_rank,
 
         -- service metrics (weighted sums, DOUBLE PRECISION, NULLIF)
         CAST(SUM(pm.first_serves_made) AS DOUBLE PRECISION)
@@ -108,6 +113,15 @@ latest_snapshot AS (
         win_rate_10
     FROM {{ ref('rolling_features') }}
     ORDER BY player_id, snapshot_date DESC
+),
+
+-- latest official ATP weekly ranking per player
+latest_rank AS (
+    SELECT DISTINCT ON (r.player_id)
+        r.player_id,
+        r.rank
+    FROM {{ source('bronze', 'rankings') }} r
+    ORDER BY r.player_id, r.ranking_date DESC
 )
 
 SELECT
@@ -138,6 +152,9 @@ SELECT
     pa.latest_positive_date                   AS latest_rank_points_date,
     pa.latest_positive_points_det - pa.earliest_positive_points
         AS rank_points_delta,
+    -- current rank: official ATP weekly ranking, falling back to the
+    -- player's rank during their most recent match when absent
+    COALESCE(lr.rank, pa.last_match_rank)       AS current_rank,
 
     -- service
     pa.first_serve_in_pct,
@@ -171,3 +188,4 @@ FROM {{ source('bronze', 'player_profiles') }} bp
 LEFT JOIN player_agg pa       ON pa.player_id = bp.player_id
 LEFT JOIN return_agg ra       ON ra.player_id = bp.player_id
 LEFT JOIN latest_snapshot ls  ON ls.player_id = bp.player_id
+LEFT JOIN latest_rank lr      ON lr.player_id = bp.player_id

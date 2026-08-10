@@ -23,6 +23,11 @@ GOLD_TABLE = "gold.match_features"
 # ATP data provides player identity; Wikipedia adds missing enrichment.
 ATP_DATABASE_CSV = ROOT / "data" / "ATP_player_database.csv"
 
+# Reviewed ranking identity map: authoritative by ranking source player id, with
+# the source name kept for audit only. Never resolved implicitly by name.
+RANKING_PLAYER_MAP_CSV = ROOT / "data" / "ranking_player_map.csv"
+RANKING_MAP_COLUMNS = ["ranking_player_id", "ranking_name", "player_id"]
+
 # ATP metadata columns; Wikipedia owns summary and enriched_at.
 ATP_PROFILE_COLUMNS = [
     "player_id",
@@ -438,6 +443,385 @@ def load_atp_profiles(
     if unresolved:
         print(f"  IOC: {unresolved}/{len(df)} profiles unresolved (missing/invalid -> {UNK})")
     return len(df)
+
+
+# ── Ranking Identity Map ───────────────────────────────────────
+
+
+def canonical_players(csv_path: str | Path = ATP_DATABASE_CSV) -> dict[str, str]:
+    """{canonical player_id: display_name} from the canonical profile reference.
+
+    The canonical id space is the profiles' ATP_Database.id space (the same ids
+    match events and player profiles are keyed on). This is the review target
+    and the validation reference for ranking map targets.
+    """
+    df = pd.read_csv(csv_path, dtype=str)
+    if not {"id", "player"} <= set(df.columns):
+        raise ValueError(f"canonical player reference CSV missing columns: {csv_path}")
+    return {
+        str(pid).strip(): (name or "").strip()
+        for pid, name in zip(df["id"], df["player"], strict=True)
+    }
+
+
+def _normalize_name(name: str) -> str:
+    """Deterministic normalized name for review-only candidate matching."""
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def load_ranking_player_map(
+    csv_path: str | Path = RANKING_PLAYER_MAP_CSV,
+    canonical_ids: set[str] | None = None,
+) -> dict[str, str]:
+    """Load and validate the reviewed ranking identity map; returns
+    {ranking_player_id: player_id}.
+
+    The map is authoritative by source id; ranking_name is an audit/review field
+    and is never used for a production write. Raises ValueError on an invalid map
+    before any rows are written: a missing column, an empty required cell, a
+    duplicated source id, a canonical player_id targeted by more than one row, or
+    a target id absent from the canonical player reference.
+    """
+    df = pd.read_csv(csv_path, dtype=str)
+    missing = set(RANKING_MAP_COLUMNS) - set(df.columns)
+    if missing:
+        raise ValueError(f"ranking player map missing columns: {sorted(missing)}")
+    df = df[list(RANKING_MAP_COLUMNS)]
+    for col in RANKING_MAP_COLUMNS:
+        df[col] = df[col].fillna("").astype(str).str.strip()
+
+    for col in RANKING_MAP_COLUMNS:
+        empties = df[col].eq("")
+        if empties.any():
+            raise ValueError(f"ranking player map has empty {col} rows")
+
+    dup_src = df.loc[df["ranking_player_id"].duplicated(keep=False), "ranking_player_id"]
+    if not dup_src.empty:
+        raise ValueError(f"duplicate ranking source ids (mapped by >1 row): {sorted(set(dup_src))}")
+
+    # Multiple ranking source ids may legitimately map to the same canonical
+    # player id (separate entries in different ranking files, name variants, etc).
+    # Only reject the same source id mapping to different targets (caught above).
+    dup_src_conflict = df.groupby("ranking_player_id")["player_id"].nunique().loc[lambda x: x > 1]
+    if not dup_src_conflict.empty:
+        raise ValueError(
+            f"conflicting ranking map (same source -> different targets): "
+            f"{sorted(dup_src_conflict.index)}"
+        )
+
+    if canonical_ids is None:
+        canonical_ids = set(canonical_players())
+    unknown = sorted(set(df["player_id"]) - canonical_ids)
+    if unknown:
+        raise ValueError(f"unknown canonical player ids in ranking map: {unknown}")
+
+    return dict(zip(df["ranking_player_id"], df["player_id"], strict=True))
+
+
+def ranking_name_candidates(
+    ranking_rows: list[dict[str, Any]],
+    canonical: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Deterministic normalized-name candidate report for maintainer review.
+
+    For each distinct ranking source row this reports the canonical players whose
+    exact name (case-insensitive) or normalized name matches the ranking name,
+    flagging `ambiguous` when a normalized name matches more than one canonical
+    player. Review-only: it never writes and is never used as a production mapping.
+    """
+    if canonical is None:
+        canonical = canonical_players()
+    exact: dict[str, list[str]] = {}
+    norm: dict[str, list[str]] = {}
+    for pid, name in canonical.items():
+        exact.setdefault(name.lower(), []).append(pid)
+        norm.setdefault(_normalize_name(name), []).append(pid)
+
+    report: dict[str, dict[str, Any]] = {}
+    for row in ranking_rows:
+        src = str(row["ranking_player_id"]).strip()
+        name = str(row.get("ranking_name") or "").strip()
+        entry = report.setdefault(
+            src,
+            {
+                "ranking_player_id": src,
+                "ranking_name": name,
+                "exact_candidates": [],
+                "normalized_candidates": [],
+                "ambiguous": False,
+            },
+        )
+        entry["exact_candidates"] = sorted(exact.get(name.lower(), []))
+        normalized = sorted(norm.get(_normalize_name(name), []))
+        entry["normalized_candidates"] = normalized
+        entry["ambiguous"] = len(normalized) > 1
+    return [report[k] for k in sorted(report)]
+
+
+def unmapped_ranking_rows(
+    ranking_rows: list[dict[str, Any]], rank_map: dict[str, str]
+) -> list[dict[str, Any]]:
+    """Ranking source rows not covered by the approved map: id, audit name, count.
+
+    Unmapped rows do not fail an import; this report surfaces them so a maintainer
+    can review and extend the approved map.
+    """
+    counts: dict[str, dict[str, Any]] = {}
+    for row in ranking_rows:
+        src = str(row["ranking_player_id"]).strip()
+        if src in rank_map:
+            continue
+        entry = counts.setdefault(
+            src,
+            {
+                "ranking_player_id": src,
+                "ranking_name": str(row.get("ranking_name") or "").strip(),
+                "count": 0,
+            },
+        )
+        entry["count"] += 1
+    return [counts[k] for k in sorted(counts)]
+
+
+# ── Official Rankings Ingest ───────────────────────────────────
+
+BRONZE_RANKINGS_TABLE = "bronze.rankings"
+RANKINGS_DIR = ROOT / "data" / "raw" / "rankings"
+ATP_PLAYERS_CSV = RANKINGS_DIR / "atp_players.csv"
+
+# Only atp_rankings_*.csv are discovered; atp_players.csv is metadata.
+RANKINGS_GLOB = "atp_rankings_*.csv"
+
+# Documented raw ranking shape. `player` is the ATP ranking source id; `points`
+# is empty (NULL) in early eras.
+RANKINGS_COLUMNS = ["ranking_date", "rank", "player", "points"]
+RANKING_TARGET_COLUMNS = ["ranking_date", "player_id", "rank", "points"]
+PLAYER_ID_RE = re.compile(r"^\d+$")
+
+
+def discover_ranking_csvs(rankings_dir: Path = RANKINGS_DIR) -> list[Path]:
+    """Discover data/raw/rankings/atp_rankings_*.csv files, sorted by name."""
+    return sorted(p for p in rankings_dir.glob(RANKINGS_GLOB) if p.is_file())
+
+
+def load_ranking_rows(csv_paths: list[Path]) -> pd.DataFrame:
+    """Read and combine ranking CSVs into one validated, typed frame.
+
+    Raises ValueError on any malformed input before a row is returned: a file
+    missing the exact four documented columns, an empty/unparseable
+    ranking_date (YYYYMMDD), a non-integer or non-positive rank, a non-integer
+    player id, or non-empty non-integer points. Empty points are allowed (NULL).
+    """
+    frames: list[pd.DataFrame] = []
+    for path in csv_paths:
+        df = pd.read_csv(path, dtype=str)
+        if list(df.columns) != RANKINGS_COLUMNS:
+            raise ValueError(
+                f"{path.name}: expected columns {RANKINGS_COLUMNS}, got {list(df.columns)}"
+            )
+        for col in RANKINGS_COLUMNS:
+            df[col] = df[col].fillna("").astype(str).str.strip()
+        frames.append(df)
+    raw = pd.concat(frames, ignore_index=True)
+    if raw.empty:
+        return pd.DataFrame(columns=RANKING_TARGET_COLUMNS)
+
+    date_s = raw["ranking_date"]
+    parsed = pd.to_datetime(date_s.mask(date_s.eq("")), format="%Y%m%d", errors="coerce")
+    bad_date = parsed.isna()
+    if bad_date.any():
+        offenders = ", ".join(
+            f"{i}: {v!r}" for i, v in zip(raw.index[bad_date], date_s[bad_date], strict=True)
+        )
+        raise ValueError(f"ranking_date malformed (expected YYYYMMDD): {offenders}")
+
+    rank_s = raw["rank"]
+    rank_num = pd.to_numeric(rank_s.mask(rank_s.eq("")), errors="coerce")
+    bad_rank = ~(rank_num.notna() & (rank_num >= 1) & (rank_num == rank_num.round()))
+    if bad_rank.any():
+        offenders = ", ".join(
+            f"{i}: {v!r}" for i, v in zip(raw.index[bad_rank], rank_s[bad_rank], strict=True)
+        )
+        raise ValueError(f"rank malformed (expected integer >= 1): {offenders}")
+
+    player_s = raw["player"]
+    bad_player = ~player_s.str.fullmatch(PLAYER_ID_RE)
+    if bad_player.any():
+        offenders = ", ".join(
+            f"{i}: {v!r}" for i, v in zip(raw.index[bad_player], player_s[bad_player], strict=True)
+        )
+        raise ValueError(f"player malformed (expected integer id): {offenders}")
+
+    pts_s = raw["points"]
+    pts_num = pd.to_numeric(pts_s.mask(pts_s.eq("")), errors="coerce")
+    bad_pts = pts_s.ne("") & ~(pts_num.notna() & (pts_num == pts_num.round()))
+    if bad_pts.any():
+        offenders = ", ".join(
+            f"{i}: {v!r}" for i, v in zip(raw.index[bad_pts], pts_s[bad_pts], strict=True)
+        )
+        raise ValueError(f"points malformed (expected integer or empty): {offenders}")
+
+    return pd.DataFrame(
+        {
+            "ranking_date": parsed,
+            "player_id": player_s,
+            "rank": rank_num.astype("Int64"),
+            "points": pts_num.astype("Int64"),
+        }
+    )
+
+
+def _atp_players_names(players_csv: Path) -> dict[str, str]:
+    """{ranking source player id: display name} from data/raw/rankings/atp_players.csv."""
+    df = pd.read_csv(players_csv, dtype=str)
+    if not {"player_id", "name_first", "name_last"} <= set(df.columns):
+        raise ValueError(f"atp_players.csv missing expected columns: {players_csv}")
+
+    def cell(value: Any) -> str:
+        return "" if value is None or pd.isna(value) else str(value).strip()
+
+    names: dict[str, str] = {}
+    for pid, first, last in zip(df["player_id"], df["name_first"], df["name_last"], strict=True):
+        key = cell(pid)
+        if not key:
+            continue
+        names[key] = f"{cell(first)} {cell(last)}".strip()
+    return names
+
+
+def _unmapped_report(
+    top200: pd.DataFrame, rank_map: dict[str, str], players_csv: Path
+) -> list[dict[str, Any]]:
+    """Top-200 source rows whose player id is absent from the approved map.
+
+    Grouped by source id with the atp_players display name and skipped-row
+    count, so the import report is actionable for maintainers extending the map.
+    """
+    names = _atp_players_names(players_csv)
+    counts: dict[str, dict[str, Any]] = {}
+    for pid in top200["player_id"]:
+        pid = str(pid).strip()
+        if pid in rank_map:
+            continue
+        entry = counts.setdefault(
+            pid,
+            {"ranking_player_id": pid, "ranking_name": names.get(pid, ""), "count": 0},
+        )
+        entry["count"] += 1
+    return [counts[k] for k in sorted(counts)]
+
+
+def _atp_players_iocs(players_csv: Path) -> dict[str, str]:
+    """{ranking source player id: normalized ioc} from atp_players.csv."""
+    df = pd.read_csv(players_csv, dtype=str)
+    if not {"player_id", "ioc"} <= set(df.columns):
+        raise ValueError(f"atp_players.csv missing expected columns: {players_csv}")
+    iocs: dict[str, str] = {}
+    for pid, ioc in zip(df["player_id"], df["ioc"], strict=True):
+        key = "" if pid is None or pd.isna(pid) else str(pid).strip()
+        if not key:
+            continue
+        iocs[key] = valid_ioc(ioc)
+    return iocs
+
+
+def backfill_profile_iocs(rank_map: dict[str, str], players_csv: Path = ATP_PLAYERS_CSV) -> int:
+    """Backfill bronze.player_profiles.ioc for mapped players, returns count.
+
+    atp_players.csv is the higher-confidence IOC source: only players present in
+    the approved map are touched, and only a valid code replaces the UNK
+    sentinel/empty value — a verified IOC is never overwritten.
+    """
+    iocs = _atp_players_iocs(players_csv)
+    updates: list[tuple[str, str]] = []
+    for src_id, canonical in rank_map.items():
+        ioc = iocs.get(src_id)
+        if ioc is not None and ioc != UNK:
+            updates.append((ioc, canonical))
+    if not updates:
+        return 0
+    conn = get_conn()
+    with conn.transaction(), conn.cursor() as cur:
+        cur.executemany(
+            cast(
+                LiteralString,
+                f"UPDATE {BRONZE_PROFILES_TABLE} SET ioc = %s "
+                f"WHERE player_id = %s AND (ioc IS NULL OR ioc = '' OR ioc = 'UNK')",
+            ),
+            updates,
+        )
+    return len(updates)
+
+
+def ingest_rankings(
+    rankings_dir: Path = RANKINGS_DIR,
+    map_csv: Path = RANKING_PLAYER_MAP_CSV,
+    players_csv: Path = ATP_PLAYERS_CSV,
+) -> dict[str, Any]:
+    """Idempotent official-rankings import; returns the import summary.
+
+    Discover -> validate -> filter rank <= 200 -> map to canonical ids -> upsert.
+    Raw ranking source ids never reach the table: player_id is resolved through
+    the approved identity map, and unmapped top-200 rows are reported and
+    skipped. Raises ValueError on malformed input or an invalid map before any
+    database write.
+    """
+    csv_paths = discover_ranking_csvs(rankings_dir)
+    if not csv_paths:
+        print("No atp_rankings_*.csv files found under data/raw/rankings; nothing to import")
+        return {"files": 0, "source_rows": 0, "top200": 0, "upserted": 0, "unmapped": 0}
+
+    rows = load_ranking_rows(csv_paths)
+    top200 = cast(pd.DataFrame, rows[rows["rank"] <= 200])
+    source_rows = len(rows)
+    top200_count = len(top200)
+
+    rank_map = load_ranking_player_map(map_csv)
+    unmapped = _unmapped_report(top200, rank_map, players_csv)
+
+    canonical = top200["player_id"].map(rank_map)
+    mapped = cast(pd.DataFrame, top200.loc[canonical.notna()]).copy()
+    mapped["player_id"] = canonical[mapped.index]
+    # Dedupe on the PK before the upsert: duplicate (date, player) rows would
+    # trip PostgreSQL's "cannot affect row a second time" ON CONFLICT rule.
+    mapped = cast(
+        pd.DataFrame,
+        mapped.drop_duplicates(subset=["ranking_date", "player_id"], keep="last"),
+    )
+    mapped = cast(pd.DataFrame, mapped[RANKING_TARGET_COLUMNS]).reset_index(drop=True)
+
+    upserted = 0
+    if not mapped.empty:
+        _copy_df_into(
+            BRONZE_RANKINGS_TABLE,
+            mapped,
+            conflict_col="ranking_date, player_id",
+            update_cols=["rank", "points"],
+        )
+        upserted = len(mapped)
+
+    ioc_updated = backfill_profile_iocs(rank_map, players_csv)
+
+    summary = {
+        "files": len(csv_paths),
+        "source_rows": source_rows,
+        "top200": top200_count,
+        "upserted": upserted,
+        "unmapped": int(sum(u["count"] for u in unmapped)),
+    }
+    print(
+        f"Rankings import: {summary['files']} files, {summary['source_rows']} source rows, "
+        f"{summary['top200']} retained top-200 rows, "
+        f"{summary['upserted']} inserted/updated rows, "
+        f"{summary['unmapped']} unmapped rows skipped, "
+        f"{ioc_updated} profile IOCs backfilled"
+    )
+    for u in unmapped:
+        print(
+            f"  unmapped: source_id={u['ranking_player_id']} name={u['ranking_name']!r} "
+            f"rows={u['count']}"
+        )
+    return summary
 
 
 # ── Wikipedia Profile Enrichment ────────────────────────────────

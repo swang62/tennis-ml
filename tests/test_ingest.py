@@ -44,6 +44,10 @@ class _FakeCursor:
         self._conn.statements.append((sql, params))
         return self
 
+    def executemany(self, sql, seq_of_params):
+        self._conn.statements.append((sql, list(seq_of_params)))
+        return self
+
     def copy(self, sql):
         return _FakeCopy(self._conn, sql)
 
@@ -930,3 +934,473 @@ def test_init_backfills_null_ioc_and_is_idempotent(postgres_ready):  # noqa: ARG
             [null_id, empty_id, known_id],
         )
         conn.execute(f"ALTER TABLE {BRONZE_PROFILES_TABLE} ALTER COLUMN ioc SET NOT NULL")
+
+
+# ── Ranking identity map contract ────────────────────────────────
+
+
+def _write_map_csv(tmp_path: Path, rows: list[dict[str, str]]) -> Path:
+    csv = tmp_path / "ranking_player_map.csv"
+    pd.DataFrame(rows).to_csv(csv, index=False)
+    return csv
+
+
+def test_canonical_players_loads_id_to_name_reference():
+    players = ingest.canonical_players()
+
+    assert isinstance(players, dict)
+    assert "A0E2" in players  # canonical ATP_Database id for Carlos Alcaraz
+    assert players["A0E2"] == "Carlos Alcaraz"
+    assert all(pid and name for pid, name in players.items())
+
+
+def test_load_ranking_player_map_returns_source_to_canonical(tmp_path):
+    csv = _write_map_csv(
+        tmp_path,
+        [
+            {"ranking_player_id": "207989", "ranking_name": "Carlos Alcaraz", "player_id": "A0E2"},
+            {
+                "ranking_player_id": "100644",
+                "ranking_name": "Alexander Zverev",
+                "player_id": "Z355",
+            },
+        ],
+    )
+
+    result = ingest.load_ranking_player_map(csv, canonical_ids={"A0E2", "Z355"})
+
+    assert result == {"207989": "A0E2", "100644": "Z355"}
+
+
+def test_load_ranking_player_map_rejects_missing_column(tmp_path):
+    csv = _write_map_csv(tmp_path, [{"ranking_player_id": "207989", "player_id": "A0E2"}])
+
+    with pytest.raises(ValueError, match="missing columns"):
+        ingest.load_ranking_player_map(csv, canonical_ids={"A0E2"})
+
+
+def test_load_ranking_player_map_rejects_empty_required_cell(tmp_path):
+    csv = _write_map_csv(
+        tmp_path,
+        [
+            {"ranking_player_id": "207989", "ranking_name": "", "player_id": "A0E2"},
+        ],
+    )
+
+    with pytest.raises(ValueError, match="empty ranking_name"):
+        ingest.load_ranking_player_map(csv, canonical_ids={"A0E2"})
+
+
+def test_load_ranking_player_map_rejects_duplicate_source_id(tmp_path):
+    csv = _write_map_csv(
+        tmp_path,
+        [
+            {"ranking_player_id": "207989", "ranking_name": "A", "player_id": "A0E2"},
+            {"ranking_player_id": "207989", "ranking_name": "B", "player_id": "Z355"},
+        ],
+    )
+
+    with pytest.raises(ValueError, match="duplicate ranking source ids"):
+        ingest.load_ranking_player_map(csv, canonical_ids={"A0E2", "Z355"})
+
+
+def test_load_ranking_player_map_allows_multiple_sources_to_same_target(tmp_path):
+    """Multiple ranking source ids may legitimately map to the same canonical id."""
+    csv = _write_map_csv(
+        tmp_path,
+        [
+            {"ranking_player_id": "207989", "ranking_name": "A", "player_id": "A0E2"},
+            {"ranking_player_id": "100644", "ranking_name": "B", "player_id": "A0E2"},
+        ],
+    )
+
+    result = ingest.load_ranking_player_map(csv, canonical_ids={"A0E2"})
+    assert result == {"207989": "A0E2", "100644": "A0E2"}
+
+
+def test_load_ranking_player_map_rejects_unknown_canonical_id(tmp_path):
+    csv = _write_map_csv(
+        tmp_path,
+        [
+            {"ranking_player_id": "207989", "ranking_name": "A", "player_id": "NOT_A_PLAYER"},
+        ],
+    )
+
+    with pytest.raises(ValueError, match="unknown canonical player ids"):
+        ingest.load_ranking_player_map(csv, canonical_ids={"A0E2"})
+
+
+def test_load_ranking_player_map_defaults_canonical_ids_from_reference(tmp_path):
+    """Omitting canonical_ids validates targets against the canonical reference."""
+    csv = _write_map_csv(
+        tmp_path,
+        [
+            {"ranking_player_id": "207989", "ranking_name": "Carlos Alcaraz", "player_id": "A0E2"},
+        ],
+    )
+
+    assert ingest.load_ranking_player_map(csv) == {"207989": "A0E2"}
+
+
+def test_committed_ranking_player_map_is_valid_and_deterministic():
+    """The reviewed map file loads cleanly and pins the approved source id."""
+    result = ingest.load_ranking_player_map()
+
+    assert "207989" in result
+    assert result["207989"] == "A0E2"  # Alcaraz source id -> canonical id
+    assert ingest.load_ranking_player_map() == result  # deterministic
+
+
+def test_ranking_name_candidates_reports_ambiguous_and_exact():
+    ranking_rows = [
+        {"ranking_player_id": "207989", "ranking_name": "Carlos Alcaraz"},
+        {"ranking_player_id": "100000", "ranking_name": "Chris Lewis"},
+        {"ranking_player_id": "777777", "ranking_name": "Nobody Here"},
+    ]
+    canonical = {
+        "A0E2": "Carlos Alcaraz",
+        "L024": "Chris Lewis",
+        "L639": "Chris Lewis",
+        "Z999": "Someone Else",
+    }
+
+    report = ingest.ranking_name_candidates(ranking_rows, canonical=canonical)
+
+    by_src = {r["ranking_player_id"]: r for r in report}
+    assert by_src["207989"] == {
+        "ranking_player_id": "207989",
+        "ranking_name": "Carlos Alcaraz",
+        "exact_candidates": ["A0E2"],
+        "normalized_candidates": ["A0E2"],
+        "ambiguous": False,
+    }
+    assert by_src["100000"]["ambiguous"] is True
+    assert by_src["100000"]["normalized_candidates"] == ["L024", "L639"]
+    assert by_src["777777"]["ambiguous"] is False
+    assert by_src["777777"]["normalized_candidates"] == []
+
+
+def test_ranking_name_candidates_is_deterministic_and_sorted():
+    ranking_rows = [{"ranking_player_id": "200000", "ranking_name": "J. Smith"}]
+    canonical = {"S1": "J Smith", "S2": "John Smith"}
+
+    first = ingest.ranking_name_candidates(ranking_rows, canonical=canonical)
+    second = ingest.ranking_name_candidates(ranking_rows, canonical=canonical)
+
+    assert first == second
+
+
+def test_ranking_name_candidates_normalizes_accents_and_punctuation():
+    ranking_rows = [{"ranking_player_id": "300000", "ranking_name": "Daniil Medvedev"}]
+    canonical = {"M001": "Daniil  Medvedev", "M002": "Daniil Medvedev-Something"}
+
+    report = ingest.ranking_name_candidates(ranking_rows, canonical=canonical)
+
+    assert report[0]["exact_candidates"] == []  # exact name differs
+    assert report[0]["normalized_candidates"] == ["M001"]  # whitespace collapses
+    assert report[0]["ambiguous"] is False
+
+
+def test_unmapped_ranking_rows_reports_id_name_count():
+    rank_map = {"207989": "A0E2"}
+    rows = [
+        {"ranking_player_id": "207989", "ranking_name": "Carlos Alcaraz"},
+        {"ranking_player_id": "100000", "ranking_name": "Chris Lewis"},
+        {"ranking_player_id": "100000", "ranking_name": "Chris Lewis"},
+        {"ranking_player_id": "100001", "ranking_name": "Another"},
+    ]
+
+    report = ingest.unmapped_ranking_rows(rows, rank_map)
+
+    assert report == [
+        {"ranking_player_id": "100000", "ranking_name": "Chris Lewis", "count": 2},
+        {"ranking_player_id": "100001", "ranking_name": "Another", "count": 1},
+    ]
+
+
+# ── Official rankings ingest ───────────────────────────────────
+
+
+def _write_ranking_csv(tmp_path: Path, name: str, rows: list[list[object]]) -> Path:
+    csv = tmp_path / name
+    pd.DataFrame(rows, columns=ingest.RANKINGS_COLUMNS).to_csv(csv, index=False)
+    return csv
+
+
+def _write_players_csv(tmp_path: Path, rows: list[dict[str, str]]) -> Path:
+    csv = tmp_path / "atp_players.csv"
+    pd.DataFrame(rows).to_csv(csv, index=False)
+    return csv
+
+
+def test_discover_ranking_csvs_finds_only_atp_rankings_files(tmp_path):
+    import csv
+
+    def write(name):
+        with open(tmp_path / name, "w") as f:
+            csv.writer(f).writerow(["header"])
+
+    write("atp_rankings_00s.csv")
+    write("atp_rankings_10s.csv")
+    write("atp_rankings_current.csv")
+    write("atp_players.csv")
+    write("notes.txt")
+    write(".DS_Store")
+
+    found = ingest.discover_ranking_csvs(tmp_path)
+
+    assert [p.name for p in found] == [
+        "atp_rankings_00s.csv",
+        "atp_rankings_10s.csv",
+        "atp_rankings_current.csv",
+    ]
+
+
+def test_discover_ranking_csvs_empty(tmp_path):
+    assert ingest.discover_ranking_csvs(tmp_path) == []
+
+
+def test_load_ranking_rows_combines_files_and_empty_points_null(tmp_path):
+    _write_ranking_csv(tmp_path, "atp_rankings_00s.csv", [["20260105", 1, "207989", "12050"]])
+    _write_ranking_csv(
+        tmp_path,
+        "atp_rankings_10s.csv",
+        [
+            ["19730827", 129, "100005", ""],
+            ["19730827", 200, "100011", ""],
+        ],
+    )
+
+    rows = ingest.load_ranking_rows(ingest.discover_ranking_csvs(tmp_path))
+
+    assert len(rows) == 3
+    assert rows["rank"].tolist() == [1, 129, 200]
+    assert rows["player_id"].tolist() == ["207989", "100005", "100011"]
+    assert rows["points"].iloc[0] == 12050
+    assert rows["points"].isna().sum() == 2  # empty points -> NULL
+
+
+def test_load_ranking_rows_rejects_missing_column(tmp_path):
+    csv = tmp_path / "atp_rankings_00s.csv"
+    pd.DataFrame([["20260105", 1, "207989"]], columns=["ranking_date", "rank", "player"]).to_csv(
+        csv, index=False
+    )
+
+    with pytest.raises(ValueError, match="expected columns"):
+        ingest.load_ranking_rows([csv])
+
+
+def test_load_ranking_rows_rejects_extra_column(tmp_path):
+    csv = tmp_path / "atp_rankings_00s.csv"
+    pd.DataFrame(
+        [["20260105", 1, "207989", "12050", "extra"]],
+        columns=["ranking_date", "rank", "player", "points", "extra"],
+    ).to_csv(csv, index=False)
+
+    with pytest.raises(ValueError, match="expected columns"):
+        ingest.load_ranking_rows([csv])
+
+
+def test_load_ranking_rows_rejects_malformed_date(tmp_path):
+    csv = _write_ranking_csv(tmp_path, "atp_rankings_00s.csv", [["20261301", 1, "207989", "1"]])
+
+    with pytest.raises(ValueError, match="ranking_date malformed"):
+        ingest.load_ranking_rows([csv])
+
+
+@pytest.mark.parametrize("rank", ["abc", "0", "-3", ""])
+def test_load_ranking_rows_rejects_malformed_rank(tmp_path, rank):
+    csv = _write_ranking_csv(tmp_path, "atp_rankings_00s.csv", [["20260105", rank, "207989", "1"]])
+
+    with pytest.raises(ValueError, match="rank malformed"):
+        ingest.load_ranking_rows([csv])
+
+
+@pytest.mark.parametrize("player", ["abc", ""])
+def test_load_ranking_rows_rejects_malformed_player(tmp_path, player):
+    csv = _write_ranking_csv(tmp_path, "atp_rankings_00s.csv", [["20260105", 1, player, "1"]])
+
+    with pytest.raises(ValueError, match="player malformed"):
+        ingest.load_ranking_rows([csv])
+
+
+def test_load_ranking_rows_rejects_malformed_points(tmp_path):
+    csv = _write_ranking_csv(tmp_path, "atp_rankings_00s.csv", [["20260105", 1, "207989", "abc"]])
+
+    with pytest.raises(ValueError, match="points malformed"):
+        ingest.load_ranking_rows([csv])
+
+
+def test_ingest_rankings_upserts_only_mapped_canonical_ids(fake_ingest_conn, tmp_path):
+    """Raw ranking source ids never reach the table: only canonical ids from the
+    approved map are copied, and unmapped top-200 rows are skipped."""
+    _write_ranking_csv(
+        tmp_path,
+        "atp_rankings_00s.csv",
+        [
+            ["20260105", 1, "207989", "12050"],  # mapped -> A0E2
+            ["20260105", 2, "999999", "10000"],  # unmapped -> skipped
+            ["20260105", 300, "207989", "5000"],  # out of top-200 -> dropped
+        ],
+    )
+    _write_map_csv(
+        tmp_path,
+        [{"ranking_player_id": "207989", "ranking_name": "Carlos Alcaraz", "player_id": "A0E2"}],
+    )
+    _write_players_csv(
+        tmp_path,
+        [
+            {"player_id": "207989", "name_first": "Carlos", "name_last": "Alcaraz", "ioc": "ESP"},
+            {"player_id": "999999", "name_first": "Nobody", "name_last": "Here", "ioc": "XYZ"},
+        ],
+    )
+
+    summary = ingest.ingest_rankings(
+        tmp_path,
+        map_csv=tmp_path / "ranking_player_map.csv",
+        players_csv=tmp_path / "atp_players.csv",
+    )
+
+    assert summary == {
+        "files": 1,
+        "source_rows": 3,
+        "top200": 2,
+        "upserted": 1,
+        "unmapped": 1,
+    }
+    # Only the single mapped top-200 row is copied; the raw source id 999999
+    # and the rank-300 row never reach the table.
+    assert len(fake_ingest_conn.copied_rows) == 1
+    row = fake_ingest_conn.copied_rows[0]
+    assert str(row[0]) == "2026-01-05"
+    assert row[1] == "A0E2"
+    assert int(row[2]) == 1
+    assert int(row[3]) == 12050
+
+
+def test_ingest_rankings_top200_boundary_keeps_200_drops_201(fake_ingest_conn, tmp_path):
+    """Rank exactly 200 imports; rank 201 is the first filtered-out rank."""
+    _write_ranking_csv(
+        tmp_path,
+        "atp_rankings_00s.csv",
+        [
+            ["20260105", 1, "207989", "12050"],
+            ["20260105", 200, "100644", "50"],
+            ["20260105", 201, "100644", "40"],
+        ],
+    )
+    _write_map_csv(
+        tmp_path,
+        [
+            {"ranking_player_id": "207989", "ranking_name": "Carlos Alcaraz", "player_id": "A0E2"},
+            {
+                "ranking_player_id": "100644",
+                "ranking_name": "Alexander Zverev",
+                "player_id": "Z355",
+            },
+        ],
+    )
+    _write_players_csv(
+        tmp_path,
+        [{"player_id": "100644", "name_first": "Alexander", "name_last": "Zverev", "ioc": ""}],
+    )
+
+    summary = ingest.ingest_rankings(
+        tmp_path,
+        map_csv=tmp_path / "ranking_player_map.csv",
+        players_csv=tmp_path / "atp_players.csv",
+    )
+
+    assert summary["source_rows"] == 3
+    assert summary["top200"] == 2  # 201 is filtered out before mapping
+    assert summary["upserted"] == 2
+    assert sorted(int(r[2]) for r in fake_ingest_conn.copied_rows) == [1, 200]
+
+
+def test_ingest_rankings_upsert_uses_on_conflict_do_update(fake_ingest_conn, tmp_path):
+    _write_ranking_csv(tmp_path, "atp_rankings_00s.csv", [["20260105", 1, "207989", "12050"]])
+    _write_map_csv(
+        tmp_path,
+        [{"ranking_player_id": "207989", "ranking_name": "Carlos Alcaraz", "player_id": "A0E2"}],
+    )
+    _write_players_csv(
+        tmp_path, [{"player_id": "207989", "name_first": "C", "name_last": "A", "ioc": ""}]
+    )
+
+    ingest.ingest_rankings(
+        tmp_path,
+        map_csv=tmp_path / "ranking_player_map.csv",
+        players_csv=tmp_path / "atp_players.csv",
+    )
+
+    insert_sql = next(
+        s
+        for s, _ in fake_ingest_conn.statements
+        if s.startswith(f"INSERT INTO {ingest.BRONZE_RANKINGS_TABLE}")
+    )
+    assert insert_sql.startswith(f"INSERT INTO {ingest.BRONZE_RANKINGS_TABLE}")
+    assert "ON CONFLICT (ranking_date, player_id) DO UPDATE SET" in insert_sql
+    assert "rank = excluded.rank" in insert_sql
+    assert "points = excluded.points" in insert_sql
+
+
+def test_ingest_rankings_reports_unmapped_rows(fake_ingest_conn, tmp_path, capsys):  # noqa: ARG001 — fixture patches ingest.get_conn
+    _write_ranking_csv(
+        tmp_path,
+        "atp_rankings_00s.csv",
+        [
+            ["20260105", 2, "999999", "10000"],
+            ["20260106", 3, "999999", "9000"],
+            ["20260105", 1, "207989", "12050"],
+        ],
+    )
+    _write_map_csv(
+        tmp_path,
+        [{"ranking_player_id": "207989", "ranking_name": "Carlos Alcaraz", "player_id": "A0E2"}],
+    )
+    _write_players_csv(
+        tmp_path, [{"player_id": "999999", "name_first": "Nobody", "name_last": "Here", "ioc": ""}]
+    )
+
+    summary = ingest.ingest_rankings(
+        tmp_path,
+        map_csv=tmp_path / "ranking_player_map.csv",
+        players_csv=tmp_path / "atp_players.csv",
+    )
+
+    assert summary["unmapped"] == 2
+    out = capsys.readouterr().out
+    assert "unmapped: source_id=999999 name='Nobody Here' rows=2" in out
+
+
+def test_backfill_profile_iocs_updates_only_unk(fake_ingest_conn, tmp_path):
+    players = _write_players_csv(
+        tmp_path, [{"player_id": "100004", "name_first": "G", "name_last": "M", "ioc": "ITA"}]
+    )
+
+    n = ingest.backfill_profile_iocs({"100004": "M276"}, players_csv=players)
+
+    assert n == 1
+    sql, params = fake_ingest_conn.statements[0]
+    assert sql.startswith(f"UPDATE {ingest.BRONZE_PROFILES_TABLE}")
+    assert "WHERE player_id = %s AND (ioc IS NULL OR ioc = '' OR ioc = 'UNK')" in sql
+    assert params == [("ITA", "M276")]
+
+
+def test_backfill_profile_iocs_skips_invalid_ioc(fake_ingest_conn, tmp_path):
+    players = _write_players_csv(
+        tmp_path, [{"player_id": "100004", "name_first": "G", "name_last": "M", "ioc": "XYZ"}]
+    )
+
+    assert ingest.backfill_profile_iocs({"100004": "M276"}, players_csv=players) == 0
+    assert fake_ingest_conn.statements == []
+
+
+def test_backfill_profile_iocs_skips_players_not_in_map(fake_ingest_conn, tmp_path):
+    players = _write_players_csv(
+        tmp_path, [{"player_id": "100004", "name_first": "G", "name_last": "M", "ioc": "ITA"}]
+    )
+
+    # The map only covers 207989, so 100004's IOC is never touched.
+    assert ingest.backfill_profile_iocs({"207989": "A0E2"}, players_csv=players) == 0
+    assert fake_ingest_conn.statements == []

@@ -314,15 +314,17 @@ def _compose():
     return yaml.safe_load((_deploy().ROOT / "compose.yaml").read_text())
 
 
-def test_compose_image_uses_repository_and_name():
-    """The Bento image is derived from the required repository and image name."""
+def test_compose_bento_uses_published_image():
+    """The Bento image is the published swang62/tennis-ml:latest, not an
+    env-interpolated repository/name."""
     import os
     import subprocess
 
     import pytest
 
     image = _compose()["services"]["bento"]["image"]
-    assert image == "${DOCKER_REPO}/${IMAGE_NAME}:latest"
+    assert image == "swang62/tennis-ml:latest"
+    assert "${" not in image  # published image: no repo/name env interpolation
 
     # Real check through the compose CLI when available (config needs no daemon).
     if subprocess.run(["docker", "compose", "version"], capture_output=True).returncode != 0:
@@ -331,8 +333,8 @@ def test_compose_image_uses_repository_and_name():
     d = _deploy()
     base_env = {
         **os.environ,
-        "DOCKER_REPO": "acme",
-        "IMAGE_NAME": "tennis-ml",
+        "POSTGRES_PASSWORD": "pw",
+        "DRIFT_API_KEY": "key",
     }
 
     def rendered_image(env):
@@ -349,7 +351,7 @@ def test_compose_image_uses_repository_and_name():
                 return line.strip().split("image:", 1)[1].strip()
         raise AssertionError("no image line in compose config output")
 
-    assert rendered_image(base_env) == "acme/tennis-ml:latest"
+    assert rendered_image(base_env) == "swang62/tennis-ml:latest"
 
 
 def test_compose_has_pinned_postgres_service():
@@ -374,22 +376,24 @@ def test_compose_has_pinned_postgres_service():
     assert "pg_isready" in healthcheck[1]
 
 
-def test_compose_postgres_uses_fixed_local_dev_credential():
-    """Compose PostgreSQL uses its tracked fixed local-development credential."""
+def test_compose_postgres_uses_required_env_credential():
+    """Compose PostgreSQL takes its password from the required POSTGRES_PASSWORD
+    env var — no hardcoded credential is tracked."""
     env = _compose()["services"]["postgres"]["environment"]
     assert env["POSTGRES_USER"] == "postgres"
     assert env["POSTGRES_DB"] == "tennis"
-    assert env["POSTGRES_PASSWORD"] == "password"
+    assert env["POSTGRES_PASSWORD"] == "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
     assert "POSTGRES_HOST_AUTH_METHOD" not in env
 
 
 def test_compose_bento_gets_single_database_url():
-    """Bento receives the Compose DATABASE_URL plus the production-mode marker;
-    no separate credential variable (POSTGRES_PASSWORD) is ever passed."""
+    """Bento receives the Compose DATABASE_URL embedding the env-var password
+    plus the production-mode marker; no separate credential variable
+    (POSTGRES_PASSWORD) is ever passed."""
     bento_env = _compose()["services"]["bento"]["environment"]
     assert bento_env == {
         "SERVING_MODE": "production",
-        "DATABASE_URL": "postgresql://postgres:password@postgres:5432/tennis",
+        "DATABASE_URL": "postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/tennis",
     }
 
 
@@ -459,12 +463,12 @@ def test_nginx_proxies_only_allowlisted_routes():
         "similar_players",
     ):
         assert f"location /api/{route}" in conf
-        assert f"proxy_pass http://bento:3000/{route};" in conf
+        assert f"proxy_pass ${{BENTO_API_URL}}/{route};" in conf
     # Allowlisted POST route.
     assert "location /api/predict_from_ids" in conf
-    assert "proxy_pass http://bento:3000/predict_from_ids;" in conf
+    assert "proxy_pass ${BENTO_API_URL}/predict_from_ids;" in conf
     # The broad /api/ catch-all proxy is gone.
-    assert "proxy_pass http://bento:3000/;" not in conf
+    assert "proxy_pass ${BENTO_API_URL}/;" not in conf
     # Model-only /predict is explicitly rejected; unknown /api paths 404.
     assert "location /api/predict" in conf
     assert "return 403" in conf

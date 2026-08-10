@@ -139,6 +139,24 @@ UPDATE bronze.player_profiles SET ioc = 'UNK'
 ALTER TABLE bronze.player_profiles ALTER COLUMN ioc SET DEFAULT 'UNK';
 ALTER TABLE bronze.player_profiles ALTER COLUMN ioc SET NOT NULL;
 
+-- Official weekly ATP rankings (rank 1-200 only), sourced from
+-- data/raw/rankings/atp_rankings_*.csv. player_id is the canonical id resolved
+-- through the approved ranking identity map (data/ranking_player_map.csv) — the
+-- raw ranking source id is never stored. rank is the official value exactly as
+-- read from the source; it is never estimated or interpolated. points is empty
+-- (NULL) in early eras that predate published points.
+CREATE TABLE IF NOT EXISTS bronze.rankings (
+    ranking_date DATE     NOT NULL,   -- weekly ranking Monday
+    player_id    VARCHAR  NOT NULL,   -- canonical player id (ranked identity)
+    rank         SMALLINT NOT NULL CHECK (rank BETWEEN 1 AND 200),
+    points       INTEGER,             -- NULL when the source era has no points
+    PRIMARY KEY (ranking_date, player_id)
+);
+
+-- API lookup: a player's rank history ordered by date.
+CREATE INDEX IF NOT EXISTS idx_rankings_player_date
+    ON bronze.rankings (player_id, ranking_date);
+
 -- gold.player_profiles is now dbt-owned (dbt/models/gold/player_profiles.sql
 -- materializes it as a table from bronze.player_profiles + silver aggregates).
 -- This definition is retained ONLY as a fresh-install bootstrap convenience;

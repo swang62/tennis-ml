@@ -52,3 +52,7 @@ dbt/             — silver→gold SQL models + tests (bronze is the PostgreSQL 
 DNS/TLS for `*.macsteve.lan` itself is served by the host
 
 **MLflow is the registry of record.** Training runs against the local store or k8s service. Deploy resolves `@champion` (and the exact base pins tagged on it) from whatever `MLFLOW_TRACKING_URI` points at.
+
+**Ranking identity map** — `data/ranking_player_map.csv` is the authoritative reviewed mapping from ranking-source player id (`ranking_player_id`, the id in `data/raw/rankings/atp_rankings_*.csv`) to the canonical player id (`player_id`, the ATP_Database id space used by matches and profiles); `ranking_name` is an audit/review field only, never a production match key. Ingestion validates the map (structure, duplicate source ids, conflicting targets, unknown canonical ids) before any write and rejects it otherwise; unmapped top-200 rows are skipped and reported with source id, name, and count, never silently name-matched. `ranking_name_candidates()` in `src/flows/ingest.py` is a deterministic normalized-name review aid for maintainers extending the map.
+
+**Official rankings** — ingested ranks are strictly official ATP top-200 values per week; downstream rank/current-rank values are actual official ranks only, never estimated or interpolated.

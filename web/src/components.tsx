@@ -12,6 +12,42 @@ export function Kicker({ children }: { children: ReactNode }) {
   return <p className="kicker">{children}</p>
 }
 
+// Inline country flag from FlagCDN (20px wide). UNK/missing iso2 or a failed
+// image load falls back to the native white-flag glyph, never a broken image.
+export function PlayerFlag({
+  iso2,
+  countryName,
+}: {
+  iso2?: string | null
+  countryName?: string | null
+}) {
+  const [failed, setFailed] = useState(false)
+  const code = iso2?.trim().toLowerCase()
+  const unknown = !code || code === 'unk' || code.length !== 2
+  if (unknown || failed) {
+    return (
+      <span
+        className="player-flag"
+        role="img"
+        aria-label="Country unknown"
+        title="Country unknown"
+      >
+        🏳️
+      </span>
+    )
+  }
+  return (
+    <img
+      className="player-flag"
+      src={`https://flagcdn.com/w20/${code}.png`}
+      alt={countryName ?? code}
+      title={countryName ?? code}
+      loading="lazy"
+      onError={() => setFailed(true)}
+    />
+  )
+}
+
 export function Loading({ label = 'Loading' }: { label?: string }) {
   return (
     <div className="skeleton" role="status" aria-label={label}>
@@ -137,7 +173,7 @@ export function PlayerPicker({
   const selected = players.find((p) => p.player_id === value) ?? null
   const q = query.trim().toLowerCase()
   // Unfiltered pickers show the ranked top-20 directory (the API already
-  // orders by estimated_rank ASC NULLS LAST), with the other picker excluded.
+  // orders by current_rank ASC NULLS LAST), with the other picker excluded.
   const rankedDefaults = players
     .filter((p) => p.player_id !== exclude)
     .slice(0, 20)
@@ -276,8 +312,8 @@ export function PlayerPicker({
                   className={`picker-option${i === active ? ' is-active' : ''}${p.player_id === value ? ' is-selected' : ''}`}
                 >
                   <span className="picker-option-name">{p.display_name}</span>
-                  {p.estimated_rank != null && (
-                    <span className="picker-option-rank num">#{p.estimated_rank}</span>
+                  {p.current_rank != null && (
+                    <span className="picker-option-rank num">#{p.current_rank}</span>
                   )}
                 </button>
               ))

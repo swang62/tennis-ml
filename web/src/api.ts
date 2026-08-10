@@ -8,7 +8,10 @@ export interface Player {
   display_name: string
   matches_played: number
   latest_rank_points?: number
-  estimated_rank?: number | null
+  current_rank?: number | null
+  ioc: string
+  iso2: string
+  country_name: string
 }
 
 export interface CareerStats {
@@ -41,7 +44,7 @@ export interface RankInfo {
   earliest_rank_points_date: string | null
   latest_rank_points_date: string | null
   rank_points_delta: number | null
-  estimated_rank: number | null
+  current_rank: number | null
 }
 
 export interface TourComparisons {
@@ -99,7 +102,9 @@ export interface PlayerProfile {
   birthdate: string | null
   weight: number | null
   coaches: string | null
-  ioc: string | null
+  ioc: string
+  iso2: string
+  country_name: string
   career: CareerStats
   serve: ServeMetrics
   return: ReturnMetrics
@@ -113,7 +118,7 @@ export interface PlayerProfile {
 
 export interface RankPoint {
   rank_date: string
-  rank: number | null
+  rank: number
 }
 
 export interface RankHistory {

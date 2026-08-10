@@ -122,3 +122,19 @@ sources:
             description: Wikipedia bio summary written by the enrichment fallback.
           - name: enriched_at
             description: Timestamp of the last Wikipedia enrichment write.
+      - name: rankings
+        description: >
+          Official weekly ATP rankings (rank 1-200) sourced from
+          data/raw/rankings/atp_rankings_*.csv, with player IDs resolved
+          through data/ranking_player_map.csv to canonical ATP ids.
+        columns:
+          - name: player_id
+            description: Canonical ATP player id (mapped via ranking_player_map.csv).
+          - name: ranking_date
+            description: Monday of the rankings week.
+          - name: rank
+            description: Official ATP singles rank (1-200).
+            tests:
+              - not_null
+          - name: points
+            description: ATP ranking points; NULL in early eras.

@@ -27,6 +27,10 @@ db-reset:
 db-seed *args:
     uv run python src/db/seed.py {{args}}
 
+# Ingest official weekly ATP rankings (rank 1-200) from data/raw/rankings/.
+db-rankings:
+    uv run python -c "from src.flows.ingest import ingest_rankings; ingest_rankings()"
+
 # Export an atomic PostgreSQL training snapshot.
 db-snapshot:
     uv run python src/db/snapshot.py
@@ -34,6 +38,11 @@ db-snapshot:
 # Build and push the production Bento image.
 deploy-bento *args:
     uv run python src/flows/deploy.py {{args}}
+
+# Build and push the web UI image to Docker Hub.
+deploy-web:
+    docker build -t swang62/tennis-web:latest web/
+    docker push swang62/tennis-web:latest
 
 # Install Python dependencies.
 deps:
@@ -50,6 +59,10 @@ dev:
 # Start the Compose production stack.
 docker-up:
     docker compose up -d --build
+    
+# Register the Monday Prefect deployment with: uv run python src/flows/rankings.py --deploy
+rankings-fetch:
+    uv run python src/flows/rankings.py
 
 # Run all configured linters.
 lint:

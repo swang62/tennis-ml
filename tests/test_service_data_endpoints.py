@@ -23,21 +23,24 @@ def _players_df() -> pd.DataFrame:
                 "display_name": "B Player",
                 "matches_played": 40,
                 "latest_rank_points": 1500.0,
-                "estimated_rank": 1,
+                "ioc": "ESP",
+                "current_rank": 1,
             },
             {
                 "player_id": "p1",
                 "display_name": "A Player",
                 "matches_played": 20,
                 "latest_rank_points": None,  # never had positive points
-                "estimated_rank": None,
+                "ioc": "UNK",
+                "current_rank": None,
             },
             {
                 "player_id": "p3",
                 "display_name": "C Player",
                 "matches_played": 60,
                 "latest_rank_points": 900.0,
-                "estimated_rank": 2,
+                "ioc": "ARG",
+                "current_rank": 2,
             },
         ]
     )
@@ -56,23 +59,32 @@ def test_players_returns_materialized_directory():
         "display_name": "B Player",
         "matches_played": 40,
         "latest_rank_points": 1500.0,
-        "estimated_rank": 1,
+        "ioc": "ESP",
+        "iso2": "ES",
+        "country_name": "Spain",
+        "current_rank": 1,
     }
-    # unranked players keep the entry with null rank data
+    # unranked players keep the entry with null rank data and UNK country
     assert players[1]["latest_rank_points"] is None
-    assert players[1]["estimated_rank"] is None
+    assert players[1]["current_rank"] is None
+    assert players[1]["ioc"] == "UNK"
+    assert players[1]["iso2"] == ""
+    assert players[1]["country_name"] == "Country unknown"
+    assert players[2]["iso2"] == "AR"
+    assert players[2]["country_name"] == "Argentina"
 
 
 def test_players_sql_reads_profiles_without_match_aggregation():
-    """One ordered read from gold.player_profiles; no joins, no request-time aggregation."""
+    """One ordered read from gold.player_profiles; current_rank is dbt-
+    materialized (no per-query join to bronze.rankings or bronze.match_events)."""
     with patch("src.serving.service.execute_df", return_value=_players_df()) as exec:
         resp = client.get("/players")
     assert resp.status_code == 200
     sql = exec.call_args_list[0].args[0]
     assert "FROM gold.player_profiles" in sql
-    assert "ROW_NUMBER()" in sql
-    assert "JOIN" not in sql
-    assert "ORDER BY estimated_rank NULLS LAST, display_name, player_id" in sql
+    assert "bronze.rankings" not in sql
+    assert "bronze.match_events" not in sql
+    assert "ORDER BY current_rank NULLS LAST, display_name, player_id" in sql
 
 
 def test_players_empty():
@@ -90,8 +102,7 @@ def test_players_database_error_returns_500():
 
 
 def test_players_tie_ordering_by_player_id_deterministic():
-    """Equal rank points tie-break by player_id (ROW_NUMBER), so the response
-    is deterministic and preserves the SQL order."""
+    """Equal current ranks are ordered deterministically by the SQL order."""
     df = pd.DataFrame(
         [
             {
@@ -99,21 +110,24 @@ def test_players_tie_ordering_by_player_id_deterministic():
                 "display_name": "A Player",
                 "matches_played": 5,
                 "latest_rank_points": 1000.0,
-                "estimated_rank": 1,
+                "ioc": "ESP",
+                "current_rank": 1,
             },
             {
                 "player_id": "p3",
                 "display_name": "C Player",
                 "matches_played": 5,
                 "latest_rank_points": 1000.0,
-                "estimated_rank": 2,
+                "ioc": "ESP",
+                "current_rank": 2,
             },
             {
                 "player_id": "p2",
                 "display_name": "B Player",
                 "matches_played": 5,
                 "latest_rank_points": None,
-                "estimated_rank": None,
+                "ioc": "UNK",
+                "current_rank": None,
             },
         ]
     )
@@ -124,12 +138,11 @@ def test_players_tie_ordering_by_player_id_deterministic():
     # query order preserved (handler never re-sorts)
     assert [p["player_id"] for p in players] == ["p1", "p3", "p2"]
     sql = exec.call_args_list[0].args[0]
-    assert "latest_rank_points DESC NULLS LAST, player_id ASC" in sql
-    assert "ORDER BY estimated_rank NULLS LAST, display_name, player_id" in sql
+    assert "ORDER BY current_rank NULLS LAST, display_name, player_id" in sql
 
 
 def test_players_null_rank_ordered_last():
-    """Profiles without positive points keep a null estimated_rank and sort last."""
+    """Profiles without a bronze.rankings row keep a null current_rank and sort last."""
     df = pd.DataFrame(
         [
             {
@@ -137,14 +150,16 @@ def test_players_null_rank_ordered_last():
                 "display_name": "A",
                 "matches_played": 5,
                 "latest_rank_points": 900.0,
-                "estimated_rank": 1,
+                "ioc": "ESP",
+                "current_rank": 1,
             },
             {
                 "player_id": "p2",
                 "display_name": "B",
                 "matches_played": 2,
                 "latest_rank_points": None,
-                "estimated_rank": None,
+                "ioc": "UNK",
+                "current_rank": None,
             },
         ]
     )
@@ -153,7 +168,7 @@ def test_players_null_rank_ordered_last():
     assert resp.status_code == 200
     players = resp.json()["data"]["players"]
     assert [p["player_id"] for p in players] == ["p1", "p2"]
-    assert players[1]["estimated_rank"] is None
+    assert players[1]["current_rank"] is None
     assert players[1]["latest_rank_points"] is None
 
 
@@ -166,7 +181,8 @@ def test_players_zero_match_profile_present():
                 "display_name": "No Match",
                 "matches_played": 0,
                 "latest_rank_points": None,
-                "estimated_rank": None,
+                "ioc": "UNK",
+                "current_rank": None,
             }
         ]
     )
@@ -246,9 +262,9 @@ def test_players_latest_rank_points_ignore_newer_zero_observations(postgres_read
 
 
 def test_players_live_null_rank_ordered_last(postgres_ready, gold_ready):  # noqa: ARG001
-    """Unranked players (null points) sort after all ranked players."""
+    """Unranked players (no bronze.rankings row) sort after all ranked players."""
     players = client.get("/players").json()["data"]["players"]
-    ranks = [p["estimated_rank"] for p in players]
+    ranks = [p["current_rank"] for p in players]
     ranked = [r for r in ranks if r is not None]
     unranked = [r for r in ranks if r is None]
     assert ranks == ranked + unranked
@@ -265,11 +281,12 @@ def test_players_live_stable_ordering(postgres_ready, gold_ready):  # noqa: ARG0
 
 
 def _rank_history_df() -> pd.DataFrame:
+    # bronze.rankings rows, chronological (the query orders by ranking_date).
     return pd.DataFrame(
         [
-            {"match_date": "2024-01-01", "ranking": 100},
-            {"match_date": "2024-02-01", "ranking": 90},
-            {"match_date": "2024-03-01", "ranking": None},
+            {"ranking_date": "2024-01-01", "rank": 100, "points": 400},
+            {"ranking_date": "2024-02-05", "rank": 90, "points": 500},
+            {"ranking_date": "2024-03-04", "rank": 88, "points": 530},
         ]
     )
 
@@ -285,9 +302,30 @@ def test_rank_history_shape_and_parameter_binding():
     assert data["player_id"] == "p1"
     assert data["rank_history"] == [
         {"rank_date": "2024-01-01", "rank": 100},
-        {"rank_date": "2024-02-01", "rank": 90},
-        {"rank_date": "2024-03-01", "rank": None},
+        {"rank_date": "2024-02-05", "rank": 90},
+        {"rank_date": "2024-03-04", "rank": 88},
     ]
+
+
+def test_rank_history_reads_bronze_rankings_not_match_events():
+    """History is weekly official rows from bronze.rankings, never match ranks."""
+    with patch("src.serving.service.execute_df", return_value=pd.DataFrame()) as exec:
+        resp = client.get("/rank_history?player_id=p1")
+    assert resp.status_code == 200
+    sql = exec.call_args_list[0].args[0]
+    assert "FROM bronze.rankings" in sql
+    assert "ORDER BY ranking_date" in sql
+    assert "bronze.match_events" not in sql
+
+
+def test_rank_history_empty_for_player_without_rankings():
+    """A player with no bronze.rankings rows gets an empty history, not a 404."""
+    with patch("src.serving.service.execute_df", return_value=pd.DataFrame()):
+        resp = client.get("/rank_history?player_id=p1")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["player_id"] == "p1"
+    assert data["rank_history"] == []
 
 
 def test_rank_history_requires_player_id():

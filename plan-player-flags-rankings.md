@@ -34,7 +34,7 @@ Show an accessible country flag next to player names on the player profile and t
 
 ## Tasks
 
-### [ ] Task 1: Add country-reference data and enforce the IOC invariant
+### [x] Task 1: Add country-reference data and enforce the IOC invariant
 
 - **Description**:
   - Add a versioned IOC reference CSV containing `ioc`, `iso2`, and `country_name`, including the explicit `UNK` sentinel.
@@ -55,7 +55,7 @@ Show an accessible country flag next to player names on the player profile and t
   - Do not infer nationality from a player name, birthplace, or Wikipedia.
   - Do not call a third-party country API at runtime.
 
-### [ ] Task 2: Add the reviewed ranking identity-map contract
+### [x] Task 2: Add the reviewed ranking identity-map contract
 
 - **Description**:
   - Add the authoritative mapping CSV with columns such as `ranking_player_id`, `ranking_name`, and `player_id`; document that source ID is the match key and the name is an audit/review field.
@@ -74,7 +74,7 @@ Show an accessible country flag next to player names on the player profile and t
   - Do not use a name match as an implicit production mapping.
   - Do not add a mapping-management UI or external identity service.
 
-### [ ] Task 3: Create and ingest `bronze.rankings`
+### [x] Task 3: Create and ingest `bronze.rankings`
 
 - **Description**:
   - Define `bronze.rankings` in bootstrap SQL with `ranking_date`, canonical `player_id`, `rank`, and `points`; add a primary key on date/player, rank range check, and the player/date lookup index required by the API.
@@ -99,7 +99,7 @@ Show an accessible country flag next to player names on the player profile and t
   - Do not modify the existing deterministic match seed data set or introduce ranking ingestion into its default path.
   - Do not derive official history from match rows once this table is available.
 
-### [ ] Task 4: Serve official rankings and country metadata
+### [x] Task 4: Serve official rankings and country metadata
 
 - **Description**:
   - Extend `/players` and `/player_profile` responses with IOC plus resolved ISO alpha-2 code and country name.
@@ -113,12 +113,13 @@ Show an accessible country flag next to player names on the player profile and t
 - **Acceptance Criteria**:
   - Profile and player-list API responses expose consistent country metadata for known, `UNK`, and missing-reference cases.
   - `/rank_history` returns weekly official entries only, in chronological order, and no longer reads `bronze.match_events`.
+  - the match rank and diff is still the source of truth for training and gold tables, only frontend uses rank_history official ranks
   - Existing consumers keep receiving `rank_date` and `rank` without a frontend-breaking endpoint change.
 - **Guardrails**:
   - Do not expose raw mapping-file internals in public API responses.
   - Do not alter prediction endpoint contracts.
 
-### [ ] Task 5: Render flags only in the requested UI locations
+### [x] Task 5: Render flags only in the requested UI locations
 
 - **Description**:
   - Add a small shared flag/name presentation component that accepts resolved country metadata and handles FlagCDN image failure by replacing the `<img>` with the native white-flag glyph (`🏳️`).
@@ -140,7 +141,7 @@ Show an accessible country flag next to player names on the player profile and t
   - Do not add a flag-icon dependency or local asset bundle.
   - Do not change the selected-player picker UI.
 
-### [ ] Task 6: Simplify the official-ranking chart time axis
+### [x] Task 6: Simplify the official-ranking chart time axis
 
 - **Description**:
   - In the profile rank-chart view model, group the API's weekly history by UTC `YYYY-MM` and retain each month's latest dated rank as its plotted point; leave the underlying API history untouched for tooltips and other callers.
@@ -159,7 +160,7 @@ Show an accessible country flag next to player names on the player profile and t
   - Do not reduce the stored/imported cadence below weekly.
   - Do not introduce a custom SVG/canvas axis renderer or new chart dependency just for uneven tick lengths.
 
-### [ ] Task 7: Verify the full data-to-UI contract
+### [x] Task 7: Verify the full data-to-UI contract
 
 - **Description**:
   - Add focused unit coverage for country lookup/fallback, mapping validation, top-200 filtering, unmapped-row reporting, idempotent ranking upsert, and service query behavior.
@@ -179,7 +180,7 @@ Show an accessible country flag next to player names on the player profile and t
 - **Guardrails**:
   - Do not weaken existing match-ingestion or inference tests to accommodate the new table.
 
-### [ ] Task 8: Automate rankings catch-up after the initial backfill
+### [x] Task 8: Automate rankings catch-up after the initial backfill
 
 - **Description**:
   - Add a host-executed Prefect flow that launches CloakBrowser through its Python API and visits each missing weekly ATP singles-ranking URL.
@@ -210,7 +211,30 @@ Show an accessible country flag next to player names on the player profile and t
   - Do not make the Prefect worker call CloakBrowser MCP.
   - Do not automate CAPTCHA solving or preserve/replay challenge credentials.
   - Do not skip identity-map validation or silently ingest unmapped players.
-  - Do not schedule this before the initial historical backfill is complete.
+   - Do not schedule this before the initial historical backfill is complete.
+
+### [x] Task 9: Package web app as standalone Docker Compose deployment
+
+- **Description**:
+  - Add a `web/Dockerfile` that builds the React/Vite app as a production Nginx SPA, configurable via environment variables for the API backend URL and PostgreSQL connection details.
+  - Push the image to Docker Hub as `swang62/tennis-web:latest`.
+  - Update the existing `compose.yaml` (or create a standalone one) so that after `docker compose pull` and `docker compose up`, the full stack (postgres, bento, web) boots without any host dependencies other than Docker. The web container proxies `/api` requests to the Bento service.
+  - Ensure the compose file uses only published images (postgres:18.4, swang62/tennis-ml:latest, swang62/tennis-web:latest) — no local builds required for deployment.
+  - Document how to set env vars (POSTGRES_PASSWORD, etc.) for both the compose file and the web Nginx config, so the stack works on any machine with just `docker compose up`.
+- **Files**:
+  - New `web/Dockerfile`
+  - New `web/nginx.conf`
+  - `compose.yaml` (or new `compose.prod.yaml`)
+  - `README.md`
+- **Acceptance Criteria**:
+  - `docker compose up` after pulling images starts postgres, bento, and web; the web UI loads at `http://localhost:8187`.
+  - Changing PostgreSQL credentials in `.env` and restarting works without rebuilding images.
+  - The web container healthcheck succeeds.
+  - An image `swang62/tennis-web:latest` exists on Docker Hub.
+- **Guardrails**:
+  - Do not hardcode credentials in the Dockerfile or compose file — use environment variables.
+  - Do not require node/npm on the deployment host.
+  - Do not embed local build artifacts; the image must be reproducible from the Dockerfile alone.
 
 ## Dependencies
 
@@ -221,6 +245,7 @@ Show an accessible country flag next to player names on the player profile and t
 5. Task 4 precedes Task 6; the chart consumes the official-history response.
 6. Task 7 follows all implementation tasks.
 7. Task 8 is the final task and depends on Tasks 2, 3, and 7; it is enabled only after initial historical rankings are fully ingested and validated.
+8. Task 9 depends on Tasks 4-6 (API shape and UI must be stable) and can run in parallel with Tasks 7-8.
 
 ## QA / Testing Scenarios
 

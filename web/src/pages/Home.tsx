@@ -23,7 +23,10 @@ const MINISEARCH_OPTS = {
     "display_name",
     "matches_played",
     "latest_rank_points",
-    "estimated_rank",
+    "current_rank",
+    "ioc",
+    "iso2",
+    "country_name",
   ],
   searchOptions: { fuzzy: 0.2, prefix: true, boost: { display_name: 2 } },
 };
@@ -73,7 +76,10 @@ function useMiniSearch() {
         display_name: r.display_name as string,
         matches_played: r.matches_played as number,
         latest_rank_points: r.latest_rank_points as number | undefined,
-        estimated_rank: r.estimated_rank as number | null | undefined,
+        current_rank: r.current_rank as number | null | undefined,
+        ioc: r.ioc as string,
+        iso2: r.iso2 as string,
+        country_name: r.country_name as string,
       }));
   }, []);
 
@@ -122,8 +128,8 @@ export default function Home() {
   });
   const players = playersQ.data?.players ?? [];
   const totalMatches = players.reduce((n, p) => n + p.matches_played, 0);
-  // Directory estimate backs the profile's current-rank label while the
-  // profile query loads; the profile response is authoritative once it lands.
+  // Directory rank backs the profile's current-rank label while the profile
+  // query loads; the profile response is authoritative once it lands.
   const selectedPlayer = players.find((p) => p.player_id === selectedId) ?? null;
 
   const handleSelectPlayer = (playerId: string | null) => {
@@ -202,7 +208,7 @@ export default function Home() {
           {profileQ.data && (
             <ProfileContent
               profile={profileQ.data}
-              estimatedRank={selectedPlayer?.estimated_rank ?? null}
+              directoryRank={selectedPlayer?.current_rank ?? null}
               rankHistory={rankQ.data}
               rankLoading={rankQ.isLoading}
               matchHistory={matchesQ.data}

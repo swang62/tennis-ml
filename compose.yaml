@@ -1,8 +1,14 @@
+# Required env vars (see README "Standalone Compose deployment"):
+#   POSTGRES_PASSWORD  (also used by bento's DATABASE_URL)
+#   DRIFT_API_KEY      (authenticates the /api/internal/* nginx routes)
+# Optional: BENTO_API_URL (defaults to http://bento:3000).
+
 services:
   web:
-    build:
-      context: ./web
-      dockerfile: Dockerfile
+    image: swang62/tennis-web:latest
+    # build:
+    #   context: ./web
+    #   dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
       bento:
@@ -10,7 +16,10 @@ services:
     ports:
       - "127.0.0.1:8187:80"
     environment:
-      DRIFT_API_KEY: ${DRIFT_API_KEY}
+      BENTO_API_URL: ${BENTO_API_URL:-http://bento:3000}
+      DRIFT_API_KEY: ${DRIFT_API_KEY:?DRIFT_API_KEY is required}
+    networks:
+      - app-net
     healthcheck:
       test: wget -q -O /dev/null http://127.0.0.1/ || exit 1
       interval: 60s
@@ -28,8 +37,10 @@ services:
       - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: tennis
+    networks:
+      - app-net
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U postgres -d tennis" ]
       interval: 60s
@@ -38,17 +49,16 @@ services:
       start_period: 30s
 
   bento:
-    image: ${DOCKER_REPO}/${IMAGE_NAME}:latest
+    image: swang62/tennis-ml:latest
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      # Production deployment marker for /model_info; local source-mode
-      # serving (scripts/dev.sh) never sets this, so it cannot claim
-      # production mode.
       SERVING_MODE: production
-      DATABASE_URL: postgresql://postgres:password@postgres:5432/tennis
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/tennis
+    networks:
+      - app-net
     healthcheck:
       test: [ "CMD-SHELL", "python -c 'import urllib.request;urllib.request.urlopen(\"http://localhost:3000/readyz\")'" ]
       interval: 60s
@@ -59,3 +69,8 @@ services:
 
 volumes:
   postgres-data-18:
+
+
+networks:
+  app-net:
+    driver: bridge

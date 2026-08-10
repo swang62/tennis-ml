@@ -22,6 +22,9 @@ dependencies = [
   "xgboost>=3.2",
   "lightgbm>=4.6",
   "catboost>=1.2",
+  # Stealth-Chromium Playwright wrapper used by the rankings catch-up flow
+  # (src/flows/rankings.py); the binary downloads on first launch.
+  "cloakbrowser>=0.5.6",
   "optuna>=4.9",
   "papermill>=2.7",
   "pandas>=2.3",

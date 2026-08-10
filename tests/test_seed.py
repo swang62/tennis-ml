@@ -231,6 +231,14 @@ def test_seed_exposes_no_enrichment_path():
     assert "--offline" not in (seed.__doc__ or "")
 
 
+def test_seed_exposes_no_ranking_ingestion_path():
+    """Ranking ingestion is a separate path; seed stays match-only."""
+    assert not hasattr(seed, "ingest_rankings")
+    assert not hasattr(seed, "discover_ranking_csvs")
+    assert not hasattr(seed, "load_ranking_rows")
+    assert "rankings" not in (seed.__doc__ or "")
+
+
 def test_main_dispatches_without_network(monkeypatch):
     """Default and --all seed paths remain offline."""
     calls = []

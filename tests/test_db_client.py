@@ -114,9 +114,7 @@ def test_execute_df_with_tuple_params(fake_conn):
 
 def test_get_conn_uses_passwordless_local_database_url(monkeypatch):
     """Use the passwordless local DATABASE_URL verbatim."""
-    monkeypatch.setattr(
-        db_client.constants, "DATABASE_URL", "postgresql://steve@127.0.0.1:5432/postgres"
-    )
+    monkeypatch.setenv("DATABASE_URL", "postgresql://steve@127.0.0.1:5432/postgres")
     monkeypatch.setattr(db_client, "_conn", None)
 
     fake = FakeConn()
@@ -131,17 +129,16 @@ def test_get_conn_uses_passwordless_local_database_url(monkeypatch):
 
 
 def test_missing_config_fails_before_any_fallback(monkeypatch):
-    monkeypatch.setattr(db_client.constants, "DATABASE_URL", None)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.setattr(db_client, "_conn", None)
 
-    with pytest.raises(RuntimeError, match="missing PostgreSQL configuration"):
+    with pytest.raises(RuntimeError, match="DATABASE_URL not set"):
         db_client.get_conn()
 
 
 def test_get_conn_uses_password_bearing_database_url(monkeypatch):
     """Use the password-bearing Compose DATABASE_URL verbatim."""
-    monkeypatch.setattr(
-        db_client.constants,
+    monkeypatch.setenv(
         "DATABASE_URL",
         "postgresql://postgres:password@postgres:5432/tennis",
     )

@@ -29,5 +29,20 @@ if not api_url:
     sys.exit("PREFECT_API_URL is not set in .env — cannot reach the Prefect server.")
 
 print(f"Connecting worker to Prefect API at {api_url}")
+
+
+def _register_deployments() -> None:
+    """Register host-run scheduled deployments (idempotent upserts by name).
+
+    The Monday rankings catch-up deployment lives on the host work pool, so it
+    is created/updated whenever this worker starts and stays manually
+    triggerable from the Prefect UI or `prefect deployment run`.
+    """
+    from src.flows.rankings import register_deployment
+
+    register_deployment()
+
+
+_register_deployments()
 cmd = ["prefect", "worker", "start", "--pool", "tennis-pool"]
 raise SystemExit(subprocess.call(cmd))

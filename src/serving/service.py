@@ -30,10 +30,12 @@ from src.constants import (
     BRONZE_TABLE,
     PRODUCTION_MODEL,
     PROFILES_TABLE,
+    RANKINGS_TABLE,
     ROOT,
     SILVER_PLAYER_MATCHES,
     TOUR_AVERAGES_TABLE,
 )
+from src.countries import resolve_ioc, valid_ioc
 from src.db.client import execute_df, first_row_dict
 from src.features.columns import FEATURE_COLS
 from src.features.inference import (
@@ -175,45 +177,23 @@ def _predict_from_ids_bulk_impl(
 
 # ── SQL (table names interpolated from constants; values always via `%s`) ──
 
-# Directory read from the materialized player-grain profile table. estimated_rank
-# is a pure window over materialized latest_rank_points (no match-fact scan);
-# players without positive points keep a null rank.
+# Directory read from the materialized player-grain profile table. current_rank
+# is the player's latest official weekly rank (bronze.rankings), falling back to
+# match-time rank from the most recent match when no ranking row exists.
 _PLAYERS_SQL = f"""
-WITH ranked AS (
-    SELECT
-        player_id,
-        display_name,
-        match_count,
-        latest_rank_points,
-        CASE WHEN latest_rank_points IS NOT NULL
-             THEN ROW_NUMBER() OVER (
-                 ORDER BY latest_rank_points DESC NULLS LAST, player_id ASC
-             )
-             ELSE NULL END AS estimated_rank
-    FROM {PROFILES_TABLE}
-)
 SELECT player_id, display_name, match_count AS matches_played,
-       latest_rank_points, estimated_rank
-FROM ranked
-ORDER BY estimated_rank NULLS LAST, display_name, player_id
+       latest_rank_points, ioc, current_rank
+FROM {PROFILES_TABLE}
+ORDER BY current_rank NULLS LAST, display_name, player_id
 """
 
 # One point query: the player's materialized profile cross joined to the one-row
-# tour singleton. estimated_rank reuses the directory window so profile and
-# picker ranks agree. Tour comparison deltas are computed in Python, not SQL.
+# tour singleton. current_rank is already materialized in player_profiles via
+# dbt (official ranking with match-time fallback); no per-query CTE needed.
+# Tour comparison deltas are computed in Python, not SQL.
 _PROFILE_SQL = f"""
-WITH ranked AS (
-    SELECT
-        pp.*,
-        CASE WHEN pp.latest_rank_points IS NOT NULL
-             THEN ROW_NUMBER() OVER (
-                 ORDER BY pp.latest_rank_points DESC NULLS LAST, pp.player_id ASC
-             )
-             ELSE NULL END AS estimated_rank
-    FROM {PROFILES_TABLE} pp
-)
 SELECT
-    r.*,
+    pp.*,
     ta.tour_first_serve_win_pct,
     ta.tour_second_serve_win_pct,
     ta.tour_ace_rate,
@@ -224,23 +204,19 @@ SELECT
     ta.tour_df_rate,
     ta.tour_aces_per_svc_game,
     ta.tour_break_point_opportunities_per_return_game
-FROM ranked r
+FROM {PROFILES_TABLE} pp
 CROSS JOIN {TOUR_AVERAGES_TABLE} ta
-WHERE r.player_id = %s
+WHERE pp.player_id = %s
 """
 
-# Expand both bronze sides into a player ranking time series.
+# Official weekly history only: bronze.rankings, chronological. Never derived
+# from match rows. The response envelope stays {rank_date, rank}; points is
+# selected for parity with the source but not exposed.
 _RANK_HISTORY_SQL = f"""
-SELECT match_date, ranking
-FROM (
-    SELECT match_date, player1_id AS player_id, player1_ranking AS ranking
-    FROM {BRONZE_TABLE}
-    UNION ALL
-    SELECT match_date, player2_id AS player_id, player2_ranking AS ranking
-    FROM {BRONZE_TABLE}
-)
-WHERE player_id = %s AND ranking IS NOT NULL AND ranking > 0
-ORDER BY match_date
+SELECT ranking_date, rank, points
+FROM {RANKINGS_TABLE}
+WHERE player_id = %s
+ORDER BY ranking_date
 """
 
 # Keep the deepest round per tournament before applying the visible limit.
@@ -305,7 +281,12 @@ LIMIT %s
 def _players(_request: Request) -> JSONResponse:
     try:
         df = execute_df(_PLAYERS_SQL)
-        return _ok({"players": _records(df)})
+        players = []
+        for r in _records(df):
+            ioc = valid_ioc(r.get("ioc"))
+            iso2, country_name = resolve_ioc(ioc)
+            players.append({**r, "ioc": ioc, "iso2": iso2, "country_name": country_name})
+        return _ok({"players": players})
     except Exception as exc:  # DB errors -> 500 with message
         return _err(500, f"players query failed: {exc}")
 
@@ -420,6 +401,11 @@ def _player_profile(request: Request) -> JSONResponse:
             "delta": _iso(row["rank_points_delta"]),
         }
 
+    # Country metadata resolved from the profile's stored IOC; missing/invalid
+    # codes resolve to the UNK sentinel ("", "Country unknown").
+    ioc = valid_ioc(row["ioc"])
+    iso2, country_name = resolve_ioc(ioc)
+
     return _ok(
         {
             "player_id": row["player_id"],
@@ -434,7 +420,9 @@ def _player_profile(request: Request) -> JSONResponse:
             "birthdate": _iso(row["birthdate"]),
             "weight": _iso(row["weight"]),
             "coaches": row["coaches"],
-            "ioc": row["ioc"],
+            "ioc": ioc,
+            "iso2": iso2,
+            "country_name": country_name,
             "career": {
                 "matches_played": int(row["match_count"]),
                 "latest_match_date": _iso(row["latest_match_date"]),
@@ -445,7 +433,7 @@ def _player_profile(request: Request) -> JSONResponse:
             "recent_form": recent_form,
             "rank_points_trend": rank_points_trend,
             "rank": {
-                "estimated_rank": _iso(row["estimated_rank"]),
+                "current_rank": _iso(row["current_rank"]),
                 "latest_rank_points": _iso(row["latest_rank_points"]),
                 "earliest_rank_points": _iso(row["earliest_rank_points"]),
                 "earliest_rank_points_date": _iso(row["earliest_rank_points_date"]),
@@ -466,7 +454,7 @@ def _rank_history(request: Request) -> JSONResponse:
         df = execute_df(_RANK_HISTORY_SQL, [player_id])
     except Exception as exc:
         return _err(500, f"rank history query failed: {exc}")
-    history = [{"rank_date": _iso(r["match_date"]), "rank": r["ranking"]} for r in _records(df)]
+    history = [{"rank_date": _iso(r["ranking_date"]), "rank": r["rank"]} for r in _records(df)]
     return _ok({"player_id": player_id, "rank_history": history})
 
 

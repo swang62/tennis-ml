@@ -33,7 +33,7 @@ def _profile_row(**overrides) -> pd.DataFrame:
         "coaches": "Coach",
         "handedness": "R",
         "backhand": "2h",
-        "ioc": "TST",
+        "ioc": "ESP",
         "summary": "A test player.",
         # career
         "match_count": 50,
@@ -44,7 +44,7 @@ def _profile_row(**overrides) -> pd.DataFrame:
         "earliest_rank_points_date": "2024-01-01",
         "latest_rank_points_date": "2026-01-15",
         "rank_points_delta": 400.0,
-        "estimated_rank": 7,
+        "current_rank": 7,
         # serve
         "first_serve_in_pct": 0.62,
         "aces_per_first_serve": 0.09,
@@ -102,7 +102,9 @@ def test_profile_single_query_returns_full_contract():
     assert data["weight"] == 80
     assert data["handedness"] == "R"
     assert data["backhand"] == "2h"
-    assert data["ioc"] == "TST"
+    assert data["ioc"] == "ESP"
+    assert data["iso2"] == "ES"
+    assert data["country_name"] == "Spain"
 
     # career
     assert data["career"] == {"matches_played": 50, "latest_match_date": "2026-01-15"}
@@ -141,7 +143,7 @@ def test_profile_single_query_returns_full_contract():
 
     # new rank object with the full materialized set
     assert data["rank"] == {
-        "estimated_rank": 7,
+        "current_rank": 7,
         "latest_rank_points": 1200.0,
         "earliest_rank_points": 800.0,
         "earliest_rank_points_date": "2024-01-01",
@@ -200,7 +202,7 @@ def test_profile_zero_match_player():
         "earliest_rank_points_date": None,
         "latest_rank_points_date": None,
         "rank_points_delta": None,
-        "estimated_rank": None,
+        "current_rank": None,
         "first_serve_in_pct": None,
         "aces_per_first_serve": None,
         "first_serve_points_won_pct": None,
@@ -231,7 +233,7 @@ def test_profile_zero_match_player():
     assert data["career"]["latest_match_date"] is None
     assert data["recent_form"] is None
     assert data["rank_points_trend"] is None
-    assert data["rank"]["estimated_rank"] is None
+    assert data["rank"]["current_rank"] is None
     assert data["rank"]["latest_rank_points"] is None
     assert all(s["win_rate"] is None and s["matches"] == 0 for s in data["surface_rates"])
     assert all(v is None for v in data["serve"].values())
@@ -248,6 +250,22 @@ def test_profile_uses_parameterized_point_query():
     assert "%s" in sql
     assert "gold.player_profiles" in sql
     assert "gold.tour_averages" in sql
+    # current_rank is materialized in pp.* via dbt, not a separate column
+
+
+def test_profile_country_metadata_unk_fallback():
+    """Missing/invalid IOC resolves to the UNK country row, never a raw guess."""
+    for bad_ioc in ("TST", None):
+        with patch(
+            "src.serving.service.execute_df",
+            side_effect=[_profile_row(ioc=bad_ioc)],
+        ):
+            resp = client.get("/player_profile?player_id=p1")
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["ioc"] == "UNK"
+        assert data["iso2"] == ""
+        assert data["country_name"] == "Country unknown"
 
 
 def test_profile_unknown_player_404():

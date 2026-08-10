@@ -5,6 +5,7 @@ from typing import cast
 
 import pandas as pd
 import pytest
+from starlette.testclient import TestClient
 
 from src.constants import (
     BRONZE_PROFILES_TABLE,
@@ -17,9 +18,16 @@ from src.db import client, seed
 from src.db.client import execute_df
 from src.features.columns import FEATURE_COLS, SIMILARITY_COLS
 from src.flows import ingest
+from src.serving.service import DATA_APP
 
 RAW_CSV = ROOT / "data" / "raw" / "2026.csv"
 AS_OF = date(2026, 9, 1)  # after every seeded match, like test_inference_features
+
+# A seeded player with official ranking rows after ingest_rankings() (Sebastian
+# Baez, ARG); his match-row rank (45) differs from his official weekly ranks.
+_SEEDED_PLAYER = "B0BI"
+
+service_client = TestClient(DATA_APP)
 
 # match_features carries these 8 metadata columns before the 36 feature columns.
 META_COLS = [
@@ -215,3 +223,53 @@ def test_e2e_cold_start_imputation(gold_ready):  # noqa: ARG001 — skip-gate fi
     assert out.columns.tolist() == [*FEATURE_COLS, "player_id", "opponent_id"]
     assert len(out) == 1
     assert out["player_id"].iloc[0] == "YYYY"  # 'YYYY' < 'ZZZZ'
+
+
+def test_official_rankings_table_populated_in_range_and_idempotent(postgres_ready):  # noqa: ARG001
+    """bronze.rankings holds only official top-200 ranks via canonical ids, and
+    re-running the importer leaves the same logical rows (idempotent)."""
+    from src.flows.ingest import ingest_rankings
+
+    first = ingest_rankings()
+    assert first["files"] == 7  # all supplied ranking-period files are handled
+
+    n, lo, hi = execute_df("SELECT COUNT(*), MIN(rank), MAX(rank) FROM bronze.rankings").iloc[0]
+    assert int(n) == int(first["upserted"])
+    assert int(lo) >= 1 and int(hi) <= 200  # every stored rank is official top-200
+
+    # Raw ranking source ids must never reach the table.
+    raw = cast(
+        int,
+        execute_df("SELECT COUNT(*) FROM bronze.rankings WHERE player_id ~ '^[0-9]+$'").iloc[0, 0],
+    )
+    assert raw == 0
+
+    # Re-running the importer upserts the same logical rows, no duplication.
+    ingest_rankings()
+    again = cast(int, execute_df("SELECT COUNT(*) FROM bronze.rankings").iloc[0, 0])
+    assert again == int(n)
+
+    # The API/chart contract observes the ingested official rows: /rank_history
+    # mirrors bronze.rankings week by week, and /players current_rank is the
+    # latest official week — never a match-row rank.
+    db_history = execute_df(
+        "SELECT ranking_date, rank FROM bronze.rankings WHERE player_id = %s ORDER BY ranking_date",
+        [_SEEDED_PLAYER],
+    )
+    assert len(db_history) > 1  # weekly points across multiple ranking Mondays
+    api_history = service_client.get(f"/rank_history?player_id={_SEEDED_PLAYER}").json()["data"][
+        "rank_history"
+    ]
+    assert api_history == [
+        {
+            "rank_date": pd.Timestamp(r["ranking_date"]).date().isoformat(),
+            "rank": int(r["rank"]),
+        }
+        for r in db_history.to_dict("records")
+    ]
+    latest_official = int(db_history["rank"].iloc[-1])
+    players = service_client.get("/players").json()["data"]["players"]
+    assert (
+        next(p for p in players if p["player_id"] == _SEEDED_PLAYER)["current_rank"]
+        == latest_official
+    )
