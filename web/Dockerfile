@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Build the static SPA bundle.
 FROM node:22-alpine AS build
 WORKDIR /app
@@ -5,10 +6,12 @@ WORKDIR /app
 RUN corepack enable
 # The dashboard is self-contained, so the build context is web/.
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store/v3,sharing=locked \
+    pnpm install --frozen-lockfile
 # Copy the source, then build the dashboard.
 COPY . .
-RUN pnpm build
+RUN --mount=type=cache,id=pnpm-vite,target=/app/node_modules/.vite,sharing=locked \
+    pnpm build
 
 # Serve the SPA and proxy only allowlisted Bento routes.
 FROM nginx:alpine
