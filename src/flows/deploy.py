@@ -384,6 +384,33 @@ def _image_exists(image: str) -> bool:
     )
 
 
+def _image_id(image: str) -> str:
+    """Return the local image ID (sha256:...)."""
+    return subprocess.run(
+        ["docker", "image", "inspect", "--format", "{{.ID}}", image],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        check=True,
+    ).stdout.strip()
+
+
+def _remote_image_id(image: str) -> str | None:
+    """Return the remote image's config digest (same as local image ID), or None."""
+    proc = subprocess.run(
+        ["docker", "manifest", "inspect", image],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+    if proc.returncode != 0:
+        return None
+    try:
+        return json.loads(proc.stdout)["config"]["digest"]
+    except (json.JSONDecodeError, KeyError):
+        return None
+
+
 def _run_teed(
     cmd: list[str], log: TextIO, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess:
@@ -449,10 +476,29 @@ def build_bento_image(force: bool = False) -> tuple[str, int]:
 
 
 def deploy_bento(force: bool = False) -> None:
-    """Build then push the promoted image; token login uses stdin."""
+    """Build then push the promoted image; token login uses stdin.
+    Skips push when the remote registry already has the identical image
+    (local image ID matches the remote config digest)."""
     local_image, production_version = build_bento_image(force=force)
 
     latest = f"{DOCKER_REPO}/{IMAGE_NAME}:latest"
+    # Tag the local image with the remote name so image ID inspection works.
+    subprocess.run(
+        ["docker", "tag", local_image, latest],
+        cwd=ROOT,
+        capture_output=True,
+    )
+    local_id = _image_id(latest)
+    remote_id = None if force else _remote_image_id(latest)
+    if local_id == remote_id:
+        print(f"Remote {latest} is identical (id={local_id}) — skipping push.")
+        return
+
+    if remote_id is None:
+        print(f"No remote image for {latest} found — pushing.")
+    else:
+        print(f"Remote {latest} differs ({remote_id[:19]}... -> {local_id[:19]}...) — pushing.")
+
     _docker_login()
     LOGS.mkdir(parents=True, exist_ok=True)
     deploy_log = LOGS / f"deploy_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"

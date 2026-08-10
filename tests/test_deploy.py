@@ -114,7 +114,10 @@ def test_docker_login_raises_on_failure(monkeypatch):
 
 def _stub_subprocess(monkeypatch):
     """Replace subprocess.run with a no-op returning success."""
-    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=""),
+    )
 
 
 def test_deploy_bento_pushes_only_latest_no_compose_no_web(monkeypatch, tmp_path):
@@ -355,15 +358,15 @@ def test_compose_bento_uses_published_image():
 
 
 def test_compose_has_pinned_postgres_service():
-    """Compose PostgreSQL uses its pinned image, v18 volume, init SQL, and readiness check."""
+    """Compose PostgreSQL uses its pinned image, named volume, and readiness check."""
     cfg = _compose()
     assert "postgres" in cfg["services"]
     svc = cfg["services"]["postgres"]
     assert svc["image"] == "postgres:18.4"
+    # Postgres exposes 6543 with native SSL (not via nginx proxy).
     assert any("6543:5432" in p for p in svc["ports"])
     assert "healthcheck" in svc
-    assert "postgres-data-18" in cfg.get("volumes", {})
-    assert "postgres-data" not in cfg.get("volumes", {})
+    assert "tennis-ml-postgres" in cfg.get("volumes", {})
     assert any(v.endswith(":/var/lib/postgresql") for v in svc["volumes"])
     assert not any(":/var/lib/postgresql/data" in v for v in svc["volumes"])
     healthcheck = svc["healthcheck"]["test"]

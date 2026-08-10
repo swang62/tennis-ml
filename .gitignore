@@ -23,6 +23,9 @@ tests/___db/
 .env
 *.env
 
+# TLS keys and certs (generate per deployment)
+infra/postgres/tls/
+
 # Models (serialized)
 *.pkl
 *.joblib
