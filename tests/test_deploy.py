@@ -114,10 +114,7 @@ def test_docker_login_raises_on_failure(monkeypatch):
 
 def _stub_subprocess(monkeypatch):
     """Replace subprocess.run with a no-op returning success."""
-    monkeypatch.setattr(
-        "subprocess.run",
-        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=""),
-    )
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
 
 
 def test_deploy_bento_pushes_only_latest_no_compose_no_web(monkeypatch, tmp_path):
@@ -144,7 +141,7 @@ def test_deploy_bento_pushes_only_latest_no_compose_no_web(monkeypatch, tmp_path
     d.deploy_bento(force=False)
 
     # Push only the Docker Hub latest image.
-    assert calls == [["docker", "push", "acme/tennis-ml:latest"]]
+    assert calls == [["docker", "push", "--max-concurrent-uploads", "1", "acme/tennis-ml:latest"]]
     assert written["deployed_version"] == 5
     assert written["deployed_image"] == "acme/tennis-ml:latest"
 
@@ -166,7 +163,7 @@ def test_deploy_bento_does_not_require_postgres_password(monkeypatch, tmp_path):
 
     d.deploy_bento(force=False)  # must not raise
 
-    assert pushed == [["docker", "push", "acme/tennis-ml:latest"]]
+    assert pushed == [["docker", "push", "--max-concurrent-uploads", "1", "acme/tennis-ml:latest"]]
 
 
 def test_deploy_bento_forwards_force_to_build(monkeypatch, tmp_path):
