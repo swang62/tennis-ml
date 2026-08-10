@@ -127,7 +127,10 @@ tour_rates AS (
         CAST(SUM(double_faults) AS DOUBLE PRECISION)
             / NULLIF(SUM(total_serve_points), 0) AS tour_df_rate,
         CAST(SUM(aces) AS DOUBLE PRECISION)
-            / NULLIF(SUM(service_games), 0) AS tour_aces_per_svc_game
+            / NULLIF(SUM(service_games), 0) AS tour_aces_per_svc_game,
+        CAST(SUM(break_points_faced) AS DOUBLE PRECISION)
+            / NULLIF(SUM(service_games), 0)
+            AS tour_break_point_opportunities_per_return_game
     FROM {{ ref('player_matches') }}
 )
 SELECT
@@ -181,7 +184,8 @@ SELECT
     tr.tour_serve_win_pct,
     tr.tour_return_points_won_pct,
     tr.tour_df_rate,
-    tr.tour_aces_per_svc_game
+    tr.tour_aces_per_svc_game,
+    tr.tour_break_point_opportunities_per_return_game
 FROM pool_meta p
 CROSS JOIN snapshot_aggregates s
 CROSS JOIN activity a

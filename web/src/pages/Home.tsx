@@ -14,12 +14,17 @@ import { ErrorBox, Kicker, Loading, PlayerPicker } from "../components";
 import { useTheme } from "../theme";
 import ProfileContent from "./Profile";
 
-const PLAYERS_INDEX_KEY = "tm-player-index-v1";
+const PLAYERS_INDEX_KEY = "tm-player-index-v2";
 
 const MINISEARCH_OPTS = {
   fields: ["display_name"],
   idField: "player_id",
-  storeFields: ["display_name", "matches_played"],
+  storeFields: [
+    "display_name",
+    "matches_played",
+    "latest_rank_points",
+    "estimated_rank",
+  ],
   searchOptions: { fuzzy: 0.2, prefix: true, boost: { display_name: 2 } },
 };
 
@@ -67,6 +72,8 @@ function useMiniSearch() {
         player_id: r.id,
         display_name: r.display_name as string,
         matches_played: r.matches_played as number,
+        latest_rank_points: r.latest_rank_points as number | undefined,
+        estimated_rank: r.estimated_rank as number | null | undefined,
       }));
   }, []);
 
@@ -115,6 +122,9 @@ export default function Home() {
   });
   const players = playersQ.data?.players ?? [];
   const totalMatches = players.reduce((n, p) => n + p.matches_played, 0);
+  // Directory estimate backs the profile's current-rank label while the
+  // profile query loads; the profile response is authoritative once it lands.
+  const selectedPlayer = players.find((p) => p.player_id === selectedId) ?? null;
 
   const handleSelectPlayer = (playerId: string | null) => {
     if (!document.startViewTransition) {
@@ -192,6 +202,7 @@ export default function Home() {
           {profileQ.data && (
             <ProfileContent
               profile={profileQ.data}
+              estimatedRank={selectedPlayer?.estimated_rank ?? null}
               rankHistory={rankQ.data}
               rankLoading={rankQ.isLoading}
               matchHistory={matchesQ.data}

@@ -3,9 +3,11 @@ import type { EChartsOption } from "echarts";
 import type {
   PlayerProfile,
   RankHistory,
+  ReturnMetrics,
+  ServeMetrics,
   SimilarPlayersResponse,
 } from "../api";
-import { Card, Empty, Kicker, Loading, ResultBadge, pct } from "../components";
+import { Card, Empty, Kicker, Loading, ResultBadge } from "../components";
 import {
   axisOption,
   baseChartOption,
@@ -21,70 +23,75 @@ const SURFACE_COLORS: Record<string, string> = {
   carpet: "var(--text-dim)",
 };
 
-function StatWithDelta({
+type MetricUnit = "pct" | "rate";
+
+// pct metrics are 0..1 fractions shown as XX.X%; rate metrics are per-game /
+// per-point ratios shown as X.XX. Deltas are player minus tour benchmark.
+function formatMetric(unit: MetricUnit, value: number | null): string {
+  if (value == null) return "n/a";
+  return unit === "pct"
+    ? `${Math.round(value * 1000) / 10}%`
+    : value.toFixed(2);
+}
+
+function formatDelta(unit: MetricUnit, delta: number | null): string | null {
+  if (delta == null) return null;
+  if (unit === "pct") {
+    const pp = Math.round(delta * 1000) / 10;
+    return `${pp > 0 ? "+" : ""}${pp}pp`;
+  }
+  return `${delta > 0 ? "+" : ""}${delta.toFixed(2)}`;
+}
+
+function Metric({
   label,
-  playerRate,
-  tourRate,
+  value,
+  delta,
+  unit,
 }: {
   label: string;
-  playerRate: number | null;
-  tourRate: number | null;
+  value: number | null;
+  delta: number | null;
+  unit: MetricUnit;
 }) {
-  if (playerRate == null) {
-    return (
-      <div className="stat">
-        <span className="stat-label">{label}</span>
-        <span className="stat-num is-grass num">-</span>
-      </div>
-    );
-  }
-
-  const playerPct = Math.round(playerRate * 1000) / 10;
-
-  if (tourRate == null) {
-    return (
-      <div className="stat">
-        <span className="stat-label">{label}</span>
-        <span className="stat-num is-grass num">{playerPct}%</span>
-      </div>
-    );
-  }
-
-  const deltaPct = (playerRate - tourRate) * 100;
-  const roundedDelta = Math.round(deltaPct * 100) / 100;
-
-  if (Math.abs(roundedDelta) < 0.005) {
-    return (
-      <div className="stat">
-        <span className="stat-label">{label}</span>
-        <span className="stat-num is-grass num">{playerPct}%</span>
-      </div>
-    );
-  }
-
-  const isUp = deltaPct > 0;
-  const symbol = isUp ? "▲" : "▼";
-  const sign = isUp ? "+" : "";
-  const deltaColor = isUp ? "var(--grass)" : "var(--clay)";
-  const ariaLabel = `${Math.abs(roundedDelta).toFixed(2)} percentage points ${isUp ? "above" : "below"} tour average`;
-
+  const deltaText = formatDelta(unit, delta);
+  const deltaTone =
+    delta == null ? "" : delta > 0 ? " is-grass" : delta < 0 ? " is-clay" : "";
   return (
-    <div className="stat">
-      <span className="stat-label">{label}</span>
-      <span className="stat-num num">{playerPct}%</span>
-      <span className="stat-delta">
-        <span role="img" style={{ color: deltaColor }} aria-label={ariaLabel}>
-          {symbol}
-        </span>{" "}
-        ({sign}
-        {roundedDelta.toFixed(2)}%)
+    <div className="sr-metric">
+      <span className="sr-label">{label}</span>
+      <span className="sr-value-row">
+        <span className="sr-value num">{formatMetric(unit, value)}</span>
+        {deltaText != null && (
+          <span className={`sr-delta num${deltaTone}`}>{deltaText}</span>
+        )}
       </span>
     </div>
   );
 }
 
+const serveMetrics: { label: string; key: keyof ServeMetrics; unit: MetricUnit }[] = [
+  { label: "First serve in", key: "first_serve_in_pct", unit: "pct" },
+  { label: "Aces / first serve", key: "aces_per_first_serve", unit: "rate" },
+  { label: "1st serve points won", key: "first_serve_points_won_pct", unit: "pct" },
+  { label: "2nd serve points won", key: "second_serve_points_won_pct", unit: "pct" },
+  { label: "Serve points won", key: "overall_serve_points_won_pct", unit: "pct" },
+  { label: "Double faults / serve pt", key: "double_faults_per_serve_point", unit: "rate" },
+  { label: "Aces / service game", key: "aces_per_service_game", unit: "rate" },
+  { label: "Break points saved", key: "break_points_saved_pct", unit: "pct" },
+];
+
+const returnMetrics: { label: string; key: keyof ReturnMetrics; unit: MetricUnit }[] = [
+  { label: "Return points won", key: "return_points_won_pct", unit: "pct" },
+  { label: "1st serve return won", key: "first_serve_return_points_won_pct", unit: "pct" },
+  { label: "2nd serve return won", key: "second_serve_return_points_won_pct", unit: "pct" },
+  { label: "Break point conversion", key: "break_point_conversion_pct", unit: "pct" },
+  { label: "BP opp. / return game", key: "break_point_opportunities_per_return_game", unit: "rate" },
+];
+
 export default function ProfileContent({
   profile,
+  estimatedRank,
   rankHistory,
   rankLoading,
   matchHistory,
@@ -94,6 +101,7 @@ export default function ProfileContent({
   onSelectSimilar,
 }: {
   profile: PlayerProfile;
+  estimatedRank?: number | null;
   rankHistory: RankHistory | undefined;
   rankLoading: boolean;
   matchHistory: { matches: Array<any> } | undefined;
@@ -139,10 +147,9 @@ export default function ProfileContent({
   const rankPoints = (rankHistory?.rank_history ?? []).filter(
     (p) => p.rank != null,
   );
-  const sortedRank = [...rankPoints].sort((a, b) =>
-    b.rank_date.localeCompare(a.rank_date),
-  );
-  const currentRank = sortedRank.length > 0 ? sortedRank[0].rank : null;
+  // Final label is the profile's materialized estimate; the directory estimate
+  // only backs it while the profile query is loading.
+  const currentRank = profile.rank.estimated_rank ?? estimatedRank ?? null;
 
   const bioFacts = (
     <dl className="bio-grid">
@@ -330,13 +337,7 @@ export default function ProfileContent({
                 {profile.career.matches_played}
               </span>
             </div>
-            <div className="stat">
-              <span className="stat-label">Career win rate</span>
-              <span className="stat-num is-grass num">
-                {pct(profile.career.win_rate)}
-              </span>
-            </div>
-            {currentRank !== null && (
+            {currentRank != null && (
               <div className="stat">
                 <span className="stat-label">Current rank</span>
                 <span className="stat-num is-ice num">#{currentRank}</span>
@@ -361,66 +362,35 @@ export default function ProfileContent({
       </section>
 
       <div className="stats-row">
-        <Card title="Career all-time">
-          <div className="career-stats-col">
-            <StatWithDelta
-              label="First serve win %"
-              playerRate={profile.career.first_serve_win_pct}
-              tourRate={profile.tour_averages?.first_serve_win_pct ?? null}
-            />
-            <StatWithDelta
-              label="Second serve win %"
-              playerRate={profile.career.second_serve_win_pct}
-              tourRate={profile.tour_averages?.second_serve_win_pct ?? null}
-            />
-          </div>
-          <div className="surface-section" style={{ marginTop: "1rem" }}>
-            <span className="field-label">Surface breakdown</span>
-            <div className="space-y-3" style={{ marginTop: "0.65rem" }}>
-              {profile.surface_rates.length === 0 ? (
-                <Empty message="No surface data" />
-              ) : (
-                profile.surface_rates.map((s) => (
-                  <div key={s.surface}>
-                    <div className="flex items-baseline justify-between gap-3 text-sm">
-                      <span className="capitalize font-semibold">
-                        {s.surface}
-                      </span>
-                      <span className="num text-xs text-[var(--text-faint)]">
-                        {s.matches} {s.matches === 1 ? "match" : "matches"}
-                      </span>
-                    </div>
-                    <div className="bar mt-1">
-                      <div
-                        className={`bar-fill ${s.surface === "clay" ? "is-clay" : s.surface === "grass" ? "is-grass" : "is-ice"}`}
-                        style={{
-                          width:
-                            s.win_rate == null || s.matches === 0
-                              ? "0%"
-                              : `${Math.min(100, s.win_rate * 100)}%`,
-                        }}
-                      />
-                    </div>
-                    <div className="mt-0.5 text-right text-xs">
-                      {s.matches === 0 ? (
-                        <span className="text-[var(--text-faint)]">
-                          n/a (n=0)
-                        </span>
-                      ) : (
-                        <span className="num font-semibold">
-                          {pct(s.win_rate)}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
+        <Card title="Service">
+          <div className="sr-list">
+            {serveMetrics.map((m) => (
+              <Metric
+                key={m.key}
+                label={m.label}
+                value={profile.serve[m.key]}
+                delta={profile.tour_comparisons[m.key]}
+                unit={m.unit}
+              />
+            ))}
           </div>
         </Card>
-
-        {tourneyTable}
+        <Card title="Return">
+          <div className="sr-list">
+            {returnMetrics.map((m) => (
+              <Metric
+                key={m.key}
+                label={m.label}
+                value={profile.return[m.key]}
+                delta={profile.tour_comparisons[m.key]}
+                unit={m.unit}
+              />
+            ))}
+          </div>
+        </Card>
       </div>
+
+      {tourneyTable}
 
       <Card title="Rank history">
         {rankLoading ? (

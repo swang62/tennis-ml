@@ -859,7 +859,10 @@ html.light {
   }
 
   .picker-option {
-    display: block;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
     width: 100%;
     padding: 0.55rem 0.8rem;
     text-align: left;
@@ -869,6 +872,21 @@ html.light {
     border: 0;
     cursor: pointer;
     transition: background-color 0.12s var(--ease);
+  }
+
+  .picker-option-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .picker-option-rank {
+    flex: none;
+    font-family: var(--font-data);
+    font-size: 0.6875rem;
+    color: var(--text-faint);
+    font-variant-numeric: tabular-nums;
   }
 
   .picker-option:hover,
@@ -1293,6 +1311,52 @@ html.light {
       flex-direction: row;
       align-items: stretch;
     }
+  }
+
+  /* ---------- serve / return metric sections ---------- */
+
+  .sr-list {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .sr-metric {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.55rem 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .sr-metric:last-child {
+    border-bottom: 0;
+  }
+
+  .sr-label {
+    font-size: 0.8125rem;
+    color: var(--text-dim);
+    min-width: 0;
+  }
+
+  .sr-value-row {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    flex: none;
+  }
+
+  .sr-value {
+    font-size: 1.125rem;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .sr-delta {
+    font-size: 0.75rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-dim);
   }
 
   /* ---------- tournament table ---------- */

@@ -21,7 +21,9 @@ WITH direct AS (
         CAST(SUM(double_faults) AS DOUBLE PRECISION)
             / NULLIF(SUM(total_serve_points), 0) AS df_rate,
         CAST(SUM(aces) AS DOUBLE PRECISION)
-            / NULLIF(SUM(service_games), 0) AS aces_per_svc_game
+            / NULLIF(SUM(service_games), 0) AS aces_per_svc_game,
+        CAST(SUM(break_points_faced) AS DOUBLE PRECISION)
+            / NULLIF(SUM(service_games), 0) AS break_point_opportunities_per_return_game
     FROM {{ ref('player_matches') }}
 )
 SELECT ta.singleton_id, 'tour_ace_rate' AS column_name,
@@ -72,3 +74,11 @@ SELECT ta.singleton_id, 'tour_aces_per_svc_game', ta.tour_aces_per_svc_game, d.a
 FROM {{ ref('tour_averages') }} ta
 CROSS JOIN direct d
 WHERE ta.tour_aces_per_svc_game IS DISTINCT FROM d.aces_per_svc_game
+UNION ALL
+SELECT ta.singleton_id, 'tour_break_point_opportunities_per_return_game',
+       ta.tour_break_point_opportunities_per_return_game,
+       d.break_point_opportunities_per_return_game
+FROM {{ ref('tour_averages') }} ta
+CROSS JOIN direct d
+WHERE ta.tour_break_point_opportunities_per_return_game
+    IS DISTINCT FROM d.break_point_opportunities_per_return_game

@@ -32,7 +32,7 @@ from src.constants import (
     PROFILES_TABLE,
     ROOT,
     SILVER_PLAYER_MATCHES,
-    SILVER_ROLLING_FEATURES,
+    TOUR_AVERAGES_TABLE,
 )
 from src.db.client import execute_df, first_row_dict
 from src.features.columns import FEATURE_COLS
@@ -41,7 +41,6 @@ from src.features.inference import (
     _to_date,
     build_inference_features_bulk,
 )
-from src.features.tour_averages import load_tour_averages
 from src.models.similarity import PlayerSimilarity
 from src.utils import load_env
 
@@ -54,6 +53,8 @@ MODEL_INFO_FILE = AUX_DIR / "model_info.json"
 load_env()
 
 # Set LOG_LEVEL=DEBUG to enable per-request observability prints.
+# Suppress BentoML's noisy service lifecycle INFO (initialized/cleanup spam).
+logging.getLogger("bentoml").setLevel(logging.WARNING)
 _log = logging.getLogger("tennis_ml.serving")
 _log.setLevel(getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO))
 if not _log.handlers:
@@ -114,6 +115,22 @@ def _records(df: pd.DataFrame) -> list[dict[str, object]]:
     return [{str(k): _iso(v) for k, v in row.items()} for row in df.to_dict("records")]
 
 
+def _complement(value: object) -> object:
+    """1 - benchmark for return-side tour comparisons; None when the benchmark is null."""
+    number = _iso(value)
+    if number is None:
+        return None
+    return 1.0 - cast(float, number)
+
+
+def _delta(player_value: object, tour_value: object) -> object:
+    """Player-minus-tour delta; None when either side is unavailable."""
+    player, tour = _iso(player_value), _iso(tour_value)
+    if player is None or tour is None:
+        return None
+    return cast(float, player) - cast(float, tour)
+
+
 def _require_id(request: Request, name: str) -> str | None:
     """Return the non-blank query param value or None (caller turns None into a 400)."""
     raw = request.query_params.get(name)
@@ -158,71 +175,58 @@ def _predict_from_ids_bulk_impl(
 
 # ── SQL (table names interpolated from constants; values always via `%s`) ──
 
+# Directory read from the materialized player-grain profile table. estimated_rank
+# is a pure window over materialized latest_rank_points (no match-fact scan);
+# players without positive points keep a null rank.
 _PLAYERS_SQL = f"""
+WITH ranked AS (
+    SELECT
+        player_id,
+        display_name,
+        match_count,
+        latest_rank_points,
+        CASE WHEN latest_rank_points IS NOT NULL
+             THEN ROW_NUMBER() OVER (
+                 ORDER BY latest_rank_points DESC NULLS LAST, player_id ASC
+             )
+             ELSE NULL END AS estimated_rank
+    FROM {PROFILES_TABLE}
+)
+SELECT player_id, display_name, match_count AS matches_played,
+       latest_rank_points, estimated_rank
+FROM ranked
+ORDER BY estimated_rank NULLS LAST, display_name, player_id
+"""
+
+# One point query: the player's materialized profile cross joined to the one-row
+# tour singleton. estimated_rank reuses the directory window so profile and
+# picker ranks agree. Tour comparison deltas are computed in Python, not SQL.
+_PROFILE_SQL = f"""
+WITH ranked AS (
+    SELECT
+        pp.*,
+        CASE WHEN pp.latest_rank_points IS NOT NULL
+             THEN ROW_NUMBER() OVER (
+                 ORDER BY pp.latest_rank_points DESC NULLS LAST, pp.player_id ASC
+             )
+             ELSE NULL END AS estimated_rank
+    FROM {PROFILES_TABLE} pp
+)
 SELECT
-    p.player_id,
-    p.display_name,
-    COUNT(pm.player_id) AS matches_played
-FROM {PROFILES_TABLE} p
-LEFT JOIN {SILVER_PLAYER_MATCHES} pm ON pm.player_id = p.player_id
-GROUP BY p.player_id, p.display_name
-ORDER BY p.display_name
-"""
-
-# Bio block: identity columns the dashboard shows on the profile header.
-_PROFILE_BIO_SQL = f"""
-SELECT
-    player_id, display_name, handedness, backhand, height,
-    turned_pro, birthplace, summary
-FROM {PROFILES_TABLE}
-WHERE player_id = %s
-"""
-
-# Career rates use NULLIF and double precision to avoid divide-by-zero and truncation.
-_PROFILE_CAREER_SQL = f"""
-SELECT
-    COUNT(*) AS matches_played,
-    AVG(match_won) AS win_rate,
-    SUM(first_serve_points_won)::double precision / NULLIF(SUM(first_serves_made), 0)
-        AS first_serve_win_pct,
-    SUM(second_serve_points_won)::double precision
-        / NULLIF(SUM(total_serve_points - first_serves_made), 0)
-        AS second_serve_win_pct,
-    SUM(first_serve_points_won + second_serve_points_won)::double precision
-        / NULLIF(SUM(total_serve_points), 0)
-        AS serve_win_pct,
-    SUM(break_points_saved)::double precision / NULLIF(SUM(break_points_faced), 0)
-        AS break_points_saved_pct
-FROM {SILVER_PLAYER_MATCHES}
-WHERE player_id = %s
-"""
-
-# Unplayed surfaces have no row; the handler renders them as n/a, not 0%.
-_PROFILE_SURFACE_SQL = f"""
-SELECT
-    surface,
-    COUNT(*) AS matches,
-    AVG(match_won) AS win_rate
-FROM {SILVER_PLAYER_MATCHES}
-WHERE player_id = %s
-GROUP BY surface
-"""
-
-# Newest as-of rolling snapshot per player (recent form).
-_PROFILE_FORM_SQL = f"""
-SELECT snapshot_date, win_rate_10
-FROM {SILVER_ROLLING_FEATURES}
-WHERE player_id = %s
-ORDER BY player_match_number DESC
-LIMIT 1
-"""
-
-# Rank-points series ordered by date, for latest-vs-earliest trend.
-_PROFILE_RANK_POINTS_SQL = f"""
-SELECT match_date, player_rank_points
-FROM {SILVER_PLAYER_MATCHES}
-WHERE player_id = %s AND player_rank_points IS NOT NULL
-ORDER BY match_date, match_id
+    r.*,
+    ta.tour_first_serve_win_pct,
+    ta.tour_second_serve_win_pct,
+    ta.tour_ace_rate,
+    ta.tour_first_serve_pct,
+    ta.tour_break_points_saved_pct,
+    ta.tour_serve_win_pct,
+    ta.tour_return_points_won_pct,
+    ta.tour_df_rate,
+    ta.tour_aces_per_svc_game,
+    ta.tour_break_point_opportunities_per_return_game
+FROM ranked r
+CROSS JOIN {TOUR_AVERAGES_TABLE} ta
+WHERE r.player_id = %s
 """
 
 # Expand both bronze sides into a player ranking time series.
@@ -283,19 +287,15 @@ ORDER BY match_date DESC, match_id DESC
 LIMIT %s
 """
 
-# Dedupe player perspectives; a_won is the canonical lower-id side's result.
+# Direct bronze pair read: one row per meeting, no silver expansion or dedup.
 _H2H_MEETINGS_SQL = f"""
-SELECT
-    pm.match_id, pm.match_date, br.surface, br.tournament, br.round,
-    MAX(br.winner_id) AS winner_id,
-    MAX(CASE WHEN pm.player_id < pm.opponent_id THEN pm.match_won
-             ELSE 1 - pm.match_won END) AS a_won
-FROM {SILVER_PLAYER_MATCHES} pm
-LEFT JOIN {BRONZE_TABLE} br ON br.match_id = pm.match_id
-WHERE ((%s = pm.player_id AND %s = pm.opponent_id)
-    OR (%s = pm.opponent_id AND %s = pm.player_id))
-GROUP BY pm.match_id, pm.match_date, br.surface, br.tournament, br.round
-ORDER BY pm.match_date DESC, pm.match_id DESC
+SELECT match_id, match_date, tournament, round, surface,
+       player1_id, player2_id, winner_id
+FROM {BRONZE_TABLE}
+WHERE (player1_id = %s AND player2_id = %s)
+   OR (player1_id = %s AND player2_id = %s)
+ORDER BY match_date DESC, match_id DESC
+LIMIT %s
 """
 
 
@@ -315,87 +315,145 @@ def _player_profile(request: Request) -> JSONResponse:
     if player_id is None:
         return _err(400, "missing required query parameter: player_id")
     try:
-        bio_df = execute_df(_PROFILE_BIO_SQL, [player_id])
-        if bio_df.empty:
-            return _err(404, f"unknown player_id: {player_id}")
-        career_df = execute_df(_PROFILE_CAREER_SQL, [player_id])
-        surf_df = execute_df(_PROFILE_SURFACE_SQL, [player_id])
-        form_df = execute_df(_PROFILE_FORM_SQL, [player_id])
-        rp_df = execute_df(_PROFILE_RANK_POINTS_SQL, [player_id])
+        df = execute_df(_PROFILE_SQL, [player_id])
     except Exception as exc:
         return _err(500, f"profile query failed: {exc}")
+    # One point query: the player's materialized profile row plus the tour
+    # singleton (cross join). An empty result means the player is unknown.
+    if df.empty:
+        return _err(404, f"unknown player_id: {player_id}")
+    row = first_row_dict(df)
 
-    # Weighted tour benchmarks from the gold.tour_averages singleton (never an
-    # aggregate computed in the request path). NULL denominators -> null.
-    try:
-        ta = load_tour_averages()
-    except RuntimeError as exc:
-        return _err(500, f"tour_averages lookup failed: {exc}")
+    def delta(col: str, tour_value: object) -> object:
+        return _delta(row[col], tour_value)
+
+    serve = {
+        "first_serve_in_pct": _iso(row["first_serve_in_pct"]),
+        "aces_per_first_serve": _iso(row["aces_per_first_serve"]),
+        "first_serve_points_won_pct": _iso(row["first_serve_points_won_pct"]),
+        "second_serve_points_won_pct": _iso(row["second_serve_points_won_pct"]),
+        "overall_serve_points_won_pct": _iso(row["overall_serve_points_won_pct"]),
+        "double_faults_per_serve_point": _iso(row["double_faults_per_serve_point"]),
+        "aces_per_service_game": _iso(row["aces_per_service_game"]),
+        "break_points_saved_pct": _iso(row["break_points_saved_pct"]),
+    }
+    return_metrics = {
+        "return_points_won_pct": _iso(row["return_points_won_pct"]),
+        "first_serve_return_points_won_pct": _iso(row["first_serve_return_points_won_pct"]),
+        "second_serve_return_points_won_pct": _iso(row["second_serve_return_points_won_pct"]),
+        "break_point_conversion_pct": _iso(row["break_point_conversion_pct"]),
+        "break_point_opportunities_per_return_game": _iso(
+            row["break_point_opportunities_per_return_game"]
+        ),
+    }
+
+    # Deltas are player minus tour, computed here — never in SQL. The three
+    # return-side benchmarks derive from their serve complements; nulls flow
+    # through unchanged.
+    tour_comparisons = {
+        "first_serve_in_pct": delta("first_serve_in_pct", row["tour_first_serve_pct"]),
+        "aces_per_first_serve": delta("aces_per_first_serve", row["tour_ace_rate"]),
+        "first_serve_points_won_pct": delta(
+            "first_serve_points_won_pct", row["tour_first_serve_win_pct"]
+        ),
+        "second_serve_points_won_pct": delta(
+            "second_serve_points_won_pct", row["tour_second_serve_win_pct"]
+        ),
+        "overall_serve_points_won_pct": delta(
+            "overall_serve_points_won_pct", row["tour_serve_win_pct"]
+        ),
+        "double_faults_per_serve_point": delta(
+            "double_faults_per_serve_point", row["tour_df_rate"]
+        ),
+        "aces_per_service_game": delta("aces_per_service_game", row["tour_aces_per_svc_game"]),
+        "break_points_saved_pct": delta(
+            "break_points_saved_pct", row["tour_break_points_saved_pct"]
+        ),
+        "return_points_won_pct": delta("return_points_won_pct", row["tour_return_points_won_pct"]),
+        "first_serve_return_points_won_pct": delta(
+            "first_serve_return_points_won_pct",
+            _complement(row["tour_first_serve_win_pct"]),
+        ),
+        "second_serve_return_points_won_pct": delta(
+            "second_serve_return_points_won_pct",
+            _complement(row["tour_second_serve_win_pct"]),
+        ),
+        "break_point_conversion_pct": delta(
+            "break_point_conversion_pct", _complement(row["tour_break_points_saved_pct"])
+        ),
+        "break_point_opportunities_per_return_game": delta(
+            "break_point_opportunities_per_return_game",
+            row["tour_break_point_opportunities_per_return_game"],
+        ),
+    }
+
+    # Weighted tour benchmarks from the same row (the singleton side of the join).
     tour_averages_out = {
-        "first_serve_win_pct": _iso(ta.get("tour_first_serve_win_pct")),
-        "second_serve_win_pct": _iso(ta.get("tour_second_serve_win_pct")),
+        "first_serve_win_pct": _iso(row["tour_first_serve_win_pct"]),
+        "second_serve_win_pct": _iso(row["tour_second_serve_win_pct"]),
     }
 
-    bio = first_row_dict(bio_df)
-    career = first_row_dict(career_df)
-    career_out: dict[str, object] = {
-        "matches_played": _iso(career["matches_played"]),
-        "win_rate": _iso(career["win_rate"]),
-        "first_serve_win_pct": _iso(career["first_serve_win_pct"]),
-        "second_serve_win_pct": _iso(career["second_serve_win_pct"]),
-        "serve_win_pct": _iso(career["serve_win_pct"]),
-        "break_points_saved_pct": _iso(career["break_points_saved_pct"]),
-    }
-
-    # Unplayed model surfaces are n/a, not 0%.
-    surf_rates = {r["surface"]: r for r in surf_df.to_dict("records")}
+    # Unplayed model surfaces are n/a (null win rate), not 0%.
     surface_rates = [
         {
             "surface": s,
-            "matches": int(surf_rates[s]["matches"]) if s in surf_rates else 0,
-            "win_rate": _iso(surf_rates[s]["win_rate"]) if s in surf_rates else None,
+            "matches": int(row[f"{s}_matches"]),
+            "win_rate": _iso(row[f"{s}_win_rate"]),
         }
         for s in ("clay", "grass", "hard")
     ]
 
-    # Recent form: last-10 win rate from the newest rolling snapshot (if any).
+    # Recent form from the newest rolling snapshot (if the player has one).
     recent_form: dict[str, object] | None = None
-    if not form_df.empty:
-        form = first_row_dict(form_df)
+    if row["recent_snapshot_date"] is not None:
         recent_form = {
-            "snapshot_date": _iso(form["snapshot_date"]),
-            "last_10_win_rate": _iso(form["win_rate_10"]),
+            "snapshot_date": _iso(row["recent_snapshot_date"]),
+            "last_10_win_rate": _iso(row["win_rate_10"]),
         }
 
-    # Rank-points trend from earliest to latest observation.
+    # Rank-points trend from the materialized latest vs earliest positive points.
     rank_points_trend: dict[str, object] | None = None
-    if not rp_df.empty:
-        points = rp_df["player_rank_points"].tolist()
-        earliest = float(points[0])
-        latest = float(points[-1])
-        # single point: no trend to show
-        delta = latest - earliest if len(points) >= 2 else 0.0
+    if row["latest_rank_points"] is not None:
         rank_points_trend = {
-            "earliest": earliest,
-            "latest": latest,
-            "delta": delta,
+            "earliest": _iso(row["earliest_rank_points"]),
+            "latest": _iso(row["latest_rank_points"]),
+            "delta": _iso(row["rank_points_delta"]),
         }
 
     return _ok(
         {
-            "player_id": bio["player_id"],
-            "display_name": bio["display_name"],
-            "handedness": bio["handedness"],
-            "backhand": bio["backhand"],
-            "height": bio["height"],
-            "turned_pro": bio["turned_pro"],
-            "birthplace": bio["birthplace"],
-            "summary": bio["summary"],
-            "career": career_out,
+            "player_id": row["player_id"],
+            "display_name": row["display_name"],
+            "handedness": row["handedness"],
+            "backhand": row["backhand"],
+            "height": _iso(row["height"]),
+            "turned_pro": _iso(row["turned_pro"]),
+            "birthplace": row["birthplace"],
+            "summary": row["summary"],
+            "atp_name": row["atp_name"],
+            "birthdate": _iso(row["birthdate"]),
+            "weight": _iso(row["weight"]),
+            "coaches": row["coaches"],
+            "ioc": row["ioc"],
+            "career": {
+                "matches_played": int(row["match_count"]),
+                "latest_match_date": _iso(row["latest_match_date"]),
+            },
+            "serve": serve,
+            "return": return_metrics,
             "surface_rates": surface_rates,
             "recent_form": recent_form,
             "rank_points_trend": rank_points_trend,
+            "rank": {
+                "estimated_rank": _iso(row["estimated_rank"]),
+                "latest_rank_points": _iso(row["latest_rank_points"]),
+                "earliest_rank_points": _iso(row["earliest_rank_points"]),
+                "earliest_rank_points_date": _iso(row["earliest_rank_points_date"]),
+                "latest_rank_points_date": _iso(row["latest_rank_points_date"]),
+                "rank_points_delta": _iso(row["rank_points_delta"]),
+            },
             "tour_averages": tour_averages_out,
+            "tour_comparisons": tour_comparisons,
         }
     )
 
@@ -465,24 +523,31 @@ def _head_to_head(request: Request) -> JSONResponse:
         )
     # Canonical pair: lower id is the player_* side (matches model convention).
     lower, higher = sorted([p1, p2])
+    raw_limit = request.query_params.get("limit", "100")
     try:
-        df = execute_df(_H2H_MEETINGS_SQL, [lower, higher, lower, higher])
+        limit = int(raw_limit)
+    except ValueError:
+        return _err(400, "limit must be an integer")
+    limit = max(1, min(limit, 100))  # clamp: a pair never meets more than this
+    try:
+        df = execute_df(_H2H_MEETINGS_SQL, [lower, higher, higher, lower, limit])
     except Exception as exc:
         return _err(500, f"head-to-head query failed: {exc}")
 
     meetings = []
     for r in _records(df):
         winner_id = r["winner_id"]
-        loser_id = higher if winner_id == lower else lower
+        player1_won = winner_id == lower
         meetings.append(
             {
+                "match_id": r["match_id"],
                 "match_date": r["match_date"],
                 "surface": r["surface"],
                 "tournament": r["tournament"],
                 "round": r["round"],
                 "winner_id": winner_id,
-                "loser_id": loser_id,
-                "player1_won": bool(r["a_won"] == 1),
+                "loser_id": higher if player1_won else lower,
+                "player1_won": bool(player1_won),
             }
         )
 

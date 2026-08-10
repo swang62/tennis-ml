@@ -10,7 +10,8 @@ from typing import Any, LiteralString, cast
 import pandas as pd
 import requests
 
-from src.constants import ROOT
+from src.constants import BRONZE_PROFILES_TABLE, PROFILES_TABLE, ROOT
+from src.countries import UNK, valid_ioc
 from src.db.client import get_conn, to_dataframe
 from src.features.columns import BRONZE_COLUMNS
 from src.features.validate import run_ingestion_checks
@@ -18,7 +19,6 @@ from src.utils import load_env
 
 BRONZE_TABLE = "bronze.match_events"
 GOLD_TABLE = "gold.match_features"
-PROFILES_TABLE = "gold.player_profiles"
 
 # ATP data provides player identity; Wikipedia adds missing enrichment.
 ATP_DATABASE_CSV = ROOT / "data" / "ATP_player_database.csv"
@@ -398,6 +398,10 @@ def load_atp_profiles(
     atp = atp[~cast(pd.Series, atp["id"]).duplicated(keep="last")]
 
     ids = cast(pd.Series, atp["id"])
+    # IOC codes are trimmed/uppercased; verified codes are preserved and
+    # missing/invalid values fall back to the UNK sentinel (see src/countries).
+    ioc = cast(pd.Series, atp["ioc"]).map(valid_ioc)
+    unresolved = int((ioc == UNK).sum())
     birthdate = _parse_birthdate(cast(pd.Series, atp["birthdate"]), ids)
     weight = _parse_int(cast(pd.Series, atp["weight"]), "weight", ids, low=20, high=300).astype(
         "Int16"
@@ -421,28 +425,30 @@ def load_atp_profiles(
             "coaches": atp["coaches"],
             "handedness": atp["hand"],
             "backhand": atp["backhand"],
-            "ioc": atp["ioc"],
+            "ioc": ioc,
         }
     )
 
     _copy_df_into(
-        PROFILES_TABLE,
+        BRONZE_PROFILES_TABLE,
         cast(pd.DataFrame, df[ATP_PROFILE_COLUMNS]),
         conflict_col="player_id",
         update_cols=[c for c in ATP_PROFILE_COLUMNS if c != "player_id"],
     )
+    if unresolved:
+        print(f"  IOC: {unresolved}/{len(df)} profiles unresolved (missing/invalid -> {UNK})")
     return len(df)
 
 
 # ── Wikipedia Profile Enrichment ────────────────────────────────
 
 
-def get_players_without_profiles() -> list[str]:
+def get_players_without_summary() -> list[str]:
+    """Players in gold.player_profiles who lack a Wikipedia summary."""
     sql = f"""
-        SELECT DISTINCT gold.player_id
-        FROM {GOLD_TABLE} gold
-        LEFT JOIN {PROFILES_TABLE} prof ON gold.player_id = prof.player_id
-        WHERE prof.player_id IS NULL
+        SELECT player_id
+        FROM {PROFILES_TABLE}
+        WHERE summary IS NULL OR summary = ''
     """
     df = to_dataframe(sql)
     return df["player_id"].tolist()
@@ -556,14 +562,6 @@ def enrich_player(name: str, player_id: str | None = None) -> bool:
         print(f"  SKIP {pid}: no usable paragraph for {title!r}")
         return False
 
-    infobox = extract_infobox_fields(page["summary"])
-
-    # Wikipedia height is meters; the database stores centimeters.
-    height_m = cast(str | None, infobox.get("height"))
-    height_cm = round(float(height_m) * 100) if height_m else None
-    turned_pro_raw = cast(str | None, infobox.get("turned_pro"))
-    turned_pro = int(turned_pro_raw) if turned_pro_raw else None
-
     # Prepared statement: None binds as NULL, apostrophes need no escaping.
     summary_text = bio_paragraph[:SUMMARY_MAX_CHARS]
 
@@ -571,30 +569,18 @@ def enrich_player(name: str, player_id: str | None = None) -> bool:
     conn.execute(
         cast(
             LiteralString,
-            f"""INSERT INTO {PROFILES_TABLE}
-            (player_id, display_name, summary, handedness, backhand,
-             height, turned_pro, enriched_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
-        ON CONFLICT (player_id) DO UPDATE SET
-            summary = excluded.summary,
-            enriched_at = excluded.enriched_at""",
+            f"""UPDATE {PROFILES_TABLE}
+            SET summary = %s, enriched_at = CURRENT_TIMESTAMP
+            WHERE player_id = %s""",
         ),
-        [
-            pid,
-            page["title"],
-            summary_text,
-            infobox.get("plays", "").lower().replace(" ", "_"),
-            infobox.get("backhand", "").lower().replace(" ", "_"),
-            height_cm,
-            turned_pro,
-        ],
+        [summary_text, pid],
     )
     print(f"  OK {pid}: wrote {len(summary_text)}-char summary from {page['title']}")
     return True
 
 
 def enrich_players(player_ids: list[str]) -> int:
-    """Best-effort enrich profile rows that do not already have a summary."""
+    """Best-effort enrich gold profiles missing a Wikipedia summary."""
     if not player_ids:
         return 0
     conn = get_conn()
@@ -624,27 +610,21 @@ def enrich_players(player_ids: list[str]) -> int:
 
 
 def enrich_missing() -> int:
-    """Find all players in gold missing from profiles, fetch from Wikipedia.
+    """Idempotent Wikipedia enrichment for gold profiles missing a summary.
 
-    Players without a profile row have no stored name, so the raw player id is
-    used as the search key (best effort). Returns count of profiles inserted.
+    Queries gold.player_profiles for rows with null/empty summary and fetches
+    bios from Wikipedia. Skips profiles that already have a non-empty summary.
+    Returns count of profiles enriched.
     """
-    missing = get_players_without_profiles()
-    if not missing:
-        print("All players have profiles. Nothing to do.")
+    missing_summary = get_players_without_summary()
+    if not missing_summary:
+        print("All profiles have summaries. Nothing to do.")
         return 0
 
-    print(f"Found {len(missing)} players without profiles")
-    inserted = 0
-    for player in missing:
-        try:
-            if enrich_player(player):
-                inserted += 1
-        except Exception as e:
-            print(f"  ERROR {player}: {e}")
-
-    print(f"Done: {inserted}/{len(missing)} profiles inserted")
-    return inserted
+    print(f"Found {len(missing_summary)} profiles without summaries")
+    enriched = enrich_players(missing_summary)
+    print(f"Done: {enriched}/{len(missing_summary)} profiles enriched")
+    return enriched
 
 
 if __name__ == "__main__":

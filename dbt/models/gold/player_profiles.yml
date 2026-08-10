@@ -1,0 +1,101 @@
+version: 2
+
+models:
+  - name: player_profiles
+    description: >
+      One row per player with identity, biography, match counts, career
+      service/return aggregates, surface counts/win rates, latest rolling
+      snapshot, rank points, and estimated current rank. Materialized from
+      bronze.player_profiles (identity) + silver.player_matches (aggregates)
+      + silver.rolling_features (latest snapshot). Zero-match players are
+      preserved with zero counts and null rates.
+    columns:
+      - name: player_id
+        description: Canonical ATP id (primary key).
+        tests:
+          - unique
+          - not_null
+      - name: display_name
+        description: Canonical display name from ATP database.
+      - name: atp_name
+        description: Alternate name variant.
+      - name: birthdate
+        description: Birth date.
+      - name: weight
+        description: Weight in kg (NULL when unknown).
+      - name: height
+        description: Height in cm (NULL when unknown).
+      - name: turned_pro
+        description: Year turned professional (NULL when unknown).
+      - name: birthplace
+        description: Birthplace.
+      - name: coaches
+        description: Coach names.
+      - name: handedness
+        description: Playing hand (R/L).
+      - name: backhand
+        description: Backhand style (1H/2H).
+      - name: ioc
+        description: IOC country code.
+      - name: summary
+        description: Wikipedia bio summary.
+      - name: enriched_at
+        description: Timestamp of last Wikipedia enrichment.
+      - name: match_count
+        description: Total career matches in bronze.
+        tests:
+          - not_null
+      - name: latest_match_date
+        description: Most recent match date (NULL for zero-match players).
+      - name: latest_rank_points
+        description: Latest positive ATP rank points (NULL if never had points).
+      - name: earliest_rank_points
+        description: Earliest positive ATP rank points.
+      - name: earliest_rank_points_date
+        description: Date of earliest positive rank points.
+      - name: latest_rank_points_date
+        description: Date of latest positive rank points.
+      - name: rank_points_delta
+        description: Latest minus earliest positive rank points.
+      - name: first_serve_in_pct
+        description: Career first serve in percentage (weighted).
+      - name: aces_per_first_serve
+        description: Career aces per first serve.
+      - name: first_serve_points_won_pct
+        description: Career first serve points won percentage.
+      - name: second_serve_points_won_pct
+        description: Career second serve points won percentage.
+      - name: overall_serve_points_won_pct
+        description: Career overall serve points won percentage.
+      - name: double_faults_per_serve_point
+        description: Career double faults per serve point.
+      - name: aces_per_service_game
+        description: Career aces per service game.
+      - name: break_points_saved_pct
+        description: Career break points saved percentage.
+      - name: return_points_won_pct
+        description: Career return points won percentage.
+      - name: first_serve_return_points_won_pct
+        description: Career first serve return points won (from opponent perspective).
+      - name: second_serve_return_points_won_pct
+        description: Career second serve return points won (from opponent perspective).
+      - name: break_point_conversion_pct
+        description: Career break point conversion percentage (from opponent perspective).
+      - name: break_point_opportunities_per_return_game
+        description: Career break point opportunities per return game (from opponent perspective).
+      - name: hard_matches
+        description: Career hard court matches.
+      - name: clay_matches
+        description: Career clay court matches.
+      - name: grass_matches
+        description: Career grass court matches.
+      - name: hard_win_rate
+        description: Career hard court win rate.
+      - name: clay_win_rate
+        description: Career clay court win rate.
+      - name: grass_win_rate
+        description: Career grass court win rate.
+      - name: recent_snapshot_date
+        description: Date of latest rolling features snapshot.
+      - name: win_rate_10
+        description: Win rate over last 10 matches from latest snapshot.

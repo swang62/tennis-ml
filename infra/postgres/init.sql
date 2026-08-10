@@ -9,12 +9,12 @@
 --
 -- It is idempotent (CREATE ... IF NOT EXISTS), so re-running it is safe.
 
--- Creates structure only: the three schemas and the two non-dbt-owned base
--- tables (bronze.match_events and gold.player_profiles). No data is loaded
--- here — dbt owns silver.player_matches / silver.rolling_features /
--- gold.match_features / gold.tour_averages, and data is written later by
--- just db-seed / db-etl. Nothing is baked into an image; the Compose named
--- volume persists everything.
+-- Creates structure only: the three schemas and the non-dbt-owned base tables
+-- (bronze.match_events and bronze.player_profiles). No data is loaded here —
+-- dbt owns silver.player_matches / silver.rolling_features /
+-- gold.match_features / gold.tour_averages / gold.player_profiles, and data
+-- is written later by just db-seed / db-etl. Nothing is baked into an image;
+-- the Compose named volume persists everything.
 
 CREATE SCHEMA IF NOT EXISTS bronze;
 CREATE SCHEMA IF NOT EXISTS silver;
@@ -106,6 +106,51 @@ CREATE INDEX IF NOT EXISTS idx_match_events_p2_date
 -- (data/ATP_player_database.csv, canonical ATP id/name + base metadata).
 -- Enrichment columns at the bottom are left empty by the ATP load and filled
 -- by the Wikipedia fallback in src/flows/ingest.py for players it covers.
+--
+-- bronze.player_profiles is the ingest-owned write target: ATP identity
+-- loading and Wikipedia enrichment both UPSERT here (on player_id). dbt
+-- materializes the enriched, aggregate gold.player_profiles from this source.
+CREATE TABLE IF NOT EXISTS bronze.player_profiles (
+    player_id    VARCHAR PRIMARY KEY,  -- canonical ATP id (ATP_Database.id)
+    display_name VARCHAR,              -- canonical ATP name (ATP_Database.player)
+    atp_name     VARCHAR,              -- alternate name variant (ATP_Database.atpname)
+    birthdate    DATE,                 -- ATP_Database.birthdate (YYYYMMDD)
+    weight       SMALLINT,             -- kg (ATP_Database.weight) NULL when unknown
+    height       SMALLINT,             -- cm (ATP_Database.height) NULL when unknown
+    turned_pro   INTEGER,              -- year turned pro (ATP_Database.turnedpro)
+    birthplace   VARCHAR,              -- ATP_Database.birthplace
+    coaches      VARCHAR,              -- ATP_Database.coaches
+    handedness   VARCHAR,              -- ATP_Database.hand (R/L)
+    backhand     VARCHAR,              -- ATP_Database.backhand (1H/2H)
+    ioc          VARCHAR NOT NULL DEFAULT 'UNK',  -- ATP_Database.ioc; UNK when unknown
+    -- Wikipedia enrichment (fallback for incomplete ATP rows)
+    summary      VARCHAR,
+    enriched_at  TIMESTAMP
+);
+
+-- IOC invariant: every bronze.player_profiles.ioc row is non-null. New rows
+-- default to the UNK sentinel, and this idempotent upgrade backfills any
+-- existing NULL/empty values (from databases created before the invariant)
+-- to UNK, then enforces NOT NULL. Re-running is safe: the UPDATE is a no-op
+-- once no NULL/empty rows remain, and SET DEFAULT/SET NOT NULL are no-ops
+-- when already applied. Verified IOC values are never overwritten here.
+UPDATE bronze.player_profiles SET ioc = 'UNK'
+    WHERE ioc IS NULL OR ioc = '';
+ALTER TABLE bronze.player_profiles ALTER COLUMN ioc SET DEFAULT 'UNK';
+ALTER TABLE bronze.player_profiles ALTER COLUMN ioc SET NOT NULL;
+
+-- gold.player_profiles is now dbt-owned (dbt/models/gold/player_profiles.sql
+-- materializes it as a table from bronze.player_profiles + silver aggregates).
+-- This definition is retained ONLY as a fresh-install bootstrap convenience;
+-- dbt overwrites the relation (and its schema) on the first build.
+--
+-- ONE-TIME MIGRATION for existing installs: before the first `dbt build` with
+-- this change, the operator must manually drop the legacy ingest-owned table
+-- so dbt can recreate it with the materialized aggregate schema:
+--
+--   psql -U <user> -d <db> -c "DROP TABLE IF EXISTS gold.player_profiles;"
+--
+-- This is an explicit operator action; this file never drops data silently.
 CREATE TABLE IF NOT EXISTS gold.player_profiles (
     player_id    VARCHAR PRIMARY KEY,  -- canonical ATP id (ATP_Database.id)
     display_name VARCHAR,              -- canonical ATP name (ATP_Database.player)

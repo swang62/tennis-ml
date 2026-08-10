@@ -175,9 +175,9 @@ print("dev import complete")
     exit 1
 }
 
-echo "starting Bento on http://127.0.0.1:3000 (--reload) and Vite on http://127.0.0.1:5173; Ctrl-C stops both"
+echo "starting Bento on http://127.0.0.1:3000 and Vite on http://127.0.0.1:5173; Ctrl-C stops both"
 (
-    cd "$ROOT" && exec uv run bentoml serve src/serving/service.py:TennisPredictor --host 127.0.0.1 --port 3000 --reload
+    cd "$ROOT" && exec uv run bentoml serve src/serving/service.py:TennisPredictor --host 127.0.0.1 --port 3000
 ) &
 BENTO_PID=$!
 (

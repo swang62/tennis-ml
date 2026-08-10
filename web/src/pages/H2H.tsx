@@ -5,11 +5,9 @@ import type { EChartsOption } from "echarts";
 import {
   getHeadToHead,
   getPlayers,
-  getRankHistory,
   predictFromIds,
   type H2HMeeting,
   type MatchRound,
-  type RankHistory,
   type Surface,
   type TournamentTier,
 } from "../api";
@@ -69,17 +67,10 @@ function meetingMeta(m: H2HMeeting): string {
   return parts.filter(Boolean).join(" · ");
 }
 
-// Latest non-null rank is this page's sole rank signal.
-function lastRank(
-  history: RankHistory | undefined,
-): { rank: number; date: string } | null {
-  const pts = (history?.rank_history ?? []).filter((p) => p.rank != null);
-  if (pts.length === 0) return null;
-  const sorted = [...pts].sort((a, b) =>
-    a.rank_date.localeCompare(b.rank_date),
-  );
-  const latest = sorted[sorted.length - 1];
-  return { rank: latest.rank as number, date: latest.rank_date };
+// Latest non-null rank is this page's sole rank signal; the picker directory
+// carries the same materialized estimate as the profile view.
+function lastRank(player: { estimated_rank?: number | null } | undefined): number | null {
+  return player?.estimated_rank ?? null;
 }
 
 // Centered direct-comparison row.
@@ -109,16 +100,6 @@ export default function H2H() {
   const h2hQ = useQuery({
     queryKey: ["h2h", playerA, playerB],
     queryFn: () => getHeadToHead(playerA!, playerB!),
-    enabled: ready,
-  });
-  const rankAQ = useQuery({
-    queryKey: ["rank_history", playerA],
-    queryFn: () => getRankHistory(playerA!),
-    enabled: ready,
-  });
-  const rankBQ = useQuery({
-    queryKey: ["rank_history", playerB],
-    queryFn: () => getRankHistory(playerB!),
     enabled: ready,
   });
 
@@ -161,7 +142,7 @@ export default function H2H() {
     : 0;
 
   const rankOf = (id: string) =>
-    lastRank(id === playerA ? rankAQ.data : rankBQ.data);
+    lastRank(players.find((p) => p.player_id === id));
 
   const t = chartTokens();
   const ax = axisOption(t);
@@ -233,13 +214,13 @@ export default function H2H() {
     });
     const r1 = rankOf(h2h.player1_id);
     const r2 = rankOf(h2h.player2_id);
-    if (r1 || r2) {
+    if (r1 != null || r2 != null) {
       mirrorRows.push({
         label: "Current rank",
-        a: r1?.rank ?? null,
-        b: r2?.rank ?? null,
-        aText: r1 ? `#${r1.rank}` : "n/a",
-        bText: r2 ? `#${r2.rank}` : "n/a",
+        a: r1,
+        b: r2,
+        aText: r1 != null ? `#${r1}` : "n/a",
+        bText: r2 != null ? `#${r2}` : "n/a",
         invert: true,
       });
     }

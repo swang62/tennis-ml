@@ -92,3 +92,10 @@ UNION ALL
 SELECT singleton_id, 'tour_aces_per_svc_game', tour_aces_per_svc_game
 FROM {{ ref('tour_averages') }}
 WHERE tour_aces_per_svc_game IS NOT NULL AND tour_aces_per_svc_game < 0
+UNION ALL
+SELECT singleton_id, 'tour_break_point_opportunities_per_return_game',
+       tour_break_point_opportunities_per_return_game
+FROM {{ ref('tour_averages') }}
+WHERE tour_break_point_opportunities_per_return_game IS NOT NULL
+  AND (tour_break_point_opportunities_per_return_game < 0
+       OR tour_break_point_opportunities_per_return_game > 1)

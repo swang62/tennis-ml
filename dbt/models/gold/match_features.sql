@@ -121,7 +121,7 @@ WITH player_match_enriched AS (
     CROSS JOIN {{ ref('tour_averages') }} fd
     LEFT JOIN {{ source('bronze', 'match_events') }} bron
         ON bron.match_id = pm.match_id
-    LEFT JOIN gold.player_profiles prof
+    LEFT JOIN {{ ref('player_profiles') }} prof
         ON prof.player_id = pm.player_id
 ),
 -- Dedupe player perspectives to canonical meetings for H2H aggregation.

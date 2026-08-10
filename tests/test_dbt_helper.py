@@ -63,25 +63,16 @@ def test_dbt_build_cmd_is_exact():
     ]
 
 
-def test_etl_flow_does_not_trigger_wikipedia_enrichment(monkeypatch):
-    """ETL builds bronze-to-gold without online enrichment."""
+def test_etl_flow_builds_without_enrichment(monkeypatch):
+    """ETL builds bronze-to-gold without enrichment — it's a separate step."""
     monkeypatch.setattr("src.flows.etl.bronze_to_gold", lambda: FAKE_GOLD_COUNT)
-    monkeypatch.setattr(
-        "src.flows.etl.enrich_bios",
-        lambda: (_ for _ in ()).throw(AssertionError("etl_flow must not call enrich_bios")),
-    )
     monkeypatch.setattr("src.flows.etl.load_env", lambda: None)
 
     etl_flow()
 
 
-def test_etl_flow_enrich_true_calls_enrich_bios(monkeypatch):
-    """Only the explicit `enrich=True` opt-in triggers bio enrichment."""
-    monkeypatch.setattr("src.flows.etl.bronze_to_gold", lambda: FAKE_GOLD_COUNT)
-    calls = []
-    monkeypatch.setattr("src.flows.etl.enrich_bios", lambda: calls.append("enrich"))
-    monkeypatch.setattr("src.flows.etl.load_env", lambda: None)
+def test_enrich_missing_is_callable():
+    """Enrichment is a separate, idempotent module-level function."""
+    from src.flows.ingest import enrich_missing
 
-    etl_flow(enrich=True)
-
-    assert calls == ["enrich"]
+    assert callable(enrich_missing)

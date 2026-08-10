@@ -86,3 +86,39 @@ sources:
             description: Player2 age in fractional years at match time (raw loser_age).
           - name: winner_id
             description: Player who won the match (player1_id or player2_id).
+      - name: player_profiles
+        description: >
+          One row per player: identity and biography, upserted by ingest
+          (src/flows/ingest.py) from the ATP player database
+          (data/ATP_player_database.csv) and, when enabled, the Wikipedia
+          enrichment fallback. The write target for profile identity; dbt
+          materializes the enriched gold.player_profiles from this source.
+        columns:
+          - name: player_id
+            description: Canonical ATP id (ATP_Database.id); the primary key.
+          - name: display_name
+            description: Canonical ATP name (ATP_Database.player).
+          - name: atp_name
+            description: Alternate name variant (ATP_Database.atpname).
+          - name: birthdate
+            description: Birth date (ATP_Database.birthdate, YYYYMMDD); NULL when unknown.
+          - name: weight
+            description: Weight in kg (ATP_Database.weight); NULL when unknown.
+          - name: height
+            description: Height in cm (ATP_Database.height); NULL when unknown.
+          - name: turned_pro
+            description: Year turned professional (ATP_Database.turnedpro); NULL when unknown.
+          - name: birthplace
+            description: Birthplace (ATP_Database.birthplace).
+          - name: coaches
+            description: Coach names (ATP_Database.coaches).
+          - name: handedness
+            description: Playing hand (R/L; ATP_Database.hand).
+          - name: backhand
+            description: Backhand style (1H/2H; ATP_Database.backhand).
+          - name: ioc
+            description: IOC country code (ATP_Database.ioc).
+          - name: summary
+            description: Wikipedia bio summary written by the enrichment fallback.
+          - name: enriched_at
+            description: Timestamp of the last Wikipedia enrichment write.

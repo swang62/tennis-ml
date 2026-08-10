@@ -6,7 +6,13 @@ from typing import cast
 import pandas as pd
 import pytest
 
-from src.constants import BRONZE_TABLE, GOLD_TABLE, PROFILES_TABLE, ROOT, SILVER_ROLLING_FEATURES
+from src.constants import (
+    BRONZE_PROFILES_TABLE,
+    BRONZE_TABLE,
+    GOLD_TABLE,
+    ROOT,
+    SILVER_ROLLING_FEATURES,
+)
 from src.db import client, seed
 from src.db.client import execute_df
 from src.features.columns import FEATURE_COLS, SIMILARITY_COLS
@@ -107,7 +113,7 @@ def test_profile_upsert_preserves_enrichment(postgres_ready, tmp_path):  # noqa:
     ingest.load_atp_profiles(csv, player_ids={"P1"})
     with client.transaction() as cur:
         cur.execute(
-            "UPDATE gold.player_profiles SET summary = %s, enriched_at = CURRENT_TIMESTAMP "
+            f"UPDATE {BRONZE_PROFILES_TABLE} SET summary = %s, enriched_at = CURRENT_TIMESTAMP "
             "WHERE player_id = %s",
             ["Existing enrichment", "P1"],
         )
@@ -115,7 +121,7 @@ def test_profile_upsert_preserves_enrichment(postgres_ready, tmp_path):  # noqa:
     ingest.load_atp_profiles(csv, player_ids={"P1"})
 
     row = execute_df(
-        "SELECT summary, weight FROM gold.player_profiles WHERE player_id = %s", ["P1"]
+        f"SELECT summary, weight FROM {BRONZE_PROFILES_TABLE} WHERE player_id = %s", ["P1"]
     ).iloc[0]
     assert row["summary"] == "Existing enrichment"  # enrichment survives the reload
     assert int(row["weight"]) == 85  # ATP metadata refreshed

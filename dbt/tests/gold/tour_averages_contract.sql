@@ -132,6 +132,13 @@ WITH checks AS (
                   OR avg_years_pro = 'Infinity'::DOUBLE PRECISION
                   OR avg_years_pro = '-Infinity'::DOUBLE PRECISION
              THEN 'avg_years_pro must be non-null and finite' END,
+        -- Weighted tour benchmarks may be NULL (zero denominator) but must be
+        -- finite when present.
+        CASE WHEN tour_break_point_opportunities_per_return_game IS NOT NULL
+                  AND (tour_break_point_opportunities_per_return_game = 'NaN'::DOUBLE PRECISION
+                       OR tour_break_point_opportunities_per_return_game = 'Infinity'::DOUBLE PRECISION
+                       OR tour_break_point_opportunities_per_return_game = '-Infinity'::DOUBLE PRECISION)
+             THEN 'tour_break_point_opportunities_per_return_game must be finite when present' END,
         -- Observability counts are never negative.
         CASE WHEN snapshot_pool_rows < 0 THEN 'snapshot_pool_rows must be non-negative' END,
         CASE WHEN snapshot_pool_players < 0 THEN 'snapshot_pool_players must be non-negative' END,

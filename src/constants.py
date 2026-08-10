@@ -95,4 +95,9 @@ SILVER_PLAYER_MATCHES = "silver.player_matches"
 SILVER_ROLLING_FEATURES = "silver.rolling_features"
 GOLD_TABLE = "gold.match_features"
 TOUR_AVERAGES_TABLE = "gold.tour_averages"
+# PROFILES_TABLE is the consumer-facing read relation: inference, similarity,
+# and serving all read the stable, dbt-materialized gold.player_profiles.
 PROFILES_TABLE = "gold.player_profiles"
+# BRONZE_PROFILES_TABLE is the ingest write target: ATP identity loading and
+# Wikipedia enrichment UPSERT here; dbt publishes bronze -> gold.
+BRONZE_PROFILES_TABLE = "bronze.player_profiles"

@@ -136,13 +136,21 @@ export function PlayerPicker({
 
   const selected = players.find((p) => p.player_id === value) ?? null
   const q = query.trim().toLowerCase()
-  const options = searchFn
-    ? (q.length > 0 ? searchFn(q) : [])
-    : players.filter(
-        (p) => p.player_id !== exclude && p.display_name.toLowerCase().includes(q),
-      )
+  // Unfiltered pickers show the ranked top-20 directory (the API already
+  // orders by estimated_rank ASC NULLS LAST), with the other picker excluded.
+  const rankedDefaults = players
+    .filter((p) => p.player_id !== exclude)
+    .slice(0, 20)
+  const options =
+    q.length === 0
+      ? rankedDefaults
+      : searchFn
+        ? searchFn(q)
+        : players.filter(
+            (p) => p.player_id !== exclude && p.display_name.toLowerCase().includes(q),
+          )
   const active = Math.min(activeIndex, Math.max(options.length - 1, 0))
-  const showLoading = loading && q.length > 0
+  const showLoading = loading && (q.length > 0 || options.length === 0)
 
   const close = (refocus: boolean) => {
     setOpen(false)
@@ -267,7 +275,10 @@ export function PlayerPicker({
                   onClick={() => select(p.player_id)}
                   className={`picker-option${i === active ? ' is-active' : ''}${p.player_id === value ? ' is-selected' : ''}`}
                 >
-                  {p.display_name}
+                  <span className="picker-option-name">{p.display_name}</span>
+                  {p.estimated_rank != null && (
+                    <span className="picker-option-rank num">#{p.estimated_rank}</span>
+                  )}
                 </button>
               ))
             )}

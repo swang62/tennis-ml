@@ -180,3 +180,10 @@ models:
         description: Tour-wide double-fault rate (SUM(double_faults) / SUM(total_serve_points)).
       - name: tour_aces_per_svc_game
         description: Tour-wide aces per service game (SUM(aces) / SUM(service_games)); non-negative when present.
+      - name: tour_break_point_opportunities_per_return_game
+        description: >
+          Tour-wide break-point opportunities per return game
+          (SUM(break_points_faced) / SUM(service_games)): weighted opponent
+          break points faced per service game played. May be NULL only when
+          the denominator is zero; bounded to [0, 1] by
+          tour_averages_rate_bounds when present.

@@ -7,15 +7,57 @@ export interface Player {
   player_id: string
   display_name: string
   matches_played: number
+  latest_rank_points?: number
+  estimated_rank?: number | null
 }
 
 export interface CareerStats {
   matches_played: number
-  win_rate: number | null
-  first_serve_win_pct: number | null
-  second_serve_win_pct: number | null
-  serve_win_pct: number | null
+  latest_match_date: string | null
+}
+
+export interface ServeMetrics {
+  first_serve_in_pct: number | null
+  aces_per_first_serve: number | null
+  first_serve_points_won_pct: number | null
+  second_serve_points_won_pct: number | null
+  overall_serve_points_won_pct: number | null
+  double_faults_per_serve_point: number | null
+  aces_per_service_game: number | null
   break_points_saved_pct: number | null
+}
+
+export interface ReturnMetrics {
+  return_points_won_pct: number | null
+  first_serve_return_points_won_pct: number | null
+  second_serve_return_points_won_pct: number | null
+  break_point_conversion_pct: number | null
+  break_point_opportunities_per_return_game: number | null
+}
+
+export interface RankInfo {
+  latest_rank_points: number | null
+  earliest_rank_points: number | null
+  earliest_rank_points_date: string | null
+  latest_rank_points_date: string | null
+  rank_points_delta: number | null
+  estimated_rank: number | null
+}
+
+export interface TourComparisons {
+  first_serve_in_pct: number | null
+  aces_per_first_serve: number | null
+  first_serve_points_won_pct: number | null
+  second_serve_points_won_pct: number | null
+  overall_serve_points_won_pct: number | null
+  double_faults_per_serve_point: number | null
+  aces_per_service_game: number | null
+  break_points_saved_pct: number | null
+  return_points_won_pct: number | null
+  first_serve_return_points_won_pct: number | null
+  second_serve_return_points_won_pct: number | null
+  break_point_conversion_pct: number | null
+  break_point_opportunities_per_return_game: number | null
 }
 
 export interface RecentForm {
@@ -53,11 +95,20 @@ export interface PlayerProfile {
   turned_pro: number | null
   birthplace: string | null
   summary: string | null
+  atp_name: string | null
+  birthdate: string | null
+  weight: number | null
+  coaches: string | null
+  ioc: string | null
   career: CareerStats
+  serve: ServeMetrics
+  return: ReturnMetrics
   surface_rates: SurfaceRate[]
   recent_form: RecentForm | null
   rank_points_trend: RankPointsTrend | null
+  rank: RankInfo
   tour_averages: TourAverages
+  tour_comparisons: TourComparisons
 }
 
 export interface RankPoint {
@@ -97,6 +148,7 @@ export interface MatchHistory {
 }
 
 export interface H2HMeeting {
+  match_id: string
   match_date: string
   surface: string
   tournament: string

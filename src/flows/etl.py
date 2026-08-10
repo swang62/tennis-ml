@@ -3,8 +3,10 @@
 Runs `dbt build` which builds the medallion layers in dependency order:
 silver.player_matches (player-perspective rows) -> silver.rolling_features
 (post-match snapshots) -> gold.match_features (canonical one-row-per-match
-training table). Also enriches player bios (first `Playing style` paragraph,
-lead fallback) once the gold layer exists.
+training table) -> gold.player_profiles (enriched player-grain aggregates).
+
+Wikipedia bio enrichment is a separate, idempotent step: run it via
+`just db-enrich` after dbt, then re-run dbt to pick up new summaries.
 """
 
 import os
@@ -20,7 +22,6 @@ from src import constants
 from src.constants import GOLD_TABLE, LOGS
 from src.db.client import get_conn
 from src.db.conninfo import dbt_env
-from src.flows.ingest import enrich_missing as _enrich_missing
 from src.utils import load_env
 
 DBT_BUILD_CMD = ["uv", "run", "dbt", "build", "--project-dir", "dbt", "--profiles-dir", "dbt"]
@@ -75,34 +76,15 @@ def bronze_to_gold() -> int:
     return row_count
 
 
-@task(retries=1, retry_delay_seconds=10)
-def enrich_bios():
-    inserted = _enrich_missing()
-    print(f"Bios enriched: {inserted} new")
-    return inserted
-
-
 @flow(log_prints=True)
-def etl_flow(enrich: bool = False):
-    """Bronze → gold ETL. Offline by default: never triggers Wikipedia
-    enrichment. Pass `enrich=True` (or `just db-etl -- --enrich`) as the
-    explicit operator opt-in for bio enrichment.
+def etl_flow():
+    """Bronze → gold ETL: dbt build only. Wikipedia enrichment is a separate,
+    idempotent step — run `just db-enrich` after dbt, then re-run dbt.
     """
     load_env()
     rows = bronze_to_gold()
     print(f"ETL complete: {rows} gold rows")
-    if enrich:
-        enrich_bios()
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--enrich",
-        action="store_true",
-        help="explicit opt-in to Wikipedia bio enrichment after the gold build (default: offline)",
-    )
-    args = parser.parse_args()
-    etl_flow(enrich=args.enrich)
+    etl_flow()

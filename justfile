@@ -6,9 +6,14 @@ create:
 db-dbt:
     uv run python -c "from src.flows.etl import run_dbt_build; run_dbt_build()"
 
-# Run bronze-to-gold ETL; pass --enrich to fetch bios.
-db-etl *args:
-    uv run python src/flows/etl.py {{args}}
+# Run bronze-to-gold ETL (dbt build).
+db-etl:
+    uv run python src/flows/etl.py
+
+# Run idempotent Wikipedia bio enrichment (skips already-enriched profiles).
+# Run this after dbt, then re-run dbt to pick up new summaries in gold.
+db-enrich:
+    uv run python -c "from src.flows.ingest import enrich_missing; enrich_missing()"
 
 # Create PostgreSQL schemas and tables.
 db-init:

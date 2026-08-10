@@ -5,7 +5,10 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+import src.countries as countries_mod
 import src.flows.ingest as ingest
+from src.constants import BRONZE_PROFILES_TABLE
+from src.db import client, init_db
 from src.features.columns import BRONZE_COLUMNS
 
 
@@ -494,7 +497,7 @@ def test_load_atp_profiles_bulk_copies_base_columns(fake_ingest_conn, tmp_path):
     )
     assert len(fake_ingest_conn.copied_rows) == 2
     insert_sql, _params = fake_ingest_conn.statements[-1]
-    assert insert_sql.startswith(f"INSERT INTO {ingest.PROFILES_TABLE}")
+    assert insert_sql.startswith(f"INSERT INTO {ingest.BRONZE_PROFILES_TABLE}")
     assert "ON CONFLICT (player_id) DO UPDATE SET" in insert_sql
 
 
@@ -581,10 +584,10 @@ def test_enrich_player_apostrophe_name_binds_as_param(monkeypatch, fake_ingest_c
     sql, params = fake_ingest_conn.statements[0]
     assert "%s" in sql  # psycopg placeholders, never string interpolation
     assert "O'Brien" not in sql
-    assert "ON CONFLICT (player_id) DO UPDATE SET" in sql
-    assert "summary = excluded.summary" in sql
-    assert params[0] == "Jan O'Brien"  # the name travels as a bound parameter
-    assert params[1] == "Jan O'Brien"
+    assert "UPDATE" in sql
+    assert "SET summary = %s" in sql
+    assert len(params) == 2  # summary_text, player_id
+    assert params[1] == "Jan O'Brien"  # player_id bound as param
 
 
 def test_enrich_player_uses_explicit_player_id(monkeypatch, fake_ingest_conn):
@@ -598,7 +601,7 @@ def test_enrich_player_uses_explicit_player_id(monkeypatch, fake_ingest_conn):
     assert ingest.enrich_player("Name", "REALID") is True
 
     _sql, params = fake_ingest_conn.statements[0]
-    assert params[0] == "REALID"
+    assert params[1] == "REALID"
 
 
 # ── extract_playing_style_paragraph / extract_lead_paragraph ──────
@@ -655,7 +658,7 @@ def test_enrich_player_stores_playing_style_paragraph(monkeypatch, fake_ingest_c
     assert ingest.enrich_player("Player") is True
 
     _sql, params = fake_ingest_conn.statements[0]
-    assert params[2] == "Style paragraph."
+    assert params[0] == "Style paragraph."
 
 
 def test_enrich_player_falls_back_to_lead_paragraph(monkeypatch, fake_ingest_conn):
@@ -674,7 +677,7 @@ def test_enrich_player_falls_back_to_lead_paragraph(monkeypatch, fake_ingest_con
     assert ingest.enrich_player("Player") is True
 
     _sql, params = fake_ingest_conn.statements[0]
-    assert params[2] == "Lead paragraph."
+    assert params[0] == "Lead paragraph."
 
 
 def test_enrich_player_skips_when_no_usable_paragraph(monkeypatch, fake_ingest_conn):
@@ -695,14 +698,14 @@ def test_enrich_player_skips_when_no_usable_paragraph(monkeypatch, fake_ingest_c
 
 
 def test_enrich_missing_enriches_missing_players(monkeypatch):
-    monkeypatch.setattr(ingest, "get_players_without_profiles", lambda: ["X"])
-    monkeypatch.setattr(ingest, "enrich_player", lambda _name: True)
+    monkeypatch.setattr(ingest, "get_players_without_summary", lambda: ["X", "Y"])
+    monkeypatch.setattr(ingest, "enrich_players", lambda _ids: 2)
 
-    assert ingest.enrich_missing() == 1
+    assert ingest.enrich_missing() == 2
 
 
 def test_enrich_missing_noop_when_none_missing(monkeypatch):
-    monkeypatch.setattr(ingest, "get_players_without_profiles", lambda: [])
+    monkeypatch.setattr(ingest, "get_players_without_summary", lambda: [])
 
     assert ingest.enrich_missing() == 0
 
@@ -771,3 +774,159 @@ def test_atp_rows_to_bronze_indoor_missing_maps_to_nan():
     row["indoor"] = None
     df = ingest.atp_rows_to_bronze([row])
     assert pd.isna(df.iloc[0]["is_indoor"])
+
+
+# ── IOC country reference (src/countries) ─────────────────────────
+
+
+def test_country_reference_csv_is_well_formed():
+    """The versioned reference is loadable, includes UNK, has no duplicate
+    codes, and every non-UNK row carries a usable ISO alpha-2 code."""
+    countries = countries_mod.load_countries()
+
+    assert countries_mod.UNK in countries
+    assert countries_mod.resolve_ioc(countries_mod.UNK) == ("", "Country unknown")
+    assert all(iso2 or code == countries_mod.UNK for code, (iso2, _) in countries.items())
+
+
+def test_normalize_ioc_trims_and_uppercases():
+    assert countries_mod.normalize_ioc(" fra ") == "FRA"
+    assert countries_mod.normalize_ioc("gbr") == "GBR"
+
+
+def test_normalize_ioc_empty_or_none_becomes_unk():
+    assert countries_mod.normalize_ioc(None) == countries_mod.UNK
+    assert countries_mod.normalize_ioc("") == countries_mod.UNK
+    assert countries_mod.normalize_ioc("   ") == countries_mod.UNK
+
+
+def test_valid_ioc_preserves_known_and_falls_back_to_unk():
+    assert countries_mod.valid_ioc(" FRA ") == "FRA"  # trimmed/uppercased
+    assert countries_mod.valid_ioc("gbr") == "GBR"
+    assert countries_mod.valid_ioc("UNK") == "UNK"
+    for bad in (None, "", "  ", "XYZ", "URS", float("nan")):
+        assert countries_mod.valid_ioc(bad) == "UNK"
+
+
+def test_resolve_ioc_known_codes():
+    assert countries_mod.resolve_ioc("FRA") == ("FR", "France")
+    assert countries_mod.resolve_ioc("USA") == ("US", "United States")
+
+
+def test_resolve_ioc_unknown_falls_back_to_unk_row():
+    unknown = ("", "Country unknown")
+    assert countries_mod.resolve_ioc("XYZ") == unknown
+    assert countries_mod.resolve_ioc("") == unknown
+    assert countries_mod.resolve_ioc("UNK") == unknown
+
+
+def test_is_known_ioc():
+    assert countries_mod.is_known_ioc("fra")
+    assert not countries_mod.is_known_ioc("XYZ")
+
+
+# ── IOC normalization in load_atp_profiles ────────────────────────
+
+
+def test_load_atp_profiles_normalizes_ioc_and_reports_unresolved(
+    fake_ingest_conn, tmp_path, capsys
+):
+    """Valid IOC values are preserved (trimmed/uppercased); missing/invalid
+    values become UNK and the unresolved count is reported."""
+    csv = tmp_path / "ioc.csv"
+    pd.DataFrame(
+        [
+            {
+                "id": f"P{i}",
+                "player": f"Player {i}",
+                "atpname": "",
+                "birthdate": "19930101",
+                "weight": "80",
+                "height": "180",
+                "turnedpro": "2015",
+                "birthplace": "",
+                "coaches": "",
+                "hand": "R",
+                "backhand": "2H",
+                "ioc": ioc,
+            }
+            for i, ioc in enumerate([" FRA ", "", "XYZ", "gbr"])
+        ]
+    ).to_csv(csv, index=False)
+
+    assert ingest.load_atp_profiles(csv) == 4
+
+    copied = {row[0]: row[11] for row in fake_ingest_conn.copied_rows}
+    assert copied == {"P0": "FRA", "P1": "UNK", "P2": "UNK", "P3": "GBR"}
+    assert "IOC: 2/4 profiles unresolved (missing/invalid -> UNK)" in capsys.readouterr().out
+
+
+def test_load_atp_profiles_reports_nothing_when_all_ioc_resolve(fake_ingest_conn, tmp_path, capsys):
+    csv = _write_profiles_csv(tmp_path)  # P1=FRA, P2=GBR, both known
+
+    ingest.load_atp_profiles(csv)
+
+    assert "IOC:" not in capsys.readouterr().out
+    assert {row[0]: row[11] for row in fake_ingest_conn.copied_rows} == {
+        "P1": "FRA",
+        "P2": "GBR",
+    }
+
+
+# ── Idempotent IOC backfill via init.sql (real PostgreSQL) ────────
+
+
+def test_init_backfills_null_ioc_and_is_idempotent(postgres_ready):  # noqa: ARG001 — skip-gate
+    """Re-running init.sql backfills NULL/empty ioc to UNK, never overwrites a
+    verified value, and leaves bronze.player_profiles.ioc NOT NULL.
+
+    Simulates a pre-upgrade database by dropping NOT NULL before inserting a
+    NULL-ioc row, then re-applies the bootstrap and checks the upgrade.
+    """
+    conn = client.get_conn()
+    null_id, empty_id, known_id = "__test_ioc_null__", "__test_ioc_empty__", "__test_ioc_known__"
+    # Legacy (pre-upgrade) schema: ioc nullable. DROP NOT NULL is a no-op if
+    # the column is already nullable, so this is safe to re-run.
+    conn.execute(f"ALTER TABLE {BRONZE_PROFILES_TABLE} ALTER COLUMN ioc DROP NOT NULL")
+    conn.execute(
+        f"INSERT INTO {BRONZE_PROFILES_TABLE} (player_id, display_name, ioc) "
+        "VALUES (%s, %s, NULL), (%s, %s, ''), (%s, %s, 'FRA') "
+        "ON CONFLICT (player_id) DO UPDATE SET ioc = EXCLUDED.ioc",
+        [null_id, "Null", empty_id, "Empty", known_id, "Known"],
+    )
+    try:
+        init_db.init()  # re-run bootstrap on an already-initialized database
+
+        rows = {
+            r[0]: r[1]
+            for r in conn.execute(
+                f"SELECT player_id, ioc FROM {BRONZE_PROFILES_TABLE} "
+                "WHERE player_id IN (%s, %s, %s)",
+                [null_id, empty_id, known_id],
+            ).fetchall()
+        }
+        assert rows[null_id] == "UNK"  # NULL backfilled to the sentinel
+        assert rows[empty_id] == "UNK"  # empty string backfilled
+        assert rows[known_id] == "FRA"  # verified value preserved
+
+        nullable = conn.execute(
+            "SELECT is_nullable FROM information_schema.columns "
+            "WHERE table_schema = 'bronze' AND table_name = 'player_profiles' "
+            "AND column_name = 'ioc'"
+        ).fetchone()
+        assert nullable is not None
+        assert nullable[0] == "NO"
+
+        init_db.init()  # second re-run: idempotent, no error, same state
+        again = conn.execute(
+            f"SELECT ioc FROM {BRONZE_PROFILES_TABLE} WHERE player_id = %s",
+            [known_id],
+        ).fetchone()
+        assert again is not None
+        assert again[0] == "FRA"
+    finally:
+        conn.execute(
+            f"DELETE FROM {BRONZE_PROFILES_TABLE} WHERE player_id IN (%s, %s, %s)",
+            [null_id, empty_id, known_id],
+        )
+        conn.execute(f"ALTER TABLE {BRONZE_PROFILES_TABLE} ALTER COLUMN ioc SET NOT NULL")
