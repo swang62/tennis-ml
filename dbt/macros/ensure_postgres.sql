@@ -1,5 +1,4 @@
-{% comment %}
-PostgreSQL-safe idempotent post-hook helpers.
+{# PostgreSQL-safe idempotent post-hook helpers.
 
 dbt-postgres materializes `table` models by swapping a transient backup relation
 into place (rename old -> backup, build new, drop backup) within the model
@@ -12,7 +11,7 @@ backup) the previous incarnation. `ADD CONSTRAINT` also has no `IF NOT EXISTS`.
 These macros clean up the stale object by its name first, then recreate it on
 the target relation, so they are safe on a first build, a plain rebuild, and a
 --full-refresh. Constraint and index names are project-unique per model.
-{% endcomment %}
+#}
 
 {% macro ensure_primary_key_sql(relation, conname, columns) -%}
 DO $$

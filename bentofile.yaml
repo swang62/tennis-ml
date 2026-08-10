@@ -4,6 +4,7 @@ name: stacked_ensemble
 service: "src/serving/service.py:TennisPredictor"
 include:
   - "src/"
+  - "infra/postgres/init.sql"
   - "data/processed/linear_scaler.pkl"
   - "data/processed/bio_embeddings.parquet"
   - "data/processed/bio_feature_cols.json"

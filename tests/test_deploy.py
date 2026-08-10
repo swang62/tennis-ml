@@ -366,10 +366,6 @@ def test_compose_has_pinned_postgres_service():
     assert "postgres-data" not in cfg.get("volumes", {})
     assert any(v.endswith(":/var/lib/postgresql") for v in svc["volumes"])
     assert not any(":/var/lib/postgresql/data" in v for v in svc["volumes"])
-    assert any(
-        "infra/postgres/init.sql" in v and "docker-entrypoint-initdb.d/init.sql" in v
-        for v in svc["volumes"]
-    )
     healthcheck = svc["healthcheck"]["test"]
     assert healthcheck[0] == "CMD-SHELL"
     assert len(healthcheck) == 2  # readiness-only: a single pg_isready command

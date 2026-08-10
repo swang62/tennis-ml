@@ -115,15 +115,6 @@ Required env vars (compose reads them from `.env` or the shell):
 | `POSTGRES_PASSWORD` | postgres, bento | PostgreSQL password; bento's `DATABASE_URL` derives from it  |
 | `DRIFT_API_KEY`     | web             | Authenticates the `/api/internal/*` nginx operational routes |
 
-### Endpoints
-
-Two BentoML endpoints exposed by `src/serving/service.py`:
-
-| Endpoint            | Method | Purpose                                                      |
-| ------------------- | ------ | ------------------------------------------------------------ |
-| `/healthz`          | GET    | Liveness probe (alias `/livez`, `/readyz`)                   |
-| `/predict_from_ids` | POST   | On-demand prediction from minimal inputs (two ids + surface) |
-
 ### Input schema for inference
 
 The `/predict_from_ids` endpoint accepts a JSON object with the following fields:

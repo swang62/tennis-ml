@@ -223,14 +223,6 @@ def test_parse_args_all():
     assert args.all is True
 
 
-def test_seed_exposes_no_enrichment_path():
-    """Seed exposes no Wikipedia enrichment path."""
-    assert not hasattr(seed, "enrich_players")
-    assert not hasattr(seed, "enrich_missing")
-    assert "--enrich" not in (seed.__doc__ or "")
-    assert "--offline" not in (seed.__doc__ or "")
-
-
 def test_seed_exposes_no_ranking_ingestion_path():
     """Ranking ingestion is a separate path; seed stays match-only."""
     assert not hasattr(seed, "ingest_rankings")

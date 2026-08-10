@@ -2,18 +2,9 @@
 create:
     ./infra/k3d/start.sh
 
-# Build silver and gold dbt models.
-db-dbt:
-    uv run python -c "from src.flows.etl import run_dbt_build; run_dbt_build()"
-
 # Run bronze-to-gold ETL (dbt build).
 db-etl:
     uv run python src/flows/etl.py
-
-# Run idempotent Wikipedia bio enrichment (skips already-enriched profiles).
-# Run this after dbt, then re-run dbt to pick up new summaries in gold.
-db-enrich:
-    uv run python -c "from src.flows.ingest import enrich_missing; enrich_missing()"
 
 # Create PostgreSQL schemas and tables.
 db-init:
@@ -27,20 +18,13 @@ db-reset:
 db-seed *args:
     uv run python src/db/seed.py {{args}}
 
-# Ingest official weekly ATP rankings (rank 1-200) from data/raw/rankings/.
-db-rankings:
-    uv run python -c "from src.flows.ingest import ingest_rankings; ingest_rankings()"
-
 # Export an atomic PostgreSQL training snapshot.
 db-snapshot:
     uv run python src/db/snapshot.py
 
-# Build and push the production Bento image.
-deploy-bento *args:
+# Build and push all production docker images.
+deploy *args:
     uv run python src/flows/deploy.py {{args}}
-
-# Build and push the web UI image to Docker Hub.
-deploy-web:
     docker build -t swang62/tennis-web:latest web/
     docker push swang62/tennis-web:latest
 

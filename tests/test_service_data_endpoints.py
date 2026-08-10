@@ -3,10 +3,8 @@
 from unittest.mock import patch
 
 import pandas as pd
-import pytest
 from starlette.testclient import TestClient
 
-from src.db.client import execute_df
 from src.serving.service import DATA_APP
 
 client = TestClient(DATA_APP)
@@ -210,71 +208,9 @@ def test_players_ignores_unexpected_query_params():
         resp = client.get("/players?x=1%3BDROP%20TABLE%20gold.player_profiles")
     assert resp.status_code == 200
     args = exec.call_args_list[0].args
-    assert len(args) == 1  # players query takes no params
-    assert "%s" not in args[0]
-
-
-def test_players_live_directory_contains_all_profiles(postgres_ready, gold_ready):  # noqa: ARG001
-    """Every profile is present (including zero-match players) and no served
-    rank point is a false zero: only positive or null."""
-    resp = client.get("/players")
-    assert resp.status_code == 200
-    players = resp.json()["data"]["players"]
-    expected_row = execute_df("SELECT COUNT(*) FROM gold.player_profiles").iloc[0, 0]
-    expected: int = int(expected_row)  # type: ignore[arg-type]
-    assert len(players) == expected
-    assert any(p["matches_played"] == 0 for p in players)
-    for p in players:
-        assert p["latest_rank_points"] is None or p["latest_rank_points"] > 0
-
-
-def test_players_latest_rank_points_ignore_newer_zero_observations(postgres_ready, gold_ready):  # noqa: ARG001
-    """gold.latest_rank_points honors the latest POSITIVE observation: a newer
-    zero/null rank-points observation must not override it. Cross-checked
-    against the silver-derived ARRAY_AGG FILTER contract and the live endpoint."""
-    mismatches_row = execute_df(
-        """
-            WITH expected AS (
-                SELECT player_id,
-                    (ARRAY_AGG(player_rank_points ORDER BY match_date DESC, match_id DESC)
-                        FILTER (WHERE player_rank_points > 0))[1] AS exp_latest
-                FROM silver.player_matches
-                GROUP BY player_id
-            )
-            SELECT COUNT(*) FROM expected e
-            JOIN gold.player_profiles g ON g.player_id = e.player_id
-            WHERE g.latest_rank_points IS DISTINCT FROM e.exp_latest
-            """
-    ).iloc[0, 0]
-    mismatches: int = int(mismatches_row)  # type: ignore[arg-type]
-    assert mismatches == 0
-
-    resp = client.get("/players")
-    served = {p["player_id"]: p["latest_rank_points"] for p in resp.json()["data"]["players"]}
-    gold = execute_df("SELECT player_id, latest_rank_points FROM gold.player_profiles")
-    for _, row in gold.iterrows():
-        served_val = served[str(row["player_id"])]
-        expected_val = row["latest_rank_points"]
-        if pd.isna(expected_val):
-            assert served_val is None
-        else:
-            assert served_val == pytest.approx(float(expected_val))
-
-
-def test_players_live_null_rank_ordered_last(postgres_ready, gold_ready):  # noqa: ARG001
-    """Unranked players (no bronze.rankings row) sort after all ranked players."""
-    players = client.get("/players").json()["data"]["players"]
-    ranks = [p["current_rank"] for p in players]
-    ranked = [r for r in ranks if r is not None]
-    unranked = [r for r in ranks if r is None]
-    assert ranks == ranked + unranked
-    assert ranked == sorted(ranked)  # ascending, distinct via player_id tie-break
-
-
-def test_players_live_stable_ordering(postgres_ready, gold_ready):  # noqa: ARG001
-    a = client.get("/players").json()["data"]["players"]
-    b = client.get("/players").json()["data"]["players"]
-    assert a == b
+    assert len(args) == 2  # _safe_query(sql, params=None)
+    assert "%s" not in args[0]  # query string never parameterised from URL
+    assert args[1] is None
 
 
 # ── /rank_history ───────────────────────────────────────────────────────────

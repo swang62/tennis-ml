@@ -1,7 +1,6 @@
-# Required env vars (see README "Standalone Compose deployment"):
+# Required env vars:
 #   POSTGRES_PASSWORD  (also used by bento's DATABASE_URL)
 #   DRIFT_API_KEY      (authenticates the /api/internal/* nginx routes)
-# Optional: BENTO_API_URL (defaults to http://bento:3000).
 
 services:
   web:
@@ -18,8 +17,6 @@ services:
     environment:
       BENTO_API_URL: ${BENTO_API_URL:-http://bento:3000}
       DRIFT_API_KEY: ${DRIFT_API_KEY:?DRIFT_API_KEY is required}
-    networks:
-      - app-net
     healthcheck:
       test: wget -q -O /dev/null http://127.0.0.1/ || exit 1
       interval: 60s
@@ -34,13 +31,10 @@ services:
       - "127.0.0.1:6543:5432"
     volumes:
       - postgres-data-18:/var/lib/postgresql
-      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: tennis
-    networks:
-      - app-net
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U postgres -d tennis" ]
       interval: 60s
@@ -57,8 +51,6 @@ services:
     environment:
       SERVING_MODE: production
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/tennis
-    networks:
-      - app-net
     healthcheck:
       test: [ "CMD-SHELL", "python -c 'import urllib.request;urllib.request.urlopen(\"http://localhost:3000/readyz\")'" ]
       interval: 60s
@@ -69,8 +61,3 @@ services:
 
 volumes:
   postgres-data-18:
-
-
-networks:
-  app-net:
-    driver: bridge

@@ -20,8 +20,10 @@ import bentoml
 import numpy as np
 import onnxruntime as ort
 import pandas as pd
+from bentoml.exceptions import InvalidArgument
 from bentoml.images import Image
 from starlette.applications import Starlette
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -37,6 +39,7 @@ from src.constants import (
 )
 from src.countries import resolve_ioc, valid_ioc
 from src.db.client import execute_df, first_row_dict
+from src.db.init_db import init as init_db
 from src.features.columns import FEATURE_COLS
 from src.features.inference import (
     _build_inference_features_with_meta,
@@ -86,6 +89,20 @@ SERVING_IMAGE = Image(
 # ── Read-only data endpoints (GET, no auth) ────────────────────────────────
 # Bento APIs are POST-only, so dashboard GET routes use a mounted Starlette app.
 # SQL values are always parameterized; response shapes are a dashboard contract.
+
+import psycopg.errors as _pg_errors
+
+
+def _safe_query(sql: str, params: list | None = None) -> pd.DataFrame:
+    """Run *sql* and return the result; return empty DataFrame when dbt-created
+    tables (silver/gold) do not exist yet so the web dashboard renders an empty
+    state instead of a 500 error.
+    """
+    try:
+        return execute_df(sql, params)
+    except (_pg_errors.UndefinedTable, _pg_errors.UndefinedColumn):
+        _log.warning("safe query returned empty: dbt tables may not exist yet")
+        return pd.DataFrame()
 
 
 # Response envelope used by every data endpoint.
@@ -141,6 +158,22 @@ def _require_id(request: Request, name: str) -> str | None:
     return raw.strip()
 
 
+_NORMALIZE_KEYS = frozenset(
+    {
+        "player_id",
+        "opponent_id",
+        "surface",
+        "as_of_date",
+        "tournament_level",
+        "round_encoded",
+        "tournament",
+        "round",
+        "is_indoor",
+        "indoor",
+    }
+)
+
+
 def _predict_from_ids_bulk_impl(
     rows: list[dict[str, object]], predict_proba: object
 ) -> pd.DataFrame:
@@ -154,7 +187,8 @@ def _predict_from_ids_bulk_impl(
     started_at = perf_counter()
     normalized: list[dict[str, object]] = []
     for row in rows:
-        r = dict(row)
+        # Strip BentoML auto-generated Pydantic extras before normalize.
+        r = {k: v for k, v in row.items() if k in _NORMALIZE_KEYS}
         if "indoor" in r:  # scalar endpoint field -> builder field
             r["is_indoor"] = r.pop("indoor")
         if r.get("as_of_date") is not None:
@@ -280,7 +314,7 @@ LIMIT %s
 
 def _players(_request: Request) -> JSONResponse:
     try:
-        df = execute_df(_PLAYERS_SQL)
+        df = _safe_query(_PLAYERS_SQL)
         players = []
         for r in _records(df):
             ioc = valid_ioc(r.get("ioc"))
@@ -296,7 +330,7 @@ def _player_profile(request: Request) -> JSONResponse:
     if player_id is None:
         return _err(400, "missing required query parameter: player_id")
     try:
-        df = execute_df(_PROFILE_SQL, [player_id])
+        df = _safe_query(_PROFILE_SQL, [player_id])
     except Exception as exc:
         return _err(500, f"profile query failed: {exc}")
     # One point query: the player's materialized profile row plus the tour
@@ -469,7 +503,7 @@ def _match_history(request: Request) -> JSONResponse:
         return _err(400, "limit must be an integer")
     limit = max(1, min(limit, 100))  # clamp: dashboard never needs more
     try:
-        df = execute_df(_MATCH_HISTORY_SQL, [player_id, limit])
+        df = _safe_query(_MATCH_HISTORY_SQL, [player_id, limit])
     except Exception as exc:
         return _err(500, f"match history query failed: {exc}")
     matches = []
@@ -642,7 +676,31 @@ def _model_info(_request: Request) -> JSONResponse:
 
 # Mounted at the service root; coexists with the POST-only @bentoml.api routes
 # (the SDK's server checks its own routes first, then falls through to mounts).
+
+
+async def _handle_starlette_error(_request: Request, exc: StarletteHTTPException):
+    """Return every Starlette HTTPException as a json {ok, error} envelope."""
+    return JSONResponse(
+        {"ok": False, "error": exc.detail or "internal error"},
+        status_code=exc.status_code,
+        headers=getattr(exc, "headers", None) or {},
+    )
+
+
+async def _catch_all_error(_request: Request, _exc: Exception):
+    """Catch-all for unexpected errors — log and return 500."""
+    _log.exception("unhandled server error")
+    return JSONResponse(
+        {"ok": False, "error": "internal server error"},
+        status_code=500,
+    )
+
+
 DATA_APP = Starlette(
+    exception_handlers={  # type: ignore[arg-type]  # Starlette typing doesn't narrow per-key
+        StarletteHTTPException: _handle_starlette_error,
+        Exception: _catch_all_error,
+    },
     routes=[
         Route("/players", _players, methods=["GET"]),
         Route("/player_profile", _player_profile, methods=["GET"]),
@@ -651,7 +709,7 @@ DATA_APP = Starlette(
         Route("/head_to_head", _head_to_head, methods=["GET"]),
         Route("/similar_players", _similar_players, methods=["GET"]),
         Route("/model_info", _model_info, methods=["GET"]),
-    ]
+    ],
 )
 
 
@@ -671,6 +729,9 @@ class TennisPredictor:
     bento_production = bentoml.models.BentoModel(f"{PRODUCTION_MODEL}:latest")
 
     def __init__(self):
+        # Idempotent schema bootstrap (applies init.sql). Must run before
+        # any read endpoint queries the tables it creates.
+        init_db()
         self.linear = bentoml.mlflow.load_model(self.bento_linear).get_raw_model()
         self.gbdt = bentoml.mlflow.load_model(self.bento_gbdt).get_raw_model()
         self.production = bentoml.mlflow.load_model(self.bento_production).get_raw_model()
@@ -841,7 +902,15 @@ class TennisPredictor:
         1,000 rows and the ensemble runs once for the whole batch. This
         endpoint is internal: Nginx does not expose it publicly.
         """
-        return _records(self._predict_from_ids_bulk(rows))
+        if not rows:
+            raise InvalidArgument("rows must be a non-empty list")
+        if len(rows) > 1000:
+            raise InvalidArgument(f"max 1000 rows, got {len(rows)}")
+        try:
+            return _records(self._predict_from_ids_bulk(rows))
+        except Exception:
+            _log.exception("predict_from_ids_bulk failed")
+            raise InvalidArgument("prediction failed — check input row format") from None
 
     def _row_bio_np(self, ids: np.ndarray) -> np.ndarray:
         """Map player ids to bio vectors (np.float32), zero-filled for unknown players."""
