@@ -7,7 +7,14 @@ import type {
   ServeMetrics,
   SimilarPlayersResponse,
 } from "../api";
-import { Card, Empty, Kicker, Loading, PlayerFlag, ResultBadge } from "../components";
+import {
+  Card,
+  Empty,
+  Kicker,
+  Loading,
+  PlayerFlag,
+  ResultBadge,
+} from "../components";
 import {
   axisOption,
   baseChartOption,
@@ -23,45 +30,34 @@ const SURFACE_COLORS: Record<string, string> = {
   carpet: "var(--text-dim)",
 };
 
-type MetricUnit = "pct" | "rate";
-
-// pct metrics are 0..1 fractions shown as XX.X%; rate metrics are per-game /
-// per-point ratios shown as X.XX. Deltas are player minus tour benchmark.
-function formatMetric(unit: MetricUnit, value: number | null): string {
+function formatMetric(value: number | null): string {
   if (value == null) return "n/a";
-  return unit === "pct"
-    ? `${Math.round(value * 1000) / 10}%`
-    : value.toFixed(2);
+  return `${Math.round(value * 1000) / 10}%`;
 }
 
-function formatDelta(unit: MetricUnit, delta: number | null): string | null {
+function formatDelta(delta: number | null): string | null {
   if (delta == null) return null;
-  if (unit === "pct") {
-    const pp = Math.round(delta * 1000) / 10;
-    return `${pp > 0 ? "+" : ""}${pp}pp`;
-  }
-  return `${delta > 0 ? "+" : ""}${delta.toFixed(2)}`;
+  const change = `${Math.round(Math.abs(delta) * 1000) / 10}%`;
+  return delta > 0 ? `▲ ${change}` : delta < 0 ? `▼ ${change}` : change;
 }
 
 function Metric({
   label,
   value,
   delta,
-  unit,
 }: {
   label: string;
   value: number | null;
   delta: number | null;
-  unit: MetricUnit;
 }) {
-  const deltaText = formatDelta(unit, delta);
+  const deltaText = formatDelta(delta);
   const deltaTone =
-    delta == null ? "" : delta > 0 ? " is-grass" : delta < 0 ? " is-clay" : "";
+    delta == null ? "" : delta > 0 ? " is-grass" : delta < 0 ? " is-down" : "";
   return (
     <div className="sr-metric">
       <span className="sr-label">{label}</span>
       <span className="sr-value-row">
-        <span className="sr-value num">{formatMetric(unit, value)}</span>
+        <span className="sr-value num">{formatMetric(value)}</span>
         {deltaText != null && (
           <span className={`sr-delta num${deltaTone}`}>{deltaText}</span>
         )}
@@ -70,23 +66,21 @@ function Metric({
   );
 }
 
-const serveMetrics: { label: string; key: keyof ServeMetrics; unit: MetricUnit }[] = [
-  { label: "First serve in", key: "first_serve_in_pct", unit: "pct" },
-  { label: "Aces / first serve", key: "aces_per_first_serve", unit: "rate" },
-  { label: "1st serve points won", key: "first_serve_points_won_pct", unit: "pct" },
-  { label: "2nd serve points won", key: "second_serve_points_won_pct", unit: "pct" },
-  { label: "Serve points won", key: "overall_serve_points_won_pct", unit: "pct" },
-  { label: "Double faults / serve pt", key: "double_faults_per_serve_point", unit: "rate" },
-  { label: "Aces / service game", key: "aces_per_service_game", unit: "rate" },
-  { label: "Break points saved", key: "break_points_saved_pct", unit: "pct" },
+const serveMetrics: { label: string; key: keyof ServeMetrics }[] = [
+  { label: "1st serve points won", key: "first_serve_points_won_pct" },
+  { label: "2nd serve points won", key: "second_serve_points_won_pct" },
+  { label: "Aces per game", key: "aces_per_service_game" },
+  { label: "Break points saved", key: "break_points_saved_pct" },
 ];
 
-const returnMetrics: { label: string; key: keyof ReturnMetrics; unit: MetricUnit }[] = [
-  { label: "Return points won", key: "return_points_won_pct", unit: "pct" },
-  { label: "1st serve return won", key: "first_serve_return_points_won_pct", unit: "pct" },
-  { label: "2nd serve return won", key: "second_serve_return_points_won_pct", unit: "pct" },
-  { label: "Break point conversion", key: "break_point_conversion_pct", unit: "pct" },
-  { label: "BP opp. / return game", key: "break_point_opportunities_per_return_game", unit: "rate" },
+const returnMetrics: { label: string; key: keyof ReturnMetrics }[] = [
+  { label: "1st serve returns won", key: "first_serve_return_points_won_pct" },
+  { label: "2nd serve returns won", key: "second_serve_return_points_won_pct" },
+  {
+    label: "Break point opportunities",
+    key: "break_point_opportunities_per_return_game",
+  },
+  { label: "Break points converted", key: "break_point_conversion_pct" },
 ];
 
 export default function ProfileContent({
@@ -147,6 +141,14 @@ export default function ProfileContent({
   const rankPoints = (rankHistory?.rank_history ?? []).filter(
     (p) => p.rank != null,
   );
+  const firstRankYear = Number(rankPoints[0]?.rank_date.slice(0, 4));
+  const lastRankYear = Number(rankPoints.at(-1)?.rank_date.slice(0, 4));
+  const rankYears =
+    Number.isFinite(firstRankYear) && Number.isFinite(lastRankYear)
+      ? Array.from({ length: lastRankYear - firstRankYear + 1 }, (_, index) =>
+          String(firstRankYear + index),
+        )
+      : [];
   // Final label is the profile's official rank; the directory rank only backs
   // it while the profile query is loading.
   const currentRank = profile.rank.current_rank ?? directoryRank ?? null;
@@ -275,7 +277,7 @@ export default function ProfileContent({
         margin: 8,
         formatter: (value: number) => {
           const d = new Date(value);
-          return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+          return String(d.getFullYear());
         },
       },
       splitLine: { show: false },
@@ -306,6 +308,13 @@ export default function ProfileContent({
         smooth: true,
         showSymbol: false,
         lineStyle: { color: t.grass, width: 2.5 },
+        markLine: {
+          silent: true,
+          symbol: "none",
+          label: { show: false },
+          lineStyle: { color: t.line, type: "dashed" },
+          data: rankYears.map((year) => ({ xAxis: `${year}-01-01` })),
+        },
         areaStyle: {
           color: {
             type: "linear",
@@ -329,7 +338,10 @@ export default function ProfileContent({
         <Kicker>Player profile</Kicker>
         <div className="profile-head">
           <h1 className="page-title">
-            <PlayerFlag iso2={profile.iso2} countryName={profile.country_name} />
+            <PlayerFlag
+              iso2={profile.iso2}
+              countryName={profile.country_name}
+            />
             {profile.display_name}
           </h1>
           {trendBadge}
@@ -365,7 +377,7 @@ export default function ProfileContent({
       </section>
 
       <div className="stats-row">
-        <Card title="Service">
+        <Card title="On serve">
           <div className="sr-list">
             {serveMetrics.map((m) => (
               <Metric
@@ -373,12 +385,11 @@ export default function ProfileContent({
                 label={m.label}
                 value={profile.serve[m.key]}
                 delta={profile.tour_comparisons[m.key]}
-                unit={m.unit}
               />
             ))}
           </div>
         </Card>
-        <Card title="Return">
+        <Card title="On return">
           <div className="sr-list">
             {returnMetrics.map((m) => (
               <Metric
@@ -386,7 +397,6 @@ export default function ProfileContent({
                 label={m.label}
                 value={profile.return[m.key]}
                 delta={profile.tour_comparisons[m.key]}
-                unit={m.unit}
               />
             ))}
           </div>

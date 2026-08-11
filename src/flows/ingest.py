@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any, LiteralString, cast
 
@@ -101,8 +102,8 @@ RECENT = 10
 WIKI_API = "https://en.wikipedia.org/w/api.php"
 USER_AGENT = "TennisML/0.1 (research project; contact@tennis-ml.local)"
 
-# Wikipedia summaries are truncated to this many chars before they are stored.
-SUMMARY_MAX_CHARS = 2000
+# Wikipedia bios stay brief enough for the profile view.
+SUMMARY_MAX_CHARS = 1000
 
 load_env()
 
@@ -838,18 +839,31 @@ def get_players_without_summary() -> list[str]:
     return df["player_id"].tolist()
 
 
+def _normalized_wiki_name(value: str) -> str:
+    value = re.sub(r"\s*\([^)]*\)\s*$", "", value)
+    value = "".join(
+        char for char in unicodedata.normalize("NFKD", value) if not unicodedata.combining(char)
+    )
+    return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+
+
 def search_wikipedia(name: str) -> str | None:
     params = {
         "action": "query",
         "list": "search",
         "srsearch": f"{name} tennis player",
         "format": "json",
-        "srlimit": 1,
+        "srlimit": 5,
     }
     resp = requests.get(WIKI_API, params=params, headers={"User-Agent": USER_AGENT}, timeout=10)
     data = resp.json()
     pages = data.get("query", {}).get("search", [])
-    return pages[0]["title"] if pages else None
+    expected = _normalized_wiki_name(name)
+    for page in pages:
+        title = str(page.get("title", ""))
+        if _normalized_wiki_name(title) == expected:
+            return title
+    return None
 
 
 def fetch_summary(title: str) -> dict[str, str] | None:
@@ -921,6 +935,15 @@ def extract_lead_paragraph(summary: str) -> str | None:
     return None
 
 
+def clean_bio_paragraph(text: str) -> str:
+    """Collapse wiki whitespace and avoid cutting a bio mid-sentence."""
+    cleaned = re.sub(r"\s+", " ", text).strip()
+    if len(cleaned) <= SUMMARY_MAX_CHARS:
+        return cleaned
+    last_period = cleaned.rfind(".", 0, SUMMARY_MAX_CHARS + 1)
+    return cleaned[: last_period + 1] if last_period >= 0 else ""
+
+
 def enrich_player(name: str, player_id: str | None = None) -> bool:
     """Upsert a usable Wikipedia bio, preferring the Playing style paragraph."""
     pid = player_id or name
@@ -947,7 +970,10 @@ def enrich_player(name: str, player_id: str | None = None) -> bool:
         return False
 
     # Prepared statement: None binds as NULL, apostrophes need no escaping.
-    summary_text = bio_paragraph[:SUMMARY_MAX_CHARS]
+    summary_text = clean_bio_paragraph(bio_paragraph)
+    if not summary_text:
+        print(f"  SKIP {pid}: no complete sentence within summary limit")
+        return False
 
     conn = get_conn()
     conn.execute(

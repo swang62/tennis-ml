@@ -31,6 +31,7 @@
   --clay-ink: #1a0b04;
   --grass: #4cb98a;
   --grass-soft: rgba(76, 185, 138, 0.14);
+  --down: #e87070;
   --ice: #66a8d1;
   --ice-soft: rgba(102, 168, 209, 0.14);
 
@@ -71,6 +72,7 @@ html.light {
   --clay-ink: #fdf9f2;
   --grass: #2e8b62;
   --grass-soft: rgba(46, 139, 98, 0.12);
+  --down: #c94f4f;
   --ice: #3d7fa8;
   --ice-soft: rgba(61, 127, 168, 0.12);
 
@@ -1226,7 +1228,7 @@ html.light {
     font-variant-numeric: tabular-nums;
   }
 
-  /* Profile main: two-column layout — bio (stats) left, summary (description) right */
+  /* Profile main: summary left, compact bio stats right on desktop. */
 
   .profile-main {
     display: grid;
@@ -1236,8 +1238,17 @@ html.light {
 
   @media (min-width: 880px) {
     .profile-main {
-      grid-template-columns: minmax(0, 1fr) minmax(0, 5fr);
+      grid-template-columns: minmax(0, 1fr) minmax(0, 4fr) minmax(0, 1fr);
       align-items: start;
+    }
+
+    .profile-bio {
+      justify-self: end;
+      text-align: right;
+    }
+
+    .profile-bio .bio-grid {
+      justify-items: end;
     }
   }
 
@@ -1270,12 +1281,6 @@ html.light {
     color: var(--text-dim);
     font-size: 0.9375rem;
     line-height: 1.6;
-    max-width: 70ch;
-    background: var(--bg-inset);
-    border: 1px solid var(--line);
-    border-left: 3px solid var(--clay);
-    border-radius: var(--radius-sm);
-    padding: 1rem 1.1rem;
   }
 
   /* ---------- profile footer (similar players inline) ---------- */
@@ -1384,6 +1389,14 @@ html.light {
     font-weight: 700;
     font-variant-numeric: tabular-nums;
     color: var(--text-dim);
+  }
+
+  .sr-delta.is-grass {
+    color: var(--grass);
+  }
+
+  .sr-delta.is-down {
+    color: var(--down);
   }
 
   /* ---------- tournament table ---------- */

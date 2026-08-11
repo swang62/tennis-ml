@@ -429,6 +429,31 @@ def test_search_wikipedia_returns_none_without_pages(monkeypatch):
     assert ingest.search_wikipedia("Nobody") is None
 
 
+def test_search_wikipedia_rejects_tournament_result_for_player(monkeypatch):
+    _patch_wiki_get(
+        monkeypatch,
+        {
+            "query": {
+                "search": [
+                    {"title": "2026 Qatar ExxonMobil Open"},
+                    {"title": "Carlos Alcaraz"},
+                ]
+            }
+        },
+    )
+
+    assert ingest.search_wikipedia("Carlos Alcaraz") == "Carlos Alcaraz"
+
+
+def test_clean_bio_paragraph_truncates_at_last_period(monkeypatch):
+    monkeypatch.setattr(ingest, "SUMMARY_MAX_CHARS", 28)
+
+    assert (
+        ingest.clean_bio_paragraph("First sentence. Second sentence is too long.")
+        == "First sentence."
+    )
+
+
 def test_fetch_summary_returns_page_dict(monkeypatch):
     _patch_wiki_get(
         monkeypatch,
