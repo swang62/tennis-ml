@@ -1,0 +1,49 @@
+# Data
+data/raw/
+data/processed/bentofile.pinned.yaml
+data/processed/bento_tag.txt
+data/processed/bento_build_state.json
+data/processed/candidate_manifest.json
+data/*.csv
+
+# Training artifacts
+artifacts/
+mlruns/
+
+# Notebooks
+notebooks/
+outputs/
+
+# Frontend
+web/
+node_modules/
+
+# Tests
+tests/
+
+# Infrastructure (except init.sql)
+infra/k3d/
+infra/manifests/
+infra/prefect/
+
+# DBT
+dbt/
+
+# Config/build
+.env*
+compose.yaml
+justfile
+Dockerfile
+docker-compose*.yml
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# VCS
+.git/
+
+# OS
+.DS_Store

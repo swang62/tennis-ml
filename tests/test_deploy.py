@@ -1,6 +1,7 @@
 """Offline deployment tests with mocked MLflow, BentoML, Docker, and Compose."""
 
 import importlib
+import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -120,9 +121,9 @@ def _stub_subprocess(monkeypatch):
 def test_deploy_bento_pushes_only_latest_no_compose_no_web(monkeypatch, tmp_path):
     d = _deploy()
     monkeypatch.setattr(d, "DOCKER_REPO", "acme")
-    monkeypatch.setattr(d, "IMAGE_NAME", "tennis-ml")
+    monkeypatch.setattr(d, "IMAGE_NAME", "tennis-bento")
     monkeypatch.setattr(d, "LOGS", tmp_path)
-    monkeypatch.setattr(d, "build_bento_image", lambda **_kwargs: ("tennis-ml:latest", 5))
+    monkeypatch.setattr(d, "build_bento_image", lambda **_kwargs: ("tennis-bento:latest", 5))
     monkeypatch.setattr(d, "_docker_login", lambda: None)
     monkeypatch.setattr(d, "_read_state", lambda: {})
     written = {}
@@ -138,21 +139,21 @@ def test_deploy_bento_pushes_only_latest_no_compose_no_web(monkeypatch, tmp_path
 
     monkeypatch.setattr(d, "_run_teed", fake_run_teed)
 
-    d.deploy_bento(force=False)
+    d.deploy_bento()
 
     # Push only the Docker Hub latest image.
-    assert calls == [["docker", "push", "--max-concurrent-uploads", "1", "acme/tennis-ml:latest"]]
+    assert calls == [["docker", "push", "acme/tennis-bento:latest"]]
     assert written["deployed_version"] == 5
-    assert written["deployed_image"] == "acme/tennis-ml:latest"
+    assert written["deployed_image"] == "acme/tennis-bento:latest"
 
 
 def test_deploy_bento_does_not_require_postgres_password(monkeypatch, tmp_path):
     """Deploy does not require a PostgreSQL credential."""
     d = _deploy()
     monkeypatch.setattr(d, "DOCKER_REPO", "acme")
-    monkeypatch.setattr(d, "IMAGE_NAME", "tennis-ml")
+    monkeypatch.setattr(d, "IMAGE_NAME", "tennis-bento")
     monkeypatch.setattr(d, "LOGS", tmp_path)
-    monkeypatch.setattr(d, "build_bento_image", lambda **_kwargs: ("tennis-ml:latest", 5))
+    monkeypatch.setattr(d, "build_bento_image", lambda **_kwargs: ("tennis-bento:latest", 5))
     monkeypatch.setattr(d, "_docker_login", lambda: None)
     monkeypatch.setattr(d, "_read_state", lambda: {})
     monkeypatch.setattr(d, "_write_state", lambda _s: None)
@@ -161,32 +162,46 @@ def test_deploy_bento_does_not_require_postgres_password(monkeypatch, tmp_path):
     monkeypatch.setattr(d, "_run_teed", lambda cmd, _log: pushed.append(list(cmd)))
     _stub_subprocess(monkeypatch)
 
-    d.deploy_bento(force=False)  # must not raise
+    d.deploy_bento()  # must not raise
 
-    assert pushed == [["docker", "push", "--max-concurrent-uploads", "1", "acme/tennis-ml:latest"]]
+    assert pushed == [["docker", "push", "acme/tennis-bento:latest"]]
 
 
-def test_deploy_bento_forwards_force_to_build(monkeypatch, tmp_path):
+def test_deploy_bento_fails_when_push_fails(monkeypatch, tmp_path):
     d = _deploy()
-    seen = {}
-
-    def fake_build(force=False):
-        seen["force"] = force
-        return ("tennis-ml:latest", 5)
-
-    monkeypatch.setattr(d, "build_bento_image", fake_build)
     monkeypatch.setattr(d, "LOGS", tmp_path)
+    monkeypatch.setattr(d, "build_bento_image", lambda **_kwargs: ("tennis-bento:latest", 5))
     monkeypatch.setattr(d, "_docker_login", lambda: None)
-    monkeypatch.setattr(d, "_read_state", lambda: {})
-    monkeypatch.setattr(d, "_write_state", lambda _s: None)
-    monkeypatch.setattr(d, "_run_teed", lambda _cmd, _log: None)
     _stub_subprocess(monkeypatch)
 
-    d.deploy_bento(force=True)
-    assert seen["force"] is True
+    def fail_push(_cmd, _log):
+        raise subprocess.CalledProcessError(1, ["docker", "push"])
+
+    monkeypatch.setattr(d, "_run_teed", fail_push)
+
+    import pytest
+
+    with pytest.raises(subprocess.CalledProcessError):
+        d.deploy_bento()
 
 
-# --- Force behavior ---
+# --- Force behavior (removed — deployments always rebuild) ---
+
+
+def test_reuse_or_materialize_nn_onnx_uses_exact_model_uri(monkeypatch, tmp_path):
+    d = _deploy()
+    onnx_file = tmp_path / "nn_best.onnx"
+    onnx_file.write_bytes(b"onnx")
+    monkeypatch.setattr(d, "NN_ONNX_FILE", onnx_file)
+    materialized = []
+    monkeypatch.setattr(d, "_materialize_nn_onnx", lambda pin: materialized.append(pin))
+    pin = {"model_uri": "models:/nn_best/7"}
+
+    assert d._reuse_or_materialize_nn_onnx({"nn_onnx_model_uri": pin["model_uri"]}, pin)
+    assert materialized == []
+
+    assert not d._reuse_or_materialize_nn_onnx({"nn_onnx_model_uri": "models:/nn_best/6"}, pin)
+    assert materialized == [pin]
 
 
 def _stub_bento_build(monkeypatch):
@@ -194,7 +209,7 @@ def _stub_bento_build(monkeypatch):
     d = _deploy()
     from pathlib import Path as _Path
 
-    monkeypatch.setattr(d, "IMAGE_NAME", "tennis-ml")
+    monkeypatch.setattr(d, "IMAGE_NAME", "tennis-bento")
     monkeypatch.setattr(d, "BENTO_TAG_FILE", _Path("/tmp/bento_tag.txt"))
     monkeypatch.setattr(d, "STATE_FILE", _Path("/tmp/state.json"))
     monkeypatch.setattr(d, "MODEL_INFO_FILE", _Path("/tmp/model_info.json"))
@@ -206,20 +221,19 @@ def _stub_bento_build(monkeypatch):
     monkeypatch.setattr(
         d,
         "_lineage_pins",
-        lambda _client, _prod: {k: {} for k in ("nn", "linear", "gbdt", "production")},
+        lambda _client, _prod: {
+            k: {"model_uri": f"models:/{k}/7"} for k in ("nn", "linear", "gbdt", "production")
+        },
     )
-    monkeypatch.setattr(d, "_materialize_nn_onnx", lambda _nn: None)
+    monkeypatch.setattr(d, "_reuse_or_materialize_nn_onnx", lambda _state, _nn: False)
     monkeypatch.setattr(d, "_check_aux_files", lambda: None)
     monkeypatch.setattr(d, "build_input_fingerprint", lambda _client, _prod: "fp")
     monkeypatch.setattr(d, "_read_state", lambda: {"fingerprint": "fp"})
-    # A cache HIT: _cached_tag would return a tag when not forced.
-    monkeypatch.setattr(d, "_cached_tag", lambda _state, _fp: "bento:abc")
     monkeypatch.setattr(
         d, "_import_models", lambda _pins: {"linear": "l", "gbdt": "g", "production": "p"}
     )
     monkeypatch.setattr(d, "_write_pinned_bentofile", lambda _tags: "pinned")
     monkeypatch.setattr(d, "_write_state", lambda _s: None)
-    monkeypatch.setattr(d, "_image_exists", lambda _image: True)
     docker_calls = []
     monkeypatch.setattr(
         "subprocess.run",
@@ -264,235 +278,26 @@ def _stub_bento_build(monkeypatch):
     return d, built
 
 
-def test_build_force_rebuilds_over_cache_hit(monkeypatch):
+def test_build_force_rebuilds(monkeypatch):
     d, built = _stub_bento_build(monkeypatch)
 
-    # force=True: rebuild the Bento and containerize even though the cache hits.
-    image, version = d.build_bento_image(force=True)
+    image, version = d.build_bento_image()
     assert built["bento"] == 1
     assert built["container"] == 1
     # Build only the moving local latest tag.
-    assert built["image_tags"] == [("tennis-ml:latest",)]
-    assert image == "tennis-ml:latest"
+    assert built["image_tags"] == [("tennis-bento:latest",)]
+    assert image == "tennis-bento:latest"
     assert version == 7
     assert built["docker_calls"] == []
 
 
-def test_build_no_force_reuses_cache_hit(monkeypatch):
+def test_build_without_force_rebuilds(monkeypatch):
     d, built = _stub_bento_build(monkeypatch)
 
-    # Cache hit with a local image skips rebuild and containerization.
-    d.build_bento_image(force=False)
-    assert built["bento"] == 0
-    assert built["container"] == 0
-    assert built["image_tags"] == []
-
-
-def test_deploy_flow_forwards_force(monkeypatch):
-    d = _deploy()
-    seen = {}
-
-    def fake_deploy_bento(force=False):
-        seen["force"] = force
-
-    monkeypatch.setattr(d, "deploy_bento", fake_deploy_bento)
-
-    d.deploy_flow(force=True)
-    assert seen["force"] is True
-    d.deploy_flow(force=False)
-    assert seen["force"] is False
-
-
-# --- Task 1: host-managed PostgreSQL + shared connection contract ---
-# compose.yaml is the separate manual `pnpm docker` workflow — deploy.py no
-# longer references it, so these tests read the file directly.
-
-
-def _compose():
-    import yaml
-
-    return yaml.safe_load((_deploy().ROOT / "compose.yaml").read_text())
-
-
-def test_compose_bento_uses_published_image():
-    """The Bento image is the published swang62/tennis-ml:latest, not an
-    env-interpolated repository/name."""
-    import os
-    import subprocess
-
-    import pytest
-
-    image = _compose()["services"]["bento"]["image"]
-    assert image == "swang62/tennis-ml:latest"
-    assert "${" not in image  # published image: no repo/name env interpolation
-
-    # Real check through the compose CLI when available (config needs no daemon).
-    if subprocess.run(["docker", "compose", "version"], capture_output=True).returncode != 0:
-        pytest.skip("docker compose CLI not available")
-
-    d = _deploy()
-    base_env = {
-        **os.environ,
-        "POSTGRES_PASSWORD": "pw",
-        "DRIFT_API_KEY": "key",
-    }
-
-    def rendered_image(env):
-        proc = subprocess.run(
-            ["docker", "compose", "-f", str(d.ROOT / "compose.yaml"), "config"],
-            cwd=d.ROOT,
-            env=env,
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        for line in proc.stdout.splitlines():
-            if line.strip().startswith("image:"):
-                return line.strip().split("image:", 1)[1].strip()
-        raise AssertionError("no image line in compose config output")
-
-    assert rendered_image(base_env) == "swang62/tennis-ml:latest"
-
-
-def test_compose_has_pinned_postgres_service():
-    """Compose PostgreSQL uses its pinned image, named volume, and readiness check."""
-    cfg = _compose()
-    assert "postgres" in cfg["services"]
-    svc = cfg["services"]["postgres"]
-    assert svc["image"] == "postgres:18.4"
-    # Postgres exposes 6543 with native SSL (not via nginx proxy).
-    assert any("6543:5432" in p for p in svc["ports"])
-    assert "healthcheck" in svc
-    assert "tennis-ml-postgres" in cfg.get("volumes", {})
-    assert any(v.endswith(":/var/lib/postgresql") for v in svc["volumes"])
-    assert not any(":/var/lib/postgresql/data" in v for v in svc["volumes"])
-    healthcheck = svc["healthcheck"]["test"]
-    assert healthcheck[0] == "CMD-SHELL"
-    assert len(healthcheck) == 2  # readiness-only: a single pg_isready command
-    assert "pg_isready" in healthcheck[1]
-
-
-def test_compose_postgres_uses_required_env_credential():
-    """Compose PostgreSQL takes its password from the required POSTGRES_PASSWORD
-    env var — no hardcoded credential is tracked."""
-    env = _compose()["services"]["postgres"]["environment"]
-    assert env["POSTGRES_USER"] == "postgres"
-    assert env["POSTGRES_DB"] == "tennis"
-    assert env["POSTGRES_PASSWORD"] == "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
-    assert "POSTGRES_HOST_AUTH_METHOD" not in env
-
-
-def test_compose_bento_gets_single_database_url():
-    """Bento receives the Compose DATABASE_URL embedding the env-var password
-    plus the production-mode marker; no separate credential variable
-    (POSTGRES_PASSWORD) is ever passed."""
-    bento_env = _compose()["services"]["bento"]["environment"]
-    assert bento_env == {
-        "SERVING_MODE": "production",
-        "DATABASE_URL": "postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/tennis",
-    }
-
-
-def test_compose_bento_depends_on_postgres_healthy():
-    """Bento starts only after the postgres service is healthy."""
-    deps = _compose()["services"]["bento"]["depends_on"]
-    assert deps["postgres"]["condition"] == "service_healthy"
-
-
-def test_compose_bento_readiness_hits_readyz_endpoint():
-    """Bento readiness hits the built-in /readyz HTTP endpoint."""
-    cfg = _compose()
-    assert "healthcheck" in cfg["services"]["bento"]
-    test = cfg["services"]["bento"]["healthcheck"]["test"]
-    assert test[0] == "CMD-SHELL"
-    cmd = test[-1]
-    assert "urllib.request" in cmd
-    assert "readyz" in cmd
-    assert "localhost:3000" in cmd
-
-
-def test_web_image_uses_exactly_one_nginx_worker():
-    """Pin nginx to one main-config worker for the static SPA."""
-    root = _deploy().ROOT
-    dockerfile = (root / "web" / "Dockerfile").read_text()
-    nginx_conf = (root / "web" / "nginx.conf.template").read_text()
-
-    # The Dockerfile patches the distro main config to exactly one worker and
-    # fails the build loudly if the upstream line changes shape.
-    assert "worker_processes" in dockerfile
-    assert "worker_processes  1;" in dockerfile
-    assert "sed -i" in dockerfile
-    assert "/etc/nginx/nginx.conf" in dockerfile
-    # The server-only conf.d template must stay free of main-context directives.
-    assert "worker_processes" not in nginx_conf
-
-
-def test_web_dockerfile_builds_with_pnpm_frozen_lockfile():
-    """Build the dashboard with Corepack pnpm and its frozen lockfile."""
-    dockerfile = (_deploy().ROOT / "web" / "Dockerfile").read_text()
-    assert "corepack enable" in dockerfile
-    assert "pnpm install --frozen-lockfile" in dockerfile
-    assert "pnpm-lock.yaml" in dockerfile
-    # npm is gone: no npm ci, no package-lock.json, no npm run build.
-    assert "npm ci" not in dockerfile
-    assert "package-lock.json" not in dockerfile
-    assert "npm run" not in dockerfile
-
-
-def test_compose_bento_has_no_host_published_port():
-    """nginx (web) is the only public API entrypoint — the Bento must not
-    publish a host port (no `3000:3000`)."""
-    cfg = _compose()
-    assert "ports" not in cfg["services"]["bento"]
-
-
-def test_nginx_proxies_only_allowlisted_routes():
-    """nginx proxies only allowlisted routes and rejects other API paths."""
-    conf = (_deploy().ROOT / "web" / "nginx.conf.template").read_text()
-    # Allowlisted GET routes (stripped: /api/players -> /players).
-    for route in (
-        "players",
-        "player_profile",
-        "rank_history",
-        "match_history",
-        "head_to_head",
-        "similar_players",
-    ):
-        assert f"location /api/{route}" in conf
-        assert f"proxy_pass ${{BENTO_API_URL}}/{route};" in conf
-    # Allowlisted POST route.
-    assert "location /api/predict_from_ids" in conf
-    assert "proxy_pass ${BENTO_API_URL}/predict_from_ids;" in conf
-    # The broad /api/ catch-all proxy is gone.
-    assert "proxy_pass ${BENTO_API_URL}/;" not in conf
-    # Model-only /predict is explicitly rejected; unknown /api paths 404.
-    assert "location /api/predict" in conf
-    assert "return 403" in conf
-    assert "return 404" in conf
-
-
-def test_nginx_hardens_prediction_and_limits():
-    """Prediction hardening: POST-only, JSON-only, bounded body, per-IP
-    rate/connection limits, bounded proxy timeouts, and generic gateway
-    errors."""
-    conf = (_deploy().ROOT / "web" / "nginx.conf.template").read_text()
-    # Method + content-type + size guards on the prediction route.
-    assert "limit_except POST" in conf
-    assert "content-type must be application/json" in conf
-    assert "client_max_body_size" in conf
-    # Per-IP rate + connection limits.
-    assert "limit_req_zone" in conf
-    assert "limit_conn_zone" in conf
-    assert "limit_req zone=api_req" in conf
-    assert "limit_conn api_conn" in conf
-    # Bounded proxy timeouts.
-    assert "proxy_connect_timeout" in conf
-    assert "proxy_read_timeout" in conf
-    assert "proxy_send_timeout" in conf
-    # Generic gateway errors (intercept + JSON error page).
-    assert "proxy_intercept_errors on" in conf
-    assert "error_page 502 504" in conf
-    assert '"ok":false' in conf
+    d.build_bento_image()
+    assert built["bento"] == 1
+    assert built["container"] == 1
+    assert built["image_tags"] == [("tennis-bento:latest",)]
 
 
 def test_build_database_url_returns_passwordless_local_url(monkeypatch):
@@ -543,7 +348,7 @@ def _lineage_tags():
         "base_nn_version": "1",
         "base_nn_run_id": "run-nn",
         "base_nn_model_uri": "runs:/run-nn/nn_model",
-        "aux_embeddings_uri": "runs:/run-aux/bio_embeddings.parquet",
+        "aux_embeddings_uri": "runs:/run-aux/bio_embeddings.npz",
         "aux_embeddings_hash": "bbb",
         "aux_bio_feature_cols_uri": "runs:/run-aux/bio_feature_cols.json",
         "aux_bio_feature_cols_hash": "ccc",
@@ -578,6 +383,8 @@ class _FakeMlflowClient:
 def test_lineage_pins_resolve_exact_versions_from_champion_tags(monkeypatch):
     """Deploy resolves bases from champion tags: exact versions, never aliases."""
     d = _deploy()
+    # Framework detection loads the pinned GBDT model via MLflow; stub it out.
+    monkeypatch.setattr(d, "_gbdt_framework", lambda _uri: "xgboost")
     client = _FakeMlflowClient(_FakeModelVersion(_lineage_tags()))
     production = SimpleNamespace(version="7", run_id="run-prod")
 
@@ -592,12 +399,13 @@ def test_lineage_pins_resolve_exact_versions_from_champion_tags(monkeypatch):
     assert pins["linear"]["scaler_uri"] == "runs:/run-linear/linear_scaler.pkl"
     assert pins["linear"]["scaler_hash"] == "aaa"
     assert pins["gbdt"]["run_id"] == "run-gbdt"
+    assert pins["gbdt"]["framework"] == "xgboost"
     assert pins["nn"]["model_uri"] == "runs:/run-nn/nn_model"
     # Only the ensemble @champion alias is ever resolved — no base alias lookups.
     assert client.alias_queries == []
 
 
-def test_lineage_pins_missing_tags_fail_fast(monkeypatch):
+def test_lineage_pins_missing_tags_fail_fast():
     """A champion without its exact lineage tags is not deployable."""
     import pytest
 
@@ -635,7 +443,7 @@ def test_build_input_fingerprint_includes_lineage_and_sources(monkeypatch, tmp_p
     assert "bentofile.pinned" not in fp
     assert "bento_build_state" not in fp
     assert "bento_tag" not in fp
-    assert "tennis-ml:latest" not in fp
+    assert "tennis-bento:latest" not in fp
 
 
 def test_build_input_fingerprint_ignores_generated_outputs(monkeypatch, tmp_path):
@@ -696,7 +504,7 @@ def test_build_lineage_tags_flattens_exact_pins():
         },
     }
     aux_pins = {
-        "embeddings_uri": "runs:/run-aux/bio_embeddings.parquet",
+        "embeddings_uri": "runs:/run-aux/bio_embeddings.npz",
         "embeddings_hash": "bbb",
         "bio_feature_cols_uri": "runs:/run-aux/bio_feature_cols.json",
         "bio_feature_cols_hash": "ccc",

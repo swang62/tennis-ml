@@ -6,7 +6,7 @@ include:
   - "src/"
   - "infra/postgres/init.sql"
   - "data/processed/linear_scaler.pkl"
-  - "data/processed/bio_embeddings.parquet"
+  - "data/processed/bio_embeddings.npz"
   - "data/processed/bio_feature_cols.json"
   - "data/processed/nn_best.onnx"
   - "data/processed/player_similarity.index"

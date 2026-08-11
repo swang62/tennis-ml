@@ -11,44 +11,6 @@ version = "0.1.0"
 description = "Tennis match prediction pipeline using Prefect, MLflow, and BentoML"
 readme = "README.md"
 requires-python = ">=3.12, <3.13"
-dependencies = [
-  "prefect>=3.7",
-  "mlflow>=3.13",
-  "bentoml>=1.4",
-  "torch>=2.12",
-  "onnxscript>=0.1.0",
-  "lightning>=2.6",
-  "scikit-learn>=1.8",
-  "xgboost>=3.2",
-  "lightgbm>=4.6",
-  "catboost>=1.2",
-  # Stealth-Chromium Playwright wrapper used by the rankings catch-up flow
-  # (src/flows/rankings.py); the binary downloads on first launch.
-  "cloakbrowser>=0.5.6",
-  "optuna>=4.9",
-  "papermill>=2.7",
-  "pandas>=2.3",
-  "numpy>=2.4",
-  # Operational database access; DuckDB stays installed for training snapshots.
-  "psycopg[binary]>=3.2",
-  "duckdb>=1.5",
-  # dbt ETL runs against PostgreSQL (dbt-postgres); DuckDB is not a dbt target.
-  "dbt-postgres>=1.10",
-  "scipy>=1.17",
-  "matplotlib>=3.10",
-  "seaborn>=0.13",
-  "shap>=0.52",
-  "numba>=0.65",
-  "llvmlite>=0.47",
-  "ipykernel>=7.2",
-  "rich>=15.0",
-  "requests>=2.34",
-  "faiss-cpu>=1.14.3",
-  "fastembed>=0.8",
-  "ipywidgets>=8.1.8",
-  "jupyter>=1.1.1",
-  "optuna-integration[pytorch-lightning]>=4.9.0",
-]
 
 [tool.ruff]
 line-length = 100
@@ -69,20 +31,22 @@ venvPath = "."
 venv = ".venv"
 include = ["src", "tests", "notebooks"]
 exclude = [
-    ".venv",
-    "**/__pycache__",
-    "artifacts",
-    "data",
-    "dbt",
-    "infra",
-    "mlruns",
-    ".git",
-    "**/.ipynb_checkpoints/**",
+  ".venv",
+  "**/__pycache__",
+  "artifacts",
+  "data",
+  "dbt",
+  "infra",
+  "mlruns",
+  ".git",
+  "**/.ipynb_checkpoints/**",
 ]
 # Untyped notebook MLflow/Lightning APIs need narrow pyright exceptions.
 executionEnvironments = [
-    # Repo-root extra path lets notebooks import src.*.
-    { root = "notebooks", extraPaths = ["."], reportPrivateImportUsage = "none", reportAttributeAccessIssue = "none" },
+  # Repo-root extra path lets notebooks import src.*.
+  { root = "notebooks", extraPaths = [
+    ".",
+  ], reportPrivateImportUsage = "none", reportAttributeAccessIssue = "none" },
 ]
 # Data-science dependencies lack stubs; preserve inference boundary guards.
 reportAny = "none"
@@ -114,17 +78,66 @@ tennis-ml = { workspace = true, editable = true }
 environments = ["sys_platform == 'darwin' and platform_machine == 'arm64'"]
 
 [dependency-groups]
-dev = [
+# Runtime serving subset: packages imported by src/serving/ and src/features/
+# during prediction only. Strict subset of training — no mlflow/torch/optuna.
+inference = [
+  "bentoml>=1.4",
+  "scikit-learn>=1.8",
+  "xgboost>=3.2",
+  "lightgbm>=4.6",
+  "psycopg[binary]>=3.2",
+  "pandas>=2.3",
+  "numpy>=2.4",
+  "onnxruntime>=1.27.0",
+  "faiss-cpu>=1.14.3",
   "python-dotenv>=1.2.2",
+]
+
+# Model training/tuning: everything notebooks 00-05 and pipeline.py need.
+training = [
+  { include-group = "inference" },
+  "mlflow>=3.13",
+  "torch>=2.12",
+  "onnxscript>=0.1.0",
+  "lightning>=2.6",
+  "optuna>=4.9",
+  "optuna-integration[pytorch-lightning]>=4.9.0",
+  "papermill>=2.7",
+  "scipy>=1.17",
+  "matplotlib>=3.10",
+  "seaborn>=0.13",
+  "shap>=0.52",
+  "numba>=0.65",
+  "llvmlite>=0.47",
+  "fastembed>=0.8",
+  "ipykernel>=7.2",
+  "rich>=15.0",
+  "requests>=2.34",
+  "ipywidgets>=8.1.8",
+  "jupyter>=1.1.1",
+]
+
+# Local ETL/ops: Prefect orchestration, dbt, DuckDB snapshot, rankings catch-up.
+local = [
+  { include-group = "training" },
+  "prefect>=3.7",
+  "duckdb>=1.5",
+  "dbt-postgres>=1.10",
+  "cloakbrowser>=0.5.6",
+]
+
+# Full local test/lint/type-check tooling
+dev = [
+  { include-group = "local" },
+  "pytest>=9.1",
+  "pytest-env>=1.7.0",
+  "pytest-testmon>=2.2",
   "ruff>=0.15",
   "pre-commit>=4.6",
-  "pytest>=9.1",
-  "pytest-env>=1.7",
-  "pytest-testmon>=2.2",
-  "tennis-ml",
+  "python-dotenv>=1.2.2",
   "basedpyright>=1.39",
   "pandas-stubs>=3.0",
-  "pytest-env>=1.7.0",
+  "tennis-ml",
 ]
 
 [tool.pytest.ini_options]

@@ -1,0 +1,39 @@
+{# Custom Dockerfile template — no build-essential, cleanup in pip install layer. #}
+{% extends bento_base_template %}
+{% import '_macros.j2' as common %}
+
+{% block SETUP_BENTO_COMPONENTS %}
+COPY --chown={{ bento__user }}:{{ bento__user }} ./env/docker ./env/docker/
+
+{# Minimal runtime system deps only — no build-essential, git, gnupg2. #}
+{% call common.RUN(__enable_buildkit__) -%} {{ __secret_mounts__ }} {% endcall -%} {{ __secret_exports__ }}apt-get update && apt-get install -q -y --no-install-recommends ca-certificates bash && rm -rf /var/lib/apt/lists/*
+
+{% call common.RUN(__enable_buildkit__) -%} {{ __secret_mounts__ }} {% endcall -%} {{ __secret_exports__ }}command -v uv >/dev/null || pip install uv
+{% call common.RUN(__enable_buildkit__) -%} {{ __secret_mounts__ }} {% endcall -%} {{ __secret_exports__ }}UV_PYTHON_INSTALL_DIR=/app/python/ uv venv --python {{ __options__python_version }} /app/.venv && chown -R {{ bento__user }}:{{ bento__user }} /app/.venv
+ENV VIRTUAL_ENV=/app/.venv
+ENV UV_COMPILE_BYTECODE=1
+ENV UV_NO_PROGRESS=1
+ENV PATH=/app/.venv/bin:${PATH}
+
+{% set __pip_cache__ = common.mount_cache("/root/.cache/") %}
+
+COPY --chown={{ bento__user }}:{{ bento__user }} ./env/python ./env/python/
+{% for name in __options__build_include %}
+COPY --chown={{ bento__user }}:{{ bento__user }} ./src/{{ name }} ./src/{{ name }}
+{% endfor %}
+
+{# pip install + cleanup in ONE layer. #}
+{% call common.RUN(__enable_buildkit__) -%} {{ __secret_mounts__ }} {{ __pip_cache__ }} {% endcall -%} if [ -d ./src ]; \
+    then INSTALL_ROOT="./src"; \
+    else INSTALL_ROOT="./env/python"; \
+    fi; {{ __secret_exports__ }}uv --directory $INSTALL_ROOT pip install -r $BENTO_PATH/env/python/requirements.txt \
+    && rm -rf /root/.cache/pip /root/.cache/uv \
+    && find /app/.venv -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true \
+    && find /app/.venv -name '*.pyc' -delete 2>/dev/null || true
+
+{% for command in __options__post_commands %}
+{% call common.RUN(__enable_buildkit__) -%} {{ __secret_mounts__ }} {% endcall -%} {{ __secret_exports__ }}{{ command }}
+{% endfor %}
+
+COPY --chown={{ bento__user }}:{{ bento__user }} . ./
+{% endblock %}

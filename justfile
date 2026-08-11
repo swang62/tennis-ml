@@ -16,7 +16,7 @@ db-reset:
 
 # Seed deterministic raw matches.
 db-seed *args:
-    uv run python src/db/seed.py {{args}}
+    uv run python src/db/seed.py {{ args }}
 
 # Export an atomic PostgreSQL training snapshot.
 db-snapshot:
@@ -24,8 +24,8 @@ db-snapshot:
 
 # Build and push all production docker images.
 deploy *args:
-    uv run python src/flows/deploy.py {{args}}
-    docker build -t swang62/tennis-web:latest web/
+    uv run python src/flows/deploy.py {{ args }}
+    docker build -t swang62/tennis-web:latest web/ --no-cache
     docker push swang62/tennis-web:latest
 
 # Install Python dependencies.
@@ -43,7 +43,7 @@ dev:
 # Start the Compose production stack.
 docker-up:
     docker compose up -d --build
-    
+
 # Register the Monday Prefect deployment with: uv run python src/flows/rankings.py --deploy
 rankings-fetch:
     uv run python src/flows/rankings.py

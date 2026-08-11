@@ -519,18 +519,8 @@ export default function H2H() {
                       className="meeting"
                     >
                       <span className="meeting-date mono">{m.match_date}</span>
-                      <span className="meeting-players">
-                        <span
-                          className={`meeting-name${aWon ? " is-winner" : ""}`}
-                        >
-                          {name(playerA!)}
-                        </span>
-                        <span className="meeting-vs">beat</span>
-                        <span
-                          className={`meeting-name${aWon ? "" : " is-winner"}`}
-                        >
-                          {name(playerB!)}
-                        </span>
+                      <span className="meeting-result">
+                        {aWon ? name(playerA!) : name(playerB!)} won
                       </span>
                       <span className="meeting-meta">{meetingMeta(m)}</span>
                     </div>

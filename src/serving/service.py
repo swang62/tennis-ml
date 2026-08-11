@@ -14,7 +14,7 @@ from collections.abc import Callable
 from datetime import date, datetime
 from decimal import Decimal
 from time import perf_counter
-from typing import cast
+from typing import Any, cast
 
 import bentoml
 import numpy as np
@@ -66,23 +66,26 @@ if not _log.handlers:
     _log.addHandler(logging.StreamHandler())
 
 # Serving dependencies stay here. Model packages are pinned because models are pickled.
+# base_image avoids BentoML's default build-essential injection; ca-certificates
+# and bash are the only system deps needed at runtime.
 SERVING_IMAGE = Image(
-    python_version="3.12", distro="debian", lock_python_packages=False
+    base_image="python:3.12-slim",
+    distro="",
+    lock_python_packages=False,
+    commands=[
+        "apt-get update && apt-get install -y --no-install-recommends ca-certificates bash libgomp1 && rm -rf /var/lib/apt/lists/*"
+    ],
 ).python_packages(
     "bentoml==1.4.39",
-    "mlflow==3.13.0",
     "scikit-learn==1.8.0",
     "xgboost-cpu==3.2.0",
     "lightgbm==4.6.0",
-    "catboost==1.2.10",  # 02_tune_gbdt tries xgb/lgbm/catboost; image must support whichever wins
     "psycopg[binary]==3.3.4",
-    "psycopg-pool==3.3.1",
     "pandas==2.3.3",
-    "pyarrow==24.0.0",
     "numpy==2.4.6",
-    "scipy==1.17.1",
     "onnxruntime==1.27.0",
-    "faiss-cpu==1.14.3",  # loads the packaged player-similarity index for /similar_players
+    "faiss-cpu==1.14.3",
+    "python-dotenv==1.2.2",
 )
 
 
@@ -713,6 +716,22 @@ DATA_APP = Starlette(
 )
 
 
+class _LGBMProbaAdapter:
+    """Expose sklearn-style predict_proba over a native LightGBM Booster.
+
+    bentoml.lightgbm.load_model returns the native Booster, which has no
+    predict_proba; Booster.predict already returns P(class 1) for the binary
+    objective, so predict_proba stacks [1 - p, p] to match the sklearn API.
+    """
+
+    def __init__(self, booster: Any) -> None:
+        self._booster = booster
+
+    def predict_proba(self, X: Any) -> np.ndarray:
+        p = np.asarray(self._booster.predict(X), dtype=np.float64)
+        return np.column_stack([1.0 - p, p])
+
+
 @bentoml.service(
     image=SERVING_IMAGE,
     # Aligned with Nginx's 120s operational batch window so a large
@@ -732,18 +751,26 @@ class TennisPredictor:
         # Idempotent schema bootstrap (applies init.sql). Must run before
         # any read endpoint queries the tables it creates.
         init_db()
-        self.linear = bentoml.mlflow.load_model(self.bento_linear).get_raw_model()
-        self.gbdt = bentoml.mlflow.load_model(self.bento_gbdt).get_raw_model()
-        self.production = bentoml.mlflow.load_model(self.bento_production).get_raw_model()
+        self.linear: Any = bentoml.sklearn.load_model(self.bento_linear)
+        manifest = json.loads(MODEL_INFO_FILE.read_text())
+        gbdt_framework = manifest["bases"]["gbdt"]["framework"]
+        if gbdt_framework == "xgboost":
+            self.gbdt: Any = bentoml.xgboost.load_model(self.bento_gbdt)
+        else:
+            # bentoml.lightgbm.load_model returns a Booster (no predict_proba);
+            # the adapter restores the sklearn-style interface.
+            self.gbdt = _LGBMProbaAdapter(bentoml.lightgbm.load_model(self.bento_gbdt))
+        self.production: Any = bentoml.sklearn.load_model(self.bento_production)
         self.nn_session = ort.InferenceSession(str(AUX_DIR / "nn_best.onnx"))
 
         with open(AUX_DIR / "linear_scaler.pkl", "rb") as f:
             self.scaler = pickle.load(f)
-        bio_df = pd.read_parquet(AUX_DIR / "bio_embeddings.parquet")
         with open(AUX_DIR / "bio_feature_cols.json") as f:
             self.bio_feature_cols = json.load(f)
-        self.bio_by_player = {pid: i for i, pid in enumerate(bio_df["player_id"])}
-        self.bio_array = bio_df[self.bio_feature_cols].to_numpy(np.float32)
+        bio_data = np.load(str(AUX_DIR / "bio_embeddings.npz"), allow_pickle=True)
+        # player_ids is a string array (object dtype, requires pickle); vectors is float32.
+        self.bio_by_player = {pid: i for i, pid in enumerate(bio_data["player_ids"])}
+        self.bio_array = bio_data["vectors"].astype(np.float32)
 
     def _predict_proba(self, input: pd.DataFrame) -> pd.DataFrame:
         """Run the stacked ensemble without recursively calling the HTTP endpoint."""

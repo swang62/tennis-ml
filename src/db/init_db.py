@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from typing import LiteralString, cast
 
-from psycopg.conninfo import conninfo_to_dict
+import psycopg
+from psycopg import sql as pg_sql
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
+from psycopg.errors import DuplicateDatabase
 
 from src import constants
 from src.constants import ROOT
@@ -18,10 +22,29 @@ LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 def init() -> None:
-    """Apply infra/postgres/init.sql (idempotent, structure only)."""
-    sql = INIT_SQL.read_text()
+    """Create the configured database if needed, then apply init.sql."""
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError("DATABASE_URL not set")
+    conninfo = conninfo_to_dict(database_url)
+    database = str(conninfo.get("dbname") or "")
+    if not database:
+        raise RuntimeError("DATABASE_URL must include a database name")
+    # template1 always exists, unlike postgres when POSTGRES_DB names a
+    # different initial database in the official container image.
+    conninfo["dbname"] = "template1"
+    maintenance_url = make_conninfo(
+        **{key: str(value) for key, value in conninfo.items() if value is not None}
+    )
+    with psycopg.connect(maintenance_url, autocommit=True).cursor() as cur:
+        try:
+            cur.execute(pg_sql.SQL("CREATE DATABASE {}").format(pg_sql.Identifier(database)))
+            print(f"PostgreSQL database created: {database}")
+        except DuplicateDatabase:
+            pass
+    init_sql = INIT_SQL.read_text()
     with get_conn().cursor() as cur:
-        cur.execute(cast(LiteralString, sql))
+        cur.execute(cast(LiteralString, init_sql))
     print("PostgreSQL init: done")
 
 

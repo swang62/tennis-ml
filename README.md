@@ -92,11 +92,11 @@ Training pipeline.py (features, tuning, evaluation, promotion)
 
 ### Deployment
 
-| Service    | Image source                | Host port | Healthcheck                                 |
-| ---------- | --------------------------- | --------- | ------------------------------------------- |
-| `postgres` | `postgres:18.4`             | 6543      | `pg_isready` (database readiness)           |
-| `bento`    | `swang62/tennis-ml:latest`  | none      | authenticated `SELECT 1` against PostgreSQL |
-| `web`      | `swang62/tennis-web:latest` | 8187      | `wget` of the SPA root inside the container |
+| Service    | Image source                  | Host port | Healthcheck                                 |
+| ---------- | ----------------------------- | --------- | ------------------------------------------- |
+| `postgres` | `postgres:18.4`               | 6543      | `pg_isready` (database readiness)           |
+| `bento`    | `swang62/tennis-bento:latest` | none      | authenticated `SELECT 1` against PostgreSQL |
+| `web`      | `swang62/tennis-web:latest`   | 8187      | `wget` of the SPA root inside the container |
 
 ### Standalone Compose deployment
 
@@ -128,9 +128,28 @@ The `/predict_from_ids` endpoint accepts a JSON object with the following fields
 | `round`       | no       | 0       | `r128` / `r64` / `r32` / `r16` / `qf` / `sf` / `f` |
 | `as_of_date`  | no       | today   | `datetime.date`                                    |
 
+## Dependency Groups
+
+The project uses uv's nested dependency groups. The `inference` group is the strict runtime subset:
+
+```bash
+# Full local development (all notebooks, ETL, linting, tests)
+uv sync
+
+# Inference-only — the exact packages in the production Bento image
+uv sync --group inference
+```
+
+| Group     | Contents                                                                              |
+| --------- | ------------------------------------------------------------------------------------- |
+| inference | BentoML, scikit-learn, XGBoost, LightGBM, psycopg, pandas, NumPy, ONNX Runtime, FAISS |
+| training  | inference + MLflow, PyTorch, Optuna, Papermill, plotting, Jupyter                     |
+| local     | training + Prefect, dbt, DuckDB, rankings catch-up                                    |
+| dev       | local + pytest, ruff, pre-commit, type-checking                                       |
+
 ## Extra Notes
 
 - **Canonicalization** — balanced symmetric features, the lower lexicographic player id becomes the `player_*` side
 - **Rolling form lookup** — live inference reads each player's newest snapshot strictly before `as_of_date`
 - **Cold-start imputation** — missing players use the materialized `gold.tour_averages` singleton (pre-computed full-pool defaults + weighted tour benchmarks), never on-demand aggregates.
-- **Bento image data sources** — Bento loads 4 artifacts from the MLflow registry pinned to the champion's exact lineage tags (no base aliases), ensemble model uses promoted `[p_linear, p_gbdt, p_nn]` → `p_win`. Production serving reads PostgreSQL live through sidecar.
+- **Bento image data sources** — Bento loads native sklearn/XGBoost/LightGBM models materialized at deploy time from the champion's exact lineage tags; no MLflow at serving time. NN is ONNX Runtime. Bio embeddings are compressed NumPy `.npz`, not Parquet. Production serving reads PostgreSQL live through sidecar.

@@ -1598,31 +1598,9 @@ html.light {
     white-space: nowrap;
   }
 
-  .meeting-players {
-    display: inline-flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 0 0.35rem;
-    min-width: 0;
+  .meeting-result {
     font-weight: 600;
-  }
-
-  .meeting-name {
-    min-width: 0;
-    overflow-wrap: anywhere;
-    color: var(--text-dim);
-  }
-
-  .meeting-name.is-winner {
-    font-weight: 800;
-    color: var(--clay);
-  }
-
-  .meeting-vs {
-    font-family: var(--font-data);
-    font-size: 0.6875rem;
-    text-transform: uppercase;
-    color: var(--text-faint);
+    white-space: nowrap;
   }
 
   .meeting-meta {

@@ -412,24 +412,6 @@ wheels = [
 ]
 
 [[package]]
-name = "catboost"
-version = "1.2.10"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "graphviz" },
-    { name = "matplotlib" },
-    { name = "numpy" },
-    { name = "pandas" },
-    { name = "plotly" },
-    { name = "scipy" },
-    { name = "six" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/e9/0e/09e8fa0858570fda88090bc3f441b69c18ea3d6f4a02fd41aa5426c157bf/catboost-1.2.10.tar.gz", hash = "sha256:26ae6d423acaf0e9d8160f2477a990431057ed04522d993c2f42dac62743b4f7", size = 39925863, upload-time = "2026-02-18T16:13:29.092Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/bb/52/f5cd568800c87576012d715481730da93bcc34e609c5c204550a9ad0c067/catboost-1.2.10-cp312-cp312-macosx_11_0_universal2.whl", hash = "sha256:b27115d5b443048f710001c8ac666892dfe03498492310b00466203c91cc30a5", size = 28884278, upload-time = "2026-02-18T16:12:07.659Z" },
-]
-
-[[package]]
 name = "cattrs"
 version = "23.1.2"
 source = { registry = "https://pypi.org/simple" }
@@ -2155,15 +2137,6 @@ wheels = [
 ]
 
 [[package]]
-name = "narwhals"
-version = "2.22.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/62/3c/c4ef2164a71c1a63d7f1ae411c4082c5fa872405106db60a4b7114989ad7/narwhals-2.22.1.tar.gz", hash = "sha256:d62920805a0a43b7ff8b54b0c0d3142d796f8a9301836ada37e573d6a33cbcd9", size = 647493, upload-time = "2026-06-05T12:34:34.051Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/48/ca/36339329c4604adbcc99c899b7eb1ce1a555c499b6a6860757dc9bfed36d/narwhals-2.22.1-py3-none-any.whl", hash = "sha256:60567d774edf77db53906f89d9fbd164e66e56d66d388e1e6990f17ac33cfb53", size = 454815, upload-time = "2026-06-05T12:34:32.289Z" },
-]
-
-[[package]]
 name = "nbclient"
 version = "0.11.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2707,19 +2680,6 @@ dependencies = [
 wheels = [
     { url = "https://files.pythonhosted.org/packages/af/1a/0bfbe9904350961f4dbb713f04342e40d548c5fc26c8157bd13617c81492/playwright-1.62.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:db755ab27db21a04186f1fe8169888e42356086e439b1059b923ef417f0b6034", size = 42510842, upload-time = "2026-07-31T17:00:48.596Z" },
     { url = "https://files.pythonhosted.org/packages/66/dc/c0486b407ad0699a250f6bbe3066fca95344009a99ca66e88ca175c69dc1/playwright-1.62.0-py3-none-macosx_11_0_universal2.whl", hash = "sha256:5108bd5b3e87169ddf269feee097da5893af7f8aea4634dfc840518d64c1f1da", size = 43732093, upload-time = "2026-07-31T17:00:52.218Z" },
-]
-
-[[package]]
-name = "plotly"
-version = "6.8.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "narwhals" },
-    { name = "packaging" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/94/fd/d72c292d78aadb93d1a9bcd76bf3c678271040c7cf10abe5788b33040a39/plotly-6.8.0.tar.gz", hash = "sha256:e088e7ddc68d4f70e3d66659224727a45296d71d2b8284181862d3d8f1f0d88f", size = 6915161, upload-time = "2026-06-03T18:33:40.226Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/f9/14/abe5ce876ab5b66ee3c691bf537fcd43d037aea55d447aacf74630a8f31e/plotly-6.8.0-py3-none-any.whl", hash = "sha256:13c5c4a0f70b74cab1913eda0de49b826df5931708eb6f9c3010040614700ec8", size = 9902055, upload-time = "2026-06-03T18:33:34.26Z" },
 ]
 
 [[package]]
@@ -3745,9 +3705,11 @@ wheels = [
 name = "tennis-ml"
 version = "0.1.0"
 source = { editable = "." }
-dependencies = [
+
+[package.dev-dependencies]
+dev = [
+    { name = "basedpyright" },
     { name = "bentoml" },
-    { name = "catboost" },
     { name = "cloakbrowser" },
     { name = "dbt-postgres" },
     { name = "duckdb" },
@@ -3763,6 +3725,61 @@ dependencies = [
     { name = "mlflow" },
     { name = "numba" },
     { name = "numpy" },
+    { name = "onnxruntime" },
+    { name = "onnxscript" },
+    { name = "optuna" },
+    { name = "optuna-integration", extra = ["pytorch-lightning"] },
+    { name = "pandas" },
+    { name = "pandas-stubs" },
+    { name = "papermill" },
+    { name = "pre-commit" },
+    { name = "prefect" },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "pytest" },
+    { name = "pytest-env" },
+    { name = "pytest-testmon" },
+    { name = "python-dotenv" },
+    { name = "requests" },
+    { name = "rich" },
+    { name = "ruff" },
+    { name = "scikit-learn" },
+    { name = "scipy" },
+    { name = "seaborn" },
+    { name = "shap" },
+    { name = "tennis-ml" },
+    { name = "torch" },
+    { name = "xgboost" },
+]
+inference = [
+    { name = "bentoml" },
+    { name = "faiss-cpu" },
+    { name = "lightgbm" },
+    { name = "numpy" },
+    { name = "onnxruntime" },
+    { name = "pandas" },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "python-dotenv" },
+    { name = "scikit-learn" },
+    { name = "xgboost" },
+]
+local = [
+    { name = "bentoml" },
+    { name = "cloakbrowser" },
+    { name = "dbt-postgres" },
+    { name = "duckdb" },
+    { name = "faiss-cpu" },
+    { name = "fastembed" },
+    { name = "ipykernel" },
+    { name = "ipywidgets" },
+    { name = "jupyter" },
+    { name = "lightgbm" },
+    { name = "lightning" },
+    { name = "llvmlite" },
+    { name = "matplotlib" },
+    { name = "mlflow" },
+    { name = "numba" },
+    { name = "numpy" },
+    { name = "onnxruntime" },
     { name = "onnxscript" },
     { name = "optuna" },
     { name = "optuna-integration", extra = ["pytorch-lightning"] },
@@ -3770,6 +3787,38 @@ dependencies = [
     { name = "papermill" },
     { name = "prefect" },
     { name = "psycopg", extra = ["binary"] },
+    { name = "python-dotenv" },
+    { name = "requests" },
+    { name = "rich" },
+    { name = "scikit-learn" },
+    { name = "scipy" },
+    { name = "seaborn" },
+    { name = "shap" },
+    { name = "torch" },
+    { name = "xgboost" },
+]
+training = [
+    { name = "bentoml" },
+    { name = "faiss-cpu" },
+    { name = "fastembed" },
+    { name = "ipykernel" },
+    { name = "ipywidgets" },
+    { name = "jupyter" },
+    { name = "lightgbm" },
+    { name = "lightning" },
+    { name = "llvmlite" },
+    { name = "matplotlib" },
+    { name = "mlflow" },
+    { name = "numba" },
+    { name = "numpy" },
+    { name = "onnxruntime" },
+    { name = "onnxscript" },
+    { name = "optuna" },
+    { name = "optuna-integration", extra = ["pytorch-lightning"] },
+    { name = "pandas" },
+    { name = "papermill" },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "python-dotenv" },
     { name = "requests" },
     { name = "rich" },
     { name = "scikit-learn" },
@@ -3780,23 +3829,12 @@ dependencies = [
     { name = "xgboost" },
 ]
 
-[package.dev-dependencies]
-dev = [
-    { name = "basedpyright" },
-    { name = "pandas-stubs" },
-    { name = "pre-commit" },
-    { name = "pytest" },
-    { name = "pytest-env" },
-    { name = "pytest-testmon" },
-    { name = "python-dotenv" },
-    { name = "ruff" },
-    { name = "tennis-ml" },
-]
-
 [package.metadata]
-requires-dist = [
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "basedpyright", specifier = ">=1.39" },
     { name = "bentoml", specifier = ">=1.4" },
-    { name = "catboost", specifier = ">=1.2" },
     { name = "cloakbrowser", specifier = ">=0.5.6" },
     { name = "dbt-postgres", specifier = ">=1.10" },
     { name = "duckdb", specifier = ">=1.5" },
@@ -3812,6 +3850,61 @@ requires-dist = [
     { name = "mlflow", specifier = ">=3.13" },
     { name = "numba", specifier = ">=0.65" },
     { name = "numpy", specifier = ">=2.4" },
+    { name = "onnxruntime", specifier = ">=1.27.0" },
+    { name = "onnxscript", specifier = ">=0.1.0" },
+    { name = "optuna", specifier = ">=4.9" },
+    { name = "optuna-integration", extras = ["pytorch-lightning"], specifier = ">=4.9.0" },
+    { name = "pandas", specifier = ">=2.3" },
+    { name = "pandas-stubs", specifier = ">=3.0" },
+    { name = "papermill", specifier = ">=2.7" },
+    { name = "pre-commit", specifier = ">=4.6" },
+    { name = "prefect", specifier = ">=3.7" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
+    { name = "pytest", specifier = ">=9.1" },
+    { name = "pytest-env", specifier = ">=1.7.0" },
+    { name = "pytest-testmon", specifier = ">=2.2" },
+    { name = "python-dotenv", specifier = ">=1.2.2" },
+    { name = "requests", specifier = ">=2.34" },
+    { name = "rich", specifier = ">=15.0" },
+    { name = "ruff", specifier = ">=0.15" },
+    { name = "scikit-learn", specifier = ">=1.8" },
+    { name = "scipy", specifier = ">=1.17" },
+    { name = "seaborn", specifier = ">=0.13" },
+    { name = "shap", specifier = ">=0.52" },
+    { name = "tennis-ml", editable = "." },
+    { name = "torch", specifier = ">=2.12" },
+    { name = "xgboost", specifier = ">=3.2" },
+]
+inference = [
+    { name = "bentoml", specifier = ">=1.4" },
+    { name = "faiss-cpu", specifier = ">=1.14.3" },
+    { name = "lightgbm", specifier = ">=4.6" },
+    { name = "numpy", specifier = ">=2.4" },
+    { name = "onnxruntime", specifier = ">=1.27.0" },
+    { name = "pandas", specifier = ">=2.3" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
+    { name = "python-dotenv", specifier = ">=1.2.2" },
+    { name = "scikit-learn", specifier = ">=1.8" },
+    { name = "xgboost", specifier = ">=3.2" },
+]
+local = [
+    { name = "bentoml", specifier = ">=1.4" },
+    { name = "cloakbrowser", specifier = ">=0.5.6" },
+    { name = "dbt-postgres", specifier = ">=1.10" },
+    { name = "duckdb", specifier = ">=1.5" },
+    { name = "faiss-cpu", specifier = ">=1.14.3" },
+    { name = "fastembed", specifier = ">=0.8" },
+    { name = "ipykernel", specifier = ">=7.2" },
+    { name = "ipywidgets", specifier = ">=8.1.8" },
+    { name = "jupyter", specifier = ">=1.1.1" },
+    { name = "lightgbm", specifier = ">=4.6" },
+    { name = "lightning", specifier = ">=2.6" },
+    { name = "llvmlite", specifier = ">=0.47" },
+    { name = "matplotlib", specifier = ">=3.10" },
+    { name = "mlflow", specifier = ">=3.13" },
+    { name = "numba", specifier = ">=0.65" },
+    { name = "numpy", specifier = ">=2.4" },
+    { name = "onnxruntime", specifier = ">=1.27.0" },
     { name = "onnxscript", specifier = ">=0.1.0" },
     { name = "optuna", specifier = ">=4.9" },
     { name = "optuna-integration", extras = ["pytorch-lightning"], specifier = ">=4.9.0" },
@@ -3819,6 +3912,7 @@ requires-dist = [
     { name = "papermill", specifier = ">=2.7" },
     { name = "prefect", specifier = ">=3.7" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
+    { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "requests", specifier = ">=2.34" },
     { name = "rich", specifier = ">=15.0" },
     { name = "scikit-learn", specifier = ">=1.8" },
@@ -3828,18 +3922,36 @@ requires-dist = [
     { name = "torch", specifier = ">=2.12" },
     { name = "xgboost", specifier = ">=3.2" },
 ]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "basedpyright", specifier = ">=1.39" },
-    { name = "pandas-stubs", specifier = ">=3.0" },
-    { name = "pre-commit", specifier = ">=4.6" },
-    { name = "pytest", specifier = ">=9.1" },
-    { name = "pytest-env", specifier = ">=1.7.0" },
-    { name = "pytest-testmon", specifier = ">=2.2" },
+training = [
+    { name = "bentoml", specifier = ">=1.4" },
+    { name = "faiss-cpu", specifier = ">=1.14.3" },
+    { name = "fastembed", specifier = ">=0.8" },
+    { name = "ipykernel", specifier = ">=7.2" },
+    { name = "ipywidgets", specifier = ">=8.1.8" },
+    { name = "jupyter", specifier = ">=1.1.1" },
+    { name = "lightgbm", specifier = ">=4.6" },
+    { name = "lightning", specifier = ">=2.6" },
+    { name = "llvmlite", specifier = ">=0.47" },
+    { name = "matplotlib", specifier = ">=3.10" },
+    { name = "mlflow", specifier = ">=3.13" },
+    { name = "numba", specifier = ">=0.65" },
+    { name = "numpy", specifier = ">=2.4" },
+    { name = "onnxruntime", specifier = ">=1.27.0" },
+    { name = "onnxscript", specifier = ">=0.1.0" },
+    { name = "optuna", specifier = ">=4.9" },
+    { name = "optuna-integration", extras = ["pytorch-lightning"], specifier = ">=4.9.0" },
+    { name = "pandas", specifier = ">=2.3" },
+    { name = "papermill", specifier = ">=2.7" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
-    { name = "ruff", specifier = ">=0.15" },
-    { name = "tennis-ml", editable = "." },
+    { name = "requests", specifier = ">=2.34" },
+    { name = "rich", specifier = ">=15.0" },
+    { name = "scikit-learn", specifier = ">=1.8" },
+    { name = "scipy", specifier = ">=1.17" },
+    { name = "seaborn", specifier = ">=0.13" },
+    { name = "shap", specifier = ">=0.52" },
+    { name = "torch", specifier = ">=2.12" },
+    { name = "xgboost", specifier = ">=3.2" },
 ]
 
 [[package]]

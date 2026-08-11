@@ -31,7 +31,7 @@ STATE_FILE = DATA_PROCESSED / "bento_build_state.json"
 load_env()
 
 assert IMAGE_NAME is not None, "IMAGE_NAME not set in env; load_env() must be called first"
-# Docker Hub uses only `latest`; MLflow and Bento versions remain cache state.
+# Docker Hub uses only `latest`; MLflow pins determine the packaged model versions.
 DOCKER_REPO = os.getenv("DOCKER_REPO", "swang62")
 
 # nn_best is exported to ONNX and included as an artifact, not a BentoModel.
@@ -56,7 +56,7 @@ SIMILARITY_METADATA = DATA_PROCESSED / "player_metadata.json"
 MODEL_INFO_FILE = DATA_PROCESSED / "model_info.json"
 AUX_FILES = [
     DATA_PROCESSED / "linear_scaler.pkl",
-    DATA_PROCESSED / "bio_embeddings.parquet",
+    DATA_PROCESSED / "bio_embeddings.npz",
     DATA_PROCESSED / "bio_feature_cols.json",
     NN_ONNX_FILE,
     SIMILARITY_INDEX,
@@ -80,13 +80,20 @@ SOURCE_FINGERPRINT_FILES = [
     ROOT / "src" / "features" / "inference.py",
     ROOT / "src" / "features" / "tour_averages.py",
     ROOT / "src" / "constants.py",
+    # Rest of the runtime source closure shipped in the Bento image.
+    ROOT / "src" / "countries.py",
+    ROOT / "src" / "db" / "client.py",
+    ROOT / "src" / "db" / "init_db.py",
+    ROOT / "src" / "utils.py",
+    ROOT / "src" / "models" / "similarity.py",
+    ROOT / "src" / "models" / "nn.py",
 ]
 
 
 @flow(log_prints=True)
-def deploy_flow(force: bool = False) -> None:
-    """Deploy the promoted model; force bypasses the Bento and image caches."""
-    deploy_bento(force=force)
+def deploy_flow() -> None:
+    """Deploy the promoted model, rebuilding the Bento image every time."""
+    deploy_bento()
 
 
 def _latest_production_version(client: Any) -> Any:
@@ -148,6 +155,10 @@ def _lineage_pins(client: Any, production: Any) -> dict[str, dict[str, str]]:
             tag_key = f"base_{cls}_{key}"
             if tag_key in tags:
                 pins[cls][key] = tags[tag_key]
+    # The GBDT framework picks the native serving adapter (bentoml.xgboost vs
+    # bentoml.lightgbm); detect it once here so the manifest and the
+    # materialization step both know it.
+    pins["gbdt"]["framework"] = _gbdt_framework(pins["gbdt"]["model_uri"])
     return pins
 
 
@@ -194,7 +205,75 @@ def _check_aux_files() -> None:
         )
 
 
-def _import_or_reuse(pin: dict[str, Any]) -> Any:
+def _detect_gbdt_framework(raw: Any) -> str:
+    """Map a raw GBDT estimator to its native BentoML adapter name."""
+    import lightgbm
+    import xgboost
+
+    if isinstance(raw, xgboost.XGBModel):
+        return "xgboost"
+    if isinstance(raw, lightgbm.LGBMModel):
+        return "lightgbm"
+    raise RuntimeError(f"gbdt_best model is neither XGBoost nor LightGBM: {type(raw).__name__}")
+
+
+def _gbdt_framework(model_uri: str) -> str:
+    """Detect the pinned GBDT framework by loading the MLflow model briefly."""
+    import mlflow
+
+    raw = mlflow.pyfunc.load_model(model_uri).get_raw_model()
+    framework = _detect_gbdt_framework(raw)
+    print(f"Detected GBDT framework {framework} for {model_uri}")
+    return framework
+
+
+def _is_sklearn_estimator(model: Any) -> bool:
+    """Cheap duck-type check: fitted sklearn estimators expose both."""
+    return hasattr(model, "get_params") and hasattr(model, "predict")
+
+
+def _materialize_native_model(
+    pin: dict[str, Any], framework: str | None = None
+) -> tuple[Any, str | None]:
+    """Save a pinned MLflow version as a native BentoML model.
+
+    Linear and the ensemble (sklearn estimators) go through
+    bentoml.sklearn.save_model; the GBDT goes through bentoml.xgboost or
+    bentoml.lightgbm depending on the detected framework. Returns the saved
+    BentoModel (reused when the pinned version is already materialized) and
+    the GBDT framework ("xgboost"/"lightgbm", else None).
+    """
+    import bentoml
+    import mlflow
+
+    registered_name = pin["registered_model_name"]
+    version = str(pin["version"])
+    uri = f"models:/{registered_name}/{version}"
+    try:
+        stored = bentoml.models.get(registered_name)
+    except Exception:
+        stored = None
+    if stored is not None and stored.info.metadata.get("mlflow_version") == version:
+        print(f"Reusing {stored.tag} — already materialized (MLflow v{version})")
+        return stored, framework
+
+    raw = mlflow.pyfunc.load_model(uri).get_raw_model()
+    if registered_name == BASE_BENTO_NAMES["gbdt"]:
+        framework = framework or _detect_gbdt_framework(raw)
+        metadata = {"mlflow_uri": uri, "mlflow_version": version, "framework": framework}
+        save = bentoml.xgboost.save_model if framework == "xgboost" else bentoml.lightgbm.save_model
+        return save(registered_name, raw, metadata=metadata), framework
+    if not _is_sklearn_estimator(raw):
+        raise RuntimeError(f"{registered_name} is not an sklearn estimator: {type(raw).__name__}")
+    return (
+        bentoml.sklearn.save_model(
+            registered_name, raw, metadata={"mlflow_uri": uri, "mlflow_version": version}
+        ),
+        None,
+    )
+
+
+def _mlflow_import_or_reuse(pin: dict[str, Any]) -> Any:
     """Import or reuse a pinned MLflow version by exact version, never alias."""
     import bentoml
 
@@ -213,6 +292,18 @@ def _import_or_reuse(pin: dict[str, Any]) -> Any:
     )
     print(f"Imported {uri} -> {stored.tag}")
     return stored
+
+
+def _import_or_reuse(pin: dict[str, Any], framework: str | None = None) -> Any:
+    """Materialize a pinned MLflow version as a native BentoML model.
+
+    The nn_best pin is the exception: it is exported to ONNX and never becomes
+    a BentoModel, so it still takes the MLflow import path that
+    _materialize_nn_onnx relies on.
+    """
+    if pin["registered_model_name"] == BASE_BENTO_NAMES["nn"]:
+        return _mlflow_import_or_reuse(pin)
+    return _materialize_native_model(pin, framework)[0]
 
 
 def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
@@ -274,6 +365,15 @@ def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
     print(f"Wrote ONNX: {NN_ONNX_FILE} ({NN_ONNX_FILE.stat().st_size} bytes)")
 
 
+def _reuse_or_materialize_nn_onnx(state: dict[str, Any], nn_pin: dict[str, Any]) -> bool:
+    """Reuse an ONNX export only when it came from the exact pinned NN model."""
+    if NN_ONNX_FILE.exists() and state.get("nn_onnx_model_uri") == nn_pin["model_uri"]:
+        print(f"Reusing ONNX for {nn_pin['model_uri']}")
+        return True
+    _materialize_nn_onnx(nn_pin)
+    return False
+
+
 def _file_hash(path: Path) -> str:
     import hashlib
 
@@ -307,15 +407,16 @@ def build_input_fingerprint(client: Any, production: Any) -> str:
 
 
 def _import_models(pins: dict[str, dict[str, Any]]) -> dict[str, str]:
-    """Import each pinned MLflow version into the BentoML store; return tags.
+    """Materialize each pinned MLflow version as a native BentoModel; return tags.
 
     Reuse is version-keyed via `_import_or_reuse` — the BentoML store name
     alone cannot gate reuse, so the pinned MLflow version is stored in the
-    imported model's metadata.
+    saved model's metadata.
     """
     tags: dict[str, str] = {}
     for key, pin in pins.items():
-        tags[key] = str(_import_or_reuse(pin).tag)
+        framework = pin.get("framework") if key == "gbdt" else None
+        tags[key] = str(_import_or_reuse(pin, framework).tag)
     return tags
 
 
@@ -329,22 +430,6 @@ def _write_pinned_bentofile(tags: dict[str, str]) -> Path:
     PINNED_BENTOFILE.parent.mkdir(parents=True, exist_ok=True)
     PINNED_BENTOFILE.write_text(yaml.safe_dump(config, sort_keys=False))
     return PINNED_BENTOFILE
-
-
-def _cached_tag(state: dict[str, Any], fingerprint: str) -> str | None:
-    """Return the previously built tag when the state is unchanged, else None."""
-    if state.get("fingerprint") != fingerprint:
-        return None
-    tag = state.get("tag")
-    if not tag:
-        return None
-    import bentoml
-
-    try:
-        bentoml.bentos.get(tag)
-    except Exception:
-        return None
-    return tag
 
 
 def _docker_login() -> None:
@@ -373,17 +458,6 @@ def _docker_login() -> None:
         raise RuntimeError(f"docker login failed (exit {proc.returncode})")
 
 
-def _image_exists(image: str) -> bool:
-    return (
-        subprocess.run(
-            ["docker", "image", "inspect", image],
-            cwd=ROOT,
-            capture_output=True,
-        ).returncode
-        == 0
-    )
-
-
 def _run_teed(
     cmd: list[str], log: TextIO, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess:
@@ -404,8 +478,8 @@ def _run_teed(
     return subprocess.CompletedProcess(cmd, returncode)
 
 
-def build_bento_image(force: bool = False) -> tuple[str, int]:
-    """Build the promoted Bento as `${IMAGE_NAME}:latest`; force skips caches."""
+def build_bento_image() -> tuple[str, int]:
+    """Build the promoted Bento and `${IMAGE_NAME}:latest` image on every deploy."""
     import bentoml
     from mlflow.tracking.client import MlflowClient
 
@@ -416,41 +490,35 @@ def build_bento_image(force: bool = False) -> tuple[str, int]:
 
     state = _read_state()
     pins = _lineage_pins(client, production)
-    _materialize_nn_onnx(pins["nn"])
+    _reuse_or_materialize_nn_onnx(state, pins["nn"])
     _check_aux_files()
     fingerprint = build_input_fingerprint(client, production)
     _write_model_info(client, production, pins, fingerprint)
 
-    if force:
-        print("Force: rebuilding Bento and image regardless of cache.")
-        tag = None
-    else:
-        tag = _cached_tag(state, fingerprint)
-    rebuilt = tag is None
-    if rebuilt:
-        tags = _import_models(pins)
-        pinned = _write_pinned_bentofile(tags)
-        bento = bentoml.bentos.build_bentofile(bentofile=str(pinned), build_ctx=str(ROOT))
-        tag = str(bento.tag)
-        BENTO_TAG_FILE.write_text(tag)
-        _write_state({**state, "fingerprint": fingerprint, "tag": tag})
-        print(f"Built {tag} from {pinned}")
-    else:
-        print(f"No Bento rebuild needed — reusing {tag}.")
+    tags = _import_models(pins)
+    pinned = _write_pinned_bentofile(tags)
+    bento = bentoml.bentos.build_bentofile(bentofile=str(pinned), build_ctx=str(ROOT))
+    tag = str(bento.tag)
+    BENTO_TAG_FILE.write_text(tag)
+    _write_state(
+        {
+            **state,
+            "fingerprint": fingerprint,
+            "tag": tag,
+            "nn_onnx_model_uri": pins["nn"]["model_uri"],
+        }
+    )
+    print(f"Built {tag} from {pinned}")
 
     image = f"{IMAGE_NAME}:latest"
-    containerize = force or rebuilt or not _image_exists(image)
-    if containerize:
-        print(f"Containerizing {tag} -> {image} with BentoML...")
-        bentoml.container.build(tag, backend="docker", image_tag=(image,))
-    else:
-        print(f"Local image already exists — reusing {image}.")
+    print(f"Containerizing {tag} -> {image} with BentoML...")
+    bentoml.container.build(tag, backend="docker", image_tag=(image,))
     return image, int(production.version)
 
 
-def deploy_bento(force: bool = False) -> None:
+def deploy_bento() -> None:
     """Build then push the promoted image; token login uses stdin."""
-    local_image, production_version = build_bento_image(force=force)
+    local_image, production_version = build_bento_image()
 
     latest = f"{DOCKER_REPO}/{IMAGE_NAME}:latest"
     # BentoML tags the local image without the Docker Hub repo prefix;
@@ -463,10 +531,10 @@ def deploy_bento(force: bool = False) -> None:
     deploy_log = LOGS / f"deploy_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     try:
         with deploy_log.open("w") as log:
-            _run_teed(["docker", "push", "--max-concurrent-uploads", "1", latest], log)
+            _run_teed(["docker", "push", latest], log)
     except subprocess.CalledProcessError as exc:
-        print(f"Deploy step failed ({exc}) — skipping publish; local image is ready: {local_image}")
-        return
+        print(f"Deploy step failed ({exc}); image was not published: {local_image}")
+        raise
 
     state = _read_state()
     _write_state({**state, "deployed_version": production_version, "deployed_image": latest})
@@ -474,15 +542,4 @@ def deploy_bento(force: bool = False) -> None:
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="Build and push the production Bento serving image."
-    )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Force rebuild + redeploy of the latest ensemble_lr_model, bypassing the Bento pinned cache.",
-    )
-    args = parser.parse_args()
-    deploy_flow(force=args.force)
+    deploy_flow()
