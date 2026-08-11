@@ -10,7 +10,7 @@ import faiss
 import numpy as np
 import pandas as pd
 
-from src.constants import GOLD_TABLE, PROFILES_TABLE, ROOT
+from src.constants import BRONZE_PROFILES_TABLE, GOLD_TABLE, ROOT
 from src.db.client import to_dataframe
 
 MODEL_NAME = "BAAI/bge-small-en-v1.5"
@@ -20,8 +20,9 @@ DEFAULT_METADATA = ROOT / "data" / "processed" / "player_metadata.json"
 
 BIO_COL_PREFIX = "bio_"
 
-# Read only gold so live and snapshot builds share portable SQL. The vector is
-# style-only: bio, handedness/backhand, surface rates, and serve/return rates.
+# Metadata (names/bios/handedness) comes from bronze.player_profiles; the
+# style state below comes from gold.match_features. Both go through the shared
+# query helper so live and snapshot builds use identical SQL.
 _PLAYER_STATE_SQL = f"""
 WITH player_side AS (
     SELECT match_id, match_date, surface, player_id AS pid,
@@ -151,7 +152,8 @@ class PlayerSimilarity:
         """Build and save the index using the live client or an offline query helper."""
         query = query or to_dataframe
         profiles = query(
-            f"SELECT player_id, display_name, backhand, handedness, summary FROM {PROFILES_TABLE}"
+            f"SELECT player_id, display_name, backhand, handedness, summary "
+            f"FROM {BRONZE_PROFILES_TABLE}"
         )
         profiles = profiles[profiles["player_id"] != ""].reset_index(drop=True)
         if profiles.empty:

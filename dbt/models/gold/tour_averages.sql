@@ -94,14 +94,15 @@ activity AS (
     ) per_player
 ),
 -- Static profile pool: left-handed rate over known L/R only, time-aware
--- years-pro, and the profile row count.
+-- years-pro, and the profile row count. Metadata comes from bronze —
+-- gold.player_profiles carries aggregates only.
 profile_aggregates AS (
     SELECT
         AVG(CASE WHEN prof.handedness = 'L' THEN 1
                  WHEN prof.handedness = 'R' THEN 0 END) AS left_handed_rate,
         AVG(EXTRACT(YEAR FROM p.pool_as_of_date) - prof.turned_pro) AS avg_years_pro,
         COUNT(*) AS profile_rows
-    FROM gold.player_profiles prof
+    FROM {{ source('bronze', 'player_profiles') }} prof
     CROSS JOIN pool_meta p
 ),
 -- Weighted tour benchmarks: SUM(numerator) / SUM(denominator) over ALL

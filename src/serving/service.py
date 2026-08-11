@@ -29,6 +29,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from src.constants import (
+    BRONZE_PROFILES_TABLE,
     BRONZE_TABLE,
     PRODUCTION_MODEL,
     PROFILES_TABLE,
@@ -97,13 +98,14 @@ import psycopg.errors as _pg_errors
 
 
 def _safe_query(sql: str, params: list | None = None) -> pd.DataFrame:
-    """Run *sql* and return the result; return empty DataFrame when dbt-created
-    tables (silver/gold) do not exist yet so the web dashboard renders an empty
-    state instead of a 500 error.
+    """Run *sql* and return the result; return empty DataFrame only when a
+    dbt-created relation (silver/gold table) does not exist yet, so the web
+    dashboard renders an empty state instead of a 500 before ETL. Other
+    failures (bad columns, connection errors) propagate to the 500 handler.
     """
     try:
         return execute_df(sql, params)
-    except (_pg_errors.UndefinedTable, _pg_errors.UndefinedColumn):
+    except _pg_errors.UndefinedTable:
         _log.warning("safe query returned empty: dbt tables may not exist yet")
         return pd.DataFrame()
 
@@ -214,23 +216,42 @@ def _predict_from_ids_bulk_impl(
 
 # ── SQL (table names interpolated from constants; values always via `%s`) ──
 
-# Directory read from the materialized player-grain profile table. current_rank
-# is the player's latest official weekly rank (bronze.rankings), falling back to
-# match-time rank from the most recent match when no ranking row exists.
+# Directory read: bronze metadata (name/IOC) joined to the dbt-derived gold
+# aggregates. current_rank is the player's latest official weekly rank
+# (bronze.rankings), falling back to match-time rank from the most recent
+# match when no ranking row exists — both materialized by dbt in gold.
 _PLAYERS_SQL = f"""
-SELECT player_id, display_name, match_count AS matches_played,
-       latest_rank_points, ioc, current_rank
-FROM {PROFILES_TABLE}
-ORDER BY current_rank NULLS LAST, display_name, player_id
+SELECT bp.player_id, bp.display_name, bp.ioc,
+       gp.match_count AS matches_played,
+       gp.latest_rank_points,
+       gp.current_rank
+FROM {BRONZE_PROFILES_TABLE} bp
+LEFT JOIN {PROFILES_TABLE} gp ON gp.player_id = bp.player_id
+ORDER BY gp.current_rank NULLS LAST, bp.display_name, bp.player_id
 """
 
-# One point query: the player's materialized profile cross joined to the one-row
-# tour singleton. current_rank is already materialized in player_profiles via
-# dbt (official ranking with match-time fallback); no per-query CTE needed.
-# Tour comparison deltas are computed in Python, not SQL.
+# One point query: bronze metadata (bp.*) joined to the dbt-materialized gold
+# aggregates (gp.*) and the one-row tour singleton (cross join). current_rank
+# is already materialized in gold.player_profiles via dbt (official ranking
+# with match-time fallback); no per-query CTE needed. Tour comparison deltas
+# are computed in Python, not SQL.
 _PROFILE_SQL = f"""
 SELECT
-    pp.*,
+    bp.*,
+    gp.match_count, gp.latest_match_date,
+    gp.latest_rank_points, gp.earliest_rank_points,
+    gp.earliest_rank_points_date, gp.latest_rank_points_date,
+    gp.rank_points_delta, gp.current_rank,
+    gp.first_serve_in_pct, gp.aces_per_first_serve,
+    gp.first_serve_points_won_pct, gp.second_serve_points_won_pct,
+    gp.overall_serve_points_won_pct, gp.double_faults_per_serve_point,
+    gp.aces_per_service_game, gp.break_points_saved_pct,
+    gp.return_points_won_pct, gp.first_serve_return_points_won_pct,
+    gp.second_serve_return_points_won_pct, gp.break_point_conversion_pct,
+    gp.break_point_opportunities_per_return_game,
+    gp.hard_matches, gp.clay_matches, gp.grass_matches,
+    gp.hard_win_rate, gp.clay_win_rate, gp.grass_win_rate,
+    gp.recent_snapshot_date, gp.win_rate_10,
     ta.tour_first_serve_win_pct,
     ta.tour_second_serve_win_pct,
     ta.tour_ace_rate,
@@ -241,9 +262,10 @@ SELECT
     ta.tour_df_rate,
     ta.tour_aces_per_svc_game,
     ta.tour_break_point_opportunities_per_return_game
-FROM {PROFILES_TABLE} pp
+FROM {BRONZE_PROFILES_TABLE} bp
+LEFT JOIN {PROFILES_TABLE} gp ON gp.player_id = bp.player_id
 CROSS JOIN {TOUR_AVERAGES_TABLE} ta
-WHERE pp.player_id = %s
+WHERE bp.player_id = %s
 """
 
 # Official weekly history only: bronze.rankings, chronological. Never derived
@@ -279,7 +301,7 @@ WITH per_match AS (
         END AS round_depth
     FROM {SILVER_PLAYER_MATCHES} pm
     LEFT JOIN {BRONZE_TABLE} br ON br.match_id = pm.match_id
-    LEFT JOIN {PROFILES_TABLE} pr ON pr.player_id = pm.opponent_id
+    LEFT JOIN {BRONZE_PROFILES_TABLE} pr ON pr.player_id = pm.opponent_id
     WHERE pm.player_id = %s
 ),
 ranked AS (

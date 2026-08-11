@@ -22,6 +22,8 @@ tests/___db/
 # Environment
 .env
 *.env
+!.env.example
+!web/.env.example
 
 # TLS keys and certs (generate per deployment)
 infra/postgres/tls/

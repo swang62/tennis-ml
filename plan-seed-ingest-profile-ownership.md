@@ -1,246 +1,225 @@
-# Plan: bootstrap ingestion, scraping, and aggregate-only profiles
+# Plan: bootstrap seed, rankings, and profile-schema ownership
 
 ## Goal
 
-Establish clear ownership and executable entry points:
+Make `db-seed` a complete bootstrap for the selected local match corpus:
+bronze matches, player metadata, matching official top-200 ranking history,
+and optional Wikipedia enrichment via `--enrich`. Complete the bronze/gold
+profile ownership split and apply only query-backed schema improvements
+required by the resulting seed and read paths.
 
-- `src/db/ingest.py` is a non-runnable library for all database ingestion
-  operations.
-- `src/db/seed.py` is the initial-bootstrap CLI.
-- `src/flows/scrape.py` is the Prefect flow for post-seed web scraping.
-- `gold.player_profiles` is created only by `etl.py` through dbt and stores
-  only `player_id` plus derived aggregates.
-- `bronze.player_profiles` exclusively stores ATP profile metadata and
-  Wikipedia enrichment.
-- `justfile` contains no direct Python file/module invocations; it calls only
-  installed project commands or external tools.
+## Reconciliation audit
 
-## Confirmed behavior
+- The current code still uses `src/flows/ingest.py` and `src/flows/rankings.py`;
+  the planned `src/db/ingest.py` and `src/flows/scrape.py` moves have not happened.
+- `src/db/seed.py` currently seeds matches and profiles, but rank-history data is
+  loaded separately by `ingest_rankings()` into `bronze.rankings`. This explains
+  the empty profile rank-history chart after a normal seed.
+- The serving endpoint reads `bronze.rankings` directly for `/rank_history`, so
+  no dbt model is required to make seeded rank history visible.
+- The existing ranking import already validates the reviewed identity map,
+  filters to official top-200 rows, deduplicates `(ranking_date, player_id)`, and
+  upserts idempotently. Seed should reuse that path rather than reimplement it.
+- Schema optimization is not a general rewrite: keep the normalized bronze/
+  silver/gold design and add or retain only constraints/indexes validated against
+  seed upserts, latest-rank lookup, chronological rank-history lookup, and the
+  bronze-to-gold player joins.
 
-### Initial seed
-
-- `db-seed`: deterministic miniset, bronze metadata, and all locally available
-  official top-200 ranking history for those seeded canonical players.
-- `db-seed --all`: all supported local regular-tour match CSVs, bronze
-  metadata, and ranking history only for the resulting player set.
-- `db-seed --enrich`: the only opt-in seed mode that calls Wikipedia;
-  `--all --enrich` is valid.
-- Missing approved ranking-map coverage is reported and skipped, never guessed.
-- Initial seed is offline unless `--enrich` is explicitly supplied.
-
-### Database lifecycle
-
-1. `db-init` creates schemas and bronze-owned relations only.
-2. `db-seed` writes bronze matches, profiles, and filtered official rankings.
-3. `db-etl` invokes `src/flows/etl.py`, whose dbt build creates silver models,
-   gold aggregates, and `gold.player_profiles`.
-4. Before step 3, the Bento data APIs degrade to empty player results; prediction
-   is unavailable because there are no selectable players.
-
-### Post-seed operations
-
-- `src/flows/scrape.py` owns Prefect orchestration for current/future web
-  scraping: ATP rankings now; match scraping later when actually implemented.
-- `src/db/ingest.py` exposes database ingestion operations for new supplied
-  data; it has no CLI and performs no scraping orchestration.
-- No automatic Wikipedia enrichment runs after bootstrap. The existing removed
-  `db-enrich` justfile recipe is not restored by this work.
-
-## Scope boundaries
+## Scope
 
 ### In scope
 
-- Move/rename modules and repair all imports, tests, docs, and Prefect
-  deployment entrypoints.
-- Seed flag behavior and filtered historical ranking import.
-- Gold/bronze profile ownership split and consuming SQL joins.
-- Project command entrypoints and justfile cleanup.
-- Regression coverage for fresh bootstrap, idempotency, and ownership.
+- Move ingestion ownership out of `src/flows` without changing ingestion rules.
+- Make the seed path import locally available, filtered rank history for seeded
+  canonical players.
+- Preserve separate weekly post-bootstrap rankings catch-up.
+- Add optional seed-time Wikipedia enrichment through an independent
+  `--enrich` flag.
+- Establish bronze metadata versus gold derived-profile ownership.
+- Audit and tune the affected PostgreSQL relation definitions for the known
+  write/read paths.
+- Update focused, self-contained tests and user-facing commands/docs.
 
 ### Out of scope
 
-- Implementing future match scraping.
-- Changing the approved ranking identity-map policy.
-- Running dbt, seed, or enrichment automatically during Bento startup.
-- Adding another persisted metadata projection or changing model features.
+- New match scraping, live ranking backfill from seed, or automatic Wikipedia
+  enrichment outside explicit `db-seed --enrich`.
+- Changing the reviewed ranking identity-map policy.
+- Broad schema redesign, speculative indexes, partitioning, or model-feature
+  changes.
+- Running the seed, dbt, or destructive database commands during this work.
 
 ## Tasks
 
-### [ ] Task 1: Move ingestion into a non-runnable database library
+### [x] Task 1: Establish the seed bootstrap flags and rank-history contract
+
+- **Files:** `src/db/seed.py`, `src/flows/ingest.py`, `tests/test_seed.py`,
+  `tests/test_ingest.py`
+- **Description:**
+  - Keep `seed.py` as the bootstrap orchestrator and add `--enrich` as an
+    independent, non-mutually-exclusive optional flag alongside `--all`.
+    It solely enables Wikipedia enrichment for the player set selected by the
+    chosen seed mode.
+  - Derive the canonical player-id set from the exact seeded miniset or `--all`
+    match corpus.
+  - Extend the existing ranking import operation with an optional canonical-id
+    filter and call it from seed after match/profile writes.
+  - Import only locally available official top-200 rows for the seeded players;
+    retain map validation, unmapped reporting, deduplication, and idempotent
+    upsert behavior.
+  - Run the existing bronze Wikipedia enrichment only for the seeded player set
+    when `--enrich` is supplied; `--all --enrich` is valid.
+  - Report when no ranking files exist or a seeded player has no approved-map
+    coverage; never guess by name.
+- **Acceptance criteria:**
+  - A default offline seed populates `bronze.rankings` only for selected seeded
+    players when local ranking CSVs are available.
+  - Re-running the same seed does not duplicate rankings.
+  - Default and `--all` seeds make no Wikipedia request; `--enrich` enriches
+    only the selected player set.
+  - An empty local ranking archive remains a successful seed with explicit
+    zero-import output.
+- **Guardrails:** The only seed-time network operation is explicit
+  `--enrich`; do not add ranking browser work or duplicate ranking
+  parsing/write logic.
+
+### [x] Task 2: Move database ingestion ownership without behavior changes
 
 - **Files:** `src/flows/ingest.py` -> `src/db/ingest.py`, `src/db/seed.py`,
   `src/flows/rankings.py`, `src/countries.py`, `tests/test_ingest.py`,
-  `tests/test_e2e_ingest_to_inference.py`, `tests/test_dbt_helper.py`,
-  `dbt/models/sources.yml`, `AGENTS.md`
+  `tests/test_seed.py`, `tests/test_e2e_ingest_to_inference.py`,
+  `tests/test_dbt_helper.py`, `dbt/models/sources.yml`, `AGENTS.md`
 - **Description:**
-  - Relocate the existing ingestion implementation to `src/db/ingest.py`.
-  - Remove its `__main__` block and direct CSV command-line interface.
-  - Preserve it as the single source for raw-row validation, ATP transforms,
-    bronze match/profile/ranking writes, approved-map validation, and bronze
-    Wikipedia helpers.
-  - Update every import, comment, docstring, test module path, dbt source
-    description, and operational reference.
+  - Relocate raw CSV validation, transforms, bronze writes, ranking import, and
+    profile-enrichment helpers to a non-runnable database library.
+  - Repair all import paths and references while preserving public behavior.
 - **Acceptance criteria:**
-  - There are no production or test imports of `src.flows.ingest`.
-  - Running `src/db/ingest.py` does not offer or execute a CLI operation.
-  - Existing input validation and idempotent write contracts remain unchanged.
-- **Guardrails:** Do not move Prefect flows or network/browser orchestration
-  into `src/db`.
+  - No production or test import remains on `src.flows.ingest`.
+  - The moved module has no CLI entry point.
+  - Existing validation and idempotency tests still cover the same boundaries.
+- **Guardrails:** Do not move Prefect orchestration or browser code into `src/db`.
 
-### [ ] Task 2: Rename the post-seed rankings flow to scrape
+### [x] Task 3: Keep weekly catch-up separate from initial seed
 
 - **Files:** `src/flows/rankings.py` -> `src/flows/scrape.py`,
   `infra/prefect/worker.py`, `tests/test_rankings_flow.py` ->
   `tests/test_scrape_flow.py`, `justfile`, `README.md`, `pyproject.toml`
 - **Description:**
-  - Rename the Prefect module while retaining the existing weekly ranking
-    watermark, browser lifecycle, parser, mapping, and independent-week commit
-    behavior.
-  - Change its database imports to `src.db.ingest`.
-  - Update the Prefect deployment entrypoint and worker registration import.
-  - Make `scrape.py` the documented future home for post-seed match scraping;
-    do not add an unrequested match scraper.
+  - Rename the weekly rankings Prefect flow to its post-seed scraping role.
+  - Keep its watermark behavior: it must not attempt an unbounded historical
+    browser scrape when `bronze.rankings` is empty.
+  - Point it at the moved ingestion library for its validated database writes.
 - **Acceptance criteria:**
-  - The Monday rankings deployment registers and runs from
-    `src/flows/scrape.py`.
-  - No active code, command, or documentation points at `rankings.py`.
-  - Current scrape behavior and parser tests remain unchanged after rename.
-- **Guardrails:** Preserve the no-challenge-bypass policy and the empty-table
-  behavior that avoids a historical web scrape.
+  - The Monday deployment retains its parser, map validation, and independent
+    per-week commit behavior.
+  - The initial seed and weekly catch-up are independently runnable.
+- **Guardrails:** Do not implement future match scraping or challenge bypasses.
 
-### [ ] Task 3: Make seed the complete initial-bootstrap orchestrator
-
-- **Files:** `src/db/seed.py`, `src/db/ingest.py`, `tests/test_seed.py`,
-  `tests/test_ingest.py`, `README.md`
-- **Description:**
-  - Add `--enrich` independently of `--all`.
-  - Keep seed responsible for local archive discovery, deterministic miniset
-    selection, and sequencing shared ingestion-library operations.
-  - Have both miniset and all-data paths derive and retain their canonical
-    player-ID set.
-  - Import every matching local official top-200 ranking-history row for that
-    set, after profile writes.
-  - Add an optional canonical-ID filter to the ranking ingestion operation;
-    report seeded players absent from the reviewed map and continue.
-  - Run bronze Wikipedia enrichment only when `--enrich` is provided.
-- **Acceptance criteria:**
-  - Default seed is offline and imports no ranking data for unseeded players.
-  - `--all`, `--enrich`, and their combination are deterministic and idempotent.
-  - Mapping gaps are visible in output and never resolved by name matching.
-- **Guardrails:** Seed orchestrates; it must not duplicate validation or SQL
-  write logic held by `src.db.ingest`.
-
-### [ ] Task 4: Enforce bronze-only metadata and aggregate-only gold profiles
+### [x] Task 4: Complete bronze/gold profile ownership
 
 - **Files:** `infra/postgres/init.sql`, `dbt/models/gold/player_profiles.sql`,
   `dbt/models/gold/player_profiles.yml`, `dbt/models/sources.yml`,
-  `src/constants.py`, `src/flows/etl.py`, relevant dbt tests
+  `src/constants.py`, `src/flows/etl.py`, `src/serving/service.py`,
+  `src/features/inference.py`, `src/models/similarity.py`, relevant dbt tests
 - **Description:**
-  - Preserve the user-updated init behavior: do not create
-    `gold.player_profiles` in init SQL.
-  - Make dbt's `gold.player_profiles` output `player_id` plus only derived
-    counts, rankings, service/return metrics, surface values, and rolling
-    values.
-  - Remove all copied bronze fields from gold: name variants, biographical and
-    physical attributes, coach/style fields, IOC, summary, and enrichment time.
-  - Correct ETL documentation to state that dbt creates aggregate gold tables
-    and does not enrich/copy profile metadata.
-  - Rename/reword constants whose comments imply gold owns consumer metadata.
-  - Let the first dbt build replace an existing legacy wide
-    `gold.player_profiles` relation; no manual data migration is required
-    because bronze remains the metadata system of record.
+  - Leave player metadata and enrichment exclusively in `bronze.player_profiles`.
+  - Have dbt create `gold.player_profiles` only after ETL, containing `player_id`
+    and derived aggregates.
+  - Update consumers to join bronze metadata and gold aggregates explicitly.
+  - Retain only the narrow pre-ETL missing-relation empty-state fallback.
 - **Acceptance criteria:**
-  - Immediately after `db-init` and `db-seed`, `gold.player_profiles` is absent.
-  - `db-etl` creates it with only `player_id` and derived columns.
-  - No dbt model writes or duplicates bronze profile metadata.
-- **Guardrails:** Do not create an empty gold-profile stub merely to make the
-  API boot; the serving fallback handles pre-ETL absence.
+  - `db-init` and `db-seed` do not create or write a gold profile relation.
+  - After ETL, API payloads remain contract-compatible and metadata is not
+    duplicated in gold.
+- **Guardrails:** Do not add a gold stub table or conceal unexpected post-ETL
+  query failures as empty data.
 
-### [ ] Task 5: Join ownership tables at every metadata consumer
+### [x] Task 5: Audit and apply minimal schema optimizations
 
-- **Files:** `src/serving/service.py`, `src/features/inference.py`,
-  `src/models/similarity.py`, `src/db/ingest.py`, `tests/test_service_*.py`,
-  `tests/test_inference_features.py`, `tests/test_similarity.py`
+- **Files:** `infra/postgres/init.sql`, `dbt/models/sources.yml`,
+  `dbt/models/gold/player_profiles.sql`, relevant dbt schema tests,
+  `tests/test_init_db.py`, `tests/test_service_profile.py`
 - **Description:**
-  - Update `/players` and `/player_profile` to join bronze metadata to the
-    gold aggregate row by `player_id`.
-  - Read match-history opponent names directly from bronze metadata.
-  - Update inference and similarity profile queries to select bronze metadata
-    and gold-derived values explicitly rather than treating gold as a wide
-    profile table.
-  - Make all enrichment reads/writes target bronze only.
-  - Retain a narrowly-scoped **missing-relation-only** fallback for pre-ETL
-    empty-state data endpoints.
+  - Audit actual relation constraints and indexes before changing them.
+  - Ensure `bronze.rankings` supports its idempotent conflict key and the two
+    serving patterns: latest rank per player and chronological rank history per
+    player.
+  - Ensure the bronze profile key and the gold-profile player key support the
+    explicit ownership joins.
+  - Prefer existing primary/unique keys where they already provide the required
+    access path; add no index without a named query it supports.
 - **Acceptance criteria:**
-  - API response contracts remain unchanged after ETL.
-  - Enrichment changes persist in bronze and appear in serving results after
-    the next ETL without duplicate storage in gold.
-  - A fresh initialized database returns an empty `/players` list rather than
-    a 500 response.
-- **Guardrails:** Do not mask unexpected post-ETL query failures as empty data.
+  - Schema definitions enforce the ranking identity required by upserts.
+  - Rank-history and current-rank queries have an intentional access path.
+  - No redundant index duplicates a primary-key or unique-key index.
+- **Guardrails:** No partitioning, materialized rank-history copy, broad
+  denormalization, or performance claim without an inspected query plan.
 
-### [ ] Task 6: Replace direct Python recipes with project commands
+### [x] Task 6: Normalize commands, documentation, and regression coverage
 
-- **Files:** `justfile`, `pyproject.toml`, entry-point modules for init, ETL,
-  seed, snapshot, deploy, scrape, training, drift check, and worker; tests/docs
-  that cite commands
+- **Files:** `justfile`, `pyproject.toml`, `README.md`, `AGENTS.md`,
+  `tests/test_seed.py`, `tests/test_ingest.py`, `tests/test_scrape_flow.py`,
+  `tests/test_init_db.py`, `tests/test_service_profile.py`,
+  `tests/test_e2e_ingest_to_inference.py`
 - **Description:**
-  - Add a prominent justfile header stating that recipes must not invoke Python
-    modules/files directly or contain ad-hoc Python snippets, and that recipe
-    arguments are passed directly (`just recipe --arg`), never after `--`.
-  - Define installed `[project.scripts]` entry points with small callable `main`
-    functions for each supported Python operation currently launched by just.
-  - Change recipes such as `db-init`, `db-reset`, `db-seed`, `db-etl`,
-    `db-snapshot`, `deploy-bento`, `rankings-fetch`, `train`, `worker`, and
-    `check-drift` to call those installed commands.
-  - Keep direct external-tool recipes (`docker`, `kubectl`, `k3d`, `uv`,
-    `pytest`, `pre-commit`) unchanged where appropriate.
-  - Do not restore the removed `db-enrich`, `db-rankings`, or `db-dbt` recipes.
+  - Document the bootstrap sequence: init -> seed (including local rank history
+    and optional `--enrich`) -> ETL -> weekly catch-up.
+  - Update command/module references after the ownership moves.
+  - Add self-contained tests using mocked database boundaries or fixtures only.
 - **Acceptance criteria:**
-  - No just recipe contains `python`, `python -m`, or `python -c`.
-  - Every supported Python operation is callable directly through its installed
-    console-script command.
-  - `setup` and dependent recipes still run in dependency order.
-- **Guardrails:** Use one small entry point per existing application action;
-  do not add a generic command framework or duplicate orchestration.
+  - Documentation no longer says rank history requires a separate manual step
+    after normal seed.
+  - Tests cover miniset and `--all` rank filtering, each `--enrich` combination,
+    no-ranking-file behavior, idempotency, and pre/post-ETL serving behavior.
+- **Guardrails:** Tests must not require a live database or prebuilt gold state.
 
-### [ ] Task 7: Finalize docs and regression coverage
+### [x] Task 7: Reduce dbt validation to critical contracts
 
-- **Files:** `README.md`, `AGENTS.md`, `tests/test_seed.py`,
-  `tests/test_ingest.py`, `tests/test_scrape_flow.py`,
-  `tests/test_e2e_ingest_to_inference.py`, `tests/test_dbt_helper.py`,
-  `tests/test_service_*.py`, `tests/test_similarity.py`,
-  `tests/test_inference_features.py`
+- **Files:** `dbt/models/sources.yml`, `dbt/models/silver/*.yml`,
+  `dbt/models/gold/*.yml`, `dbt/tests/**/*.sql`, `dbt/dbt_project.yml`,
+  `README.md` only if its validation commands change
 - **Description:**
-  - Replace outdated command/path references and the old match-only seed
-    contract.
-  - Cover the module moves, installed commands, all seed flag combinations,
-    filtered ranking history, unmapped reporting, bronze-only enrichment, and
-    aggregate-only gold schema.
-  - Cover the full lifecycle: fresh database -> empty API data -> seed -> ETL
-    -> populated serving/inference behavior.
+  - Inventory existing dbt schema and singular tests by the contract they prove.
+  - Retain only critical tests: source/model identity and referential integrity,
+    non-null model-training columns, finite/bounded values where the bound is a
+    real business invariant, prevention of current-match leakage, and the
+    bronze/gold ownership plus ranking-grain contracts established by this plan.
+  - Delete or consolidate duplicated, derivable, observability-only, and
+    overlapping tests that materially lengthen every `dbt build` without adding
+    a distinct safety property.
+  - Keep a compact written test inventory explaining each retained contract.
 - **Acceptance criteria:**
-  - No user-facing documentation describes a removed recipe/path.
-  - Focused unit, dbt, and end-to-end tests prove all stated contracts.
+  - Every retained dbt test maps to a distinct critical data/feature contract.
+  - Redundant tests are removed rather than merely disabled.
+  - `dbt build` still validates the canonical training dataset, ownership split,
+    ranking identity, and leakage boundary.
+- **Guardrails:** Do not weaken unique/not-null/relationship guarantees, model
+  feature validity, or leakage checks. Do not delete tests solely to make a
+  failure disappear; fix an invalid critical contract instead.
 
 ## Dependencies
 
-1. Task 1 before Tasks 2, 3, and 5.
-2. Task 2 before the scrape console-script/justfile change in Task 6.
-3. Task 4 before Task 5.
-4. Task 6 after all callable entry points are identified by Tasks 1-3.
-5. Task 7 validates the completed sequence.
+1. Task 1 defines the behavior to preserve during Task 2.
+2. Task 2 precedes Tasks 3 and 4 import changes.
+3. Task 4 precedes consumer and schema verification in Task 5.
+4. Task 6 validates the completed lifecycle after Tasks 1-5.
+5. Task 7 runs after Task 4's ownership and Task 5's schema contracts are final.
 
-## Final audit checklist
+## QA scenarios
 
-- [ ] No `src/flows/ingest.py` or `src/flows/rankings.py` references remain.
-- [ ] No just recipe invokes a Python module/file directly.
-- [ ] No init/seed path creates or writes `gold.player_profiles`.
-- [ ] No gold profile column duplicates bronze metadata.
-- [ ] No automatic Wikipedia calls occur outside `db-seed --enrich`.
-- [ ] Justfile usage and README examples pass arguments as `just recipe --arg`,
-      never `just recipe -- --arg`.
-- [ ] Empty-state serving fallback handles only an absent dbt relation, never
-      an unexpected missing column.
-- [ ] Post-seed ranking scraping writes through `src.db.ingest` and remains
-      independent from base-history seeding.
+1. Fresh database, ranking CSVs present: seed imports only selected players'
+   official rank rows; `/rank_history` returns chronologically ordered data.
+2. Fresh database, no ranking CSVs: seed succeeds, reports no import, and the
+   rank chart has no data without an API failure.
+3. Repeated identical seed: match, profile, and ranking row counts do not grow.
+4. `--enrich` enriches only the selected players; default and `--all` runs make
+   no enrichment request.
+5. Seeded player missing from the reviewed map: output reports the gap and no
+   name-based mapping occurs.
+6. Pre-ETL: player data endpoints degrade only for the absent derived relation.
+7. Post-ETL: bronze metadata plus gold aggregates produce the existing profile,
+   inference, and similarity contracts.
+8. Explain/schema inspection confirms every retained or added index serves a
+   named seed or read query.
+9. dbt test inventory maps every retained validation to a distinct critical
+   contract; the canonical training and leakage checks still pass.

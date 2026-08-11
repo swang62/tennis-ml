@@ -1,7 +1,8 @@
 -- Assert every applicable rate column in the gold.tour_averages singleton is
--- bounded to [0, 1], and tour_aces_per_svc_game is non-negative. Tour
--- benchmark columns may be NULL (zero denominator); NULLs are skipped. Any
--- returned row violates a bound.
+-- bounded to [0, 1], while tour_aces_per_svc_game and
+-- tour_break_point_opportunities_per_return_game are per-game rates that only
+-- need a lower bound of 0. Tour benchmark columns may be NULL (zero denominator);
+-- NULLs are skipped. Any returned row violates a bound.
 SELECT
     singleton_id,
     'win_rate_10' AS column_name, win_rate_10 AS value
@@ -97,5 +98,4 @@ SELECT singleton_id, 'tour_break_point_opportunities_per_return_game',
        tour_break_point_opportunities_per_return_game
 FROM {{ ref('tour_averages') }}
 WHERE tour_break_point_opportunities_per_return_game IS NOT NULL
-  AND (tour_break_point_opportunities_per_return_game < 0
-       OR tour_break_point_opportunities_per_return_game > 1)
+  AND tour_break_point_opportunities_per_return_game < 0

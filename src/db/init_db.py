@@ -74,6 +74,16 @@ def reset() -> None:
     print("PostgreSQL reset: schemas recreated, data restored via `just db-seed`")
 
 
+def main_init() -> None:
+    """Console-script entry for `just db-init`."""
+    init()
+
+
+def main_reset() -> None:
+    """Console-script entry for `just db-reset`."""
+    reset()
+
+
 if __name__ == "__main__":
     command = sys.argv[1] if len(sys.argv) > 1 else "init"
     if command == "init":
@@ -81,5 +91,5 @@ if __name__ == "__main__":
     elif command == "reset":
         reset()
     else:
-        print("Usage: uv run python -m src.flows.init_db [init|reset]")
+        print("Usage: uv run tennis-db-init | uv run tennis-db-reset")
         sys.exit(1)

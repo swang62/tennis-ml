@@ -1,16 +1,21 @@
-"""Deterministically seed PostgreSQL from ATP CSVs without network enrichment."""
+"""Deterministically seed PostgreSQL from ATP CSVs.
+
+Local match/profile data and official rank history always seed offline;
+Wikipedia bios are fetched only with the explicit --enrich flag.
+"""
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Any, LiteralString, cast
+from typing import Any
 
 from src.constants import ROOT
-from src.db.client import get_conn
-from src.flows.ingest import (
+from src.db.ingest import (
     BRONZE_TABLE,
     atp_rows_to_bronze,
+    enrich_players,
+    ingest_rankings,
     insert_bronze_rows,
     load_profiles_for,
     load_raw_atp_rows,
@@ -63,18 +68,42 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="seed every ATP match CSV under data/raw/ (not just the default miniset)",
     )
+    parser.add_argument(
+        "--enrich",
+        action="store_true",
+        help="enrich the selected players' profiles with Wikipedia bios (default/--all stay offline)",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     if args.all:
-        main_all()
+        main_all(enrich=args.enrich)
     else:
-        main_default()
+        main_default(enrich=args.enrich)
 
 
-def main_default() -> None:
+def seed_rankings_and_enrichment(player_ids: list[str], enrich: bool) -> None:
+    """Import local official rank history for seeded players; enrich when asked.
+
+    Rankings come only from the local archive (offline); the import is scoped
+    to the seeded set and is silent about players without rank coverage — never
+    name-matched. ATP_player_database.csv stays the primary IOC source; the
+    ranking-source atp_players.csv fallback fills only seeded profiles still
+    missing an IOC (NULL/empty/UNK) and never overwrites a verified one.
+    Wikipedia enrichment is gated on --enrich and forces a refresh: every
+    selected profile's summary is rewritten even when one already exists.
+    """
+    if not player_ids:
+        return
+    ingest_rankings(player_ids=set(player_ids))
+    if enrich:
+        # enrich_players emits its own per-player lines and batch summary.
+        enrich_players(player_ids, force=True)
+
+
+def main_default(enrich: bool = False) -> None:
     matches = sorted(
         load_raw_atp_rows(RAW_YEAR),
         key=lambda m: (int(m["tourney_date"]), m["tourney_id"], m["match_num"]),
@@ -92,24 +121,18 @@ def main_default() -> None:
         f"{distinct_players} players"
     )
 
-    conn = get_conn()
-    # Re-seeding replaces the seed's own rows so `just db-seed` stays idempotent.
-    conn.execute(
-        cast(
-            LiteralString,
-            f"DELETE FROM {BRONZE_TABLE} WHERE match_id IN ({', '.join(['%s'] * len(selected_ids))})",
-        ),
-        list(selected_ids),
-    )
-    insert_bronze_rows(bronze)
-    print(f"Inserted {len(bronze)} rows into {BRONZE_TABLE}")
+    # Re-seeding overwrites the seed's own rows (ON CONFLICT UPDATE) so
+    # `just db-seed` converges on repeat runs with the same source.
+    insert_bronze_rows(bronze, overwrite=True)
+    print(f"Inserted {len(bronze)} rows into {BRONZE_TABLE} (overwrite)")
 
     player_ids = sorted(set(bronze["player1_id"]) | set(bronze["player2_id"]))
     load_profiles_for(player_ids, "seeded")
+    seed_rankings_and_enrichment(player_ids, enrich)
 
 
-def main_all() -> None:
-    """Seed every ATP CSV idempotently without rewriting sources or enriching bios."""
+def main_all(enrich: bool = False) -> None:
+    """Seed every ATP CSV, overwriting selected match rows on re-runs."""
     csv_paths = discover_atp_csvs(RAW_DIR)
     if not csv_paths:
         print(f"No ATP CSVs found under {RAW_DIR}; nothing to seed")
@@ -123,11 +146,12 @@ def main_all() -> None:
         f"{distinct_players} players"
     )
 
-    insert_bronze_rows(bronze)
-    print(f"Inserted {len(bronze)} rows into {BRONZE_TABLE} (upsert, idempotent)")
+    insert_bronze_rows(bronze, overwrite=True)
+    print(f"Inserted {len(bronze)} rows into {BRONZE_TABLE} (overwrite)")
 
     player_ids = sorted(set(bronze["player1_id"]) | set(bronze["player2_id"]))
     load_profiles_for(player_ids, "seeded")
+    seed_rankings_and_enrichment(player_ids, enrich)
 
 
 if __name__ == "__main__":

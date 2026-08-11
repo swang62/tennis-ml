@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-import sys
 import unicodedata
 from pathlib import Path
 from typing import Any, LiteralString, cast
@@ -11,7 +10,7 @@ from typing import Any, LiteralString, cast
 import pandas as pd
 import requests
 
-from src.constants import BRONZE_PROFILES_TABLE, PROFILES_TABLE, ROOT
+from src.constants import BRONZE_PROFILES_TABLE, ROOT
 from src.countries import UNK, valid_ioc
 from src.db.client import get_conn, to_dataframe
 from src.features.columns import BRONZE_COLUMNS
@@ -297,12 +296,13 @@ def _copy_df_into(
             )
 
 
-def insert_bronze_rows(df: pd.DataFrame) -> int:
+def insert_bronze_rows(df: pd.DataFrame, *, overwrite: bool = False) -> int:
     """Insert bronze.match_events rows from a DataFrame; returns row count.
 
     Shared by the ingest CLI and the dev seed so both paths use one INSERT.
-    match_id is the PK, so re-ingesting an existing match_id skips the row
-    (duplicates are never overwritten).
+    match_id is the PK: generic ingestion skips an existing match_id
+    (DO NOTHING), while the seed passes overwrite=True so re-seeding replaces
+    its own selected rows (DO UPDATE) — repeat identical sources converge.
     """
     report = run_ingestion_checks(df)
     valid_df = cast(pd.DataFrame, report["valid_df"])
@@ -320,7 +320,10 @@ def insert_bronze_rows(df: pd.DataFrame) -> int:
         return 0
 
     _copy_df_into(
-        BRONZE_TABLE, cast(pd.DataFrame, valid_df[list(BRONZE_COLUMNS)]), conflict_col="match_id"
+        BRONZE_TABLE,
+        cast(pd.DataFrame, valid_df[list(BRONZE_COLUMNS)]),
+        conflict_col="match_id",
+        update_cols=[c for c in BRONZE_COLUMNS if c != "match_id"] if overwrite else None,
     )
     return len(valid_df)
 
@@ -726,21 +729,31 @@ def _atp_players_iocs(players_csv: Path) -> dict[str, str]:
     return iocs
 
 
-def backfill_profile_iocs(rank_map: dict[str, str], players_csv: Path = ATP_PLAYERS_CSV) -> int:
-    """Backfill bronze.player_profiles.ioc for mapped players, returns count.
+def backfill_profile_iocs(
+    rank_map: dict[str, str],
+    players_csv: Path = ATP_PLAYERS_CSV,
+    player_ids: set[str] | None = None,
+) -> None:
+    """Backfill bronze.player_profiles.ioc for mapped players.
 
     atp_players.csv is the higher-confidence IOC source: only players present in
     the approved map are touched, and only a valid code replaces the UNK
     sentinel/empty value — a verified IOC is never overwritten.
+
+    player_ids restricts the backfill to those canonical player ids (the seed
+    passes its exact match-corpus player set); None backfills every mapped
+    player.
     """
     iocs = _atp_players_iocs(players_csv)
     updates: list[tuple[str, str]] = []
     for src_id, canonical in rank_map.items():
+        if player_ids is not None and canonical not in player_ids:
+            continue
         ioc = iocs.get(src_id)
         if ioc is not None and ioc != UNK:
             updates.append((ioc, canonical))
     if not updates:
-        return 0
+        return
     conn = get_conn()
     with conn.transaction(), conn.cursor() as cur:
         cur.executemany(
@@ -751,21 +764,32 @@ def backfill_profile_iocs(rank_map: dict[str, str], players_csv: Path = ATP_PLAY
             ),
             updates,
         )
-    return len(updates)
 
 
 def ingest_rankings(
     rankings_dir: Path = RANKINGS_DIR,
     map_csv: Path = RANKING_PLAYER_MAP_CSV,
     players_csv: Path = ATP_PLAYERS_CSV,
+    player_ids: set[str] | None = None,
 ) -> dict[str, Any]:
-    """Idempotent official-rankings import; returns the import summary.
+    """Official-rankings import; returns the import summary.
 
     Discover -> validate -> filter rank <= 200 -> map to canonical ids -> upsert.
     Raw ranking source ids never reach the table: player_id is resolved through
     the approved identity map, and unmapped top-200 rows are reported and
     skipped. Raises ValueError on malformed input or an invalid map before any
     database write.
+
+    player_ids restricts the import (and the ranking-source IOC fallback) to
+    those canonical player ids — the seed passes its exact match-corpus player
+    set; None imports every mapped top-200 row. The filtered seed path is
+    silent: seeded players absent from the approved map or without rank rows
+    are not reported, and the summary counts only the seeded rows. Only the
+    full import (player_ids=None) reports global unmapped rows and backfills
+    global IOCs.
+
+    The ranking-source IOC fallback (atp_players.csv) only fills NULL/empty/UNK
+    profile IOCs — a verified IOC is never overwritten.
     """
     csv_paths = discover_ranking_csvs(rankings_dir)
     if not csv_paths:
@@ -778,11 +802,20 @@ def ingest_rankings(
     top200_count = len(top200)
 
     rank_map = load_ranking_player_map(map_csv)
-    unmapped = _unmapped_report(top200, rank_map, players_csv)
+    # The filtered seed path is scoped to the seeded set: archive rows outside
+    # it are not imports and are never reported. The global unmapped report is
+    # a full-import (player_ids=None) concern.
+    unmapped: list[dict[str, Any]] = []
+    if player_ids is None:
+        unmapped = _unmapped_report(top200, rank_map, players_csv)
 
     canonical = top200["player_id"].map(rank_map)
     mapped = cast(pd.DataFrame, top200.loc[canonical.notna()]).copy()
     mapped["player_id"] = canonical[mapped.index]
+    retained_top200 = top200_count
+    if player_ids is not None:
+        mapped = cast(pd.DataFrame, mapped[mapped["player_id"].isin(player_ids)])
+        retained_top200 = len(mapped)
     # Dedupe on the PK before the upsert: duplicate (date, player) rows would
     # trip PostgreSQL's "cannot affect row a second time" ON CONFLICT rule.
     mapped = cast(
@@ -801,22 +834,16 @@ def ingest_rankings(
         )
         upserted = len(mapped)
 
-    ioc_updated = backfill_profile_iocs(rank_map, players_csv)
+    backfill_profile_iocs(rank_map, players_csv, player_ids=player_ids)
 
     summary = {
         "files": len(csv_paths),
         "source_rows": source_rows,
-        "top200": top200_count,
+        "top200": retained_top200,
         "upserted": upserted,
         "unmapped": int(sum(u["count"] for u in unmapped)),
     }
-    print(
-        f"Rankings import: {summary['files']} files, {summary['source_rows']} source rows, "
-        f"{summary['top200']} retained top-200 rows, "
-        f"{summary['upserted']} inserted/updated rows, "
-        f"{summary['unmapped']} unmapped rows skipped, "
-        f"{ioc_updated} profile IOCs backfilled"
-    )
+    print(f"Rankings import: {summary['upserted']} inserted/updated rows")
     for u in unmapped:
         print(
             f"  unmapped: source_id={u['ranking_player_id']} name={u['ranking_name']!r} "
@@ -829,10 +856,10 @@ def ingest_rankings(
 
 
 def get_players_without_summary() -> list[str]:
-    """Players in gold.player_profiles who lack a Wikipedia summary."""
+    """Players in bronze.player_profiles who lack a Wikipedia summary."""
     sql = f"""
         SELECT player_id
-        FROM {PROFILES_TABLE}
+        FROM {BRONZE_PROFILES_TABLE}
         WHERE summary IS NULL OR summary = ''
     """
     df = to_dataframe(sql)
@@ -979,7 +1006,7 @@ def enrich_player(name: str, player_id: str | None = None) -> bool:
     conn.execute(
         cast(
             LiteralString,
-            f"""UPDATE {PROFILES_TABLE}
+            f"""UPDATE {BRONZE_PROFILES_TABLE}
             SET summary = %s, enriched_at = CURRENT_TIMESTAMP
             WHERE player_id = %s""",
         ),
@@ -989,8 +1016,15 @@ def enrich_player(name: str, player_id: str | None = None) -> bool:
     return True
 
 
-def enrich_players(player_ids: list[str]) -> int:
-    """Best-effort enrich gold profiles missing a Wikipedia summary."""
+def enrich_players(player_ids: list[str], force: bool = False) -> int:
+    """Best-effort enrich bronze profiles with Wikipedia summaries.
+
+    Prints a per-player SKIP/ERROR line for each non-enriched profile and a
+    final summary of the batch outcome counts. Returns the number of profiles
+    enriched. Profiles that already have a summary are skipped unless force is
+    True — the seed's --enrich passes force=True so every selected profile's
+    summary is refreshed.
+    """
     if not player_ids:
         return 0
     conn = get_conn()
@@ -998,31 +1032,41 @@ def enrich_players(player_ids: list[str]) -> int:
         cast(
             LiteralString,
             f"SELECT player_id, COALESCE(display_name, atp_name) AS name, summary "
-            f"FROM {PROFILES_TABLE} "
+            f"FROM {BRONZE_PROFILES_TABLE} "
             f"WHERE player_id IN ({', '.join(['%s'] * len(player_ids))})",
         ),
         player_ids,
     ).fetchall()
-    enriched = 0
+    attempted = enriched = skipped = failed = 0
     for pid, name, summary in rows:
+        attempted += 1
         if not name:
+            skipped += 1
             print(f"  SKIP {pid}: no profile name for enrichment")
             continue
-        if summary and summary.strip():
+        if not force and summary and summary.strip():
+            skipped += 1
             print(f"  SKIP {pid}: already enriched")
             continue
         try:
             if enrich_player(name, pid):
                 enriched += 1
+            else:
+                skipped += 1
         except Exception as e:
+            failed += 1
             print(f"  ERROR {pid} ({name}): {e}")
+    print(
+        f"Enrichment summary: {attempted} attempted, {enriched} enriched, "
+        f"{skipped} skipped, {failed} failed"
+    )
     return enriched
 
 
 def enrich_missing() -> int:
-    """Idempotent Wikipedia enrichment for gold profiles missing a summary.
+    """Idempotent Wikipedia enrichment for bronze profiles missing a summary.
 
-    Queries gold.player_profiles for rows with null/empty summary and fetches
+    Queries bronze.player_profiles for rows with null/empty summary and fetches
     bios from Wikipedia. Skips profiles that already have a non-empty summary.
     Returns count of profiles enriched.
     """
@@ -1032,29 +1076,4 @@ def enrich_missing() -> int:
         return 0
 
     print(f"Found {len(missing_summary)} profiles without summaries")
-    enriched = enrich_players(missing_summary)
-    print(f"Done: {enriched}/{len(missing_summary)} profiles enriched")
-    return enriched
-
-
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: uv run python -m src.flows.ingest data/matches.csv", file=sys.stderr)
-        sys.exit(1)
-
-    csv_path = Path(sys.argv[1])
-    if not csv_path.exists():
-        print(f"File not found: {csv_path}", file=sys.stderr)
-        sys.exit(1)
-
-    df = load_atp_csv(str(csv_path))
-    print(f"Loaded {len(df)} bronze rows from {csv_path.name}")
-
-    inserted = insert_bronze_rows(df)
-    print(f"Inserted {inserted} rows into {BRONZE_TABLE}")
-
-    player_ids = sorted(set(df["player1_id"]) | set(df["player2_id"]))
-    load_profiles_for(player_ids, "ingested")
-
-    enriched = enrich_players(player_ids)
-    print(f"Enriched {enriched} player profiles with non-empty summaries")
+    return enrich_players(missing_summary)

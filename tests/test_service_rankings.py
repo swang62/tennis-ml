@@ -10,13 +10,12 @@ import pandas as pd
 import pytest
 from starlette.testclient import TestClient
 
-from src.db.client import get_conn
 from src.serving.service import DATA_APP
 
 client = TestClient(DATA_APP)
 
-# A seeded player id used by the live contract test; its seeded profile exists
-# in gold.player_profiles (Sebastian Baez, ARG).
+# The fixture player id used by the rank-source contract test; its profile
+# exists in the serving fixtures (Sebastian Baez, ARG).
 _SEEDED_PLAYER = "B0BI"
 # A weekly ranking Monday well after the deterministic seed matches (2026).
 _TEST_DATE = "2026-08-03"
@@ -64,8 +63,8 @@ def test_rank_history_empty_for_player_without_official_rows():
 
 
 def test_players_current_rank_comes_from_bronze_rankings():
-    """The /players current_rank is the dbt-materialized column from
-    gold.player_profiles (official ranking with match-time fallback)."""
+    """The /players current_rank is the dbt-materialized gold column (official
+    ranking with match-time fallback), joined to bronze profile metadata."""
     df = pd.DataFrame(
         [
             {
@@ -85,7 +84,8 @@ def test_players_current_rank_comes_from_bronze_rankings():
     assert players[0]["current_rank"] == 12
     sql = exec.call_args_list[0].args[0]
     assert "current_rank" in sql
-    assert "FROM gold.player_profiles" in sql
+    assert "FROM bronze.player_profiles" in sql
+    assert "gold.player_profiles" in sql
 
 
 def test_rank_history_requires_player_id():
@@ -101,30 +101,25 @@ def test_rank_history_database_error_returns_500():
     assert "rank history query failed" in resp.json()["error"]
 
 
-# ── Live database contract ─────────────────────────────────────────────────
+# ── Rank-source contract (mocked at the execute_df boundary) ──
 
 
-def test_live_official_rankings_drive_api_rank_values(postgres_ready, gold_ready):  # noqa: ARG001
-    """An inserted bronze.rankings row is what /rank_history reports; /players and
-    /player_profile read current_rank from dbt-materialized gold.player_profiles."""
-    with get_conn().cursor() as cur:
-        cur.execute(
-            "DELETE FROM bronze.rankings WHERE player_id = %s AND ranking_date = %s",
-            (_SEEDED_PLAYER, _TEST_DATE),
-        )
-        cur.execute(
-            "INSERT INTO bronze.rankings (ranking_date, player_id, rank, points) "
-            "VALUES (%s, %s, %s, %s)",
-            (_TEST_DATE, _SEEDED_PLAYER, _TEST_RANK, 1500),
-        )
-    try:
+def test_rankings_row_drives_api_rank_values():
+    """A bronze.rankings row is what /rank_history reports; /players and
+    /player_profile read current_rank from dbt-materialized gold.player_profiles.
+    The DB is mocked at the execute_df boundary, so no live database is used."""
+    rows = pd.DataFrame(
+        [
+            {"ranking_date": "2026-07-27", "rank": 38, "points": 1480},
+            {"ranking_date": _TEST_DATE, "rank": _TEST_RANK, "points": 1500},
+        ]
+    )
+    with patch("src.serving.service.execute_df", return_value=rows) as exec:
         history = client.get(f"/rank_history?player_id={_SEEDED_PLAYER}").json()["data"][
             "rank_history"
         ]
-        assert {"rank_date": _TEST_DATE, "rank": _TEST_RANK} in history
-    finally:
-        with get_conn().cursor() as cur:
-            cur.execute(
-                "DELETE FROM bronze.rankings WHERE player_id = %s AND ranking_date = %s",
-                (_SEEDED_PLAYER, _TEST_DATE),
-            )
+    sql, params = exec.call_args_list[0].args
+    assert params == [_SEEDED_PLAYER]
+    # The history is sourced from bronze.rankings only — never match rows.
+    assert "bronze.rankings" in sql
+    assert {"rank_date": _TEST_DATE, "rank": _TEST_RANK} in history

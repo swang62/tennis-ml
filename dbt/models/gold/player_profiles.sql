@@ -1,7 +1,11 @@
--- gold.player_profiles: one row per player with identity, biography,
+-- gold.player_profiles: one row per player with derived aggregates only —
 -- match counts, career service/return aggregates, surface counts,
 -- recent rolling form, rank points, and current rank (official ATP
 -- weekly ranking with match-time rank fallback for unranked players).
+--
+-- Identity/biography metadata is NOT duplicated here: bronze.player_profiles
+-- owns it (display_name, handedness, summary, ...), and consumers join
+-- bronze metadata with this table's aggregates.
 --
 -- Every player from bronze.player_profiles is preserved, including
 -- zero-match players. Aggregates use weighted sums/denominators with
@@ -115,7 +119,9 @@ latest_snapshot AS (
     ORDER BY player_id, snapshot_date DESC
 ),
 
--- latest official ATP weekly ranking per player
+-- latest official ATP weekly ranking per player.
+-- Access path: bronze.idx_rankings_player_date (player_id, ranking_date)
+-- serves the DISTINCT ON via a backward scan of the per-player index run.
 latest_rank AS (
     SELECT DISTINCT ON (r.player_id)
         r.player_id,
@@ -125,21 +131,9 @@ latest_rank AS (
 )
 
 SELECT
-    -- identity/biography (preserve every bronze profile)
+    -- player_id comes from bronze (every bronze profile is preserved);
+    -- metadata columns themselves stay in bronze, never duplicated here.
     bp.player_id,
-    bp.display_name,
-    bp.atp_name,
-    bp.birthdate,
-    bp.weight,
-    bp.height,
-    bp.turned_pro,
-    bp.birthplace,
-    bp.coaches,
-    bp.handedness,
-    bp.backhand,
-    bp.ioc,
-    bp.summary,
-    bp.enriched_at,
 
     -- match counts
     COALESCE(pa.match_count, 0)               AS match_count,

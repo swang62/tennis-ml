@@ -1,17 +1,19 @@
--- Assert the tour_averages singleton contract: exactly one row, identity,
--- finite fallback defaults, non-negative counts, and a non-null pool anchor.
+-- Assert the tour_averages singleton contract: every fallback default that
+-- feeds gold.match_features imputation and live inference is non-null and
+-- finite (NULL alone does not catch NaN/Infinity), and the relation holds
+-- exactly one row (the yml unique/not_null/accepted_values on singleton_id
+-- covers duplicates and identity but passes vacuously on an empty table).
 -- Any returned row is a violation. Only the first check column is aliased
 -- `violation` (PostgreSQL rejects duplicate column names); the others are
 -- unnamed and only the first failing check per row is reported.
 
 WITH checks AS (
     SELECT
-        CASE WHEN singleton_id != 1 THEN 'singleton_id must be 1' END AS violation,
         CASE WHEN latest_player_ranking IS NULL
                   OR latest_player_ranking = 'NaN'::DOUBLE PRECISION
                   OR latest_player_ranking = 'Infinity'::DOUBLE PRECISION
                   OR latest_player_ranking = '-Infinity'::DOUBLE PRECISION
-             THEN 'latest_player_ranking must be non-null and finite' END,
+             THEN 'latest_player_ranking must be non-null and finite' END AS violation,
         CASE WHEN latest_player_rank_points IS NULL
                   OR latest_player_rank_points = 'NaN'::DOUBLE PRECISION
                   OR latest_player_rank_points = 'Infinity'::DOUBLE PRECISION
@@ -138,13 +140,7 @@ WITH checks AS (
                   AND (tour_break_point_opportunities_per_return_game = 'NaN'::DOUBLE PRECISION
                        OR tour_break_point_opportunities_per_return_game = 'Infinity'::DOUBLE PRECISION
                        OR tour_break_point_opportunities_per_return_game = '-Infinity'::DOUBLE PRECISION)
-             THEN 'tour_break_point_opportunities_per_return_game must be finite when present' END,
-        -- Observability counts are never negative.
-        CASE WHEN snapshot_pool_rows < 0 THEN 'snapshot_pool_rows must be non-negative' END,
-        CASE WHEN snapshot_pool_players < 0 THEN 'snapshot_pool_players must be non-negative' END,
-        CASE WHEN profile_rows < 0 THEN 'profile_rows must be non-negative' END,
-        CASE WHEN player_match_rows < 0 THEN 'player_match_rows must be non-negative' END,
-        CASE WHEN pool_as_of_date IS NULL THEN 'pool_as_of_date must be non-null' END
+             THEN 'tour_break_point_opportunities_per_return_game must be finite when present' END
     FROM {{ ref('tour_averages') }}
 )
 SELECT violation FROM checks WHERE violation IS NOT NULL

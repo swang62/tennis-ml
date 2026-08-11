@@ -26,8 +26,8 @@ next run. A run with no missing weeks (or with an empty table, meaning the
 initial historical backfill is not complete) logs and exits without launching
 a browser.
 
-Run once (manual/local):  ``uv run python src/flows/rankings.py``
-Register the Monday deployment:  ``uv run python src/flows/rankings.py --deploy``
+Run once (manual/local):  ``just rankings-fetch``
+Register the Monday deployment:  ``just rankings-fetch --deploy``
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ import pandas as pd
 from prefect import flow, task
 
 from src.db.client import get_conn
-from src.flows.ingest import (
+from src.db.ingest import (
     BRONZE_RANKINGS_TABLE,
     RANKING_TARGET_COLUMNS,
     _copy_df_into,
@@ -284,8 +284,8 @@ def rankings_catchup_flow(as_of_date: date | None = None):
     watermark, weeks = missing_ranking_mondays(as_of_date)
     if watermark is None:
         print(
-            "bronze.rankings is empty — initial historical backfill not complete; "
-            "run `just db-rankings` first. Skipping browser work."
+            "bronze.rankings is empty — initial seed not complete; "
+            "run `just db-seed` first. Skipping browser work."
         )
         return
     if not weeks:
@@ -324,7 +324,7 @@ def register_deployment() -> None:
         Any,
         rankings_catchup_flow.from_source(
             source=str(repo_root),
-            entrypoint="src/flows/rankings.py:rankings_catchup_flow",
+            entrypoint="src/flows/scrape.py:rankings_catchup_flow",
         ),
     )
     deployment.deploy(
@@ -338,8 +338,14 @@ def register_deployment() -> None:
     print(f"Registered deployment {RANKINGS_DEPLOYMENT_NAME!r} (cron {RANKINGS_CRON})")
 
 
-if __name__ == "__main__":
-    if "--deploy" in sys.argv:
+def main(argv: list[str] | None = None) -> None:
+    """Console-script entry for `just rankings-fetch [--deploy]`."""
+    args = sys.argv[1:] if argv is None else argv
+    if "--deploy" in args:
         register_deployment()
     else:
         rankings_catchup_flow()
+
+
+if __name__ == "__main__":
+    main()

@@ -13,10 +13,12 @@ from src.features.columns import FEATURE_COLS, SIMILARITY_COLS
 # Training's single, atomically replaced local input.
 SNAPSHOT_PATH = DATA_PROCESSED / "training_snapshot.duckdb"
 
-# Training reads only these gold tables.
+# Training reads the gold feature/aggregate tables plus the bronze profile
+# metadata (bio summaries, handedness) that similarity/embeddings consume.
 SNAPSHOT_TABLES = (
     ("gold", "match_features"),
     ("gold", "player_profiles"),
+    ("bronze", "player_profiles"),
 )
 
 # gold.match_features metadata columns preceding the 36 feature columns.
@@ -40,11 +42,12 @@ class SnapshotError(RuntimeError):
 
 
 def _copy_tables(tmp_path: Path, pg_url: str) -> None:
-    """Copy both gold tables in one transaction for a consistent source view."""
+    """Copy all snapshot tables in one transaction for a consistent source view."""
     con = duckdb.connect(str(tmp_path))
     try:
         con.execute(f"ATTACH '{pg_url}' AS pg (TYPE postgres)")
         con.execute("CREATE SCHEMA IF NOT EXISTS gold")
+        con.execute("CREATE SCHEMA IF NOT EXISTS bronze")
         con.execute("BEGIN TRANSACTION")
         for schema, table in SNAPSHOT_TABLES:
             con.execute(
@@ -88,6 +91,7 @@ def validate_snapshot(path: Path) -> None:
         for schema, table, key in (
             ("gold", "match_features", "match_id"),
             ("gold", "player_profiles", "player_id"),
+            ("bronze", "player_profiles", "player_id"),
         ):
             dupes_row = con.execute(
                 f'SELECT COUNT(*) FROM (SELECT "{key}" FROM "{schema}"."{table}" '
@@ -131,5 +135,10 @@ def refresh_snapshot(path: Path = SNAPSHOT_PATH, pg_url: str | None = None) -> P
     return path
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Console-script entry for `just db-snapshot`."""
     print(f"Training snapshot refreshed: {refresh_snapshot()}")
+
+
+if __name__ == "__main__":
+    main()

@@ -18,11 +18,12 @@ Production-grade MLOps pipeline for tennis match prediction. Prefect, PostgreSQL
 infra/           — k3d config, static K8s manifests, PostgreSQL init SQL
 notebooks/       — EDA + parameterized Papermill notebooks
 src/
-  features/      — Feature column definitions (shared)
-  flows/         — ETL Prefect flow + standalone training pipeline (src/flows/pipeline.py)
-  models/        — Player similarity index (FAISS)
+  db/            — PostgreSQL related functions
+  evaluate/      — Evaluate model performance
+  features/      — Feature column definitions
+  flows/         — ETL Prefect flow + pipelines
+  models/        — Player similarity and neural networks
   serving/       — BentoML service
-  db/            — PostgreSQL client + DuckDB training snapshot
 web/             — React + TanStack dashboard (Vite, local dev, HMR)
 ```
 
@@ -35,10 +36,13 @@ just setup
 # 2. Seed the deterministic minimal match set into PostgreSQL bronze
 just db-seed
 
-# 3. Start the Prefect worker on host
+# 3. Generate silver/gold tables
+just db-etl
+
+# 4. Start the Prefect worker on host
 just worker
 
-# 4. Local dev: Bento API (:3000) + Vite dashboard (:5173)
+# 5. Local dev: Bento API (:3000) + Vite dashboard (:5173)
 just dev
 ```
 
@@ -100,11 +104,10 @@ Training pipeline.py (features, tuning, evaluation, promotion)
 
 ### Standalone Compose deployment
 
-The stack runs from published images only; the only host requirement is Docker:
+The stack runs from published images only; the only host requirement is Docker. For optional SSL, you will need to generate CA keys in `infra/postgres/tls/`.
 
 ```bash
-cp .env.example .env   # or export the vars below
-docker compose pull
+cp .env.example .env
 docker compose up -d
 ```
 
@@ -115,7 +118,7 @@ Required env vars (compose reads them from `.env` or the shell):
 | `POSTGRES_PASSWORD` | postgres, bento | PostgreSQL password; bento's `DATABASE_URL` derives from it  |
 | `DRIFT_API_KEY`     | web             | Authenticates the `/api/internal/*` nginx operational routes |
 
-### Input schema for inference
+### Inference schema
 
 The `/predict_from_ids` endpoint accepts a JSON object with the following fields:
 
@@ -139,13 +142,6 @@ uv sync
 # Inference-only — the exact packages in the production Bento image
 uv sync --group inference
 ```
-
-| Group     | Contents                                                                              |
-| --------- | ------------------------------------------------------------------------------------- |
-| inference | BentoML, scikit-learn, XGBoost, LightGBM, psycopg, pandas, NumPy, ONNX Runtime, FAISS |
-| training  | inference + MLflow, PyTorch, Optuna, Papermill, plotting, Jupyter                     |
-| local     | training + Prefect, dbt, DuckDB, rankings catch-up                                    |
-| dev       | local + pytest, ruff, pre-commit, type-checking                                       |
 
 ## Extra Notes
 

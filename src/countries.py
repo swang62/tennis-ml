@@ -2,7 +2,7 @@
 
 The reference mapping lives in the module-level ``_COUNTRIES`` constant and is
 the single source of truth for which IOC codes are valid and how they resolve.
-Profile import (src/flows/ingest.py) and serving both use these rules, so a
+Profile import (src/db/ingest.py) and serving both use these rules, so a
 code that is valid at import time resolves identically at read time.
 
 Conventions:

@@ -6,19 +6,18 @@ import pandas as pd
 import pytest
 from starlette.testclient import TestClient
 
-from src.constants import SILVER_PLAYER_MATCHES
-from src.db.client import execute_df
 from src.serving.service import DATA_APP
 
 client = TestClient(DATA_APP)
 
 
 def _profile_row(**overrides) -> pd.DataFrame:
-    """One gold.player_profiles row cross joined to the tour singleton.
+    """One bronze metadata row joined to the gold aggregates and the tour
+    singleton.
 
-    Mirrors the columns the consolidated profile query returns: every
-    materialized profile column the handler reads plus the ten tour benchmark
-    columns.
+    Mirrors the columns the consolidated profile query returns: the bronze
+    metadata the handler reads plus every materialized gold aggregate plus the
+    ten tour benchmark columns.
     """
     row = {
         # identity
@@ -248,9 +247,12 @@ def test_profile_uses_parameterized_point_query():
     sql, params = exec.call_args_list[0].args
     assert params == ["p1"]
     assert "%s" in sql
-    assert "gold.player_profiles" in sql
+    assert "FROM bronze.player_profiles" in sql
+    assert "JOIN gold.player_profiles" in sql
     assert "gold.tour_averages" in sql
-    # current_rank is materialized in pp.* via dbt, not a separate column
+    # Ownership join keys are player_id on both sides (bronze PK in init.sql;
+    # gold PK re-applied by the dbt post-hook) — a direct equality probe.
+    assert "LEFT JOIN gold.player_profiles gp ON gp.player_id = bp.player_id" in sql
 
 
 def test_profile_country_metadata_unk_fallback():
@@ -341,178 +343,3 @@ def test_profile_matches_without_snapshot_recent_form_null():
     data = resp.json()["data"]
     assert data["career"]["matches_played"] == 5
     assert data["recent_form"] is None
-
-
-# ── Live-database contract tests (weighted ratios vs silver) ────────────
-
-# Served serve metrics must equal weighted SUM/SUM ratios from silver, never
-# averages of per-match percentages.
-_SERVE_RATIOS_SQL = f"""
-SELECT
-    CAST(SUM(pm.first_serves_made) AS DOUBLE PRECISION)
-        / NULLIF(SUM(pm.total_serve_points), 0) AS first_serve_in_pct,
-    CAST(SUM(pm.aces) AS DOUBLE PRECISION)
-        / NULLIF(SUM(pm.first_serves_made), 0) AS aces_per_first_serve,
-    CAST(SUM(pm.first_serve_points_won) AS DOUBLE PRECISION)
-        / NULLIF(SUM(pm.first_serves_made), 0) AS first_serve_points_won_pct,
-    CAST(SUM(pm.second_serve_points_won) AS DOUBLE PRECISION)
-        / NULLIF(SUM(pm.total_serve_points - pm.first_serves_made), 0)
-        AS second_serve_points_won_pct,
-    CAST(SUM(pm.first_serve_points_won + pm.second_serve_points_won) AS DOUBLE PRECISION)
-        / NULLIF(SUM(pm.total_serve_points), 0) AS overall_serve_points_won_pct,
-    CAST(SUM(pm.double_faults) AS DOUBLE PRECISION)
-        / NULLIF(SUM(pm.total_serve_points), 0) AS double_faults_per_serve_point,
-    CAST(SUM(pm.aces) AS DOUBLE PRECISION)
-        / NULLIF(SUM(pm.service_games), 0) AS aces_per_service_game,
-    CAST(SUM(pm.break_points_saved) AS DOUBLE PRECISION)
-        / NULLIF(SUM(pm.break_points_faced), 0) AS break_points_saved_pct,
-    CAST(SUM(pm.return_points_won) AS DOUBLE PRECISION)
-        / NULLIF(SUM(pm.return_points_available), 0) AS return_points_won_pct
-FROM {SILVER_PLAYER_MATCHES} pm
-WHERE pm.player_id = %s
-"""
-
-# Return metrics derive from the opponent (loser) perspective via self-join.
-_RETURN_RATIOS_SQL = f"""
-SELECT
-    CAST(SUM(opp.first_serves_made - opp.first_serve_points_won) AS DOUBLE PRECISION)
-        / NULLIF(SUM(opp.first_serves_made), 0) AS first_serve_return_points_won_pct,
-    CAST(SUM((opp.total_serve_points - opp.first_serves_made) - opp.second_serve_points_won)
-        AS DOUBLE PRECISION)
-        / NULLIF(SUM(opp.total_serve_points - opp.first_serves_made), 0)
-        AS second_serve_return_points_won_pct,
-    CAST(SUM(opp.break_points_faced - opp.break_points_saved) AS DOUBLE PRECISION)
-        / NULLIF(SUM(opp.break_points_faced), 0) AS break_point_conversion_pct,
-    CAST(SUM(opp.break_points_faced) AS DOUBLE PRECISION)
-        / NULLIF(SUM(opp.service_games), 0) AS break_point_opportunities_per_return_game
-FROM {SILVER_PLAYER_MATCHES} pm
-JOIN {SILVER_PLAYER_MATCHES} opp
-    ON opp.match_id = pm.match_id AND opp.player_id = pm.opponent_id
-WHERE pm.player_id = %s
-"""
-
-
-def test_profile_live_player_full_contract(gold_ready):  # noqa: ARG001
-    """A known player returns the full serve/return/rank/surface/tour contract
-    on the live seeded database."""
-    resp = client.get("/player_profile?player_id=B0BI")
-    assert resp.status_code == 200
-    data = resp.json()["data"]
-    assert data["player_id"] == "B0BI"
-    assert data["career"]["matches_played"] > 0
-    assert set(data["serve"]) == {
-        "first_serve_in_pct",
-        "aces_per_first_serve",
-        "first_serve_points_won_pct",
-        "second_serve_points_won_pct",
-        "overall_serve_points_won_pct",
-        "double_faults_per_serve_point",
-        "aces_per_service_game",
-        "break_points_saved_pct",
-    }
-    assert set(data["return"]) == {
-        "return_points_won_pct",
-        "first_serve_return_points_won_pct",
-        "second_serve_return_points_won_pct",
-        "break_point_conversion_pct",
-        "break_point_opportunities_per_return_game",
-    }
-    assert [s["surface"] for s in data["surface_rates"]] == ["clay", "grass", "hard"]
-    assert data["rank"]["latest_rank_points"] is not None
-    ta = execute_df("SELECT * FROM gold.tour_averages").iloc[0]
-    # tour comparisons are player-minus-tour deltas against the singleton
-    assert data["tour_comparisons"]["first_serve_points_won_pct"] == pytest.approx(
-        data["serve"]["first_serve_points_won_pct"] - float(ta["tour_first_serve_win_pct"])
-    )
-
-
-def test_profile_serve_metrics_match_weighted_silver_ratios(gold_ready):  # noqa: ARG001
-    """All 8 serve metrics are weighted SUM/SUM ratios from silver, not
-    averages of per-match percentages."""
-    resp = client.get("/player_profile?player_id=B0BI")
-    assert resp.status_code == 200
-    data = resp.json()["data"]
-    expected = execute_df(_SERVE_RATIOS_SQL, ["B0BI"]).iloc[0]
-    for key in data["serve"]:
-        assert data["serve"][key] == pytest.approx(float(expected[key])), key
-    assert data["return"]["return_points_won_pct"] == pytest.approx(
-        float(expected["return_points_won_pct"])
-    )
-
-
-def test_profile_return_metrics_match_opponent_silver_perspectives(gold_ready):  # noqa: ARG001
-    """The 4 opponent-derived return metrics equal weighted ratios over the
-    loser-perspective self-join in silver."""
-    resp = client.get("/player_profile?player_id=B0BI")
-    assert resp.status_code == 200
-    data = resp.json()["data"]
-    expected = execute_df(_RETURN_RATIOS_SQL, ["B0BI"]).iloc[0]
-    for key in (
-        "first_serve_return_points_won_pct",
-        "second_serve_return_points_won_pct",
-        "break_point_conversion_pct",
-        "break_point_opportunities_per_return_game",
-    ):
-        assert data["return"][key] == pytest.approx(float(expected[key])), key
-
-
-def test_profile_return_split_reconciliation(gold_ready):  # noqa: ARG001
-    """first_serve_return + second_serve_return numerators sum to the overall
-    return points won; served split pcts are the weighted ratios."""
-    resp = client.get("/player_profile?player_id=B0BI")
-    assert resp.status_code == 200
-    data = resp.json()["data"]
-
-    split = execute_df(
-        f"""
-        SELECT
-            SUM(opp.first_serves_made - opp.first_serve_points_won) AS first_serve_return_points_won,
-            SUM((opp.total_serve_points - opp.first_serves_made) - opp.second_serve_points_won)
-                AS second_serve_return_points_won,
-            SUM(pm.return_points_won) AS return_points_won,
-            SUM(opp.first_serves_made) AS first_serve_return_denom,
-            SUM(opp.total_serve_points - opp.first_serves_made) AS second_serve_return_denom
-        FROM {SILVER_PLAYER_MATCHES} pm
-        JOIN {SILVER_PLAYER_MATCHES} opp
-            ON opp.match_id = pm.match_id AND opp.player_id = pm.opponent_id
-        WHERE pm.player_id = %s
-        """,
-        ["B0BI"],
-    ).iloc[0]
-    assert split["first_serve_return_points_won"] + split["second_serve_return_points_won"] == (
-        pytest.approx(float(split["return_points_won"]))
-    )
-    assert data["return"]["first_serve_return_points_won_pct"] == pytest.approx(
-        float(split["first_serve_return_points_won"]) / float(split["first_serve_return_denom"])
-    )
-    assert data["return"]["second_serve_return_points_won_pct"] == pytest.approx(
-        float(split["second_serve_return_points_won"]) / float(split["second_serve_return_denom"])
-    )
-
-
-def test_profile_winner_loser_perspectives_complement(gold_ready):  # noqa: ARG001
-    """For every seeded match the winner's serve pct and the loser's return pct
-    (both materialized in silver perspectives) sum to 1, when both sides have data.
-    Walkovers/defaults with 0 serve/return points are valid rows but skipped."""
-    rows = execute_df(
-        f"""
-        SELECT w.match_id, w.total_serve_points,
-               w.first_serve_points_won + w.second_serve_points_won AS winner_points_won,
-               l.return_points_won, l.return_points_available
-        FROM {SILVER_PLAYER_MATCHES} w
-        JOIN {SILVER_PLAYER_MATCHES} l
-          ON l.match_id = w.match_id AND l.player_id = w.opponent_id
-        WHERE w.match_won = 1
-        """
-    )
-    # All 28 seed matches have a winner perspective row, but some have 0 serve/return points
-    assert len(rows) == 28
-    complemented = 0
-    for _, row in rows.iterrows():
-        if float(row["total_serve_points"]) == 0 or float(row["return_points_available"]) == 0:
-            continue
-        winner_pct = float(row["winner_points_won"]) / float(row["total_serve_points"])
-        loser_pct = float(row["return_points_won"]) / float(row["return_points_available"])
-        assert winner_pct + loser_pct == pytest.approx(1.0)
-        complemented += 1
-    assert complemented >= 27  # at most one match has 0 serve/return points

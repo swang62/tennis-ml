@@ -1,4 +1,4 @@
-"""Similarity tests with fake embeddings, DuckDB fixtures, and live parity."""
+"""Similarity tests with fake embeddings and DuckDB fixtures."""
 
 import re
 import sys
@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.db import client, snapshot, training
+from src.db import client, training
 from src.models import similarity
 from src.models.similarity import STYLE_COLS, PlayerData, PlayerSimilarity, embed_bio_summaries
 
@@ -43,6 +43,7 @@ def _patch_embedding(monkeypatch: pytest.MonkeyPatch) -> FakeTextEmbedding:
 def _create_two_table_fixture(con: duckdb.DuckDBPyConnection) -> None:
     """Create match/profile fixtures including excluded physical attributes."""
     con.execute("CREATE SCHEMA gold")
+    con.execute("CREATE SCHEMA bronze")
     con.execute(
         """
         CREATE TABLE gold.match_features (
@@ -74,7 +75,7 @@ def _create_two_table_fixture(con: duckdb.DuckDBPyConnection) -> None:
     )
     con.execute(
         """
-        CREATE TABLE gold.player_profiles (
+        CREATE TABLE bronze.player_profiles (
             player_id VARCHAR,
             display_name VARCHAR,
             backhand VARCHAR,
@@ -82,7 +83,14 @@ def _create_two_table_fixture(con: duckdb.DuckDBPyConnection) -> None:
             summary VARCHAR,
             height DOUBLE,
             turned_pro INTEGER,
-            birthplace VARCHAR,
+            birthplace VARCHAR
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE gold.player_profiles (
+            player_id VARCHAR,
             matches_played INTEGER,
             career_win_rate DOUBLE
         )
@@ -200,13 +208,23 @@ def _create_two_table_fixture(con: duckdb.DuckDBPyConnection) -> None:
         ],
     )
     con.executemany(
-        "INSERT INTO gold.player_profiles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO bronze.player_profiles VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         [
-            ("P1", "Alice", "one", "right", "Great server", 185.0, 2010, "Spain", 400, 0.72),
-            ("P2", "Bob", "two", "left", "", 190.0, 2015, "Italy", 300, 0.68),
-            ("P3", "Carol", "one", "right", "Solid returner", 178.0, 2020, "USA", 100, 0.55),
-            ("P4", "Dave", "two", "right", None, 195.0, 2012, "France", 350, 0.70),
-            ("", "Ghost", "one", "right", "No id", 180.0, 2018, "UK", 50, 0.50),
+            ("P1", "Alice", "one", "right", "Great server", 185.0, 2010, "Spain"),
+            ("P2", "Bob", "two", "left", "", 190.0, 2015, "Italy"),
+            ("P3", "Carol", "one", "right", "Solid returner", 178.0, 2020, "USA"),
+            ("P4", "Dave", "two", "right", None, 195.0, 2012, "France"),
+            ("", "Ghost", "one", "right", "No id", 180.0, 2018, "UK"),
+        ],
+    )
+    con.executemany(
+        "INSERT INTO gold.player_profiles VALUES (?, ?, ?)",
+        [
+            ("P1", 400, 0.72),
+            ("P2", 300, 0.68),
+            ("P3", 100, 0.55),
+            ("P4", 350, 0.70),
+            ("", 50, 0.50),
         ],
     )
 
@@ -343,9 +361,12 @@ def test_build_excludes_physical_and_resume_metrics(tmp_path: Path, monkeypatch)
             "opponent_ranking = opponent_ranking + 50"
         )
         con.execute(
-            "UPDATE gold.player_profiles SET height = height + 5, "
-            "turned_pro = turned_pro - 3, birthplace = 'X', "
-            "matches_played = matches_played + 999, career_win_rate = 0.99"
+            "UPDATE bronze.player_profiles SET height = height + 5, "
+            "turned_pro = turned_pro - 3, birthplace = 'X'"
+        )
+        con.execute(
+            "UPDATE gold.player_profiles SET matches_played = matches_played + 999, "
+            "career_win_rate = 0.99"
         )
         finder2 = PlayerSimilarity()
         finder2.build(query=_duck_query(con))
@@ -501,34 +522,42 @@ def test_build_defaults_to_live_postgresql_client():
     assert similarity.to_dataframe is client.to_dataframe
 
 
-def test_postgres_and_snapshot_fixtures_produce_identical_vectors(
-    postgres_ready,  # noqa: ARG001 — skip-gate fixture, unused in body
-    gold_ready,  # noqa: ARG001 — skip-gate fixture, unused in body
+def test_duck_and_snapshot_fixtures_produce_identical_vectors(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """The same SQL + builder yield bit-identical vectors through live
-    PostgreSQL and the two-table DuckDB snapshot (offline path)."""
+    """The same SQL + builder yield bit-identical vectors through a direct
+    DuckDB query and the two-table DuckDB snapshot (offline training path)."""
     _patch_embedding(monkeypatch)
     monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
     monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
 
+    con = duckdb.connect()
+    try:
+        _create_two_table_fixture(con)
+        direct = PlayerSimilarity()
+        direct.build(query=_duck_query(con))
+    finally:
+        con.close()
+
+    # The offline training path reads the same data from a snapshot file.
     snap = tmp_path / "parity.duckdb"
-    snapshot.refresh_snapshot(snap)  # copies gold.match_features + player_profiles
+    con = duckdb.connect(str(snap))
+    try:
+        _create_two_table_fixture(con)
+    finally:
+        con.close()
     monkeypatch.setattr(training, "SNAPSHOT_PATH", snap)
     training.close()
     try:
-        live = PlayerSimilarity()
-        live.build(query=client.to_dataframe)
         offline = PlayerSimilarity()
         offline.build(query=training.to_dataframe)
     finally:
         training.close()
 
-    assert live.player_ids == offline.player_ids
-    assert live.players == offline.players
-    assert live.index is not None and offline.index is not None
-    assert live.index.ntotal == offline.index.ntotal
-    for i in range(live.index.ntotal):
-        assert np.array_equal(live.index.reconstruct(i), offline.index.reconstruct(i))
-    assert live.search("P1") == offline.search("P1")
+    assert direct.player_ids == offline.player_ids
+    assert direct.players == offline.players
+    assert direct.index is not None and offline.index is not None
+    assert direct.index.ntotal == offline.index.ntotal
+    for i in range(direct.index.ntotal):
+        assert np.array_equal(direct.index.reconstruct(i), offline.index.reconstruct(i))

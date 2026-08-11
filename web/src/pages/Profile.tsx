@@ -35,9 +35,16 @@ function formatMetric(value: number | null): string {
   return `${Math.round(value * 1000) / 10}%`;
 }
 
-function formatDelta(delta: number | null): string | null {
+function formatRate(value: number | null): string {
+  if (value == null) return "n/a";
+  return (Math.round(value * 1000) / 1000).toFixed(2);
+}
+
+function formatDelta(delta: number | null, rate?: boolean): string | null {
   if (delta == null) return null;
-  const change = `${Math.round(Math.abs(delta) * 1000) / 10}%`;
+  const change = rate
+    ? (Math.round(Math.abs(delta) * 1000) / 1000).toFixed(2)
+    : `${Math.round(Math.abs(delta) * 1000) / 10}%`;
   return delta > 0 ? `▲ ${change}` : delta < 0 ? `▼ ${change}` : change;
 }
 
@@ -45,19 +52,22 @@ function Metric({
   label,
   value,
   delta,
+  rate,
 }: {
   label: string;
   value: number | null;
   delta: number | null;
+  rate?: boolean;
 }) {
-  const deltaText = formatDelta(delta);
+  const fmt = rate ? formatRate(value) : formatMetric(value);
+  const deltaText = formatDelta(delta, rate);
   const deltaTone =
     delta == null ? "" : delta > 0 ? " is-grass" : delta < 0 ? " is-down" : "";
   return (
     <div className="sr-metric">
       <span className="sr-label">{label}</span>
       <span className="sr-value-row">
-        <span className="sr-value num">{formatMetric(value)}</span>
+        <span className="sr-value num">{fmt}</span>
         {deltaText != null && (
           <span className={`sr-delta num${deltaTone}`}>{deltaText}</span>
         )}
@@ -72,16 +82,15 @@ const serveMetrics: { label: string; key: keyof ServeMetrics }[] = [
   { label: "Aces per game", key: "aces_per_service_game" },
   { label: "Break points saved", key: "break_points_saved_pct" },
 ];
+const serveRates = new Set(["aces_per_service_game"]);
 
 const returnMetrics: { label: string; key: keyof ReturnMetrics }[] = [
   { label: "1st serve returns won", key: "first_serve_return_points_won_pct" },
   { label: "2nd serve returns won", key: "second_serve_return_points_won_pct" },
-  {
-    label: "Break point opportunities",
-    key: "break_point_opportunities_per_return_game",
-  },
+  { label: "Break point opportunities", key: "break_point_opportunities_per_return_game" },
   { label: "Break points converted", key: "break_point_conversion_pct" },
 ];
+const returnRates = new Set(["break_point_opportunities_per_return_game"]);
 
 export default function ProfileContent({
   profile,
@@ -286,6 +295,7 @@ export default function ProfileContent({
       type: "value",
       inverse: true,
       min: 1,
+      max: 200,
       minInterval: 1,
       name: "Rank",
       nameLocation: "middle",
@@ -385,6 +395,7 @@ export default function ProfileContent({
                 label={m.label}
                 value={profile.serve[m.key]}
                 delta={profile.tour_comparisons[m.key]}
+                rate={serveRates.has(m.key)}
               />
             ))}
           </div>
@@ -397,6 +408,7 @@ export default function ProfileContent({
                 label={m.label}
                 value={profile.return[m.key]}
                 delta={profile.tour_comparisons[m.key]}
+                rate={returnRates.has(m.key)}
               />
             ))}
           </div>

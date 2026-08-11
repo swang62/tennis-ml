@@ -1,38 +1,394 @@
-"""Integration tests for the PostgreSQL-backed ID inference builder."""
+"""Hermetic inference-builder tests against an in-memory DuckDB stand-in.
+
+The seeded PostgreSQL used by earlier versions of this suite is replaced by a
+per-test in-memory DuckDB holding the same deterministic fixture data. Every
+SQL call the builder makes (latest snapshot, 30-day activity, profiles,
+head-to-head, the gold.tour_averages singleton, and the direct cross-checks in
+this file) executes against that DuckDB with `%s` params translated to `?`. No
+live database, connection, DATABASE_URL, or seed is involved.
+"""
 
 import math
 from datetime import date
 from typing import cast, override
 
+import duckdb
 import pandas as pd
 import pytest
 
 from src.constants import SILVER_ROLLING_FEATURES
-from src.db.client import execute_df, get_conn
 from src.features import inference
 from src.features.columns import DIFF_COLS, FEATURE_COLS, TOUR_AVERAGES_FALLBACK_COLS
 from src.features.inference import build_inference_features
 from src.features.tour_averages import load_tour_averages
 
-# All seeded matches are in 2026 (2026-03-15 .. 2026-07-15); a fixed as-of date
-# after the last match exercises the full snapshot history deterministically.
+# All fixture matches are in 2026 (2026-01-04 .. 2026-07-12); a fixed as-of
+# date after the last match exercises the full snapshot history deterministically.
 AS_OF_AFTER_ALL_MATCHES = date(2026, 9, 1)
 
-
-@pytest.fixture(autouse=True)
-def _require_gold(gold_ready):
-    """Skip the whole module until the dbt gold/silver layers exist (Task 4)."""
+_DB: duckdb.DuckDBPyConnection | None = None
 
 
-@pytest.fixture(autouse=True)
-def _cleanup_h2h_rows(_require_gold):
-    """Remove synthetic rows that would violate later dbt tests."""
-    yield
-    with get_conn().cursor() as cur:
-        cur.execute(
-            "DELETE FROM silver.player_matches "
-            "WHERE player_id LIKE 'H2H_%' OR opponent_id LIKE 'H2H_%'"
+def execute_df(sql: str, params: list[object] | None = None) -> pd.DataFrame:
+    """Test stand-in for src.db.client.execute_df over the in-memory DuckDB."""
+    assert _DB is not None, "the _duck_db_backed fixture must be active"
+    return _DB.execute(sql.replace("%s", "?"), params or []).df()
+
+
+# ── Fixture data ─────────────────────────────────────────────────────────────
+#
+# Mirrors the deterministic seeded set the live suite used, narrowed to the
+# players the tests reference:
+#   S0AG (righty, turned pro 2018) and Z355 (righty, 2013) both have rolling
+#   snapshots; A0E2 and F0FV have one snapshot each so their 30-day window is
+#   exercised; the single S0AG-vs-Z355 meeting (2026-07-12) drives head-to-head
+#   and the train/inference parity check; gold.tour_averages holds one
+#   full-pool singleton row whose rate cells equal the pool aggregates, exactly
+#   as dbt materializes them.
+
+_S0AG = (
+    2.0,
+    11500.0,
+    24.43,
+    0.8,
+    0.8,
+    0.2,
+    0.7,
+    0.6,
+    0.7,
+    0.55,
+    0.63,
+    0.42,
+    0.05,
+    0.4,
+    3,
+    3.0,
+    20.0,
+    0.8,
+    0.8,
+    0.8,
+)
+_Z355 = (
+    4.0,
+    4555.0,
+    28.85,
+    0.4,
+    0.5,
+    0.1,
+    0.6,
+    0.5,
+    0.6,
+    0.5,
+    0.55,
+    0.4,
+    0.03,
+    0.3,
+    1,
+    5.0,
+    25.0,
+    0.6,
+    0.6,
+    0.6,
+)
+_MINOR = (
+    1.0,
+    12050.0,
+    22.7,
+    0.4,
+    0.5,
+    0.15,
+    0.65,
+    0.55,
+    0.62,
+    0.5,
+    0.58,
+    0.42,
+    0.04,
+    0.35,
+    2,
+    2.0,
+    30.0,
+    0.55,
+    0.55,
+    0.6,
+)
+
+_SNAP_COLS = (
+    "latest_player_ranking",
+    "latest_player_rank_points",
+    "latest_player_age",
+    "weighted_form_10",
+    "win_rate_10",
+    "ace_rate_10",
+    "first_serve_pct_10",
+    "break_points_saved_pct_10",
+    "first_serve_win_pct_10",
+    "second_serve_win_pct_10",
+    "serve_win_pct_10",
+    "return_points_won_pct_10",
+    "df_rate_10",
+    "aces_per_svc_game_10",
+    "streak",
+    "avg_player_rank_10",
+    "avg_rank_faced_10",
+    "clay_win_rate_10",
+    "grass_win_rate_10",
+    "hard_win_rate_10",
+)
+
+
+def _snap_rows() -> list[tuple[object, ...]]:
+    """One snapshot per seeded player match, stats constant per player."""
+    rows: list[tuple[object, ...]] = []
+    dates: list[tuple[str, str, int]] = [
+        ("S0AG", "s1", 1),
+        ("S0AG", "s2", 2),
+        ("S0AG", "s3", 3),
+        ("S0AG", "s4", 4),
+        ("S0AG", "s5", 5),
+        ("S0AG", "s6", 6),
+        ("Z355", "z1", 1),
+        ("Z355", "z2", 2),
+        ("Z355", "z3", 3),
+        ("Z355", "z4", 4),
+        ("A0E2", "a1", 1),
+        ("F0FV", "f1", 1),
+    ]
+    snap_dates = {
+        "s1": date(2026, 1, 20),
+        "s2": date(2026, 2, 16),
+        "s3": date(2026, 2, 18),
+        "s4": date(2026, 3, 7),
+        "s5": date(2026, 5, 20),
+        "s6": date(2026, 7, 12),
+        "z1": date(2026, 1, 4),
+        "z2": date(2026, 1, 18),
+        "z3": date(2026, 2, 25),
+        "z4": date(2026, 7, 12),
+        "a1": date(2026, 2, 1),
+        "f1": date(2026, 4, 1),
+    }
+    for pid, match_id, num in dates:
+        stats = _S0AG if pid == "S0AG" else _Z355 if pid == "Z355" else _MINOR
+        rows.append((pid, match_id, snap_dates[match_id], num, "hard", *stats))
+    return rows
+
+
+def _match_rows() -> list[tuple[object, ...]]:
+    """Both player perspectives for seeded matches (match_number assigned)."""
+    return [
+        ("pm-s1", date(2026, 1, 20), "hard", "S0AG", "OPP1", 2.0, 20.0, 11500.0, 24.43, 1, 1),
+        ("pm-s2", date(2026, 2, 16), "hard", "S0AG", "OPP2", 2.0, 20.0, 11500.0, 24.43, 1, 2),
+        ("pm-s3", date(2026, 2, 18), "hard", "S0AG", "OPP3", 2.0, 20.0, 11500.0, 24.43, 1, 3),
+        ("pm-s4", date(2026, 3, 7), "hard", "S0AG", "OPP4", 2.0, 20.0, 11500.0, 24.43, 1, 4),
+        ("pm-s5", date(2026, 5, 20), "hard", "S0AG", "OPP5", 2.0, 20.0, 11500.0, 24.43, 1, 5),
+        ("pm-s6", date(2026, 7, 12), "hard", "S0AG", "Z355", 2.0, 4.0, 11500.0, 24.43, 1, 6),
+        ("pm-s6", date(2026, 7, 12), "hard", "Z355", "S0AG", 4.0, 2.0, 4555.0, 28.85, 0, 4),
+        ("pm-z1", date(2026, 1, 4), "hard", "Z355", "OPP6", 4.0, 20.0, 4555.0, 28.85, 1, 1),
+        ("pm-z2", date(2026, 1, 18), "hard", "Z355", "OPP7", 4.0, 20.0, 4555.0, 28.85, 1, 2),
+        ("pm-z3", date(2026, 2, 25), "hard", "Z355", "OPP8", 4.0, 20.0, 4555.0, 28.85, 1, 3),
+        ("pm-a1", date(2026, 3, 15), "hard", "A0E2", "X1", 1.0, 30.0, 12050.0, 22.7, 1, 1),
+        ("pm-a2", date(2026, 3, 21), "hard", "A0E2", "F0FV", 1.0, 32.0, 12050.0, 22.7, 1, 2),
+        ("pm-f1", date(2026, 3, 21), "hard", "F0FV", "A0E2", 32.0, 1.0, 1510.0, 19.4, 0, 1),
+    ]
+
+
+# Hand-computed gold row for the single parity match (S0AG vs Z355, hard,
+# 2026-07-12): the independent expectation the inference builder must reproduce.
+# Value order: match metadata, then FEATURE_COLS.
+_PARITY_GOLD = (
+    # match_id, match_date, player_id, opponent_id, surface
+    "pm-s6",
+    date(2026, 7, 12),
+    "S0AG",
+    "Z355",
+    "hard",
+    # 15 matchup diffs (canonical S0AG side minus Z355)
+    -2.0,
+    6945.0,
+    -4.42,
+    0.3,
+    0.1,
+    0.1,
+    0.1,
+    0.1,
+    0.05,
+    0.08,
+    0.02,
+    0.1,
+    0.0,
+    -5.0,
+    2.0,
+    # 12 absolute state values
+    0.8,
+    0.4,
+    53.0,
+    137.0,
+    0.0,
+    0.0,
+    0.8,
+    0.6,
+    0.0,
+    0.0,
+    8.0,
+    13.0,
+    # 2 head-to-head counts (no strictly-prior meetings)
+    0.0,
+    0.0,
+    # 7 context values (is_clay, is_grass, is_hard, is_carpet, is_indoor,
+    # tournament_level, round_encoded)
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+)
+
+
+def _seed(con: duckdb.DuckDBPyConnection) -> None:
+    """Create the PostgreSQL-shaped tables and insert the fixture data."""
+    con.execute("CREATE SCHEMA silver")
+    con.execute("CREATE SCHEMA bronze")
+    con.execute("CREATE SCHEMA gold")
+
+    snap_ddl = ", ".join(f'"{c}" DOUBLE' for c in _SNAP_COLS)
+    con.execute(
+        f"""
+        CREATE TABLE silver.rolling_features (
+            player_id VARCHAR, match_id VARCHAR, snapshot_date DATE,
+            player_match_number INTEGER, surface VARCHAR, {snap_ddl}
         )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE silver.player_matches (
+            match_id VARCHAR, match_date DATE, surface VARCHAR,
+            player_id VARCHAR, opponent_id VARCHAR,
+            player_ranking DOUBLE, opponent_ranking DOUBLE,
+            player_rank_points DOUBLE, player_age DOUBLE,
+            match_won INTEGER, player_match_number INTEGER
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE bronze.player_profiles (
+            player_id VARCHAR, height DOUBLE, handedness VARCHAR, turned_pro INTEGER
+        )
+        """
+    )
+    fallback_ddl = ", ".join(f'"{c}" DOUBLE' for c in TOUR_AVERAGES_FALLBACK_COLS)
+    con.execute(
+        f"""
+        CREATE TABLE gold.tour_averages (
+            singleton_id INTEGER, pool_as_of_date DATE,
+            snapshot_pool_rows INTEGER, snapshot_pool_players INTEGER,
+            profile_rows INTEGER, player_match_rows INTEGER, {fallback_ddl}
+        )
+        """
+    )
+    gold_cols = ", ".join(f'"{c}" DOUBLE' for c in FEATURE_COLS)
+    con.execute(
+        f"""
+        CREATE TABLE gold.match_features (
+            match_id VARCHAR, match_date DATE, player_id VARCHAR, opponent_id VARCHAR,
+            surface VARCHAR, {gold_cols}
+        )
+        """
+    )
+
+    con.executemany(
+        f"INSERT INTO silver.rolling_features VALUES ({', '.join(['?'] * 25)})",
+        _snap_rows(),
+    )
+    con.executemany(
+        f"INSERT INTO silver.player_matches VALUES ({', '.join(['?'] * 11)})",
+        _match_rows(),
+    )
+    con.executemany(
+        "INSERT INTO bronze.player_profiles VALUES (?, ?, ?, ?)",
+        [
+            ("S0AG", 191.0, "R", 2018),
+            ("Z355", 198.0, "R", 2013),
+        ],
+    )
+    # Pool aggregates over the 12 snapshots: weighted_form_10 -> 0.6,
+    # hard_win_rate_10 -> 0.7, win_rate_10 -> 0.65, median streak -> 2.5.
+    singleton = {
+        "singleton_id": 1,
+        "pool_as_of_date": date(2026, 8, 9),
+        "snapshot_pool_rows": 12,
+        "snapshot_pool_players": 4,
+        "profile_rows": 2,
+        "player_match_rows": 13,
+        "latest_player_ranking": 25.0,
+        "latest_player_rank_points": 1000.0,
+        "latest_player_age": 26.0,
+        "streak": 2.5,
+        "weighted_form_10": 0.6,
+        "win_rate_10": 0.65,
+        "ace_rate_10": 0.15,
+        "first_serve_pct_10": 0.65,
+        "break_points_saved_pct_10": 0.55,
+        "first_serve_win_pct_10": 0.62,
+        "second_serve_win_pct_10": 0.5,
+        "serve_win_pct_10": 0.58,
+        "return_points_won_pct_10": 0.42,
+        "df_rate_10": 0.04,
+        "aces_per_svc_game_10": 0.35,
+        "avg_player_rank_10": 15.0,
+        "avg_rank_faced_10": 30.0,
+        "clay_win_rate_10": 0.55,
+        "grass_win_rate_10": 0.5,
+        "hard_win_rate_10": 0.7,
+        "days_since_default": 14.0,
+        "matches_30d_default": 3.0,
+        "rate_default": 0.5,
+        "left_handed_rate": 0.12,
+        "avg_years_pro": 10.0,
+    }
+    con.execute(
+        f"INSERT INTO gold.tour_averages VALUES ({', '.join(['?'] * len(singleton))})",
+        list(singleton.values()),
+    )
+    con.execute(
+        f"INSERT INTO gold.match_features VALUES ({', '.join(['?'] * 41)})",
+        _PARITY_GOLD,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _duck_db_backed(monkeypatch):
+    """Route every DB call made by the module to a fresh in-memory DuckDB."""
+    global _DB
+    con = duckdb.connect()
+    try:
+        _seed(con)
+        _DB = con
+        monkeypatch.setattr("src.features.inference.execute_df", execute_df)
+        monkeypatch.setattr("src.features.tour_averages.execute_df", execute_df)
+        yield
+    finally:
+        _DB = None
+        con.close()
+
+
+def _insert_prior_meetings(pair_a: str, pair_b: str, meetings: list[tuple[str, str, int]]) -> None:
+    """Insert canonical prior meetings as two complementary player perspectives."""
+    rows = []
+    for match_id, date_iso, a_won in meetings:
+        rows.append((match_id, date.fromisoformat(date_iso), pair_a, pair_b, a_won))
+        rows.append((match_id, date.fromisoformat(date_iso), pair_b, pair_a, 1 - a_won))
+    assert _DB is not None
+    _DB.executemany(
+        "INSERT INTO silver.player_matches "
+        "(match_id, match_date, player_id, opponent_id, match_won) "
+        "VALUES (?, ?, ?, ?, ?)",
+        rows,
+    )
 
 
 def test_output_schema_contract():
@@ -97,7 +453,7 @@ def test_years_pro_time_aware_and_cold_start():
     """years_pro derives from as_of_date, not a fixed snapshot of turned_pro.
 
     At an as-of date before any seeded match (empty snapshot pool), profile
-    values still come from gold.player_profiles and years_pro tracks the
+    values still come from bronze.player_profiles and years_pro tracks the
     as-of year, while all rolling features fall back to their constants.
     """
     out = build_inference_features("S0AG", "Z355", "hard", as_of_date=date(2025, 6, 1))
@@ -148,7 +504,7 @@ def test_materialized_defaults_return_expected_values():
 def test_historical_as_of_excludes_later_snapshots():
     """Use the newest snapshot strictly before the as-of date."""
     out = build_inference_features("S0AG", "Z355", "hard", as_of_date=date(2026, 6, 30))
-    # Cross-check the expected snapshot directly in the gold table.
+    # Cross-check the expected snapshot directly in the fixture table.
     snapshot = execute_df(
         f"SELECT player_match_number, win_rate_10, weighted_form_10 "
         f"FROM {SILVER_ROLLING_FEATURES} "
@@ -511,28 +867,6 @@ def test_null_handedness_falls_back_to_pool_rate(monkeypatch):
 # Seed data has no repeated pair, so H2H tests use isolated synthetic rows.
 
 
-def _insert_prior_meetings(pair_a: str, pair_b: str, meetings: list[tuple[str, str, int]]) -> None:
-    """Insert canonical prior meetings as two complementary player perspectives."""
-    rows = []
-    match_ids = []
-    for match_id, date_iso, a_won in meetings:
-        match_ids.append(match_id)
-        rows.append((match_id, date_iso, pair_a, pair_b, a_won))
-        rows.append((match_id, date_iso, pair_b, pair_a, 1 - a_won))
-    with get_conn().cursor() as cur:
-        # Make reruns idempotent without disturbing other synthetic pairs.
-        cur.executemany(
-            "DELETE FROM silver.player_matches WHERE match_id = %s",
-            [(mid,) for mid in match_ids],
-        )
-        cur.executemany(
-            "INSERT INTO silver.player_matches "
-            "(match_id, match_date, player_id, opponent_id, match_won) "
-            "VALUES (%s, CAST(%s AS DATE), %s, %s, %s)",
-            rows,
-        )
-
-
 def test_h2h_zero_prior_meetings_neutral():
     """A pair that never met (UNKNOWN_ID has no silver rows at all) gets the
     locked neutral fallback: 0 counts for the canonical player side."""
@@ -637,11 +971,9 @@ def test_h2h_reversed_raw_ids_identical():
 
 # ── Train/inference parity (strongest train/serve agreement check) ──
 #
-# Gold and inference share N-1 snapshots. Under the finalized contract both
-# read ranking, rank points, age, and rolling state from the strictly-prior
-# snapshot (never a same-day one), so every FEATURE_COL is comparable.
+# The gold row for the single parity match (S0AG vs Z355, hard, 2026-07-12) is
+# a hand-computed fixture literal; the builder must reproduce it exactly.
 
-# Select a match whose both sides resolve to the same N-1 snapshots.
 _PARITY_MATCH_SQL = """
 SELECT mf.*
 FROM gold.match_features mf

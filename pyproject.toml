@@ -12,6 +12,20 @@ description = "Tennis match prediction pipeline using Prefect, MLflow, and Bento
 readme = "README.md"
 requires-python = ">=3.12, <3.13"
 
+# Installed console scripts back every `just` recipe; `uv run <script>` must
+# never be replaced with a direct module/file invocation.
+[project.scripts]
+tennis-db-init = "src.db.init_db:main_init"
+tennis-db-reset = "src.db.init_db:main_reset"
+tennis-db-seed = "src.db.seed:main"
+tennis-db-etl = "src.flows.etl:main"
+tennis-db-snapshot = "src.db.snapshot:main"
+tennis-deploy = "src.flows.deploy:main"
+tennis-rankings-fetch = "src.flows.scrape:main"
+tennis-train = "src.flows.pipeline:main"
+tennis-worker = "src.flows.worker:main"
+tennis-check-drift = "src.flows.check_drift:main"
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

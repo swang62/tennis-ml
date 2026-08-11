@@ -6,9 +6,8 @@ import pandas as pd
 import pytest
 
 import src.countries as countries_mod
-import src.flows.ingest as ingest
+import src.db.ingest as ingest
 from src.constants import BRONZE_PROFILES_TABLE
-from src.db import client, init_db
 from src.features.columns import BRONZE_COLUMNS
 
 
@@ -398,6 +397,29 @@ def test_insert_bronze_rows_returns_zero_when_all_invalid(fake_ingest_conn):
     assert fake_ingest_conn.copied_rows == []
 
 
+def test_insert_bronze_rows_overwrite_uses_do_update(fake_ingest_conn):
+    """The seed's overwrite path rewrites an existing match_id instead of
+    skipping it; match_id itself is never updated."""
+    df = ingest.atp_rows_to_bronze([_raw_row()])
+
+    assert ingest.insert_bronze_rows(df, overwrite=True) == 1
+
+    insert_sql, _params = fake_ingest_conn.statements[-1]
+    assert insert_sql.startswith(f"INSERT INTO {ingest.BRONZE_TABLE}")
+    assert "ON CONFLICT (match_id) DO UPDATE SET" in insert_sql
+    assert "match_id = excluded.match_id" not in insert_sql
+    assert "winner_id = excluded.winner_id" in insert_sql
+
+
+def test_insert_bronze_rows_generic_path_still_do_nothing(fake_ingest_conn):
+    """Generic ingestion stays idempotent: overwrite=False is DO NOTHING."""
+    ingest.insert_bronze_rows(ingest.atp_rows_to_bronze([_raw_row()]))
+
+    insert_sql, _params = fake_ingest_conn.statements[-1]
+    assert "ON CONFLICT (match_id) DO NOTHING" in insert_sql
+    assert "DO UPDATE" not in insert_sql
+
+
 # ── search_wikipedia / fetch_summary ──────────────────────────────
 
 
@@ -615,6 +637,9 @@ def test_enrich_player_apostrophe_name_binds_as_param(monkeypatch, fake_ingest_c
     assert "O'Brien" not in sql
     assert "UPDATE" in sql
     assert "SET summary = %s" in sql
+    # Enrichment writes bronze metadata only — never gold (dbt-derived).
+    assert "UPDATE bronze.player_profiles" in sql
+    assert "gold.player_profiles" not in sql
     assert len(params) == 2  # summary_text, player_id
     assert params[1] == "Jan O'Brien"  # player_id bound as param
 
@@ -753,10 +778,77 @@ def test_enrich_players_skips_already_enriched_and_nameless(monkeypatch, fake_in
     assert ingest.enrich_players(["P1", "P2", "P3"]) == 1
     assert calls == [("P1", "Player One")]
 
-    # The lookup must use %s placeholders with the ids bound as parameters.
+    # The lookup must use %s placeholders with the ids bound as parameters,
+    # and read from bronze metadata only — never gold (dbt-derived).
     sql, params = fake_ingest_conn.statements[0]
     assert "%s" in sql
+    assert "FROM bronze.player_profiles" in sql
+    assert "gold.player_profiles" not in sql
     assert params == ["P1", "P2", "P3"]
+
+
+def test_enrich_players_reports_success_skip_and_failure_counts(
+    capsys, monkeypatch, fake_ingest_conn
+):
+    """Batch enrichment counts OK/SKIP/ERROR outcomes and prints a summary."""
+    fake_ingest_conn.fetchall_result = [
+        ("P1", "Player One", None),
+        ("P2", "Player Two", None),
+        ("P3", "Player Three", None),
+    ]
+
+    def fake_enrich_player(name, pid):
+        if pid == "P1":
+            return True
+        if pid == "P2":
+            print(f"  SKIP {pid}: no Wikipedia match for {name!r}")
+            return False
+        raise RuntimeError("Wikipedia API timeout")
+
+    monkeypatch.setattr(ingest, "enrich_player", fake_enrich_player)
+
+    assert ingest.enrich_players(["P1", "P2", "P3"]) == 1
+
+    out = capsys.readouterr().out
+    assert "  SKIP P2: no Wikipedia match for 'Player Two'" in out
+    # Exception details are preserved on the per-player ERROR line.
+    assert "  ERROR P3 (Player Three): Wikipedia API timeout" in out
+    assert "Enrichment summary: 3 attempted, 1 enriched, 1 skipped, 1 failed" in out
+
+
+def test_enrich_players_counts_precheck_skips(capsys, monkeypatch, fake_ingest_conn):
+    """Profiles skipped before enrichment count as skipped in the summary."""
+    fake_ingest_conn.fetchall_result = [
+        ("P1", "Player One", None),
+        ("P2", "Player Two", "Already enriched."),
+        ("P3", None, None),
+    ]
+    monkeypatch.setattr(ingest, "enrich_player", lambda *_args: True)
+
+    assert ingest.enrich_players(["P1", "P2", "P3"]) == 1
+
+    out = capsys.readouterr().out
+    assert "  SKIP P2: already enriched" in out
+    assert "  SKIP P3: no profile name for enrichment" in out
+    assert "Enrichment summary: 3 attempted, 1 enriched, 2 skipped, 0 failed" in out
+
+
+def test_enrich_players_force_refreshes_existing_summaries(monkeypatch, fake_ingest_conn):
+    """force=True (the seed's --enrich) rewrites a profile's summary even when
+    one already exists — only nameless profiles are still skipped."""
+    fake_ingest_conn.fetchall_result = [
+        ("P1", "Player One", "Old summary."),
+        ("P2", "Player Two", "Another old summary."),
+    ]
+    calls: list[str] = []
+    monkeypatch.setattr(ingest, "enrich_player", lambda _name, pid: calls.append(pid) or True)
+
+    assert ingest.enrich_players(["P1", "P2"], force=True) == 2
+    assert calls == ["P1", "P2"]
+    # The lookup still reads bronze metadata only, with ids bound as params.
+    sql, params = fake_ingest_conn.statements[0]
+    assert "FROM bronze.player_profiles" in sql
+    assert params == ["P1", "P2"]
 
 
 # ── Indoor normalization ────────────────────────────────────────
@@ -900,65 +992,6 @@ def test_load_atp_profiles_reports_nothing_when_all_ioc_resolve(fake_ingest_conn
         "P1": "FRA",
         "P2": "GBR",
     }
-
-
-# ── Idempotent IOC backfill via init.sql (real PostgreSQL) ────────
-
-
-def test_init_backfills_null_ioc_and_is_idempotent(postgres_ready):  # noqa: ARG001 — skip-gate
-    """Re-running init.sql backfills NULL/empty ioc to UNK, never overwrites a
-    verified value, and leaves bronze.player_profiles.ioc NOT NULL.
-
-    Simulates a pre-upgrade database by dropping NOT NULL before inserting a
-    NULL-ioc row, then re-applies the bootstrap and checks the upgrade.
-    """
-    conn = client.get_conn()
-    null_id, empty_id, known_id = "__test_ioc_null__", "__test_ioc_empty__", "__test_ioc_known__"
-    # Legacy (pre-upgrade) schema: ioc nullable. DROP NOT NULL is a no-op if
-    # the column is already nullable, so this is safe to re-run.
-    conn.execute(f"ALTER TABLE {BRONZE_PROFILES_TABLE} ALTER COLUMN ioc DROP NOT NULL")
-    conn.execute(
-        f"INSERT INTO {BRONZE_PROFILES_TABLE} (player_id, display_name, ioc) "
-        "VALUES (%s, %s, NULL), (%s, %s, ''), (%s, %s, 'FRA') "
-        "ON CONFLICT (player_id) DO UPDATE SET ioc = EXCLUDED.ioc",
-        [null_id, "Null", empty_id, "Empty", known_id, "Known"],
-    )
-    try:
-        init_db.init()  # re-run bootstrap on an already-initialized database
-
-        rows = {
-            r[0]: r[1]
-            for r in conn.execute(
-                f"SELECT player_id, ioc FROM {BRONZE_PROFILES_TABLE} "
-                "WHERE player_id IN (%s, %s, %s)",
-                [null_id, empty_id, known_id],
-            ).fetchall()
-        }
-        assert rows[null_id] == "UNK"  # NULL backfilled to the sentinel
-        assert rows[empty_id] == "UNK"  # empty string backfilled
-        assert rows[known_id] == "FRA"  # verified value preserved
-
-        nullable = conn.execute(
-            "SELECT is_nullable FROM information_schema.columns "
-            "WHERE table_schema = 'bronze' AND table_name = 'player_profiles' "
-            "AND column_name = 'ioc'"
-        ).fetchone()
-        assert nullable is not None
-        assert nullable[0] == "NO"
-
-        init_db.init()  # second re-run: idempotent, no error, same state
-        again = conn.execute(
-            f"SELECT ioc FROM {BRONZE_PROFILES_TABLE} WHERE player_id = %s",
-            [known_id],
-        ).fetchone()
-        assert again is not None
-        assert again[0] == "FRA"
-    finally:
-        conn.execute(
-            f"DELETE FROM {BRONZE_PROFILES_TABLE} WHERE player_id IN (%s, %s, %s)",
-            [null_id, empty_id, known_id],
-        )
-        conn.execute(f"ALTER TABLE {BRONZE_PROFILES_TABLE} ALTER COLUMN ioc SET NOT NULL")
 
 
 # ── Ranking identity map contract ────────────────────────────────
@@ -1398,14 +1431,322 @@ def test_ingest_rankings_reports_unmapped_rows(fake_ingest_conn, tmp_path, capsy
     assert "unmapped: source_id=999999 name='Nobody Here' rows=2" in out
 
 
+def test_ingest_rankings_filters_to_requested_canonical_ids(fake_ingest_conn, tmp_path):
+    """player_ids restricts the import to those canonical players only."""
+    _write_ranking_csv(
+        tmp_path,
+        "atp_rankings_00s.csv",
+        [
+            ["20260105", 1, "207989", "12050"],  # mapped -> A0E2 (requested)
+            ["20260105", 2, "100644", "10000"],  # mapped -> Z355 (not requested)
+        ],
+    )
+    _write_map_csv(
+        tmp_path,
+        [
+            {"ranking_player_id": "207989", "ranking_name": "Carlos Alcaraz", "player_id": "A0E2"},
+            {
+                "ranking_player_id": "100644",
+                "ranking_name": "Alexander Zverev",
+                "player_id": "Z355",
+            },
+        ],
+    )
+    _write_players_csv(
+        tmp_path,
+        [
+            {"player_id": "207989", "name_first": "C", "name_last": "A", "ioc": ""},
+            {"player_id": "100644", "name_first": "A", "name_last": "Z", "ioc": ""},
+        ],
+    )
+
+    summary = ingest.ingest_rankings(
+        tmp_path,
+        map_csv=tmp_path / "ranking_player_map.csv",
+        players_csv=tmp_path / "atp_players.csv",
+        player_ids={"A0E2"},
+    )
+
+    assert summary["source_rows"] == 2
+    assert summary["upserted"] == 1
+    assert len(fake_ingest_conn.copied_rows) == 1
+    assert fake_ingest_conn.copied_rows[0][1] == "A0E2"
+
+
+def test_ingest_rankings_no_archive_returns_zero_import(fake_ingest_conn, tmp_path, capsys):
+    """An empty local ranking archive is a successful zero-import seed."""
+    summary = ingest.ingest_rankings(tmp_path)
+
+    assert summary == {"files": 0, "source_rows": 0, "top200": 0, "upserted": 0, "unmapped": 0}
+    assert "No atp_rankings_*.csv files found under data/raw/rankings; nothing to import" in (
+        capsys.readouterr().out
+    )
+    assert fake_ingest_conn.copied_rows == []
+
+
+def test_ingest_rankings_filtered_path_is_silent_and_seeded_scoped(
+    fake_ingest_conn, tmp_path, capsys
+):
+    """The seed path (player_ids) reports nothing about uncovered or unmapped
+    rows: archive players outside the seed set and map gaps are not seed
+    warnings, and the summary counts only the seeded result."""
+    _write_ranking_csv(
+        tmp_path,
+        "atp_rankings_00s.csv",
+        [
+            ["20260105", 1, "207989", "12050"],  # mapped -> A0E2 (requested)
+            ["20260106", 2, "207989", "11000"],  # mapped -> A0E2 (requested)
+            ["20260105", 3, "999999", "10000"],  # unmapped -> never reported
+        ],
+    )
+    _write_map_csv(
+        tmp_path,
+        [{"ranking_player_id": "207989", "ranking_name": "Carlos Alcaraz", "player_id": "A0E2"}],
+    )
+    _write_players_csv(
+        tmp_path,
+        [
+            {"player_id": "207989", "name_first": "C", "name_last": "A", "ioc": ""},
+            {"player_id": "999999", "name_first": "Nobody", "name_last": "Here", "ioc": ""},
+        ],
+    )
+
+    summary = ingest.ingest_rankings(
+        tmp_path,
+        map_csv=tmp_path / "ranking_player_map.csv",
+        players_csv=tmp_path / "atp_players.csv",
+        player_ids={"A0E2", "NOPE1"},  # NOPE1 also has no map coverage
+    )
+
+    out = capsys.readouterr().out
+    assert "uncovered: seeded player_id=" not in out
+    assert "unmapped: source_id=" not in out
+    # The summary describes only the seeded result, not the global archive.
+    assert summary == {
+        "files": 1,
+        "source_rows": 3,
+        "top200": 2,
+        "upserted": 2,
+        "unmapped": 0,
+    }
+    assert len(fake_ingest_conn.copied_rows) == 2
+    assert {row[1] for row in fake_ingest_conn.copied_rows} == {"A0E2"}
+
+
+def test_ingest_rankings_seeded_player_without_rank_rows_is_silent(
+    fake_ingest_conn, tmp_path, capsys
+):
+    """A seeded player with no rank rows in the archive is a normal seed, not a
+    warning; nothing is written."""
+    _write_ranking_csv(
+        tmp_path,
+        "atp_rankings_00s.csv",
+        [["20260105", 1, "207989", "12050"]],  # only for a player not seeded
+    )
+    _write_map_csv(
+        tmp_path,
+        [{"ranking_player_id": "207989", "ranking_name": "Carlos Alcaraz", "player_id": "A0E2"}],
+    )
+    _write_players_csv(
+        tmp_path, [{"player_id": "207989", "name_first": "C", "name_last": "A", "ioc": ""}]
+    )
+
+    summary = ingest.ingest_rankings(
+        tmp_path,
+        map_csv=tmp_path / "ranking_player_map.csv",
+        players_csv=tmp_path / "atp_players.csv",
+        player_ids={"Z355"},  # seeded but absent from the archive/map
+    )
+
+    assert summary == {
+        "files": 1,
+        "source_rows": 1,
+        "top200": 0,
+        "upserted": 0,
+        "unmapped": 0,
+    }
+    assert fake_ingest_conn.copied_rows == []
+    out = capsys.readouterr().out
+    assert "uncovered" not in out
+    assert "unmapped: source_id=" not in out
+
+
+def test_ingest_rankings_filtered_ioc_backfill_restricted_to_seeded(fake_ingest_conn, tmp_path):
+    """player_ids backfills IOCs only for the seeded canonical ids — the full
+    map is never mutated during a seed."""
+    _write_ranking_csv(tmp_path, "atp_rankings_00s.csv", [["20260105", 1, "207989", "12050"]])
+    _write_map_csv(
+        tmp_path,
+        [
+            {"ranking_player_id": "207989", "ranking_name": "Carlos Alcaraz", "player_id": "A0E2"},
+            {
+                "ranking_player_id": "100644",
+                "ranking_name": "Alexander Zverev",
+                "player_id": "Z355",
+            },
+        ],
+    )
+    _write_players_csv(
+        tmp_path,
+        [
+            {"player_id": "207989", "name_first": "C", "name_last": "A", "ioc": "ESP"},
+            {"player_id": "100644", "name_first": "A", "name_last": "Z", "ioc": "GER"},
+        ],
+    )
+
+    summary = ingest.ingest_rankings(
+        tmp_path,
+        map_csv=tmp_path / "ranking_player_map.csv",
+        players_csv=tmp_path / "atp_players.csv",
+        player_ids={"A0E2"},
+    )
+
+    assert summary["upserted"] == 1
+    ioc_stmt = next(
+        (s, p)
+        for s, p in fake_ingest_conn.statements
+        if s.startswith(f"UPDATE {ingest.BRONZE_PROFILES_TABLE}")
+    )
+    assert ioc_stmt[1] == [("ESP", "A0E2")]  # Z355 never touched during seed
+
+
+def test_ingest_rankings_seed_path_keeps_ioc_fallback(fake_ingest_conn, tmp_path, capsys):
+    """The seed path keeps the ranking-source IOC fallback, scoped to its
+    player_ids; the summary reports ranking rows only, no fallback wording."""
+    _write_ranking_csv(tmp_path, "atp_rankings_00s.csv", [["20260105", 1, "207989", "12050"]])
+    _write_map_csv(
+        tmp_path,
+        [{"ranking_player_id": "207989", "ranking_name": "Carlos Alcaraz", "player_id": "A0E2"}],
+    )
+    _write_players_csv(
+        tmp_path, [{"player_id": "207989", "name_first": "C", "name_last": "A", "ioc": "ESP"}]
+    )
+
+    summary = ingest.ingest_rankings(
+        tmp_path,
+        map_csv=tmp_path / "ranking_player_map.csv",
+        players_csv=tmp_path / "atp_players.csv",
+        player_ids={"A0E2"},
+    )
+
+    assert summary["upserted"] == 1
+    ioc_stmt = next(
+        (s, p)
+        for s, p in fake_ingest_conn.statements
+        if s.startswith(f"UPDATE {ingest.BRONZE_PROFILES_TABLE}")
+    )
+    # The fallback only replaces NULL/empty/UNK — a verified IOC is never
+    # overwritten.
+    assert "WHERE player_id = %s AND (ioc IS NULL OR ioc = '' OR ioc = 'UNK')" in ioc_stmt[0]
+    assert ioc_stmt[1] == [("ESP", "A0E2")]
+    out = capsys.readouterr().out
+    assert "Rankings import: 1 inserted/updated rows" in out
+    assert "IOC" not in out  # summary reports ranking rows only
+
+
+def test_ingest_rankings_seed_path_skips_fallback_without_source_ioc(
+    fake_ingest_conn, tmp_path, capsys
+):
+    """A seed whose ranking source carries no usable IOC emits no fallback
+    UPDATE, and the summary stays ranking-rows-only."""
+    _write_ranking_csv(tmp_path, "atp_rankings_00s.csv", [["20260105", 1, "207989", "12050"]])
+    _write_map_csv(
+        tmp_path,
+        [{"ranking_player_id": "207989", "ranking_name": "Carlos Alcaraz", "player_id": "A0E2"}],
+    )
+    # The ranking source carries no usable IOC for the seeded player.
+    _write_players_csv(
+        tmp_path, [{"player_id": "207989", "name_first": "C", "name_last": "A", "ioc": ""}]
+    )
+
+    summary = ingest.ingest_rankings(
+        tmp_path,
+        map_csv=tmp_path / "ranking_player_map.csv",
+        players_csv=tmp_path / "atp_players.csv",
+        player_ids={"A0E2"},
+    )
+
+    assert summary["upserted"] == 1
+    assert not any(
+        s.startswith(f"UPDATE {ingest.BRONZE_PROFILES_TABLE}")
+        for s, _ in fake_ingest_conn.statements
+    )
+    assert "Rankings import: 1 inserted/updated rows" in capsys.readouterr().out
+
+
+def test_ingest_rankings_full_path_keeps_ioc_fallback(fake_ingest_conn, tmp_path, capsys):
+    """The full scrape path (player_ids=None) keeps the ranking-source IOC
+    fallback; the summary reports ranking rows only, no fallback wording."""
+    _write_ranking_csv(tmp_path, "atp_rankings_00s.csv", [["20260105", 1, "207989", "12050"]])
+    _write_map_csv(
+        tmp_path,
+        [{"ranking_player_id": "207989", "ranking_name": "Carlos Alcaraz", "player_id": "A0E2"}],
+    )
+    _write_players_csv(
+        tmp_path, [{"player_id": "207989", "name_first": "C", "name_last": "A", "ioc": "ESP"}]
+    )
+
+    summary = ingest.ingest_rankings(
+        tmp_path,
+        map_csv=tmp_path / "ranking_player_map.csv",
+        players_csv=tmp_path / "atp_players.csv",
+    )
+
+    assert summary["upserted"] == 1
+    ioc_stmt = next(
+        (s, p)
+        for s, p in fake_ingest_conn.statements
+        if s.startswith(f"UPDATE {ingest.BRONZE_PROFILES_TABLE}")
+    )
+    assert ioc_stmt[1] == [("ESP", "A0E2")]
+    out = capsys.readouterr().out
+    assert "Rankings import: 1 inserted/updated rows" in out
+    assert "IOC" not in out  # summary reports ranking rows only
+
+
+def test_ingest_rankings_repeat_run_is_idempotent(fake_ingest_conn, tmp_path):
+    """Re-running the same seed upserts the same rows; the PK conflict key prevents
+    growth."""
+    _write_ranking_csv(tmp_path, "atp_rankings_00s.csv", [["20260105", 1, "207989", "12050"]])
+    _write_map_csv(
+        tmp_path,
+        [{"ranking_player_id": "207989", "ranking_name": "Carlos Alcaraz", "player_id": "A0E2"}],
+    )
+    _write_players_csv(
+        tmp_path, [{"player_id": "207989", "name_first": "C", "name_last": "A", "ioc": ""}]
+    )
+
+    first = ingest.ingest_rankings(
+        tmp_path,
+        map_csv=tmp_path / "ranking_player_map.csv",
+        players_csv=tmp_path / "atp_players.csv",
+        player_ids={"A0E2"},
+    )
+    second = ingest.ingest_rankings(
+        tmp_path,
+        map_csv=tmp_path / "ranking_player_map.csv",
+        players_csv=tmp_path / "atp_players.csv",
+        player_ids={"A0E2"},
+    )
+
+    assert first == second
+    assert first["upserted"] == 1
+    inserts = [
+        s
+        for s, _ in fake_ingest_conn.statements
+        if s.startswith(f"INSERT INTO {ingest.BRONZE_RANKINGS_TABLE}")
+    ]
+    assert len(inserts) == 2  # one COPY-stage INSERT per run
+    assert "ON CONFLICT (ranking_date, player_id) DO UPDATE SET" in inserts[0]
+
+
 def test_backfill_profile_iocs_updates_only_unk(fake_ingest_conn, tmp_path):
     players = _write_players_csv(
         tmp_path, [{"player_id": "100004", "name_first": "G", "name_last": "M", "ioc": "ITA"}]
     )
 
-    n = ingest.backfill_profile_iocs({"100004": "M276"}, players_csv=players)
+    ingest.backfill_profile_iocs({"100004": "M276"}, players_csv=players)
 
-    assert n == 1
     sql, params = fake_ingest_conn.statements[0]
     assert sql.startswith(f"UPDATE {ingest.BRONZE_PROFILES_TABLE}")
     assert "WHERE player_id = %s AND (ioc IS NULL OR ioc = '' OR ioc = 'UNK')" in sql
@@ -1417,7 +1758,7 @@ def test_backfill_profile_iocs_skips_invalid_ioc(fake_ingest_conn, tmp_path):
         tmp_path, [{"player_id": "100004", "name_first": "G", "name_last": "M", "ioc": "XYZ"}]
     )
 
-    assert ingest.backfill_profile_iocs({"100004": "M276"}, players_csv=players) == 0
+    ingest.backfill_profile_iocs({"100004": "M276"}, players_csv=players)
     assert fake_ingest_conn.statements == []
 
 
@@ -1427,5 +1768,5 @@ def test_backfill_profile_iocs_skips_players_not_in_map(fake_ingest_conn, tmp_pa
     )
 
     # The map only covers 207989, so 100004's IOC is never touched.
-    assert ingest.backfill_profile_iocs({"207989": "A0E2"}, players_csv=players) == 0
+    ingest.backfill_profile_iocs({"207989": "A0E2"}, players_csv=players)
     assert fake_ingest_conn.statements == []

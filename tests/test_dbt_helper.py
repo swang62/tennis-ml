@@ -73,6 +73,6 @@ def test_etl_flow_builds_without_enrichment(monkeypatch):
 
 def test_enrich_missing_is_callable():
     """Enrichment is a separate, idempotent module-level function."""
-    from src.flows.ingest import enrich_missing
+    from src.db.ingest import enrich_missing
 
     assert callable(enrich_missing)

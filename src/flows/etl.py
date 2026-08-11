@@ -3,10 +3,10 @@
 Runs `dbt build` which builds the medallion layers in dependency order:
 silver.player_matches (player-perspective rows) -> silver.rolling_features
 (post-match snapshots) -> gold.match_features (canonical one-row-per-match
-training table) -> gold.player_profiles (enriched player-grain aggregates).
+training table) -> gold.player_profiles (derived player-grain aggregates).
 
-Wikipedia bio enrichment is a separate, idempotent step: run it via
-`just db-enrich` after dbt, then re-run dbt to pick up new summaries.
+Wikipedia bio enrichment happens at seed time via `just db-seed --enrich`
+(never after ETL); re-run `just db-etl` to pick up new summaries.
 """
 
 import os
@@ -78,13 +78,18 @@ def bronze_to_gold() -> int:
 
 @flow(log_prints=True)
 def etl_flow():
-    """Bronze → gold ETL: dbt build only. Wikipedia enrichment is a separate,
-    idempotent step — run `just db-enrich` after dbt, then re-run dbt.
+    """Bronze → gold ETL: dbt build only. Enrichment is a seed-time step —
+    run `just db-seed --enrich`, then re-run `just db-etl`.
     """
     load_env()
     rows = bronze_to_gold()
     print(f"ETL complete: {rows} gold rows")
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Console-script entry for `just db-etl`."""
     etl_flow()
+
+
+if __name__ == "__main__":
+    main()

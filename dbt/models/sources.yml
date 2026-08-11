@@ -88,11 +88,13 @@ sources:
             description: Player who won the match (player1_id or player2_id).
       - name: player_profiles
         description: >
-          One row per player: identity and biography, upserted by ingest
-          (src/flows/ingest.py) from the ATP player database
+          One row per player: identity and biography metadata, upserted by
+          ingest (src/db/ingest.py) from the ATP player database
           (data/ATP_player_database.csv) and, when enabled, the Wikipedia
-          enrichment fallback. The write target for profile identity; dbt
-          materializes the enriched gold.player_profiles from this source.
+          enrichment fallback. Metadata/enrichment only — no aggregates live
+          here. The write target for profile identity; dbt derives the
+          aggregate gold.player_profiles (player_id + derived aggregates)
+          from this source.
         columns:
           - name: player_id
             description: Canonical ATP id (ATP_Database.id); the primary key.
@@ -126,7 +128,15 @@ sources:
         description: >
           Official weekly ATP rankings (rank 1-200) sourced from
           data/raw/rankings/atp_rankings_*.csv, with player IDs resolved
-          through data/ranking_player_map.csv to canonical ATP ids.
+          through data/ranking_player_map.csv to canonical ATP ids. One row
+          per (ranking_date, player_id): that composite identity is the
+          upsert target of both ingestion paths (seed/ingest and the weekly
+          scrape catch-up), and the uniqueness test below mirrors the bronze
+          PK.
+        tests:
+          - unique:
+              arguments:
+                column_name: "ranking_date::text || '_' || player_id"
         columns:
           - name: player_id
             description: Canonical ATP player id (mapped via ranking_player_map.csv).

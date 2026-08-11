@@ -1,10 +1,12 @@
 """Seed selection and reset-safety tests."""
 
+from pathlib import Path
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
-from src.db import init_db, seed
+from src.db import ingest, init_db, seed
 
 TOP_PLAYERS = seed.TOP_PLAYERS
 RECENT = seed.RECENT
@@ -216,54 +218,192 @@ def test_load_all_raw_atp_rows_sorts_chronologically(tmp_path):
 def test_parse_args_defaults_to_deterministic_miniset():
     args = parse_args([])
     assert args.all is False
+    assert args.enrich is False
 
 
 def test_parse_args_all():
     args = parse_args(["--all"])
     assert args.all is True
+    assert args.enrich is False
 
 
-def test_seed_exposes_no_ranking_ingestion_path():
-    """Ranking ingestion is a separate path; seed stays match-only."""
-    assert not hasattr(seed, "ingest_rankings")
-    assert not hasattr(seed, "discover_ranking_csvs")
-    assert not hasattr(seed, "load_ranking_rows")
-    assert "rankings" not in (seed.__doc__ or "")
+def test_parse_args_enrich_is_independent_of_all():
+    """--enrich is not mutually exclusive with --all; alone it keeps the miniset."""
+    assert parse_args(["--enrich"]).enrich is True
+    both = parse_args(["--all", "--enrich"])
+    assert both.all is True
+    assert both.enrich is True
+
+
+def test_seed_wires_existing_ranking_and_enrichment_paths():
+    """Seed orchestrates the validated ingest operations — no duplicate logic."""
+    assert seed.ingest_rankings is ingest.ingest_rankings
+    assert seed.enrich_players is ingest.enrich_players
 
 
 def test_main_dispatches_without_network(monkeypatch):
-    """Default and --all seed paths remain offline."""
+    """Flag combos dispatch offline; --enrich is the only network gate."""
     calls = []
 
-    monkeypatch.setattr(seed, "main_default", lambda: calls.append("default"))
-    monkeypatch.setattr(seed, "main_all", lambda: calls.append("all"))
+    monkeypatch.setattr(
+        seed, "main_default", lambda enrich=False: calls.append(("default", enrich))
+    )
+    monkeypatch.setattr(seed, "main_all", lambda enrich=False: calls.append(("all", enrich)))
 
     seed.main([])
-    assert calls == ["default"]
+    assert calls == [("default", False)]
 
     calls.clear()
     seed.main(["--all"])
-    assert calls == ["all"]
+    assert calls == [("all", False)]
+
+    calls.clear()
+    seed.main(["--enrich"])
+    assert calls == [("default", True)]
+
+    calls.clear()
+    seed.main(["--all", "--enrich"])
+    assert calls == [("all", True)]
 
 
-def test_default_seed_is_the_28_match_35_player_fixture(postgres_ready):  # noqa: ARG001
-    """The database contains the deterministic miniset, not full history."""
-    from src.db.client import get_conn
+def test_seed_rankings_and_enrichment_imports_only_seeded_players(monkeypatch):
+    """Default/--all stay offline: rankings import only, never enrichment."""
+    calls = []
+    monkeypatch.setattr(seed, "ingest_rankings", lambda **kwargs: calls.append(kwargs) or {})
+    monkeypatch.setattr(
+        seed, "enrich_players", lambda _ids, _force=False: calls.append("enrich") or 0
+    )
 
-    with get_conn().cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM bronze.match_events")
-        row = cur.fetchone()
-        matches = int(row[0] if row is not None else -1)
-        cur.execute(
-            "SELECT COUNT(*) FROM ("
-            "SELECT player1_id AS player_id FROM bronze.match_events "
-            "UNION SELECT player2_id AS player_id FROM bronze.match_events"
-            ") AS p"
-        )
-        row = cur.fetchone()
-        players = int(row[0] if row is not None else -1)
-    assert matches == 28
-    assert players == 35
+    seed.seed_rankings_and_enrichment(["A0E2", "Z355"], enrich=False)
+
+    # The seed scopes the rankings import (and its IOC fallback) to exactly its
+    # match-corpus player set; the fallback is not suppressed.
+    assert calls == [{"player_ids": {"A0E2", "Z355"}}]
+
+
+def test_seed_rankings_and_enrichment_enriches_only_when_flag(monkeypatch):
+    """--enrich adds forced Wikipedia enrichment for the exact seeded player set."""
+    calls = []
+    monkeypatch.setattr(seed, "ingest_rankings", lambda **_: calls.append("rankings") or {})
+    monkeypatch.setattr(
+        seed, "enrich_players", lambda ids, force=False: calls.append(("enrich", ids, force)) or 2
+    )
+
+    seed.seed_rankings_and_enrichment(["A0E2"], enrich=True)
+
+    assert calls == ["rankings", ("enrich", ["A0E2"], True)]
+
+
+def test_seed_rankings_and_enrichment_skips_empty_corpus(monkeypatch):
+    calls = []
+    monkeypatch.setattr(seed, "ingest_rankings", lambda **_: calls.append(1))
+    monkeypatch.setattr(seed, "enrich_players", lambda _ids, force=False: calls.append(2) or force)
+
+    seed.seed_rankings_and_enrichment([], enrich=True)
+
+    assert calls == []
+
+
+def test_seed_enrich_output_is_the_batch_summary_only(monkeypatch, capsys):
+    """--enrich seed output shows the batch summary, not success-only wording."""
+    monkeypatch.setattr(seed, "ingest_rankings", lambda **_: None)
+
+    def fake_enrich(_ids, force=False):  # noqa: ARG001
+        print("Enrichment summary: 1 attempted, 0 enriched, 1 skipped, 0 failed")
+        return 0
+
+    monkeypatch.setattr(seed, "enrich_players", fake_enrich)
+
+    seed.seed_rankings_and_enrichment(["A0E2"], enrich=True)
+
+    out = capsys.readouterr().out
+    assert "Enrichment summary: 1 attempted, 0 enriched, 1 skipped, 0 failed" in out
+    assert "seeded player profiles" not in out  # old success-only line is gone
+
+
+# ── Seed rank-history filtering (hermetic: no database) ───────────────────
+
+
+def _fake_bronze(_matches, selected_ids=None):  # noqa: ARG001
+    """Two bronze rows whose players are the seeded player set."""
+    return pd.DataFrame(
+        {
+            "match_date": ["2026-01-05", "2026-01-06"],
+            "player1_id": ["A0E2", "Z355"],
+            "player2_id": ["Z355", "A0E2"],
+        }
+    )
+
+
+def _patch_seed_writes(monkeypatch, calls):
+    """Redirect every DB/network side effect to a recorder."""
+    monkeypatch.setattr(seed, "load_raw_atp_rows", lambda _path: [])
+    monkeypatch.setattr(seed, "load_all_raw_atp_rows", lambda _paths: [])
+    monkeypatch.setattr(seed, "select_matches", lambda _matches: [])
+    monkeypatch.setattr(seed, "atp_rows_to_bronze", _fake_bronze)
+    monkeypatch.setattr(
+        seed, "insert_bronze_rows", lambda _df, overwrite=False: calls.append(overwrite) or 0
+    )
+    monkeypatch.setattr(seed, "load_profiles_for", lambda _ids, _src: None)
+    monkeypatch.setattr(
+        seed,
+        "seed_rankings_and_enrichment",
+        lambda ids, enrich: calls.append((ids, enrich)),
+    )
+
+
+def test_main_default_overwrites_selected_bronze_rows(monkeypatch):
+    """The default miniset seed overwrites its selected rows (no DO NOTHING)."""
+    calls = []
+    _patch_seed_writes(monkeypatch, calls)
+
+    seed.main_default()
+
+    assert calls == [True, (["A0E2", "Z355"], False)]
+
+
+def test_main_all_overwrites_selected_bronze_rows(monkeypatch):
+    """`--all` seed also overwrites its selected rows (no DO NOTHING)."""
+    calls = []
+    monkeypatch.setattr(seed, "discover_atp_csvs", lambda _dir: [Path("2026.csv")])
+    _patch_seed_writes(monkeypatch, calls)
+
+    seed.main_all(enrich=True)
+
+    assert calls == [True, (["A0E2", "Z355"], True)]
+
+
+def test_main_default_imports_rank_history_only_for_miniset_players(monkeypatch):
+    """The default miniset seed filters rank history to its own players."""
+    calls = []
+    _patch_seed_writes(monkeypatch, calls)
+
+    seed.main_default()
+
+    assert calls == [True, (["A0E2", "Z355"], False)]
+
+
+def test_main_all_imports_rank_history_for_every_seeded_player(monkeypatch):
+    """`--all` seeds rank history for every player in the full corpus."""
+    calls = []
+    monkeypatch.setattr(seed, "discover_atp_csvs", lambda _dir: [Path("2026.csv")])
+    _patch_seed_writes(monkeypatch, calls)
+
+    seed.main_all(enrich=True)
+
+    assert calls == [True, (["A0E2", "Z355"], True)]
+
+
+def test_main_all_without_csvs_is_a_noop(monkeypatch, capsys):
+    """An empty ATP corpus is a successful --all seed with no writes."""
+    monkeypatch.setattr(seed, "discover_atp_csvs", lambda _dir: [])
+    calls = []
+    monkeypatch.setattr(seed, "insert_bronze_rows", lambda _df: calls.append(1))
+
+    seed.main_all()
+
+    assert calls == []
+    assert "nothing to seed" in capsys.readouterr().out
 
 
 # ── Destructive reset: hard actual-target safety check ────────────────────

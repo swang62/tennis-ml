@@ -33,9 +33,11 @@ def _write_valid_snapshot(
     con = duckdb.connect(str(path))
     try:
         con.execute("CREATE SCHEMA gold")
+        con.execute("CREATE SCHEMA bronze")
         col_sql = ", ".join(f'"{c}" INTEGER' for c in columns)
         con.execute(f"CREATE TABLE gold.match_features ({col_sql})")
         con.execute("CREATE TABLE gold.player_profiles (player_id VARCHAR PRIMARY KEY)")
+        con.execute("CREATE TABLE bronze.player_profiles (player_id VARCHAR PRIMARY KEY)")
         if extra_table:
             con.execute(f"CREATE TABLE gold.{extra_table} (x INTEGER)")
         if not empty:
@@ -43,6 +45,7 @@ def _write_valid_snapshot(
                 "INSERT INTO gold.match_features VALUES (" + ", ".join(["1"] * len(columns)) + ")"
             )
         con.execute("INSERT INTO gold.player_profiles (player_id) VALUES ('p1')")
+        con.execute("INSERT INTO bronze.player_profiles (player_id) VALUES ('p1')")
     finally:
         con.close()
 
@@ -141,10 +144,17 @@ def test_refresh_failure_cleans_temp_when_validation_fails(tmp_path, monkeypatch
     assert not list(tmp_path.glob("*.tmp"))
 
 
-def test_refresh_snapshot_copies_exactly_two_gold_tables(postgres_ready, tmp_path) -> None:  # noqa: ARG001 — skip-gate fixture, unused in body
-    """Live refresh: snapshot has exactly the two gold tables, exact column order."""
+def test_refresh_snapshot_copies_exactly_the_snapshot_tables(tmp_path, monkeypatch) -> None:
+    """refresh_snapshot installs exactly the snapshot tables (two gold tables
+    plus the bronze profile metadata), exact column order, atomically."""
     p = tmp_path / "live_snap.duckdb"
-    snapshot.refresh_snapshot(p)
+
+    def fake_copy(tmp: "os.PathLike[str]", _pg_url: str) -> None:
+        # Stand-in for the PostgreSQL copy: write a valid three-table snapshot.
+        _write_valid_snapshot(tmp)
+
+    monkeypatch.setattr(snapshot, "_copy_tables", fake_copy)
+    snapshot.refresh_snapshot(p, pg_url="unused")
     assert p.exists()
 
     con = duckdb.connect(str(p), read_only=True)
@@ -155,7 +165,7 @@ def test_refresh_snapshot_copies_exactly_two_gold_tables(postgres_ready, tmp_pat
                 "SELECT schema_name, table_name FROM duckdb_tables()"
             ).fetchall()
         }
-        # bronze, silver, and rolling_features must not leak into training data.
+        # silver and rolling_features must not leak into training data.
         assert tables == set(SNAPSHOT_TABLES)
         cols = tuple(
             c[0] for c in con.execute("SELECT * FROM gold.match_features LIMIT 0").description

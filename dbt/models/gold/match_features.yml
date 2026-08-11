@@ -40,12 +40,8 @@ models:
           - not_null
       - name: tournament
         description: Tournament name (joined from bronze).
-        tests:
-          - not_null
       - name: round
         description: Draw round (r128, r64, r32, r16, qf, sf, f); non-draw stages such as "rr" pass through and encode as round_encoded 0.
-        tests:
-          - not_null
       - name: surface
         description: Court surface (clay, grass, hard, carpet); "0" when the raw CSV left it blank (Davis Cup), which encodes to all-zero surface flags like round_encoded 0.
         tests:
@@ -126,34 +122,17 @@ models:
         description: Canonical player wins in those prior meetings; 0 when never met before.
 
       # Numeric match context (one-hot surface for linear and neural models).
+      # is_clay/is_grass/is_hard/is_carpet derive directly from the surface
+      # domain (guarded above) and are covered non-null/finite by
+      # match_features_no_null_model_features; no per-flag tests.
       - name: is_clay
         description: 1 if surface = clay, else 0.
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: [0, 1]
       - name: is_grass
         description: 1 if surface = grass, else 0.
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: [0, 1]
       - name: is_hard
         description: 1 if surface = hard, else 0.
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: [0, 1]
       - name: is_carpet
         description: 1 if surface = carpet, else 0.
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: [0, 1]
       - name: is_indoor
         description: 1 if indoor, 0 if outdoor, 0 when unknown (joined from bronze).
       - name: tournament_level

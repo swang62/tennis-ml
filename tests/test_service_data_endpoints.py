@@ -3,6 +3,7 @@
 from unittest.mock import patch
 
 import pandas as pd
+from psycopg.errors import UndefinedColumn, UndefinedTable
 from starlette.testclient import TestClient
 
 from src.serving.service import DATA_APP
@@ -73,16 +74,17 @@ def test_players_returns_materialized_directory():
 
 
 def test_players_sql_reads_profiles_without_match_aggregation():
-    """One ordered read from gold.player_profiles; current_rank is dbt-
-    materialized (no per-query join to bronze.rankings or bronze.match_events)."""
+    """Directory joins bronze metadata with dbt-derived gold aggregates; no
+    per-query join to bronze.rankings or bronze.match_events."""
     with patch("src.serving.service.execute_df", return_value=_players_df()) as exec:
         resp = client.get("/players")
     assert resp.status_code == 200
     sql = exec.call_args_list[0].args[0]
-    assert "FROM gold.player_profiles" in sql
+    assert "FROM bronze.player_profiles" in sql
+    assert "JOIN gold.player_profiles" in sql
     assert "bronze.rankings" not in sql
     assert "bronze.match_events" not in sql
-    assert "ORDER BY current_rank NULLS LAST, display_name, player_id" in sql
+    assert "ORDER BY gp.current_rank NULLS LAST, bp.display_name, bp.player_id" in sql
 
 
 def test_players_empty():
@@ -94,6 +96,28 @@ def test_players_empty():
 
 def test_players_database_error_returns_500():
     with patch("src.serving.service.execute_df", side_effect=RuntimeError("boom")):
+        resp = client.get("/players")
+    assert resp.status_code == 500
+    assert "players query failed" in resp.json()["error"]
+
+
+def test_players_empty_when_dbt_relations_missing():
+    """Pre-ETL (missing dbt-created gold relations) /players renders empty, not a 500."""
+    with patch(
+        "src.serving.service.execute_df",
+        side_effect=UndefinedTable('relation "gold.player_profiles" does not exist'),
+    ):
+        resp = client.get("/players")
+    assert resp.status_code == 200
+    assert resp.json()["data"]["players"] == []
+
+
+def test_players_other_db_errors_still_500():
+    """Only missing relations are masked — bad columns/connections stay 500."""
+    with patch(
+        "src.serving.service.execute_df",
+        side_effect=UndefinedColumn("column bp.display_name does not exist"),
+    ):
         resp = client.get("/players")
     assert resp.status_code == 500
     assert "players query failed" in resp.json()["error"]
@@ -136,7 +160,7 @@ def test_players_tie_ordering_by_player_id_deterministic():
     # query order preserved (handler never re-sorts)
     assert [p["player_id"] for p in players] == ["p1", "p3", "p2"]
     sql = exec.call_args_list[0].args[0]
-    assert "ORDER BY current_rank NULLS LAST, display_name, player_id" in sql
+    assert "ORDER BY gp.current_rank NULLS LAST, bp.display_name, bp.player_id" in sql
 
 
 def test_players_null_rank_ordered_last():

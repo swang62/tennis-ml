@@ -3,11 +3,13 @@ version: 2
 models:
   - name: player_profiles
     description: >
-      One row per player with identity, biography, match counts, career
+      One row per player with derived aggregates only: match counts, career
       service/return aggregates, surface counts/win rates, latest rolling
-      snapshot, rank points, and estimated current rank. Materialized from
-      bronze.player_profiles (identity) + silver.player_matches (aggregates)
-      + silver.rolling_features (latest snapshot). Zero-match players are
+      snapshot, rank points, and estimated current rank. Materialized by dbt
+      from bronze.player_profiles (player_id driver) + silver.player_matches
+      (aggregates) + silver.rolling_features (latest snapshot). Identity and
+      biography metadata lives only in bronze.player_profiles — consumers join
+      bronze metadata with this table's aggregates. Zero-match players are
       preserved with zero counts and null rates.
     columns:
       - name: player_id
@@ -15,36 +17,8 @@ models:
         tests:
           - unique
           - not_null
-      - name: display_name
-        description: Canonical display name from ATP database.
-      - name: atp_name
-        description: Alternate name variant.
-      - name: birthdate
-        description: Birth date.
-      - name: weight
-        description: Weight in kg (NULL when unknown).
-      - name: height
-        description: Height in cm (NULL when unknown).
-      - name: turned_pro
-        description: Year turned professional (NULL when unknown).
-      - name: birthplace
-        description: Birthplace.
-      - name: coaches
-        description: Coach names.
-      - name: handedness
-        description: Playing hand (R/L).
-      - name: backhand
-        description: Backhand style (1H/2H).
-      - name: ioc
-        description: IOC country code.
-      - name: summary
-        description: Wikipedia bio summary.
-      - name: enriched_at
-        description: Timestamp of last Wikipedia enrichment.
       - name: match_count
-        description: Total career matches in bronze.
-        tests:
-          - not_null
+        description: Total career matches in bronze (derived COUNT(*), never NULL).
       - name: latest_match_date
         description: Most recent match date (NULL for zero-match players).
       - name: latest_rank_points

@@ -17,7 +17,7 @@ from typing import Any, NamedTuple, cast
 import pandas as pd
 
 from src.constants import (
-    PROFILES_TABLE,
+    BRONZE_PROFILES_TABLE,
     SILVER_PLAYER_MATCHES,
     SILVER_ROLLING_FEATURES,
     TOUR_AVERAGES_TABLE,
@@ -101,10 +101,11 @@ ORDER BY match_date DESC, match_id DESC
 LIMIT 5
 """
 
-# Per-player static identity lookup.
+# Per-player static identity lookup (metadata lives in bronze; gold has
+# aggregates only).
 _PROFILE_SQL = f"""
 SELECT player_id, height, handedness, turned_pro
-FROM {PROFILES_TABLE}
+FROM {BRONZE_PROFILES_TABLE}
 WHERE player_id = %s
 """
 
@@ -137,7 +138,7 @@ GROUP BY req.player_id, req.as_of_iso
 
 _PROFILES_BULK_SQL = f"""
 SELECT player_id, height, handedness, turned_pro
-FROM {PROFILES_TABLE}
+FROM {BRONZE_PROFILES_TABLE}
 WHERE player_id = ANY(%s::text[])
 """
 

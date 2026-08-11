@@ -105,11 +105,12 @@ CREATE INDEX IF NOT EXISTS idx_match_events_p2_date
 -- Identity backbone for players, sourced from the ATP player database
 -- (data/ATP_player_database.csv, canonical ATP id/name + base metadata).
 -- Enrichment columns at the bottom are left empty by the ATP load and filled
--- by the Wikipedia fallback in src/flows/ingest.py for players it covers.
+-- by the Wikipedia fallback in src/db/ingest.py for players it covers.
 --
 -- bronze.player_profiles is the ingest-owned write target: ATP identity
 -- loading and Wikipedia enrichment both UPSERT here (on player_id). dbt
--- materializes the enriched, aggregate gold.player_profiles from this source.
+-- derives the aggregate gold.player_profiles (player_id + derived aggregates
+-- only) from this source; metadata is never duplicated in gold.
 CREATE TABLE IF NOT EXISTS bronze.player_profiles (
     player_id    VARCHAR PRIMARY KEY,  -- canonical ATP id (ATP_Database.id)
     display_name VARCHAR,              -- canonical ATP name (ATP_Database.player)
@@ -145,6 +146,11 @@ ALTER TABLE bronze.player_profiles ALTER COLUMN ioc SET NOT NULL;
 -- raw ranking source id is never stored. rank is the official value exactly as
 -- read from the source; it is never estimated or interpolated. points is empty
 -- (NULL) in early eras that predate published points.
+--
+-- The composite PK (ranking_date, player_id) is the identity both ingestion
+-- paths upsert on: src/db/ingest.py ingest_rankings (seed) and the weekly
+-- scrape catch-up (src/flows/scrape.py), each ON CONFLICT (ranking_date,
+-- player_id) — so re-running either is idempotent.
 CREATE TABLE IF NOT EXISTS bronze.rankings (
     ranking_date DATE     NOT NULL,   -- weekly ranking Monday
     player_id    VARCHAR  NOT NULL,   -- canonical player id (ranked identity)
@@ -153,6 +159,10 @@ CREATE TABLE IF NOT EXISTS bronze.rankings (
     PRIMARY KEY (ranking_date, player_id)
 );
 
--- API lookup: a player's rank history ordered by date.
+-- Per-player rank access paths, both served by this one index:
+--  * chronological rank history: WHERE player_id = ? ORDER BY ranking_date
+--    (the /rank_history endpoint)
+--  * latest rank per player: gold.player_profiles DISTINCT ON (player_id)
+--    ORDER BY player_id, ranking_date DESC (backward scan of the same index)
 CREATE INDEX IF NOT EXISTS idx_rankings_player_date
     ON bronze.rankings (player_id, ranking_date);
