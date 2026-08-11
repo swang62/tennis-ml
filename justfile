@@ -25,7 +25,7 @@ db-snapshot:
 # Build and push all production docker images.
 deploy *args:
     uv run python src/flows/deploy.py {{ args }}
-    docker build -t swang62/tennis-web:latest web/ --no-cache
+    docker build -t swang62/tennis-web:latest web/
     docker push swang62/tennis-web:latest
 
 # Install Python dependencies.
