@@ -754,12 +754,20 @@ class TennisPredictor:
         self.linear: Any = bentoml.sklearn.load_model(self.bento_linear)
         manifest = json.loads(MODEL_INFO_FILE.read_text())
         gbdt_framework = manifest["bases"]["gbdt"]["framework"]
-        if gbdt_framework == "xgboost":
-            self.gbdt: Any = bentoml.xgboost.load_model(self.bento_gbdt)
-        else:
-            # bentoml.lightgbm.load_model returns a Booster (no predict_proba);
-            # the adapter restores the sklearn-style interface.
-            self.gbdt = _LGBMProbaAdapter(bentoml.lightgbm.load_model(self.bento_gbdt))
+        # xgboost/lightgbm use OpenMP, which can deadlock inside BentoML's
+        # forked worker processes. Force single-threaded during model load.
+        _old_omp = os.environ.get("OMP_NUM_THREADS")
+        os.environ["OMP_NUM_THREADS"] = "1"
+        try:
+            if gbdt_framework == "xgboost":
+                self.gbdt: Any = bentoml.xgboost.load_model(self.bento_gbdt)
+            else:
+                # bentoml.lightgbm.load_model returns a Booster (no predict_proba);
+                # the adapter restores the sklearn-style interface.
+                self.gbdt = _LGBMProbaAdapter(bentoml.lightgbm.load_model(self.bento_gbdt))
+        finally:
+            if _old_omp is not None:
+                os.environ["OMP_NUM_THREADS"] = _old_omp
         self.production: Any = bentoml.sklearn.load_model(self.bento_production)
         self.nn_session = ort.InferenceSession(str(AUX_DIR / "nn_best.onnx"))
 

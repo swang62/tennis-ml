@@ -228,10 +228,10 @@ html.light {
     width: 20px;
     height: 15px;
     margin-right: 0.4rem;
-    vertical-align: -0.2em;
+    vertical-align: middle;
     border-radius: 2px;
     overflow: hidden;
-    object-fit: contain;
+    object-fit: cover;
     font-size: 13px;
     line-height: 15px;
     text-align: center;
@@ -1169,6 +1169,17 @@ html.light {
     gap: 0.75rem 1rem;
   }
 
+  .profile-head .player-flag {
+    width: 32px;
+    height: 24px;
+    margin-right: 0.5rem;
+    vertical-align: middle;
+    border-radius: 3px;
+    object-fit: cover;
+    font-size: 20px;
+    line-height: 24px;
+  }
+
   .profile-head-stats {
     display: flex;
     flex-direction: column;
@@ -1599,13 +1610,22 @@ html.light {
   }
 
   .meeting-result {
-    font-weight: 600;
     white-space: nowrap;
   }
 
+  .meeting-winner-name {
+    font-weight: 700;
+  }
+
+  .meeting-won-label {
+    margin-left: 0.25rem;
+    font-family: var(--font-data);
+    font-size: 0.6875rem;
+    text-transform: uppercase;
+    color: var(--text-faint);
+  }
+
   .meeting-meta {
-    flex: 1 1 100%;
-    min-width: 0;
     color: var(--text-dim);
     white-space: nowrap;
     overflow: hidden;
@@ -1617,13 +1637,17 @@ html.light {
     min-width: 0;
   }
 
+  .h2h-trend .kicker {
+    margin-bottom: 0.75rem;
+  }
+
   /* centered matchup comparison */
 
   .mirror-head {
-    display: grid;
-    grid-template-columns: 1fr auto 1fr;
+    display: flex;
     gap: 0.75rem;
     align-items: center;
+    justify-content: center;
     margin-bottom: 0.35rem;
   }
 
@@ -1631,13 +1655,16 @@ html.light {
     min-width: 0;
     font-weight: 800;
     font-size: 0.9375rem;
+    text-align: center;
+    max-width: calc((100% - 3rem) / 2);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
 
-  .mirror-name:first-child {
-    text-align: right;
+  .mirror-name:last-child .player-flag {
+    margin-right: 0;
+    margin-left: 0.4rem;
   }
 
   .mirror-vs {

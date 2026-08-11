@@ -1,12 +1,6 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import type { Player } from './api'
-import { sanitizeErrorMessage } from './lib/format'
-
-// Format a 0..1 ratio as a percentage (e.g. 0.657 -> "65.7%").
-export function pct(value: number | null): string {
-  if (value == null) return 'n/a'
-  return `${Math.round(value * 1000) / 10}%`
-}
+import { pct, sanitizeErrorMessage } from './lib/format'
 
 export function Kicker({ children }: { children: ReactNode }) {
   return <p className="kicker">{children}</p>
@@ -39,7 +33,7 @@ export function PlayerFlag({
   return (
     <img
       className="player-flag"
-      src={`https://flagcdn.com/w20/${code}.png`}
+      src={`https://flagcdn.com/w40/${code}.png`}
       alt={countryName ?? code}
       title={countryName ?? code}
       loading="lazy"

@@ -56,15 +56,6 @@ case $hostport in
 esac
 DB_NAME=$dbname
 
-# --- Reject the Compose database target -----------------------------------
-# Reject Compose's port 6543; report keys, never values.
-case "$DB_HOST:$DB_PORT" in
-    127.0.0.1:6543 | localhost:6543 | ::1:6543)
-        echo "error: database target is the Compose stack host port (6543)" >&2
-        echo "  set DATABASE_URL in .env to the Homebrew PostgreSQL target" >&2
-        exit 1 ;;
-esac
-
 # --- Database preflight ----------------------------------------------------
 db_psql() {
     psql -X -w -tAq "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "$1"

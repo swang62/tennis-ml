@@ -138,7 +138,7 @@ export default function ProfileContent({
 
   const bioRows: Array<[string, string]> = [
     ["Turned pro", profile.turned_pro ? String(profile.turned_pro) : "-"],
-    ["Birthplace", profile.birthplace ?? "-"],
+    ["Country", profile.country_name],
     ["Height", profile.height ? `${(profile.height / 100).toFixed(2)} m` : "-"],
     ["Handedness", handednessLabel],
     ["Backhand", profile.backhand ?? "-"],

@@ -1,5 +1,12 @@
 import type { MatchRound, TournamentTier } from '../api'
 
+// Format a 0..1 ratio as a percentage (e.g. 0.657 -> "65.7%").
+export function pct(value: number | null): string {
+  if (value == null) return "—"
+  if (value < 0 || value > 1) return "—"
+  return `${Math.round(value * 1000) / 10}%`
+}
+
 // Shared labels and client-side display derivations.
 
 export const TIER_LABEL: Record<TournamentTier, string> = {

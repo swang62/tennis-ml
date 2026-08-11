@@ -19,13 +19,13 @@ import {
   Loading,
   PlayerFlag,
   PlayerPicker,
-  pct,
 } from "../components";
 import { axisOption, baseChartOption, chartTokens } from "../lib/charts";
 import {
   ROUND_LABEL,
   TIER_LABEL,
   fairOdds,
+  pct,
   sanitizeErrorMessage,
 } from "../lib/format";
 import { h2hRoute } from "../router";
@@ -70,7 +70,9 @@ function meetingMeta(m: H2HMeeting): string {
 
 // Latest non-null rank is this page's sole rank signal; the picker directory
 // carries the same official rank as the profile view.
-function lastRank(player: { current_rank?: number | null } | undefined): number | null {
+function lastRank(
+  player: { current_rank?: number | null } | undefined,
+): number | null {
   return player?.current_rank ?? null;
 }
 
@@ -117,7 +119,8 @@ export default function H2H() {
   const players = playersQ.data?.players ?? [];
   const playerById = new Map(players.map((p) => [p.player_id, p]));
   // Display names only; an unknown player gets a neutral label, never the raw id.
-  const name = (id: string) => playerById.get(id)?.display_name ?? "Unknown player";
+  const name = (id: string) =>
+    playerById.get(id)?.display_name ?? "Unknown player";
 
   if (playersQ.isLoading) return <Loading label="Loading players" />;
   if (playersQ.isError)
@@ -206,13 +209,6 @@ export default function H2H() {
   const p2 = h2h ? name(h2h.player2_id) : "";
   const mirrorRows: MirrorRow[] = [];
   if (h2h && summary) {
-    mirrorRows.push({
-      label: "All-time wins",
-      a: summary.player1_wins,
-      b: summary.player2_wins,
-      aText: String(summary.player1_wins),
-      bText: String(summary.player2_wins),
-    });
     const r1 = rankOf(h2h.player1_id);
     const r2 = rankOf(h2h.player2_id);
     if (r1 != null || r2 != null) {
@@ -225,11 +221,18 @@ export default function H2H() {
         invert: true,
       });
     }
+    mirrorRows.push({
+      label: "All-time",
+      a: summary.player1_wins,
+      b: summary.player2_wins,
+      aText: String(summary.player1_wins),
+      bText: String(summary.player2_wins),
+    });
     for (const s of ["hard", "grass", "clay"] as const) {
       const list = meetings.filter((m) => m.surface === s);
       const w1 = list.filter((m) => m.player1_won).length;
       mirrorRows.push({
-        label: `${cap(s)} wins`,
+        label: cap(s),
         a: w1,
         b: list.length - w1,
         aText: String(w1),
@@ -464,11 +467,11 @@ export default function H2H() {
                 </span>
                 <span className="mirror-vs">vs</span>
                 <span className="mirror-name">
+                  {p2}
                   <PlayerFlag
                     iso2={playerById.get(h2h.player2_id)?.iso2}
                     countryName={playerById.get(h2h.player2_id)?.country_name}
                   />
-                  {p2}
                 </span>
               </div>
               {mirrorRows.map((row) => {
@@ -484,7 +487,7 @@ export default function H2H() {
                   <div className="mirror-row" key={row.label}>
                     <div className="mirror-half is-left">
                       <span
-                        className={`mirror-value num${aLeads ? " is-grass" : bLeads ? " is-clay" : ""}`}
+                        className={`mirror-value num${aLeads ? " is-grass" : ""}`}
                       >
                         {row.aText}
                       </span>
@@ -492,7 +495,7 @@ export default function H2H() {
                     <span className="mirror-label">{row.label}</span>
                     <div className="mirror-half is-right">
                       <span
-                        className={`mirror-value num${bLeads ? " is-grass" : aLeads ? " is-clay" : ""}`}
+                        className={`mirror-value num${bLeads ? " is-grass" : ""}`}
                       >
                         {row.bText}
                       </span>
@@ -505,28 +508,142 @@ export default function H2H() {
           </Card>
 
           {/* Direct meetings */}
-          <Card title="Meetings">
+          <Card title="H2H History">
             {meetings.length === 0 ? (
               <Empty message="No prior meetings" />
             ) : (
-              <div className="meetings-list">
-                {sortedMeetings.map((m) => {
-                  // player1_won is canonical lower-id, not picker order.
-                  const aWon = m.player1_won === (playerA === h2h.player1_id);
+              <>
+                {(() => {
+                  const chrono = [...meetings].sort((a, b) =>
+                    a.match_date.localeCompare(b.match_date),
+                  );
+                  const dates = chrono.map((m) => m.match_date);
+                  let p1Cum = 0;
+                  let p2Cum = 0;
+                  const p1Data: number[] = [];
+                  const p2Data: number[] = [];
+                  for (const m of chrono) {
+                    if (m.player1_won) p1Cum++;
+                    else p2Cum++;
+                    p1Data.push(p1Cum);
+                    p2Data.push(p2Cum);
+                  }
+                  const trendOption: EChartsOption = {
+                    ...baseChartOption(t),
+                    legend: { show: false },
+                    tooltip: {
+                      ...baseChartOption(t).tooltip,
+                      trigger: "axis",
+                      formatter: (params: any) => {
+                        const items = params as Array<{
+                          name: string;
+                          seriesName: string;
+                          value: number;
+                        }>;
+                        return [
+                          items[0]?.name ?? "",
+                          ...items.map(
+                            (s) =>
+                              `${s.seriesName}: ${s.value} win${s.value === 1 ? "" : "s"}`,
+                          ),
+                        ].join("<br/>");
+                      },
+                    },
+                    grid: {
+                      left: 50,
+                      right: 112,
+                      top: 16,
+                      bottom: 28,
+                      containLabel: false,
+                    },
+                    xAxis: {
+                      type: "category",
+                      data: dates,
+                      axisLine: ax.axisLine,
+                      axisTick: { show: false },
+                      axisLabel: {
+                        ...ax.axisLabel,
+                        margin: 8,
+                        formatter: (value: string) => {
+                          const [y, mo, d] = value.split("-");
+                          return `${y}-${Number(mo)}-${Number(d)}`;
+                        },
+                      },
+                    },
+                    yAxis: {
+                      type: "value",
+                      minInterval: 1,
+                      max: Math.max(p1Cum, p2Cum, 1),
+                      name: "Cumulative Wins",
+                      nameLocation: "middle",
+                      nameGap: 36,
+                      nameTextStyle: { color: t.dim, fontSize: 11 },
+                      axisLabel: { ...ax.axisLabel, margin: 8 },
+                      splitLine: ax.splitLine,
+                    },
+                    series: [
+                      {
+                        name: p1,
+                        type: "line",
+                        step: "end",
+                        data: p1Data,
+                        lineStyle: { color: t.text, width: 2 },
+                        itemStyle: { color: t.text },
+                        symbol: "circle",
+                        symbolSize: 4,
+                        endLabel: { show: true, formatter: p1, color: t.text },
+                        labelLayout: { moveOverlap: "shiftY" },
+                      },
+                      {
+                        name: p2,
+                        type: "line",
+                        step: "end",
+                        data: p2Data,
+                        lineStyle: { color: t.text, width: 2 },
+                        itemStyle: { color: t.text },
+                        symbol: "circle",
+                        symbolSize: 4,
+                        endLabel: { show: true, formatter: p2, color: t.text },
+                        labelLayout: { moveOverlap: "shiftY" },
+                      },
+                    ],
+                  };
                   return (
-                    <div
-                      key={`${m.match_date}-${m.winner_id}`}
-                      className="meeting"
-                    >
-                      <span className="meeting-date mono">{m.match_date}</span>
-                      <span className="meeting-result">
-                        {aWon ? name(playerA!) : name(playerB!)} won
-                      </span>
-                      <span className="meeting-meta">{meetingMeta(m)}</span>
+                    <div className="h2h-trend">
+                      <ReactECharts
+                        key={`trend-${theme}`}
+                        option={trendOption}
+                        style={{ height: 160, width: "100%" }}
+                        className="chart-frame"
+                        aria-label={`Cumulative head-to-head wins: ${p1} vs ${p2}`}
+                      />
                     </div>
                   );
-                })}
-              </div>
+                })()}
+                <div className="meetings-list">
+                  {sortedMeetings.map((m) => {
+                    // player1_won is canonical lower-id, not picker order.
+                    const aWon = m.player1_won === (playerA === h2h.player1_id);
+                    return (
+                      <div
+                        key={`${m.match_date}-${m.winner_id}`}
+                        className="meeting"
+                      >
+                        <span className="meeting-date mono">
+                          {m.match_date}
+                        </span>
+                        <span className="meeting-meta">{meetingMeta(m)}</span>
+                        <span className="meeting-result">
+                          <span className="meeting-winner-name">
+                            {aWon ? name(playerA!) : name(playerB!)}
+                          </span>
+                          <span className="meeting-won-label">won</span>
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
             )}
           </Card>
         </>
