@@ -81,7 +81,7 @@ export interface TourAverages {
 
 export type Surface = 'clay' | 'grass' | 'hard' | 'carpet'
 export type TournamentTier = 'grand_slam' | 'masters' | 'atp_500' | 'atp_250' | 'davis_cup' | 'atp_finals' | 'olympics' | 'professional'
-export type MatchRound = 'r128' | 'r64' | 'r32' | 'r16' | 'qf' | 'sf' | 'f'
+export type MatchRound = 'r128' | 'r64' | 'r32' | 'r16' | 'qf' | 'sf' | 'f' | 'rr'
 
 export interface SurfaceRate {
   surface: Surface
@@ -226,6 +226,10 @@ async function get<T>(path: string): Promise<T> {
 
 export function getPlayers(): Promise<{ players: Player[] }> {
   return get('/players')
+}
+
+export function getDirectoryInfo(): Promise<{ latest_match_date: string | null }> {
+  return get('/directory_info')
 }
 
 export function getPlayerProfile(playerId: string): Promise<PlayerProfile> {

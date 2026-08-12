@@ -6,8 +6,11 @@ import {
   Outlet,
   useLocation,
 } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
 import Home from "./pages/Home";
 import H2H from "./pages/H2H";
+import { getDirectoryInfo } from "./api";
+import { formatLongDate } from "./lib/format";
 import { useTheme, type ThemeName } from "./theme";
 
 function CourtMark() {
@@ -108,6 +111,12 @@ function ThemeToggle({
 
 function Layout() {
   const { theme, toggle } = useTheme();
+  const directoryInfoQ = useQuery({
+    queryKey: ["directory_info"],
+    queryFn: getDirectoryInfo,
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
   const { pathname } = useLocation();
   const profilesActive = pathname === "/";
   const h2hActive = pathname === "/h2h";
@@ -150,10 +159,11 @@ function Layout() {
       </main>
       <footer className="footer container">
         <span>Courtside — model-driven tennis intelligence.</span>
-        <span>
-          Predictions are statistical model outputs, shown for information only;
-          not betting advice.
-        </span>
+        {directoryInfoQ.data?.latest_match_date && (
+          <span>
+            Updated {formatLongDate(directoryInfoQ.data.latest_match_date)}
+          </span>
+        )}
       </footer>
     </div>
   );

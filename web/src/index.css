@@ -1698,7 +1698,7 @@ html.light {
   }
 
   .odds-num.is-fav {
-    color: var(--clay);
+    color: var(--text);
   }
 
   .meetings-list {

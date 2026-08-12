@@ -21,6 +21,16 @@ export function formatRate(value: number | null): string {
   return `${(Math.round(value * 1000) / 1000).toFixed(2)}`;
 }
 
+export function formatLongDate(value: string): string {
+  const [year, month, day] = value.split("-").map(Number);
+  const suffix = day % 10 === 1 && day !== 11 ? "st" : day % 10 === 2 && day !== 12 ? "nd" : day % 10 === 3 && day !== 13 ? "rd" : "th";
+  return new Date(year, month - 1, day).toLocaleDateString(undefined, {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  }).replace(String(day), `${day}${suffix}`);
+}
+
 export function formatDelta(
   delta: number | null,
   rate?: boolean,
@@ -53,12 +63,13 @@ export const ROUND_LABEL: Record<MatchRound, string> = {
   qf: "Quarterfinal",
   sf: "Semifinal",
   f: "Final",
+  rr: "Round Robin",
 };
 
 // Fair decimal odds implied by a zero-margin probability.
 export function fairOdds(p: number): string {
   if (!(p > 0 && p < 1)) return "—";
-  return (1 / p).toFixed(2);
+  return (1 / p).toFixed(1);
 }
 
 const escapeRegExp = (s: string): string =>

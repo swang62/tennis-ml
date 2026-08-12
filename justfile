@@ -14,7 +14,7 @@ db-init:
 db-reset:
     uv run python src/db/init_db.py reset
 
-# Seed deterministic raw matches (--all: every ATP CSV; --enrich: Wikipedia bios).
+# Seed deterministic raw matches. --all (every CSV) --enrich (Wikipedia bios) --force (overwrite).
 db-seed *args:
     uv run python src/db/seed.py {{ args }}
 

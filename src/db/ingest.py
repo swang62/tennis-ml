@@ -120,6 +120,15 @@ def _stat(row: dict[str, Any], key: str) -> int:
         return 0
 
 
+def _rank(row: dict[str, Any], key: str) -> int | None:
+    """Official match-time rank; zero/blank means unknown, never rank #0."""
+    try:
+        value = int(row[key])
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def _float_stat(row: dict[str, Any], key: str) -> float:
     """Float stat value; 0.0 for empty/NaN (raw ages like `24.41` preserved)."""
     try:
@@ -196,8 +205,8 @@ def atp_rows_to_bronze(
                 "round": str(m["round"]).lower(),
                 "surface": str(m["surface"]).lower(),
                 "is_indoor": _normalize_indoor(m.get("indoor")),
-                "player1_ranking": m["winner_rank"],
-                "player2_ranking": m["loser_rank"],
+                "player1_ranking": _rank(m, "winner_rank"),
+                "player2_ranking": _rank(m, "loser_rank"),
                 "player1_wins_last_10": winner_wins,
                 "player1_matches_last_10": winner_matches,
                 "player1_aces": _stat(m, "w_ace"),

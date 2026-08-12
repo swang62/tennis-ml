@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "test": "node --test tests/rankHistoryAxis.test.mjs tests/rankChartOption.test.mjs tests/roundLabels.test.mjs tests/profileMetrics.test.mjs"
+    "test": "node --test tests/rankHistoryAxis.test.mjs tests/rankChartOption.test.mjs tests/roundLabels.test.mjs tests/profileMetrics.test.mjs tests/h2hOrientation.test.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.4",

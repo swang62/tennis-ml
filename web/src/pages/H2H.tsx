@@ -2,8 +2,10 @@ import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import ReactECharts from "echarts-for-react";
 import type { EChartsOption } from "echarts";
+import * as echarts from "echarts";
 import {
   getHeadToHead,
+  getPlayerProfile,
   getPlayers,
   predictFromIds,
   type H2HMeeting,
@@ -21,6 +23,11 @@ import {
   PlayerPicker,
 } from "../components";
 import { axisOption, baseChartOption, chartTokens } from "../lib/charts";
+import {
+  orientH2H,
+  pickerPreferenceEdge,
+  probabilityForPlayer,
+} from "../lib/h2hOrientation";
 import {
   ROUND_LABEL,
   TIER_LABEL,
@@ -50,9 +57,11 @@ const ROUNDS: { value: MatchRound; label: string }[] = [
   { value: "qf", label: "Quarterfinal" },
   { value: "sf", label: "Semifinal" },
   { value: "f", label: "Final" },
+  { value: "rr", label: "Round Robin" },
 ];
 
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+const today = () => new Date().toLocaleDateString("en-CA");
 
 // Join known meeting metadata; retain unknown labels rather than ids.
 function meetingMeta(m: H2HMeeting): string {
@@ -94,7 +103,7 @@ export default function H2H() {
   const [surface, setSurface] = useState<Surface>("hard");
   const [tournament, setTournament] = useState<TournamentTier | "">("");
   const [round, setRound] = useState<MatchRound | "">("");
-  const [asOfDate, setAsOfDate] = useState("");
+  const [asOfDate, setAsOfDate] = useState(today);
   const [indoor, setIndoor] = useState<"" | 0 | 1>("");
 
   const playersQ = useQuery({ queryKey: ["players"], queryFn: getPlayers });
@@ -103,6 +112,16 @@ export default function H2H() {
   const h2hQ = useQuery({
     queryKey: ["h2h", playerA, playerB],
     queryFn: () => getHeadToHead(playerA!, playerB!),
+    enabled: ready,
+  });
+  const profileAQ = useQuery({
+    queryKey: ["player-profile", playerA],
+    queryFn: () => getPlayerProfile(playerA!),
+    enabled: ready,
+  });
+  const profileBQ = useQuery({
+    queryKey: ["player-profile", playerB],
+    queryFn: () => getPlayerProfile(playerB!),
     enabled: ready,
   });
 
@@ -128,22 +147,20 @@ export default function H2H() {
       <ErrorBox error={playersQ.error} onRetry={() => playersQ.refetch()} />
     );
 
-  const h2h = h2hQ.data;
+  const h2h = h2hQ.data && playerA ? orientH2H(h2hQ.data, playerA) : undefined;
   const meetings = h2h?.meetings ?? [];
   const summary = h2h?.summary;
   const sortedMeetings = [...meetings].sort((a, b) =>
     b.match_date.localeCompare(a.match_date),
   );
 
-  // Map lower-id canonical probabilities back to Player A.
-  const orient = (p: number) => (playerA! < playerB! ? p : 1 - p);
   const pred = predict.data;
-  const orientA = pred ? orient(pred.p_win) : 0;
-  const winnerP = pred
-    ? pred.predicted_winner === pred.player_id
-      ? pred.p_win
-      : 1 - pred.p_win
+  const orientA = pred
+    ? probabilityForPlayer(pred.p_win, pred.player_id, playerA!)
     : 0;
+  const winnerP = pred ? Math.max(pred.p_win, 1 - pred.p_win) : 0;
+  const preferenceEdge = (p: number) =>
+    pickerPreferenceEdge(p, pred!.player_id, playerA!);
 
   const rankOf = (id: string) =>
     lastRank(players.find((p) => p.player_id === id));
@@ -156,48 +173,81 @@ export default function H2H() {
         ...baseChartOption(t),
         tooltip: {
           ...baseChartOption(t).tooltip,
-          trigger: "axis",
-          valueFormatter: (v) => pct(v as number),
+          trigger: "item",
+          formatter: (params: any) => {
+            const edge = params[0].value as number;
+            const favored = edge <= 0 ? name(playerA!) : name(playerB!);
+            return `${params[0].axisValue}<br/>${favored} +${Math.round(Math.abs(edge) * 100)} pts`;
+          },
         },
-        grid: { left: 8, right: 16, top: 10, bottom: 4, containLabel: true },
+        grid: {
+          left: 120,
+          right: 120,
+          top: 40,
+          bottom: 24,
+          containLabel: false,
+        },
         xAxis: {
+          type: "value",
+          min: -0.5,
+          max: 0.5,
+          axisLine: ax.axisLine,
+          axisTick: { show: false },
+          axisLabel: {
+            ...ax.axisLabel,
+            formatter: (v: number) => {
+              const edge = v as number;
+              if (edge === 0) return "Even";
+              return edge < 0
+                ? `${name(playerA!)} +${Math.round(-edge * 100)}`
+                : `${name(playerB!)} +${Math.round(edge * 100)}`;
+            },
+          },
+          splitLine: ax.splitLine,
+        },
+        yAxis: {
           type: "category",
           data: ["Linear", "GBDT", "NN"],
           axisLine: ax.axisLine,
           axisTick: { show: false },
           axisLabel: ax.axisLabel,
         },
-        yAxis: {
-          type: "value",
-          max: 1,
-          axisLabel: {
-            ...ax.axisLabel,
-            formatter: (v) => `${Math.round((v as number) * 100)}%`,
-          },
-          splitLine: ax.splitLine,
-        },
         series: [
           {
-            name: "Model probability",
+            name: "",
+            label: {
+              show: false,
+              color: t.text,
+              fontSize: 11,
+              formatter: (params: any) =>
+                `${Math.round(Number(params.value) * 100)}`,
+              position: "inside",
+            },
             type: "bar",
             barWidth: "44%",
-            data: [
-              orient(pred.p_linear),
-              orient(pred.p_gbdt),
-              orient(pred.p_nn),
-            ],
-            itemStyle: { color: t.clay, borderRadius: [6, 6, 2, 2] },
+            data: [pred.p_linear, pred.p_gbdt, pred.p_nn].map((probability) => {
+              const edge = preferenceEdge(probability);
+              return {
+                value: edge,
+                label: { position: edge <= 0 ? "left" : "right" },
+              };
+            }),
+            itemStyle: {
+              color: `${t.ice}B3`,
+              borderRadius: 0,
+            },
             markLine: {
               silent: true,
               symbol: "none",
-              lineStyle: { color: t.grass, type: "dashed", width: 1.5 },
+              lineStyle: { color: t.clay, type: "solid", width: 2 },
               label: {
-                color: t.grass,
+                color: t.clay,
                 fontSize: 11,
-                formatter: `Ensemble ${pct(orient(pred.p_win))}`,
-                position: "insideEndTop",
+                formatter: `Ensemble ${pct(winnerP)}`,
+                position: "end",
+                rotate: 0,
               },
-              data: [{ yAxis: orient(pred.p_win) }],
+              data: [{ xAxis: preferenceEdge(pred.p_win) }],
             },
           },
         ],
@@ -401,9 +451,6 @@ export default function H2H() {
                     {name(pred.predicted_winner)} wins
                   </span>
                   <span className="pred-pct num">{pct(winnerP)}</span>
-                  <span className="pred-caption">
-                    Stacked ensemble · {Math.round(pred.response_ms)} ms
-                  </span>
                 </div>
                 <div className="odds-row">
                   <div className="odds">
@@ -424,18 +471,21 @@ export default function H2H() {
                   </div>
                 </div>
                 <p className="mt-2 text-center text-[0.65rem] text-[var(--text-faint)]">
-                  Fair odds implied by the model probability (0% margin)
+                  Decimal odds show total return per 1 unit staked. A price of{" "}
+                  {fairOdds(orientA)} returns {fairOdds(orientA)} units,
+                  including the stake, if {name(playerA!)} wins.
                 </p>
                 <div className="mt-4">
                   <ReactECharts
                     key={theme}
                     option={compOption}
-                    style={{ height: 220, width: "100%" }}
+                    style={{ height: 250, width: "100%" }}
                     className="chart-frame"
                   />
                 </div>
                 <p className="mt-2 text-center text-[0.65rem] text-[var(--text-faint)]">
-                  Model probabilities for {name(playerA!)}
+                  Preference from 50%: left favors {name(playerA!)}, right
+                  favors {name(playerB!)}
                 </p>
               </div>
             )}
@@ -455,6 +505,7 @@ export default function H2H() {
       {ready && h2h && summary && (
         <>
           {/* Matchup comparison */}
+          <div className="grid gap-5 lg:grid-cols-2">
           <Card title="Matchup comparison">
             <div className="mirror">
               <div className="mirror-head">
@@ -475,30 +526,14 @@ export default function H2H() {
                 </span>
               </div>
               {mirrorRows.map((row) => {
-                const aLeads =
-                  row.a != null &&
-                  row.b != null &&
-                  (row.invert ? row.a < row.b : row.a > row.b);
-                const bLeads =
-                  row.a != null &&
-                  row.b != null &&
-                  (row.invert ? row.b < row.a : row.b > row.a);
                 return (
                   <div className="mirror-row" key={row.label}>
                     <div className="mirror-half is-left">
-                      <span
-                        className={`mirror-value num${aLeads ? " is-ice" : ""}`}
-                      >
-                        {row.aText}
-                      </span>
+                      <span className="mirror-value num">{row.aText}</span>
                     </div>
                     <span className="mirror-label">{row.label}</span>
                     <div className="mirror-half is-right">
-                      <span
-                        className={`mirror-value num${bLeads ? " is-ice" : ""}`}
-                      >
-                        {row.bText}
-                      </span>
+                      <span className="mirror-value num">{row.bText}</span>
                     </div>
                   </div>
                 );
@@ -506,145 +541,257 @@ export default function H2H() {
               <p className="sr-only">{mirrorSummary}</p>
             </div>
           </Card>
-
-          {/* Direct meetings */}
-          <Card title="H2H History">
-            {meetings.length === 0 ? (
-              <Empty message="No prior meetings" />
-            ) : (
-              <>
-                {(() => {
-                  const chrono = [...meetings].sort((a, b) =>
-                    a.match_date.localeCompare(b.match_date),
-                  );
-                  const dates = chrono.map((m) => m.match_date);
-                  let p1Cum = 0;
-                  let p2Cum = 0;
-                  const p1Data: number[] = [];
-                  const p2Data: number[] = [];
-                  for (const m of chrono) {
-                    if (m.player1_won) p1Cum++;
-                    else p2Cum++;
-                    p1Data.push(p1Cum);
-                    p2Data.push(p2Cum);
-                  }
-                  const trendOption: EChartsOption = {
+          <Card title="Strength comparison">
+              {profileAQ.isLoading || profileBQ.isLoading ? (
+                <Loading label="Loading player strengths" />
+              ) : profileAQ.data && profileBQ.data ? (
+                (() => {
+                  const radarMetrics = [
+                    [
+                      "1st serve won",
+                      profileAQ.data.serve.first_serve_points_won_pct,
+                      profileBQ.data.serve.first_serve_points_won_pct,
+                    ],
+                    [
+                      "1st return won",
+                      profileAQ.data.return.first_serve_return_points_won_pct,
+                      profileBQ.data.return.first_serve_return_points_won_pct,
+                    ],
+                    [
+                      "2nd serve won",
+                      profileAQ.data.serve.second_serve_points_won_pct,
+                      profileBQ.data.serve.second_serve_points_won_pct,
+                    ],
+                    [
+                      "2nd return won",
+                      profileAQ.data.return.second_serve_return_points_won_pct,
+                      profileBQ.data.return.second_serve_return_points_won_pct,
+                    ],
+                    [
+                      "Break saved",
+                      profileAQ.data.serve.break_points_saved_pct,
+                      profileBQ.data.serve.break_points_saved_pct,
+                    ],
+                    [
+                      "Break converted",
+                      profileAQ.data.return.break_point_conversion_pct,
+                      profileBQ.data.return.break_point_conversion_pct,
+                    ],
+                  ] as const;
+                  const radarOption: EChartsOption = {
                     ...baseChartOption(t),
-                    legend: { show: false },
+                    aria: { enabled: false },
                     tooltip: {
-                      ...baseChartOption(t).tooltip,
-                      trigger: "axis",
-                      formatter: (params: any) => {
-                        const items = params as Array<{
-                          name: string;
-                          seriesName: string;
-                          value: number;
-                        }>;
-                        return [
-                          items[0]?.name ?? "",
-                          ...items.map(
-                            (s) =>
-                              `${s.seriesName}: ${s.value} win${s.value === 1 ? "" : "s"}`,
-                          ),
-                        ].join("<br/>");
-                      },
+                      show: true,
+                      trigger: "item",
+                      formatter: (params: any) =>
+                        `<span style="color:${params.color};font-weight:700">${echarts.format.encodeHTML(params.name)}</span>`,
+                      renderMode: "html",
+                      backgroundColor: "transparent",
+                      borderWidth: 0,
+                      padding: 0,
+                      extraCssText: "box-shadow: none;",
+                      textStyle: { fontSize: 12 },
                     },
-                    grid: {
-                      left: 50,
-                      right: 112,
-                      top: 16,
-                      bottom: 28,
-                      containLabel: false,
+                    legend: {
+                      top: 0,
+                      textStyle: { color: t.dim, fontSize: 11 },
                     },
-                    xAxis: {
-                      type: "category",
-                      data: dates,
-                      axisLine: ax.axisLine,
-                      axisTick: { show: false },
-                      axisLabel: {
-                        ...ax.axisLabel,
-                        margin: 8,
-                        formatter: (value: string) => {
-                          const [y, mo, d] = value.split("-");
-                          return `${y}-${Number(mo)}-${Number(d)}`;
+                    radar: {
+                      center: ["50%", "55%"],
+                      radius: "62%",
+                      indicator: radarMetrics.map(([metric, a, b]) => ({
+                        name: `{metric|${metric}}\n{grass|${pct(a)}} {clay|${pct(b)}}`,
+                        max: 1,
+                      })),
+                      axisName: {
+                        fontSize: 10,
+                        rich: {
+                          metric: { color: t.dim, lineHeight: 14 },
+                          grass: { color: t.grass, fontWeight: "bold" },
+                          clay: { color: t.clay, fontWeight: "bold" },
                         },
                       },
-                    },
-                    yAxis: {
-                      type: "value",
-                      minInterval: 1,
-                      max: Math.max(p1Cum, p2Cum, 1),
-                      name: "Cumulative Wins",
-                      nameLocation: "middle",
-                      nameGap: 36,
-                      nameTextStyle: { color: t.dim, fontSize: 11 },
-                      axisLabel: { ...ax.axisLabel, margin: 8 },
-                      splitLine: ax.splitLine,
+                      splitLine: { lineStyle: { color: t.line } },
+                      splitArea: { areaStyle: { color: [t.inset] } },
+                      axisLine: { lineStyle: { color: t.line } },
                     },
                     series: [
                       {
-                        name: p1,
-                        type: "line",
-                        step: "end",
-                        data: p1Data,
-                        lineStyle: { color: t.text, width: 2 },
-                        itemStyle: { color: t.text },
-                        symbol: "circle",
-                        symbolSize: 4,
-                        endLabel: { show: true, formatter: p1, color: t.text },
-                        labelLayout: { moveOverlap: "shiftY" },
-                      },
-                      {
-                        name: p2,
-                        type: "line",
-                        step: "end",
-                        data: p2Data,
-                        lineStyle: { color: t.text, width: 2 },
-                        itemStyle: { color: t.text },
-                        symbol: "circle",
-                        symbolSize: 4,
-                        endLabel: { show: true, formatter: p2, color: t.text },
-                        labelLayout: { moveOverlap: "shiftY" },
+                        type: "radar",
+                        label: { show: false },
+                        emphasis: { label: { show: false } },
+                        data: [
+                          {
+                            name: name(playerA!),
+                            value: radarMetrics.map(([, a]) => a ?? 0),
+                            lineStyle: { color: t.grass, width: 2 },
+                            itemStyle: { color: t.grass },
+                            areaStyle: { color: `${t.grass}66` },
+                          },
+                          {
+                            name: name(playerB!),
+                            value: radarMetrics.map(([, , b]) => b ?? 0),
+                            lineStyle: { color: t.clay, width: 2 },
+                            itemStyle: { color: t.clay },
+                            areaStyle: { color: `${t.clay}66` },
+                          },
+                        ],
                       },
                     ],
                   };
                   return (
-                    <div className="h2h-trend">
-                      <ReactECharts
-                        key={`trend-${theme}`}
-                        option={trendOption}
-                        style={{ height: 160, width: "100%" }}
-                        className="chart-frame"
-                        aria-label={`Cumulative head-to-head wins: ${p1} vs ${p2}`}
-                      />
-                    </div>
+                    <ReactECharts
+                      key={`radar-${theme}`}
+                      option={radarOption}
+                      style={{ height: 310, width: "100%" }}
+                      className="chart-frame"
+                      aria-label={`Strength comparison: ${name(playerA!)} versus ${name(playerB!)}`}
+                    />
                   );
-                })()}
-                <div className="meetings-list">
-                  {sortedMeetings.map((m) => {
-                    // player1_won is canonical lower-id, not picker order.
-                    const aWon = m.player1_won === (playerA === h2h.player1_id);
+                })()
+              ) : (
+                <Empty message="Player strengths unavailable" />
+              )}
+            </Card>
+          </div>
+
+          <Card title="H2H History">
+              {meetings.length === 0 ? (
+                <Empty message="No prior meetings" />
+              ) : (
+                <>
+                  {(() => {
+                    const chrono = [...meetings].sort((a, b) =>
+                      a.match_date.localeCompare(b.match_date),
+                    );
+                    const dates = chrono.map((m) => m.match_date);
+                    let p1Cum = 0;
+                    let p2Cum = 0;
+                    const p1Data: number[] = [];
+                    const p2Data: number[] = [];
+                    for (const m of chrono) {
+                      if (m.player1_won) p1Cum++;
+                      else p2Cum++;
+                      p1Data.push(p1Cum);
+                      p2Data.push(p2Cum);
+                    }
+                    const trendOption: EChartsOption = {
+                      ...baseChartOption(t),
+                      legend: {
+                        top: 0,
+                        left: "center",
+                        textStyle: { color: t.dim, fontSize: 11 },
+                      },
+                      tooltip: {
+                        ...baseChartOption(t).tooltip,
+                        trigger: "axis",
+                        formatter: (params: any) => {
+                          const items = params as Array<{
+                            name: string;
+                            seriesName: string;
+                            value: number;
+                          }>;
+                          return [
+                            items[0]?.name ?? "",
+                            ...items.map(
+                              (s) =>
+                                `${s.seriesName}: ${s.value} win${s.value === 1 ? "" : "s"}`,
+                            ),
+                          ].join("<br/>");
+                        },
+                      },
+                      grid: {
+                        left: 50,
+                        right: 112,
+                        top: 38,
+                        bottom: 28,
+                        containLabel: false,
+                      },
+                      xAxis: {
+                        type: "category",
+                        data: dates,
+                        axisLine: ax.axisLine,
+                        axisTick: { show: false },
+                        axisLabel: {
+                          ...ax.axisLabel,
+                          margin: 8,
+                          formatter: (value: string) => {
+                            const [y, mo, d] = value.split("-");
+                            return `${y}-${Number(mo)}-${Number(d)}`;
+                          },
+                        },
+                      },
+                      yAxis: {
+                        type: "value",
+                        minInterval: 1,
+                        max: Math.max(p1Cum, p2Cum, 1),
+                        name: "Cumulative Wins",
+                        nameLocation: "middle",
+                        nameGap: 36,
+                        nameTextStyle: { color: t.dim, fontSize: 11 },
+                        axisLabel: { ...ax.axisLabel, margin: 8 },
+                        splitLine: ax.splitLine,
+                      },
+                      series: [
+                        {
+                          name: p1,
+                          type: "line",
+                          data: p1Data,
+                          lineStyle: { color: t.grass, width: 2.5 },
+                          itemStyle: { color: t.grass },
+                          symbol: "circle",
+                          symbolSize: 7,
+                        },
+                        {
+                          name: p2,
+                          type: "line",
+                          data: p2Data,
+                          lineStyle: { color: t.clay, width: 2.5 },
+                          itemStyle: { color: t.clay },
+                          symbol: "circle",
+                          symbolSize: 7,
+                        },
+                      ],
+                    };
                     return (
-                      <div
-                        key={`${m.match_date}-${m.winner_id}`}
-                        className="meeting"
-                      >
-                        <span className="meeting-date mono">
-                          {m.match_date}
-                        </span>
-                        <span className="meeting-meta">{meetingMeta(m)}</span>
-                        <span className="meeting-result">
-                          <span className="meeting-winner-name">
-                            {aWon ? name(playerA!) : name(playerB!)}
-                          </span>
-                          <span className="meeting-won-label pl-1">won</span>
-                        </span>
+                      <div className="h2h-trend">
+                        <ReactECharts
+                          key={`trend-${theme}`}
+                          option={trendOption}
+                          style={{ height: 160, width: "100%" }}
+                          className="chart-frame"
+                          aria-label={`Cumulative head-to-head wins: ${p1} vs ${p2}`}
+                        />
                       </div>
                     );
-                  })}
-                </div>
-              </>
-            )}
+                  })()}
+                  <div className="meetings-list">
+                    {sortedMeetings.map((m) => {
+                      // player1_won is canonical lower-id, not picker order.
+                      const aWon =
+                        m.player1_won === (playerA === h2h.player1_id);
+                      return (
+                        <div
+                          key={`${m.match_date}-${m.winner_id}`}
+                          className="meeting"
+                        >
+                          <span className="meeting-date mono">
+                            {m.match_date}
+                          </span>
+                          <span className="meeting-meta">{meetingMeta(m)}</span>
+                          <span className="meeting-result">
+                            <span className="meeting-winner-name">
+                              {aWon ? name(playerA!) : name(playerB!)}
+                            </span>
+                            <span className="meeting-won-label pl-1">won</span>
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
           </Card>
         </>
       )}

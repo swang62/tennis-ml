@@ -25,8 +25,7 @@ CREATE SCHEMA IF NOT EXISTS gold;
 --
 -- The small-integer count columns hold counts in the 0..255 range the row
 -- validator (src.features.validate) enforces; that range is re-asserted here
--- as a CHECK. Rank 0 is this project's missing/unranked marker, so
--- ranking/rank_points allow 0.
+-- as a CHECK. Unknown match-time ranks are NULL; rank points may be 0.
 CREATE TABLE IF NOT EXISTS bronze.match_events (
     match_id                   VARCHAR NOT NULL,
     match_date                 DATE    NOT NULL,
@@ -37,8 +36,8 @@ CREATE TABLE IF NOT EXISTS bronze.match_events (
     round                      VARCHAR,
     surface                    VARCHAR NOT NULL,
     is_indoor                  SMALLINT,
-    player1_ranking            INTEGER NOT NULL,
-    player2_ranking            INTEGER NOT NULL,
+    player1_ranking            INTEGER,
+    player2_ranking            INTEGER,
     player1_wins_last_10       SMALLINT,
     player1_matches_last_10    SMALLINT,
     player1_aces               SMALLINT NOT NULL,
@@ -70,7 +69,8 @@ CREATE TABLE IF NOT EXISTS bronze.match_events (
     CONSTRAINT match_events_check_players_distinct CHECK (player1_id <> player2_id),
     CONSTRAINT match_events_check_winner         CHECK (winner_id = player1_id),
     CONSTRAINT match_events_check_ranking        CHECK (
-        player1_ranking >= 0 AND player2_ranking >= 0
+        (player1_ranking IS NULL OR player1_ranking >= 1)
+        AND (player2_ranking IS NULL OR player2_ranking >= 1)
         AND player1_rank_points BETWEEN 0 AND 20000 AND player2_rank_points BETWEEN 0 AND 20000
     ),
     CONSTRAINT match_events_check_age             CHECK (
@@ -93,6 +93,18 @@ CREATE TABLE IF NOT EXISTS bronze.match_events (
         AND player2_break_points_saved BETWEEN 0 AND 255 AND player2_break_points_faced BETWEEN 0 AND 255
     ),
     CONSTRAINT match_events_check_indoor CHECK (is_indoor IS NULL OR is_indoor IN (0, 1))
+);
+
+-- Upgrade existing local databases created before unknown ranks became NULL.
+ALTER TABLE bronze.match_events ALTER COLUMN player1_ranking DROP NOT NULL;
+ALTER TABLE bronze.match_events ALTER COLUMN player2_ranking DROP NOT NULL;
+UPDATE bronze.match_events SET player1_ranking = NULL WHERE player1_ranking = 0;
+UPDATE bronze.match_events SET player2_ranking = NULL WHERE player2_ranking = 0;
+ALTER TABLE bronze.match_events DROP CONSTRAINT IF EXISTS match_events_check_ranking;
+ALTER TABLE bronze.match_events ADD CONSTRAINT match_events_check_ranking CHECK (
+    (player1_ranking IS NULL OR player1_ranking >= 1)
+    AND (player2_ranking IS NULL OR player2_ranking >= 1)
+    AND player1_rank_points BETWEEN 0 AND 20000 AND player2_rank_points BETWEEN 0 AND 20000
 );
 
 -- Secondary indexes for the common gold-layer expansion/rolling query

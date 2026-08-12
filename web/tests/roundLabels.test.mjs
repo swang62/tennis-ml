@@ -15,5 +15,6 @@ test('every supported round code maps to a full human label', () => {
     qf: 'Quarterfinal',
     sf: 'Semifinal',
     f: 'Final',
+    rr: 'Round Robin',
   })
 })

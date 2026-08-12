@@ -16,7 +16,12 @@ from src.features.columns import (
 )
 
 # Unknown indoor status is valid at ingest.
-BRONZE_COLUMNS_NULLABLE: tuple[str, ...] = ("is_indoor", "tournament_name")
+BRONZE_COLUMNS_NULLABLE: tuple[str, ...] = (
+    "is_indoor",
+    "tournament_name",
+    "player1_ranking",
+    "player2_ranking",
+)
 
 
 class IngestionCheckReport(TypedDict):
@@ -81,6 +86,9 @@ def validate_bronze_row(row: Mapping[str, Any]) -> list[str]:
         issues.append("winner_id must equal player1_id")
 
     for side in ("player1", "player2"):
+        ranking = _as_number(row.get(f"{side}_ranking"))
+        if ranking is not None and ranking < 1:
+            issues.append(f"{side}_ranking must be positive or null")
         wins = _as_number(row.get(f"{side}_wins_last_10"))
         matches = _as_number(row.get(f"{side}_matches_last_10"))
         if wins is not None and matches is not None and wins > matches:

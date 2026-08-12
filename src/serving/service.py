@@ -178,6 +178,15 @@ _NORMALIZE_KEYS = frozenset(
 )
 
 
+def _positive_class_probability(model: Any, features: Any) -> np.ndarray:
+    """Return P(match_won=1), independent of the estimator's class order."""
+    classes = np.asarray(model.classes_)
+    matches = np.flatnonzero(classes == 1)
+    if len(matches) != 1:
+        raise ValueError(f"model must expose binary classes including 1; got {classes.tolist()}")
+    return np.asarray(model.predict_proba(features))[:, matches[0]]
+
+
 def _predict_from_ids_bulk_impl(
     rows: list[dict[str, object]], predict_proba: object
 ) -> pd.DataFrame:
@@ -227,6 +236,11 @@ SELECT bp.player_id, bp.display_name, bp.ioc,
 FROM {BRONZE_PROFILES_TABLE} bp
 LEFT JOIN {PROFILES_TABLE} gp ON gp.player_id = bp.player_id
 ORDER BY gp.current_rank NULLS LAST, bp.display_name, bp.player_id
+"""
+
+_DIRECTORY_INFO_SQL = f"""
+SELECT MAX(match_date) AS latest_match_date
+FROM {BRONZE_TABLE}
 """
 
 # One point query: bronze metadata (bp.*) joined to the dbt-materialized gold
@@ -333,6 +347,14 @@ def _players(_request: Request) -> JSONResponse:
         return _ok({"players": players})
     except Exception as exc:  # DB errors -> 500 with message
         return _err(500, f"players query failed: {exc}")
+
+
+def _directory_info(_request: Request) -> JSONResponse:
+    try:
+        df = execute_df(_DIRECTORY_INFO_SQL)
+        return _ok({"latest_match_date": _iso(first_row_dict(df).get("latest_match_date"))})
+    except Exception as exc:
+        return _err(500, f"directory info query failed: {exc}")
 
 
 def _player_profile(request: Request) -> JSONResponse:
@@ -742,6 +764,7 @@ DATA_APP = Starlette(
     },
     routes=[
         Route("/players", _players, methods=["GET"]),
+        Route("/directory_info", _directory_info, methods=["GET"]),
         Route("/player_profile", _player_profile, methods=["GET"]),
         Route("/rank_history", _rank_history, methods=["GET"]),
         Route("/match_history", _match_history, methods=["GET"]),
@@ -763,6 +786,7 @@ class _LGBMProbaAdapter:
 
     def __init__(self, booster: Any) -> None:
         self._booster = booster
+        self.classes_ = np.array([0, 1])
 
     def predict_proba(self, X: Any) -> np.ndarray:
         p = np.asarray(self._booster.predict(X), dtype=np.float64)
@@ -829,11 +853,11 @@ class TennisPredictor:
         scale_ms = (perf_counter() - scale_started_at) * 1000
         # Linear path: finalized row -> persisted scaler -> classifier.
         linear_started_at = perf_counter()
-        p_linear = self.linear.predict_proba(features_scaled)[:, 1]
+        p_linear = _positive_class_probability(self.linear, features_scaled)
         linear_ms = (perf_counter() - linear_started_at) * 1000
         # GBDT path: raw finalized row.
         gbdt_started_at = perf_counter()
-        p_gbdt = self.gbdt.predict_proba(features)[:, 1]
+        p_gbdt = _positive_class_probability(self.gbdt, features)
         gbdt_ms = (perf_counter() - gbdt_started_at) * 1000
         # ONNX inputs match the training forward signature.
         nn_inputs = {
@@ -849,7 +873,7 @@ class TennisPredictor:
         # LR head: stack of base-model probabilities.
         stack = np.column_stack([p_linear, p_gbdt, p_nn])
         ensemble_started_at = perf_counter()
-        p_win = self.production.predict_proba(stack)[:, 1]
+        p_win = _positive_class_probability(self.production, stack)
         ensemble_ms = (perf_counter() - ensemble_started_at) * 1000
 
         # Aggregate-only observability: means (no per-row dumps). A single row

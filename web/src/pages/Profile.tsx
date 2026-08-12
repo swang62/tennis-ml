@@ -401,7 +401,7 @@ export default function ProfileContent({
       </section>
 
       <div className="stats-row">
-        <Card title="On serve">
+        <Card title="On service">
           <div className="sr-list">
             {serveMetrics.map((m) => (
               <Metric

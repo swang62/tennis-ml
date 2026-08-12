@@ -14,10 +14,13 @@ from src.constants import ROOT
 from src.db.ingest import (
     BRONZE_TABLE,
     atp_rows_to_bronze,
+    discover_ranking_csvs,
     enrich_players,
     ingest_rankings,
     insert_bronze_rows,
     load_profiles_for,
+    load_ranking_player_map,
+    load_ranking_rows,
     load_raw_atp_rows,
     player_history,
 )
@@ -45,20 +48,34 @@ def load_all_raw_atp_rows(csv_paths: list[Path]) -> list[dict[str, Any]]:
 
 def select_matches(
     matches: list[dict[str, Any]],
+    official_ranks: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     """Select distinct matches for the best-ranked players: their full
     default-year (DEFAULT_YEAR) history plus their RECENT most recent
     other-year matches."""
-    ranks: dict[str, int] = {}
-    for m in matches:
-        ranks[m["winner_id"]] = m["winner_rank"]
-        ranks[m["loser_id"]] = m["loser_rank"]
-    top = sorted(ranks, key=lambda pid: (ranks[pid], pid))[:TOP_PLAYERS]
-
     history = {
         pid: sorted(hist, key=lambda m: (int(m["tourney_date"]), m["tourney_id"], m["match_num"]))
         for pid, hist in player_history(matches).items()
     }
+    if official_ranks is None:
+        # Test/helper fallback only; production miniseed always supplies the
+        # official archive ranks below.
+        official_ranks = {}
+        for m in matches:
+            for player_id, rank_key in (
+                (m["winner_id"], "winner_rank"),
+                (m["loser_id"], "loser_rank"),
+            ):
+                try:
+                    rank = int(m[rank_key])
+                except (TypeError, ValueError):
+                    continue
+                if rank > 0:
+                    official_ranks[player_id] = rank
+    top = sorted(
+        (pid for pid in history if pid in official_ranks),
+        key=lambda pid: (official_ranks[pid], pid),
+    )[:TOP_PLAYERS]
     selected: dict[tuple[str, int], dict[str, Any]] = {}
     for pid in top:
         player_matches = history[pid]
@@ -72,6 +89,20 @@ def select_matches(
         selected.values(),
         key=lambda m: (int(m["tourney_date"]), m["tourney_id"], m["match_num"]),
     )
+
+
+def latest_official_ranks() -> dict[str, int]:
+    """Latest archived official ATP ranks, resolved into canonical player ids."""
+    rows = load_ranking_rows(discover_ranking_csvs())
+    if rows.empty:
+        raise ValueError("miniseed selection requires archived official rankings")
+    latest = rows[rows["ranking_date"] == rows["ranking_date"].max()]
+    rank_map = load_ranking_player_map()
+    return {
+        canonical: int(rank)
+        for source, rank in zip(latest["player_id"], latest["rank"], strict=True)
+        if (canonical := rank_map.get(str(source))) is not None
+    }
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -141,7 +172,7 @@ def main_default(enrich: bool = False, force: bool = False) -> None:
         load_raw_atp_rows(RAW_YEAR),
         key=lambda m: (int(m["tourney_date"]), m["tourney_id"], m["match_num"]),
     )
-    selected = select_matches(matches)
+    selected = select_matches(matches, official_ranks=latest_official_ranks() if matches else {})
     selected_ids = {
         f"{int(m['tourney_date'])}-{m['tourney_id']}-{int(m['match_num']):03d}" for m in selected
     }

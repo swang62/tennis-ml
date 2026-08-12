@@ -326,8 +326,7 @@ def test_load_raw_atp_rows_and_load_atp_csv_reject_missing_columns(tmp_path):
         ingest.load_atp_csv(csv)
 
 
-def test_load_raw_atp_rows_passes_ranks_through_raw(tmp_path):
-    """Ingest preserves ATP zero-rank markers; training handles imputation."""
+def test_atp_rows_convert_missing_and_zero_ranks_to_null(tmp_path):
     df = _raw_atp_df()
     null_rank = _raw_atp_df()
     null_rank.loc[0, "winner_rank"] = None
@@ -338,13 +337,13 @@ def test_load_raw_atp_rows_passes_ranks_through_raw(tmp_path):
     csv = tmp_path / "ranks.csv"
     pd.concat([df, null_rank, zero_rank], ignore_index=True).to_csv(csv, index=False)
 
-    rows = ingest.load_raw_atp_rows(csv)
+    rows = ingest.atp_rows_to_bronze(ingest.load_raw_atp_rows(csv))
 
-    assert len(rows) == 3  # missing and 0 ranks pass through, not dropped
-    by_id = {r["winner_id"]: r for r in rows}
-    assert by_id["W2"]["winner_rank"] == 0  # empty rank -> 0, no median fill
-    assert by_id["W3"]["winner_rank"] == 0  # rank 0 passes through unchanged
-    assert by_id["W3"]["loser_rank"] == 20
+    assert len(rows) == 3
+    by_id = rows.set_index("winner_id")
+    assert pd.isna(by_id.loc["W2", "player1_ranking"])
+    assert pd.isna(by_id.loc["W3", "player1_ranking"])
+    assert by_id.loc["W3", "player2_ranking"] == 20
 
 
 def test_load_raw_atp_rows_missing_indoor_column_fails(tmp_path):

@@ -155,7 +155,7 @@ def test_is_missing():
     assert _is_missing("abc") is False
 
 
-def test_run_ingestion_checks_keeps_zero_rank_rows():
+def test_run_ingestion_checks_rejects_zero_rank_rows():
     valid = _valid_row()
     zero_rank = _valid_row() | {
         "match_id": "2026-test-002",
@@ -173,15 +173,15 @@ def test_run_ingestion_checks_keeps_zero_rank_rows():
 
     assert result["passed"] is False
     assert result["input_rows"] == 3
-    assert result["valid_rows"] == 2  # rank 0 is "no rank" (imputed upstream), not invalid
-    assert result["dropped_rows"] == 1
+    assert result["valid_rows"] == 1
+    assert result["dropped_rows"] == 2
+    assert any("player1_ranking must be positive or null" in issue for issue in result["results"])
     assert any(
         "player1_first_serves_made exceeds player1_total_serve_points" in issue
         for issue in result["results"]
     )
     kept = cast(pd.DataFrame, result["valid_df"]).to_dict(orient="records")
     assert kept[0] == valid
-    assert kept[1] == zero_rank
 
 
 def test_validate_bronze_row_accepts_null_is_indoor():

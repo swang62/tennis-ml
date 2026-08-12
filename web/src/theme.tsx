@@ -29,7 +29,7 @@ const ThemeContext = createContext<ThemeContextValue>({
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setTheme] = useState<ThemeName>(() => resolveTheme())
 
-  // Keep chart CSS tokens synchronized with the document class.
+  // Keep the document class synchronized on initial mount.
   useEffect(() => {
     applyTheme(theme)
   }, [theme])
@@ -38,7 +38,11 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const mq = window.matchMedia('(prefers-color-scheme: dark)')
     const onChange = (e: MediaQueryListEvent) => {
-      if (!localStorage.getItem(STORAGE_KEY)) setTheme(e.matches ? 'dark' : 'light')
+      if (!localStorage.getItem(STORAGE_KEY)) {
+        const next = e.matches ? 'dark' : 'light'
+        applyTheme(next)
+        setTheme(next)
+      }
     }
     mq.addEventListener('change', onChange)
     return () => mq.removeEventListener('change', onChange)
@@ -48,6 +52,9 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     setTheme((current) => {
       const next = current === 'dark' ? 'light' : 'dark'
       localStorage.setItem(STORAGE_KEY, next)
+      // Charts read CSS variables during render, so update them before their
+      // theme-keyed remount rather than waiting for the post-render effect.
+      applyTheme(next)
       return next
     })
   }

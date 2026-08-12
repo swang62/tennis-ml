@@ -4,6 +4,7 @@ import { Link } from "@tanstack/react-router";
 import MiniSearch from "minisearch";
 import {
   getMatchHistory,
+  getDirectoryInfo,
   getPlayerProfile,
   getPlayers,
   getRankHistory,
@@ -12,6 +13,7 @@ import {
 } from "../api";
 import { ErrorBox, Kicker, Loading, PlayerPicker } from "../components";
 import { useTheme } from "../theme";
+import { formatLongDate } from "../lib/format";
 import ProfileContent from "./Profile";
 
 const PLAYERS_INDEX_KEY = "tm-player-index-v2";
@@ -126,11 +128,18 @@ export default function Home() {
     staleTime: Infinity,
     gcTime: Infinity,
   });
+  const directoryInfoQ = useQuery({
+    queryKey: ["directory_info"],
+    queryFn: getDirectoryInfo,
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
   const players = playersQ.data?.players ?? [];
   const totalMatches = players.reduce((n, p) => n + p.matches_played, 0);
   // Directory rank backs the profile's current-rank label while the profile
   // query loads; the profile response is authoritative once it lands.
-  const selectedPlayer = players.find((p) => p.player_id === selectedId) ?? null;
+  const selectedPlayer =
+    players.find((p) => p.player_id === selectedId) ?? null;
 
   const handleSelectPlayer = (playerId: string | null) => {
     if (!document.startViewTransition) {

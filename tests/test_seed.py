@@ -68,6 +68,17 @@ def test_select_matches_tie_break_prefers_lower_player_id():
     assert f"T{TOP_PLAYERS}" not in selected_ids
 
 
+def test_select_matches_uses_official_ranks_and_ignores_zero_match_ranks():
+    matches = [
+        _match("djokovic", "opponent", 0, 0, "DJ", "20260101", 1),
+        _match("unknown", "opponent", 0, 0, "UNK", "20260102", 1),
+    ]
+
+    selected = select_matches(matches, official_ranks={"djokovic": 8})
+
+    assert selected == [matches[0]]
+
+
 def test_select_matches_uses_latest_rank_not_earliest():
     matches = [
         _match("up", "zzz", 999, 999, "TU1", "20260101", 1),  # bad early rank
@@ -418,7 +429,7 @@ def _patch_seed_writes(monkeypatch, calls):
     """Redirect every DB/network side effect to a recorder."""
     monkeypatch.setattr(seed, "load_raw_atp_rows", lambda _path: [])
     monkeypatch.setattr(seed, "load_all_raw_atp_rows", lambda _paths: [])
-    monkeypatch.setattr(seed, "select_matches", lambda _matches: [])
+    monkeypatch.setattr(seed, "select_matches", lambda _matches, **_kwargs: [])
     monkeypatch.setattr(seed, "atp_rows_to_bronze", _fake_bronze)
     monkeypatch.setattr(
         seed, "insert_bronze_rows", lambda _df, overwrite=False: calls.append(overwrite) or 0
@@ -500,7 +511,7 @@ def test_main_default_prints_actual_inserted_and_skipped_counts(monkeypatch, cap
     """The seed line reports what the database actually inserted, not the input
     row count: 1 inserted of 2 attempted means 1 existing PK was skipped."""
     monkeypatch.setattr(seed, "load_raw_atp_rows", lambda _path: [])
-    monkeypatch.setattr(seed, "select_matches", lambda _matches: [])
+    monkeypatch.setattr(seed, "select_matches", lambda _matches, **_kwargs: [])
     monkeypatch.setattr(seed, "atp_rows_to_bronze", _fake_bronze)  # 2 rows
     monkeypatch.setattr(seed, "insert_bronze_rows", lambda _df, **kwargs: 1)  # noqa: ARG005
     monkeypatch.setattr(seed, "load_profiles_for", lambda _ids, _src, **_kwargs: None)
