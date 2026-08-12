@@ -68,7 +68,10 @@ def test_etl_flow_builds_without_enrichment(monkeypatch):
     monkeypatch.setattr("src.flows.etl.bronze_to_gold", lambda: FAKE_GOLD_COUNT)
     monkeypatch.setattr("src.flows.etl.load_env", lambda: None)
 
-    etl_flow()
+    # .fn() bypasses the Prefect engine — a bare etl_flow() call would register
+    # a real flow run on the Prefect server (PREFECT_API_URL is set in .env),
+    # polluting the deployment history from a hermetic test.
+    etl_flow.fn()
 
 
 def test_enrich_missing_is_callable():

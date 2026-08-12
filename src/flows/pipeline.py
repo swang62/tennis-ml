@@ -11,8 +11,8 @@ from typing import TextIO
 import papermill as pm
 
 from src.constants import LOGS, OUTPUTS, PARAMS
-from src.db.snapshot import SNAPSHOT_PATH, refresh_snapshot
 from src.db import training
+from src.db.snapshot import SNAPSHOT_PATH, refresh_snapshot
 from src.utils import ensure_kernel, load_env
 
 # Training notebooks (00-05), run in order.

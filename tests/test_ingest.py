@@ -1745,7 +1745,7 @@ def test_backfill_profile_iocs_updates_only_unk(fake_ingest_conn, tmp_path):
         tmp_path, [{"player_id": "100004", "name_first": "G", "name_last": "M", "ioc": "ITA"}]
     )
 
-    ingest.backfill_profile_iocs({"100004": "M276"}, players_csv=players)
+    ingest.backfill_profile_iocs({"100004": "M276"}, {"M276"}, players_csv=players)
 
     sql, params = fake_ingest_conn.statements[0]
     assert sql.startswith(f"UPDATE {ingest.BRONZE_PROFILES_TABLE}")
@@ -1758,7 +1758,7 @@ def test_backfill_profile_iocs_skips_invalid_ioc(fake_ingest_conn, tmp_path):
         tmp_path, [{"player_id": "100004", "name_first": "G", "name_last": "M", "ioc": "XYZ"}]
     )
 
-    ingest.backfill_profile_iocs({"100004": "M276"}, players_csv=players)
+    ingest.backfill_profile_iocs({"100004": "M276"}, {"M276"}, players_csv=players)
     assert fake_ingest_conn.statements == []
 
 
@@ -1768,5 +1768,5 @@ def test_backfill_profile_iocs_skips_players_not_in_map(fake_ingest_conn, tmp_pa
     )
 
     # The map only covers 207989, so 100004's IOC is never touched.
-    ingest.backfill_profile_iocs({"207989": "A0E2"}, players_csv=players)
+    ingest.backfill_profile_iocs({"207989": "A0E2"}, {"A0E2"}, players_csv=players)
     assert fake_ingest_conn.statements == []

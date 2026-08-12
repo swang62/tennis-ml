@@ -135,10 +135,5 @@ def refresh_snapshot(path: Path = SNAPSHOT_PATH, pg_url: str | None = None) -> P
     return path
 
 
-def main() -> None:
-    """Console-script entry for `just db-snapshot`."""
-    print(f"Training snapshot refreshed: {refresh_snapshot()}")
-
-
 if __name__ == "__main__":
-    main()
+    print(f"Training snapshot refreshed: {refresh_snapshot()}")

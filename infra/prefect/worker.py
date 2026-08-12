@@ -34,13 +34,15 @@ print(f"Connecting worker to Prefect API at {api_url}")
 def _register_deployments() -> None:
     """Register host-run scheduled deployments (idempotent upserts by name).
 
-    The Monday rankings catch-up deployment lives on the host work pool, so it
-    is created/updated whenever this worker starts and stays manually
+    The Monday scrape and ETL deployments live on the host work pool, so they
+    are created/updated whenever this worker starts and stay manually
     triggerable from the Prefect UI or `prefect deployment run`.
     """
-    from src.flows.rankings import register_deployment
+    from src.flows.etl import register_deployment as register_etl
+    from src.flows.scrape import register_deployment as register_scrape
 
-    register_deployment()
+    register_scrape()
+    register_etl()
 
 
 _register_deployments()

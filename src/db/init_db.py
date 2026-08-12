@@ -91,5 +91,5 @@ if __name__ == "__main__":
     elif command == "reset":
         reset()
     else:
-        print("Usage: uv run tennis-db-init | uv run tennis-db-reset")
+        print("Usage: uv run python src/db/init_db.py [init|reset]")
         sys.exit(1)

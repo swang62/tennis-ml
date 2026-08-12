@@ -8,8 +8,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
 
-from prefect import flow
-
 from src.constants import (
     CHAMPION_ALIAS,
     DATA_PROCESSED,
@@ -90,9 +88,13 @@ SOURCE_FINGERPRINT_FILES = [
 ]
 
 
-@flow(log_prints=True)
 def deploy_flow() -> None:
-    """Deploy the promoted model, rebuilding the Bento image every time."""
+    """Deploy the promoted model, rebuilding the Bento image every time.
+
+    Deliberately NOT a Prefect flow: deployment is a manual, gated decision
+    (train -> investigate drift/metrics -> deploy only if it holds up), so
+    running it must never register a Prefect flow run.
+    """
     deploy_bento()
 
 

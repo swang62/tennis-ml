@@ -4,27 +4,27 @@ create:
 
 # Run bronze-to-gold ETL (dbt build).
 db-etl:
-    uv run tennis-db-etl
+    uv run python src/flows/etl.py
 
 # Create PostgreSQL schemas and tables.
 db-init:
-    uv run tennis-db-init
+    uv run python src/db/init_db.py init
 
 # Drop and recreate PostgreSQL schemas.
 db-reset:
-    uv run tennis-db-reset
+    uv run python src/db/init_db.py reset
 
 # Seed deterministic raw matches (--all: every ATP CSV; --enrich: Wikipedia bios).
 db-seed *args:
-    uv run tennis-db-seed {{ args }}
+    uv run python src/db/seed.py {{ args }}
 
 # Export an atomic PostgreSQL training snapshot.
 db-snapshot:
-    uv run tennis-db-snapshot
+    uv run python src/db/snapshot.py
 
 # Build and push all production docker images.
 deploy *args:
-    uv run tennis-deploy {{ args }}
+    uv run python src/flows/deploy.py {{ args }}
     docker build -t swang62/tennis-web:latest web/
     docker push swang62/tennis-web:latest
 
@@ -44,9 +44,9 @@ dev:
 docker-up:
     docker compose up -d --build
 
-# Fetch missing weekly ATP rankings; register the Monday deployment with --deploy.
-rankings-fetch *args:
-    uv run tennis-rankings-fetch {{ args }}
+# Trigger the Prefect scrape deployment; pass Prefect CLI args through unchanged.
+scrape *args:
+    uv run prefect deployment run scrape-flow/scrape {{ args }}
 
 # Run all configured linters.
 lint:
@@ -75,16 +75,12 @@ test:
 
 # Run the notebook training pipeline.
 train:
-    uv run tennis-train
+    uv run python src/flows/pipeline.py
 
 # Validate Kubernetes manifests.
 validate:
     kubeconform -ignore-missing-schemas -summary infra/manifests/
 
-# Start the host Prefect worker.
-worker:
-    uv run tennis-worker
-
 # Run production drift monitoring.
 check-drift:
-    uv run tennis-check-drift
+    uv run python src/flows/check_drift.py

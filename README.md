@@ -39,11 +39,12 @@ just db-seed
 # 3. Generate silver/gold tables
 just db-etl
 
-# 4. Start the Prefect worker on host
-just worker
-
-# 5. Local dev: Bento API (:3000) + Vite dashboard (:5173)
+# 4. Local dev: Bento API (:3000) + Vite dashboard (:5173)
 just dev
+
+# 5. Optional use serviceman to run worker as daemon
+serviceman <start|restart> tennis-prefect-worker
+serviceman logs tennis-prefect-worker
 ```
 
 ## Data Flow
@@ -78,19 +79,18 @@ Training pipeline.py (features, tuning, evaluation, promotion)
 
 ## Trigger Model
 
-| Event          | Action                             | Method                                     |
-| -------------- | ---------------------------------- | ------------------------------------------ |
-| Manual ingest  | Load CSV → bronze                  | `just db-seed` (deterministic seed subset) |
-| Manual trigger | Training pipeline                  | `just train`                               |
-| Model promoted | Push promoted Bento image          | `just deploy-bento` (reads `@champion`)    |
-| Force redeploy | Rebuild + push regardless of cache | `just deploy-bento --force`                |
+| Event          | Action                             | Method                                  |
+| -------------- | ---------------------------------- | --------------------------------------- |
+| Manual ingest  | Load CSV → bronze → gold           | `just db-seed && just db-etl`           |
+| Manual trigger | Training pipeline                  | `just train`                            |
+| Model promoted | Push promoted Bento image          | `just deploy-bento` (reads `@champion`) |
+| Force redeploy | Rebuild + push regardless of cache | `just deploy-bento --force`             |
 
 ## Pipelines
 
-- `ingest.py` — validate raw ATP CSV → bronze
-- `seed.py` — the deterministic minimal seed from `data/raw/2026.csv`
-- `etl.py` — bronze → silver → gold: player_matches + rolling_features → match_features, plus feature enrichment and sanitization.
-- `pipeline.py` — training runner: features → tune 3 models → pick best → train final → evaluate → promote
+- `seed.py` — seed either miniset or full dataset into bronze, rankings + enrichment
+- `etl.py` — bronze → silver → gold: player_matches + rolling_features → match_features.
+- `pipeline.py` — training runner: features → tune 3 model categories → pick best → train final → evaluate → promote
 
 ## Serving & Inference
 

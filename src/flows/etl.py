@@ -10,6 +10,7 @@ Wikipedia bio enrichment happens at seed time via `just db-seed --enrich`
 """
 
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime
@@ -19,12 +20,24 @@ from typing import TextIO
 from prefect import flow, task
 
 from src import constants
-from src.constants import GOLD_TABLE, LOGS
+from src.constants import (
+    BRONZE_TABLE,
+    GOLD_TABLE,
+    LOGS,
+    PROFILES_TABLE,
+    SILVER_PLAYER_MATCHES,
+    SILVER_ROLLING_FEATURES,
+)
 from src.db.client import get_conn
 from src.db.conninfo import dbt_env
 from src.utils import load_env
 
 DBT_BUILD_CMD = ["uv", "run", "dbt", "build", "--project-dir", "dbt", "--profiles-dir", "dbt"]
+
+ETL_DEPLOYMENT_NAME = "etl"
+# No cron: ETL is triggered by the scrape flow via run_deployment only when new
+# rows were stored, so an empty or Cloudflare-blocked scrape never runs it.
+WORK_POOL_NAME = "tennis-pool"
 
 
 def run_dbt_build(
@@ -67,13 +80,34 @@ def _etl_log_file() -> Path:
 
 @task(retries=2, retry_delay_seconds=30)
 def bronze_to_gold() -> int:
-    run_dbt_build(log_file=_etl_log_file())
+    log_file = _etl_log_file()
+    run_dbt_build(log_file=log_file)
     with get_conn().cursor() as cur:
-        cur.execute(f"SELECT COUNT(*) FROM {GOLD_TABLE}")
-        count_row = cur.fetchone()
-        row_count = int(count_row[0]) if count_row is not None else 0
-    print(f"Gold: {row_count} rows")
-    return row_count
+        counts = {
+            "bronze.match_events": _table_count(cur, BRONZE_TABLE),
+            "silver.player_matches": _table_count(cur, SILVER_PLAYER_MATCHES),
+            "silver.rolling_features": _table_count(cur, SILVER_ROLLING_FEATURES),
+            "gold.match_features": _table_count(cur, GOLD_TABLE),
+            "gold.player_profiles": _table_count(cur, PROFILES_TABLE),
+        }
+    for table, count in counts.items():
+        print(f"{table}: {count} rows")
+    print(f"dbt: {_dbt_summary(log_file)}")
+    return counts[GOLD_TABLE]
+
+
+def _table_count(cur, table: str) -> int:
+    cur.execute(f"SELECT COUNT(*) FROM {table}")
+    row = cur.fetchone()
+    return int(row[0]) if row is not None else 0
+
+
+def _dbt_summary(log_file: Path) -> str:
+    """The final dbt result line, e.g. 'Done. PASS=41 WARN=0 ERROR=0 SKIP=0 TOTAL=41'."""
+    for line in reversed(log_file.read_text().splitlines()):
+        if re.search(r"Done\.\s+PASS=", line):
+            return re.sub(r"\x1b\[[0-9;]*m", "", line).strip()
+    return "(no summary line in dbt log)"
 
 
 @flow(log_prints=True)
@@ -86,10 +120,32 @@ def etl_flow():
     print(f"ETL complete: {rows} gold rows")
 
 
-def main() -> None:
-    """Console-script entry for `just db-etl`."""
-    etl_flow()
+def register_deployment() -> None:
+    """Create/update the ETL deployment (idempotent by name).
+
+    Registered on the host ``tennis-pool`` work pool so the scrape flow's
+    ``run_deployment("etl-flow/etl")`` trigger resolves to it. No cron — ETL
+    runs only when new data was actually scraped.
+    """
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    from typing import Any, cast
+
+    deployment = cast(
+        Any,
+        etl_flow.from_source(
+            source=str(repo_root),
+            entrypoint="src/flows/etl.py:etl_flow",
+        ),
+    )
+    deployment.deploy(
+        name=ETL_DEPLOYMENT_NAME,
+        work_pool_name=WORK_POOL_NAME,
+        build=False,
+        ignore_warnings=True,
+        print_next_steps=False,
+    )
+    print(f"Registered deployment {ETL_DEPLOYMENT_NAME!r} (no cron — scrape-triggered)")
 
 
 if __name__ == "__main__":
-    main()
+    etl_flow()

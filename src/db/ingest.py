@@ -731,23 +731,21 @@ def _atp_players_iocs(players_csv: Path) -> dict[str, str]:
 
 def backfill_profile_iocs(
     rank_map: dict[str, str],
+    player_ids: set[str],
     players_csv: Path = ATP_PLAYERS_CSV,
-    player_ids: set[str] | None = None,
 ) -> None:
-    """Backfill bronze.player_profiles.ioc for mapped players.
+    """Backfill bronze.player_profiles.ioc for the given canonical player ids.
 
     atp_players.csv is the higher-confidence IOC source: only players present in
     the approved map are touched, and only a valid code replaces the UNK
-    sentinel/empty value — a verified IOC is never overwritten.
-
-    player_ids restricts the backfill to those canonical player ids (the seed
-    passes its exact match-corpus player set); None backfills every mapped
-    player.
+    sentinel/empty value — a verified IOC is never overwritten. The caller
+    derives the concrete player set (the seed's match corpus, or every mapped
+    canonical id for a full import).
     """
     iocs = _atp_players_iocs(players_csv)
     updates: list[tuple[str, str]] = []
     for src_id, canonical in rank_map.items():
-        if player_ids is not None and canonical not in player_ids:
+        if canonical not in player_ids:
             continue
         ioc = iocs.get(src_id)
         if ioc is not None and ioc != UNK:
@@ -780,16 +778,17 @@ def ingest_rankings(
     skipped. Raises ValueError on malformed input or an invalid map before any
     database write.
 
-    player_ids restricts the import (and the ranking-source IOC fallback) to
-    those canonical player ids — the seed passes its exact match-corpus player
-    set; None imports every mapped top-200 row. The filtered seed path is
-    silent: seeded players absent from the approved map or without rank rows
-    are not reported, and the summary counts only the seeded rows. Only the
-    full import (player_ids=None) reports global unmapped rows and backfills
-    global IOCs.
+    player_ids restricts the import to those canonical player ids — the seed
+    passes its exact match-corpus player set; None imports every mapped top-200
+    row. The filtered seed path is silent: seeded players absent from the
+    approved map or without rank rows are not reported, and the summary counts
+    only the seeded rows. Only the full import (player_ids=None) reports global
+    unmapped rows.
 
-    The ranking-source IOC fallback (atp_players.csv) only fills NULL/empty/UNK
-    profile IOCs — a verified IOC is never overwritten.
+    The ranking-source IOC fallback (atp_players.csv) always runs against a
+    concrete player set — the selected seed ids when supplied, otherwise every
+    mapped canonical id — and only fills NULL/empty/UNK profile IOCs; a
+    verified IOC is never overwritten.
     """
     csv_paths = discover_ranking_csvs(rankings_dir)
     if not csv_paths:
@@ -834,7 +833,12 @@ def ingest_rankings(
         )
         upserted = len(mapped)
 
-    backfill_profile_iocs(rank_map, players_csv, player_ids=player_ids)
+    # The IOC fallback is scoped to one concrete player set: the selected seed
+    # ids when supplied, otherwise every mapped canonical id (full import). It
+    # only fills NULL/empty/UNK profile IOCs — a verified IOC is never
+    # overwritten.
+    ioc_player_ids = player_ids if player_ids is not None else set(rank_map.values())
+    backfill_profile_iocs(rank_map, ioc_player_ids, players_csv)
 
     summary = {
         "files": len(csv_paths),

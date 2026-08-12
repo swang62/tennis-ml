@@ -13,7 +13,7 @@ import json
 import math
 import os
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -116,7 +116,7 @@ def _champion_cutoff_date(client: MlflowClient) -> date | None:
     champion = resolve_champion(client)
     if champion is None:
         return None
-    return datetime.fromtimestamp(champion.creation_timestamp / 1000, tz=timezone.utc).date()
+    return datetime.fromtimestamp(champion.creation_timestamp / 1000, tz=UTC).date()
 
 
 def _post_batch(contexts: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -128,7 +128,7 @@ def _post_batch(contexts: list[dict[str, object]]) -> list[dict[str, object]]:
     resp.raise_for_status()
     body: object = resp.json()
     if not isinstance(body, list):
-        raise RuntimeError(
+        raise TypeError(
             f"/api/internal/predict-batch returned {type(body).__name__}, expected list"
         )
     return body  # type: ignore[return-value]
@@ -144,7 +144,7 @@ def _score_batches(contexts: list[dict[str, object]]) -> list[float]:
         for rec in records:
             p_win = rec.get("p_win")
             if isinstance(p_win, bool) or not isinstance(p_win, (int, float)):
-                raise RuntimeError(f"non-finite p_win in batch response: {rec!r}")
+                raise TypeError(f"non-finite p_win in batch response: {rec!r}")
             probas.append(float(p_win))
     return probas
 
@@ -258,7 +258,7 @@ def check_drift() -> int:
     load_env()
     client = MlflowClient()
     experiment_id = _ensure_experiment(client)
-    start_ts = datetime.now(timezone.utc).isoformat()
+    start_ts = datetime.now(UTC).isoformat()
 
     print("Running dbt build...")
     run_dbt_build()
