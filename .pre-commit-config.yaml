@@ -28,3 +28,11 @@ repos:
         entry: scripts/run_tests.sh
         pass_filenames: false
         files: ^(src|tests|infra/duckdb|dbt)/
+
+      - id: web-checks
+        name: web checks
+        description: TypeScript typecheck and unit tests for the web dashboard
+        language: system
+        entry: scripts/web_checks.sh
+        pass_filenames: false
+        files: ^web/

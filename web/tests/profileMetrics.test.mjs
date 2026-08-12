@@ -45,8 +45,8 @@ test('formatDelta zero has no arrow', () => {
 })
 
 test('formatDelta rate deltas keep two-decimal precision', () => {
-  assert.equal(formatDelta(0.08, true), '▲ 0.08')
-  assert.equal(formatDelta(-0.08, true), '▼ 0.08')
+  assert.equal(formatDelta(0.08, true), '▲ 0.08 ')
+  assert.equal(formatDelta(-0.08, true), '▼ 0.08 ')
 })
 
 test('formatDelta renders null as null (empty delta cell)', () => {

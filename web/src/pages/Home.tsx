@@ -4,7 +4,6 @@ import { Link } from "@tanstack/react-router";
 import MiniSearch from "minisearch";
 import {
   getMatchHistory,
-  getDirectoryInfo,
   getPlayerProfile,
   getPlayers,
   getRankHistory,
@@ -13,7 +12,6 @@ import {
 } from "../api";
 import { ErrorBox, Kicker, Loading, PlayerPicker } from "../components";
 import { useTheme } from "../theme";
-import { formatLongDate } from "../lib/format";
 import ProfileContent from "./Profile";
 
 const PLAYERS_INDEX_KEY = "tm-player-index-v2";
@@ -125,12 +123,6 @@ export default function Home() {
   const playersQ = useQuery({
     queryKey: ["players"],
     queryFn: getPlayers,
-    staleTime: Infinity,
-    gcTime: Infinity,
-  });
-  const directoryInfoQ = useQuery({
-    queryKey: ["directory_info"],
-    queryFn: getDirectoryInfo,
     staleTime: Infinity,
     gcTime: Infinity,
   });
