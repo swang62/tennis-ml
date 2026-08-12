@@ -368,6 +368,8 @@ def test_match_history_shape_and_default_limit():
     # Rows are individual matches sorted deterministically; the limit is a
     # parameter, never interpolated.
     assert "opponent_ranking" in sql
+    assert "COALESCE(pm.opponent_ranking, historical_rank.rank)" in sql
+    assert "ranking_date <= pm.match_date" in sql
     assert "ORDER BY pm.match_date DESC, pm.match_id DESC" in sql
     assert "LIMIT %s" in sql
 

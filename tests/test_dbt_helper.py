@@ -50,6 +50,21 @@ def test_run_dbt_build_propagates_called_process_error(monkeypatch):
     assert excinfo.value.cmd == DBT_BUILD_CMD
 
 
+def test_run_dbt_build_appends_full_refresh(monkeypatch):
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return "fake-result"
+
+    monkeypatch.setattr("src.flows.etl.subprocess.run", fake_run)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@db:5432/tennis")
+
+    run_dbt_build(full_refresh=True)
+
+    assert calls[0][0] == ([*DBT_BUILD_CMD, "--full-refresh"],)
+
+
 def test_dbt_build_cmd_is_exact():
     assert DBT_BUILD_CMD == [
         "uv",
@@ -65,7 +80,7 @@ def test_dbt_build_cmd_is_exact():
 
 def test_etl_flow_builds_without_enrichment(monkeypatch):
     """ETL builds bronze-to-gold without enrichment — it's a separate step."""
-    monkeypatch.setattr("src.flows.etl.bronze_to_gold", lambda: FAKE_GOLD_COUNT)
+    monkeypatch.setattr("src.flows.etl.bronze_to_gold", lambda **_: FAKE_GOLD_COUNT)
     monkeypatch.setattr("src.flows.etl.load_env", lambda: None)
 
     # .fn() bypasses the Prefect engine — a bare etl_flow() call would register

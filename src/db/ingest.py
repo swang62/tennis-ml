@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, LiteralString, cast
 
@@ -25,8 +26,8 @@ GOLD_TABLE = "gold.match_features"
 # ATP data provides player identity; Wikipedia adds missing enrichment.
 ATP_DATABASE_CSV = ROOT / "data" / "ATP_player_database.csv"
 
-# Reviewed ranking identity map: authoritative by ranking source player id, with
-# the source name kept for audit only. Never resolved implicitly by name.
+# Reviewed ranking identity map: explicit source-id assignments take precedence.
+# Unmapped source ids are resolved automatically from source/canonical names.
 RANKING_PLAYER_MAP_CSV = ROOT / "data" / "ranking_player_map.csv"
 RANKING_MAP_COLUMNS = ["ranking_player_id", "ranking_name", "player_id"]
 
@@ -612,6 +613,91 @@ def unmapped_ranking_rows(
     return [counts[k] for k in sorted(counts)]
 
 
+def _canonical_corpus_stats(
+    match_rows: list[dict[str, Any]] | None,
+) -> dict[str, dict[str, int | None]]:
+    """{canonical player_id: {matches, best_rank}} from raw ATP match rows.
+
+    match activity = appearances as winner or loser; best_rank = lowest positive
+    winner/loser rank. Used only to break name-matching ties for identity choice,
+    never to synthesize rank history. None/empty rows yield empty stats.
+    """
+    stats: dict[str, dict[str, int | None]] = {}
+    for row in match_rows or []:
+        for side in ("winner", "loser"):
+            pid = str(row.get(f"{side}_id") or "").strip()
+            if not pid:
+                continue
+            entry = stats.setdefault(pid, {"matches": 0, "best_rank": None})
+            entry["matches"] = (entry["matches"] or 0) + 1
+            try:
+                raw = row.get(f"{side}_rank")
+                rank = int(raw) if isinstance(raw, (int, str, float)) else 0
+            except (TypeError, ValueError):
+                rank = 0
+            if rank > 0:
+                best = entry["best_rank"]
+                entry["best_rank"] = rank if best is None else min(best, rank)
+    return stats
+
+
+def resolve_ranking_identities(
+    source_ids: set[str] | list[str],
+    source_names: dict[str, str],
+    canonical: dict[str, str],
+    corpus_stats: dict[str, dict[str, int | None]] | None = None,
+) -> dict[str, str]:
+    """Auto-map ranking source ids to canonical ids by normalized name.
+
+    Deterministic resolution for source ids absent from the approved map: a
+    Exact normalized names map directly. Otherwise the closest normalized name
+    is accepted when it has at least 80% character similarity. Ties resolve by
+    greatest match activity, lower best rank, then lexicographic player_id.
+    Returns {ranking source id: canonical player id}; ids with no usable source
+    name are left out. Never consults the map (explicit entries always win by
+    construction — callers resolve gaps only).
+    """
+    norm_index: dict[str, list[str]] = {}
+    for pid, name in canonical.items():
+        norm = _normalize_name(name)
+        if norm:
+            norm_index.setdefault(norm, []).append(pid)
+
+    stats = corpus_stats or {}
+    resolved: dict[str, str] = {}
+    for src_id in sorted({str(s).strip() for s in source_ids}):
+        source_name = _normalize_name(source_names.get(src_id, ""))
+        candidates = norm_index.get(source_name, [])
+        if not candidates:
+            if not source_name:
+                continue
+            scores = {
+                pid: SequenceMatcher(None, source_name, _normalize_name(name)).ratio()
+                for pid, name in canonical.items()
+            }
+            best_score = max(scores.values(), default=0.0)
+            if best_score < 0.8:
+                continue
+            candidates = [pid for pid, score in scores.items() if score == best_score]
+        resolved[src_id] = min(
+            candidates,
+            key=lambda pid: (
+                -(stats.get(pid, {}).get("matches") or 0),
+                stats.get(pid, {}).get("best_rank") or 10**9,
+                pid,
+            ),
+        )
+    return resolved
+
+
+def _name_matches_seed(name: str, player_ids: set[str], canonical: dict[str, str]) -> bool:
+    """Whether a source name normalized-matches one of the seeded canonical players."""
+    norm = _normalize_name(name)
+    if not norm:
+        return False
+    return any(_normalize_name(canonical.get(pid, "")) == norm for pid in player_ids)
+
+
 # ── Official Rankings Ingest ───────────────────────────────────
 
 BRONZE_RANKINGS_TABLE = "bronze.rankings"
@@ -795,24 +881,30 @@ def ingest_rankings(
     players_csv: Path = ATP_PLAYERS_CSV,
     player_ids: set[str] | None = None,
     force: bool = False,
+    match_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Official-rankings import; returns the import summary.
 
     Discover -> validate -> filter rank <= 200 -> map to canonical ids -> upsert.
     Raw ranking source ids never reach the table: player_id is resolved through
-    the approved identity map, and unmapped top-200 rows are reported and
-    skipped. Raises ValueError on malformed input or an invalid map before any
-    database write.
+    the approved identity map, and source ids absent from the map are auto-mapped
+    by normalized name (deterministic: unique candidate, else greatest match
+    activity, then lower best rank, then lexicographic player_id, using
+    match_rows for the activity/rank tie-break). Explicit map entries always win;
+    auto-mapping only chooses identity and never invents ranking values — only
+    official rank <= 200 archive rows are ingested. Source ids that still cannot
+    be resolved are reported and skipped. Raises ValueError on malformed input
+    or an invalid map before any database write.
 
     Idempotent by default: an existing (ranking_date, player_id) row is skipped
     (DO NOTHING). Pass force=True to overwrite existing rows (DO UPDATE).
 
     player_ids restricts the import to those canonical player ids — the seed
     passes its exact match-corpus player set; None imports every mapped top-200
-    row. The filtered seed path is silent: seeded players absent from the
-    approved map or without rank rows are not reported, and the summary counts
-    only the seeded rows. Only the full import (player_ids=None) reports global
-    unmapped rows.
+    row. The filtered seed path is silent about global archive gaps and instead
+    returns a `coverage` summary — {seeded, covered, auto_mapped, unresolved} —
+    for the seed's coverage report. Only the full import (player_ids=None)
+    reports global unmapped/auto-mapped rows.
 
     The ranking-source IOC fallback (atp_players.csv) always runs against a
     concrete player set — the selected seed ids when supplied, otherwise every
@@ -837,6 +929,23 @@ def ingest_rankings(
     top200_count = len(top200)
 
     rank_map = load_ranking_player_map(map_csv)
+    source_names = _atp_players_names(players_csv)
+    canonical_ref = canonical_players()
+    # Auto-map source ids absent from the approved map. Explicit entries are
+    # never re-resolved: auto-mapping fills gaps only, for identity choice.
+    missing = sorted({str(x).strip() for x in top200["player_id"]} - set(rank_map))
+    auto_map = (
+        resolve_ranking_identities(
+            missing,
+            source_names,
+            canonical_ref,
+            _canonical_corpus_stats(match_rows),
+        )
+        if missing
+        else {}
+    )
+    resolve = {**rank_map, **auto_map}
+
     # The filtered seed path is scoped to the seeded set: archive rows outside
     # it are not imports and are never reported. The global unmapped report is
     # a full-import (player_ids=None) concern.
@@ -844,13 +953,30 @@ def ingest_rankings(
     if player_ids is None:
         unmapped = _unmapped_report(top200, rank_map, players_csv)
 
-    canonical = top200["player_id"].map(rank_map)
+    canonical = top200["player_id"].map(resolve)
     mapped = cast(pd.DataFrame, top200.loc[canonical.notna()]).copy()
     mapped["player_id"] = canonical[mapped.index]
     retained_top200 = top200_count
+    coverage: dict[str, int] | None = None
     if player_ids is not None:
         mapped = cast(pd.DataFrame, mapped[mapped["player_id"].isin(player_ids)])
         retained_top200 = len(mapped)
+        # Seed coverage: how many seeded players got official top-200 history,
+        # how many source ids auto-mapped for them, and how many seed-relevant
+        # source ids (name matching a seeded player) remain unresolved.
+        auto_mapped_count = sum(1 for sid, cid in auto_map.items() if cid in player_ids)
+        unresolved_ids = {str(s).strip() for s in top200["player_id"]} - set(resolve)
+        unresolved_count = sum(
+            1
+            for sid in unresolved_ids
+            if _name_matches_seed(source_names.get(sid, ""), player_ids, canonical_ref)
+        )
+        coverage = {
+            "seeded": len(player_ids),
+            "covered": len(set(mapped["player_id"])),
+            "auto_mapped": auto_mapped_count,
+            "unresolved": unresolved_count,
+        }
     # Dedupe on the PK before the upsert: duplicate (date, player) rows would
     # trip PostgreSQL's "cannot affect row a second time" ON CONFLICT rule.
     mapped = cast(
@@ -872,18 +998,22 @@ def ingest_rankings(
     # ids when supplied, otherwise every mapped canonical id (full import). It
     # only fills NULL/empty/UNK profile IOCs — a verified IOC is never
     # overwritten.
-    ioc_player_ids = player_ids if player_ids is not None else set(rank_map.values())
-    backfill_profile_iocs(rank_map, ioc_player_ids, players_csv)
+    ioc_player_ids = player_ids if player_ids is not None else set(resolve.values())
+    backfill_profile_iocs(resolve, ioc_player_ids, players_csv)
 
     skipped_existing = 0 if force else len(mapped) - upserted
-    summary = {
+    summary: dict[str, object] = {
         "files": len(csv_paths),
         "source_rows": source_rows,
         "top200": retained_top200,
         "upserted": upserted,
         "skipped_existing": skipped_existing,
         "unmapped": int(sum(u["count"] for u in unmapped)),
+        "auto_mapped": len(auto_map),
+        "unresolved": len({str(s).strip() for s in top200["player_id"]} - set(resolve)),
     }
+    if coverage is not None:
+        summary["coverage"] = coverage
     if force:
         print(f"Rankings import: {summary['upserted']} inserted/updated rows (overwrite)")
     else:
@@ -891,11 +1021,17 @@ def ingest_rankings(
             f"Rankings import: {summary['upserted']} inserted/updated rows "
             f"({summary['skipped_existing']} skipped existing)"
         )
-    for u in unmapped:
-        print(
-            f"  unmapped: source_id={u['ranking_player_id']} name={u['ranking_name']!r} "
-            f"rows={u['count']}"
-        )
+    if player_ids is None:  # full import: report global gaps and auto-maps
+        for u in unmapped:
+            print(
+                f"  unmapped: source_id={u['ranking_player_id']} name={u['ranking_name']!r} "
+                f"rows={u['count']}"
+            )
+        for sid in sorted(auto_map):
+            print(
+                f"  auto-mapped: source_id={sid} name={source_names.get(sid, '')!r} "
+                f"-> {auto_map[sid]}"
+            )
     return summary
 
 

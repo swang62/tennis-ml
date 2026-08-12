@@ -18,18 +18,16 @@
 --
 -- Only gold/inference inputs remain; activity and current-match rates are derived on demand.
 --
--- Incremental boundary: this is a time snapshot — each row is the player's
--- post-match state, and a snapshot's value depends only on matches up to its
--- own (match_date, match_id). Because bronze is immutable and append-only,
--- existing snapshots are fixed; a new ETL run adds exactly the snapshots of
--- the new player_matches rows (two per new bronze match) and recomputes no
--- history. The window CTEs below are still evaluated over the FULL
--- player_matches history, so each new snapshot's rolling values are correct.
+-- Incremental boundary: affected-player rebuilds, not append-only. A snapshot
+-- depends on matches up to its own (match_date, match_id), so a historical
+-- bronze insert that lands before existing matches changes the rolling values
+-- of every later snapshot for that player. A run therefore recomputes the FULL
+-- history and returns every row of each player whose (player_id, match_id) set
+-- differs from the target; the delete+insert on the composite unique key then
+-- replaces all stale snapshots for those players in place.
 --
--- Caveat (snapshot boundary): if a mid-history bronze insert ever happened,
--- windows after it would change and this incremental append would silently
--- leave stale snapshots. The append-only contract forbids that; the escape
--- hatch is `dbt build --full-refresh`.
+-- The window CTEs are always evaluated over the FULL player_matches history, so
+-- each returned snapshot carries exactly the values a full rebuild gives.
 
 {{ config(
     materialized="incremental",
@@ -39,14 +37,17 @@
 
 WITH
 {% if is_incremental() %}
--- Snapshots not yet materialized: the (player, match) perspectives of bronze
--- matches this run must add. Keyed on match_id so the boundary is exactly the
--- bronze append identity. DISTINCT: player_matches carries one row per player
--- perspective, so the same match_id appears twice.
-new_match_ids AS (
-    SELECT DISTINCT match_id
-    FROM {{ ref('player_matches') }}
-    WHERE match_id NOT IN (SELECT match_id FROM {{ this }})
+-- Affected players have a missing snapshot or a changed ordinal. Checking the
+-- ordinal makes the model recover when player_matches committed successfully
+-- but a later model/test failed before rolling_features could be rebuilt.
+changed_players AS (
+    SELECT DISTINCT pm.player_id
+    FROM {{ ref('player_matches') }} pm
+    LEFT JOIN {{ this }} t
+        ON t.player_id = pm.player_id
+       AND t.match_id = pm.match_id
+    WHERE t.match_id IS NULL
+       OR t.player_match_number <> pm.player_match_number
 ),
 {% endif %}
 player_surface_matches AS (
@@ -239,10 +240,11 @@ WINDOW
     w10 AS (PARTITION BY s.player_id ORDER BY s.snapshot_date, s.match_id
             ROWS BETWEEN 9 PRECEDING AND CURRENT ROW)
 )
--- Trim to the new snapshots only; every window above was evaluated over the
--- full history, so these rows carry exactly the values a full rebuild gives.
+-- Trim to the affected players' full histories; every window above was
+-- evaluated over the full history, so these rows carry exactly the values a
+-- full rebuild gives and the temp relation holds unique (player_id, match_id)s.
 SELECT * FROM computed
 {% if is_incremental() %}
-WHERE match_id IN (SELECT match_id FROM new_match_ids)
+WHERE player_id IN (SELECT player_id FROM changed_players)
 {% endif %}
 ORDER BY snapshot_date, match_id, player_id

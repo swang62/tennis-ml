@@ -2,9 +2,9 @@
 create:
     ./infra/k3d/start.sh
 
-# Run bronze-to-gold ETL (dbt build).
-db-etl:
-    uv run python src/flows/etl.py
+# Run bronze-to-gold ETL; pass --full-refresh to rebuild silver/gold from bronze.
+db-etl *args:
+    uv run python src/flows/etl.py {{ args }}
 
 # Create PostgreSQL schemas and tables.
 db-init:

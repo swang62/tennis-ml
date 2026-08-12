@@ -20,6 +20,7 @@ import bentoml
 import numpy as np
 import onnxruntime as ort
 import pandas as pd
+import psycopg.errors as _pg_errors
 from bentoml.exceptions import InvalidArgument
 from bentoml.images import Image
 from starlette.applications import Starlette
@@ -93,8 +94,6 @@ SERVING_IMAGE = Image(
 # ── Read-only data endpoints (GET, no auth) ────────────────────────────────
 # Bento APIs are POST-only, so dashboard GET routes use a mounted Starlette app.
 # SQL values are always parameterized; response shapes are a dashboard contract.
-
-import psycopg.errors as _pg_errors
 
 
 def _safe_query(sql: str, params: list | None = None) -> pd.DataFrame:
@@ -286,7 +285,8 @@ _MATCH_HISTORY_SQL = f"""
 SELECT
     pm.match_id, pm.match_date, br.tournament, br.tournament_name, pm.surface, br.round,
     pm.opponent_id, pr.display_name AS opponent_name,
-    pm.opponent_ranking, pm.match_won,
+    COALESCE(pm.opponent_ranking, historical_rank.rank) AS opponent_ranking, pm.match_won,
+    (pr.player_id IS NOT NULL) AS opponent_known,
     pm.aces, pm.double_faults,
     pm.first_serve_points_won, pm.second_serve_points_won,
     pm.total_serve_points, pm.service_games,
@@ -294,6 +294,14 @@ SELECT
 FROM {SILVER_PLAYER_MATCHES} pm
 LEFT JOIN {BRONZE_TABLE} br ON br.match_id = pm.match_id
 LEFT JOIN {BRONZE_PROFILES_TABLE} pr ON pr.player_id = pm.opponent_id
+LEFT JOIN LATERAL (
+    SELECT rank
+    FROM {RANKINGS_TABLE}
+    WHERE player_id = pm.opponent_id
+      AND ranking_date <= pm.match_date
+    ORDER BY ranking_date DESC
+    LIMIT 1
+) historical_rank ON pm.opponent_ranking IS NULL
 WHERE pm.player_id = %s
 ORDER BY pm.match_date DESC, pm.match_id DESC
 LIMIT %s
@@ -510,6 +518,18 @@ def _match_history(request: Request) -> JSONResponse:
         return _err(500, f"match history query failed: {exc}")
     matches = []
     for r in _records(df):
+        # opponent_ranking preserves the source value first, then the official
+        # rank history on/before the match date (both may be NULL). The display
+        # field is ready for the UI: a known (resolved/mapped) opponent with no
+        # top-200 row reads 200+; an unresolved identity reads N/A. Current
+        # rank is never consulted.
+        ranking = r["opponent_ranking"]
+        if ranking is not None:
+            rank_display = ranking
+        elif r.get("opponent_known"):
+            rank_display = "200+"
+        else:
+            rank_display = "N/A"
         matches.append(
             {
                 "match_id": r["match_id"],
@@ -520,7 +540,8 @@ def _match_history(request: Request) -> JSONResponse:
                 "round": r["round"],
                 "opponent_id": r["opponent_id"],
                 "opponent_name": r["opponent_name"],
-                "opponent_ranking": r["opponent_ranking"],
+                "opponent_ranking": ranking,
+                "opponent_rank_display": rank_display,
                 "result": "won" if r["match_won"] == 1 else "lost",
                 "aces": r["aces"],
                 "double_faults": r["double_faults"],

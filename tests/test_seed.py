@@ -336,7 +336,7 @@ def test_seed_rankings_and_enrichment_imports_only_seeded_players(monkeypatch):
 
     # The seed scopes the rankings import (and its IOC fallback) to exactly its
     # match-corpus player set; the fallback is not suppressed.
-    assert calls == [{"player_ids": {"A0E2", "Z355"}, "force": False}]
+    assert calls == [{"player_ids": {"A0E2", "Z355"}, "force": False, "match_rows": None}]
 
 
 def test_seed_rankings_and_enrichment_enriches_only_when_flag(monkeypatch):
@@ -362,7 +362,10 @@ def test_seed_rankings_and_enrichment_force_propagates(monkeypatch):
 
     seed.seed_rankings_and_enrichment(["A0E2"], enrich=True, force=True)
 
-    assert calls == [{"player_ids": {"A0E2"}, "force": True}, ("enrich", ["A0E2"], True)]
+    assert calls == [
+        {"player_ids": {"A0E2"}, "force": True, "match_rows": None},
+        ("enrich", ["A0E2"], True),
+    ]
 
 
 def test_seed_rankings_and_enrichment_skips_empty_corpus(monkeypatch):
@@ -424,7 +427,7 @@ def _patch_seed_writes(monkeypatch, calls):
     monkeypatch.setattr(
         seed,
         "seed_rankings_and_enrichment",
-        lambda ids, enrich, force: calls.append((ids, enrich, force)),
+        lambda ids, enrich, force, **_: calls.append((ids, enrich, force)),
     )
 
 
@@ -501,7 +504,9 @@ def test_main_default_prints_actual_inserted_and_skipped_counts(monkeypatch, cap
     monkeypatch.setattr(seed, "atp_rows_to_bronze", _fake_bronze)  # 2 rows
     monkeypatch.setattr(seed, "insert_bronze_rows", lambda _df, **kwargs: 1)  # noqa: ARG005
     monkeypatch.setattr(seed, "load_profiles_for", lambda _ids, _src, **_kwargs: None)
-    monkeypatch.setattr(seed, "seed_rankings_and_enrichment", lambda _ids, _enrich, _force: None)
+    monkeypatch.setattr(
+        seed, "seed_rankings_and_enrichment", lambda _ids, _enrich, _force, **_: None
+    )
 
     seed.main_default()
 
@@ -517,7 +522,9 @@ def test_main_force_prints_inserted_overwrite_count(monkeypatch, capsys):
     monkeypatch.setattr(seed, "atp_rows_to_bronze", _fake_bronze)
     monkeypatch.setattr(seed, "insert_bronze_rows", lambda _df, **kwargs: 2)  # noqa: ARG005
     monkeypatch.setattr(seed, "load_profiles_for", lambda _ids, _src, **_kwargs: None)
-    monkeypatch.setattr(seed, "seed_rankings_and_enrichment", lambda _ids, _enrich, _force: None)
+    monkeypatch.setattr(
+        seed, "seed_rankings_and_enrichment", lambda _ids, _enrich, _force, **_: None
+    )
 
     seed.main_all(enrich=True, force=True)
 

@@ -48,10 +48,11 @@ class _FakeMlflowClient:
             raise MlflowException("Alias 'champion' not found")
         return self._champion
 
-    def get_experiment_by_name(self, name):
+    def get_experiment_by_name(self, _name):
         return _FakeExperiment()
 
     def search_runs(self, experiment_ids, filter_string, order_by, max_results=1):
+        del experiment_ids, filter_string, order_by, max_results
         return self._runs
 
     def get_run(self, run_id):
@@ -68,7 +69,7 @@ class _FakeMlflowClient:
     def log_text(self, run_id, text, artifact_file):
         self.logged_texts.append((run_id, text, artifact_file))
 
-    def download_artifacts(self, run_id, path):
+    def download_artifacts(self, _run_id, _path):
         return self._download_dir
 
 
@@ -139,6 +140,7 @@ def test_empty_population_insufficient_data(monkeypatch, tmp_path):
     mlflow_runs = []
 
     def fake_start_run(experiment_id=None, run_name=None, tags=None, log_system_metrics=False):
+        del experiment_id, log_system_metrics
         run_id = f"run-{len(mlflow_runs)}"
         mlflow_runs.append({"name": run_name, "tags": tags})
         return MagicMock(
@@ -185,6 +187,7 @@ def test_normal_flow_creates_baseline_and_check(monkeypatch, tmp_path):
     batch_calls = []
 
     def fake_post_batch(url, json=None, headers=None, timeout=None):
+        del url, headers, timeout
         batch_calls.append(json)
         fake_resp = MagicMock()
         fake_resp.raise_for_status = lambda: None
@@ -196,6 +199,7 @@ def test_normal_flow_creates_baseline_and_check(monkeypatch, tmp_path):
     mlflow_runs = []
 
     def fake_start_run(experiment_id=None, run_name=None, tags=None, log_system_metrics=False):
+        del experiment_id, log_system_metrics
         run_id = f"run-{len(mlflow_runs)}-{run_name}"
         mlflow_runs.append({"name": run_name, "tags": tags})
         return MagicMock(
@@ -255,6 +259,7 @@ def test_repeat_check_reuses_existing_runs(monkeypatch, tmp_path):
     monkeypatch.setattr(cd, "to_dataframe", lambda _sql: fake_df)
 
     def fake_post_batch(url, json=None, headers=None, timeout=None):
+        del url, headers, timeout
         fake_resp = MagicMock()
         fake_resp.raise_for_status = lambda: None
         fake_resp.json.return_value = _stub_batch_response(json or [], base_prob=0.68)
@@ -265,6 +270,7 @@ def test_repeat_check_reuses_existing_runs(monkeypatch, tmp_path):
     mlflow_runs = []
 
     def fake_start_run(experiment_id=None, run_name=None, tags=None, log_system_metrics=False):
+        del experiment_id, log_system_metrics
         run_id = f"run-{len(mlflow_runs)}-{run_name}"
         mlflow_runs.append({"name": run_name, "tags": tags})
         return MagicMock(

@@ -129,9 +129,14 @@ def verify_production_identity(model_info: object, champion: Any) -> None:
             "deploy the champion image before evaluating"
         )
     manifest = data.get("manifest")
-    if not isinstance(manifest, dict) or not isinstance(manifest.get("champion"), dict):
+    if manifest is None:
         raise RuntimeError(
             "production Bento has no baked champion manifest — deploy before evaluating"
+        )
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("champion"), dict):
+        raise TypeError(
+            f"production Bento manifest is malformed: expected a dict with a champion "
+            f"dict, got {manifest!r}"
         )
     champ = manifest["champion"]
     expected = {
@@ -179,16 +184,14 @@ def score_incumbent(
         chunk = list(contexts[start : start + chunk_size])
         records = post_batch(chunk)
         if not isinstance(records, list):
-            raise RuntimeError(
-                f"incumbent batch returned {type(records).__name__}, expected a list"
-            )
+            raise TypeError(f"incumbent batch returned {type(records).__name__}, expected a list")
         if len(records) != len(chunk):
             raise RuntimeError(
                 f"incumbent row-count mismatch: sent {len(chunk)} contexts, got {len(records)} rows"
             )
         for i, (ctx, rec) in enumerate(zip(chunk, records, strict=False)):
             if not isinstance(rec, dict):
-                raise RuntimeError(f"incumbent row {i} is {type(rec).__name__}, expected a dict")
+                raise TypeError(f"incumbent row {i} is {type(rec).__name__}, expected a dict")
             expected_ids = tuple(sorted([str(ctx["player_id"]), str(ctx["opponent_id"])]))
             got_ids = (str(rec["player_id"]), str(rec["opponent_id"]))
             if expected_ids != got_ids:
@@ -198,7 +201,7 @@ def score_incumbent(
                 )
             p_win = rec.get("p_win")
             if isinstance(p_win, bool) or not isinstance(p_win, (int, float)):
-                raise RuntimeError(f"incumbent row {i} has an invalid p_win {p_win!r}")
+                raise TypeError(f"incumbent row {i} has an invalid p_win {p_win!r}")
             value = float(p_win)
             if not math.isfinite(value):
                 raise RuntimeError(f"incumbent row {i} returned a non-finite p_win {value!r}")

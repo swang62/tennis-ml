@@ -14,12 +14,14 @@
 --
 -- Return points are derived from the opponent's raw serve totals for similarity rates.
 --
--- Incremental boundary: bronze match_events is immutable and append-only (new
--- input matches are never historical inserts), so each ETL run appends exactly
--- the two perspectives of bronze matches not yet materialized. Window values
--- (player_match_number, matches_30d_before) are still evaluated over the full
--- history, so new rows are correct and existing rows are untouched. Re-running
--- with no new bronze matches inserts nothing (idempotent).
+-- Incremental boundary: affected-player rebuilds, not append-only. A run
+-- materializes every perspective whose (player_id, match_id) is new to the
+-- target, but because ordinals and 30-day counts are windowed over the FULL
+-- history, any player with a newly inserted match must have ALL of their rows
+-- recomputed — including historical bronze inserts that fall before existing
+-- matches. Returning every row of each affected player (not just the missing
+-- match_ids) refreshes stale player_match_number values in place via the
+-- delete+insert on the composite unique key.
 
 {{ config(
     materialized="incremental",
@@ -93,6 +95,25 @@ numbered AS (
         ) AS matches_30d_before
     FROM expanded
 )
+{% if is_incremental() %}
+-- Affected players have a missing perspective or a changed window value. The
+-- comparisons also recover a partial dbt run where this model committed before
+-- a downstream test/model failed.
+, changed_players AS (
+    SELECT DISTINCT numbered.player_id
+    FROM numbered
+    LEFT JOIN {{ this }} t
+        ON t.player_id = numbered.player_id
+       AND t.match_id = numbered.match_id
+    WHERE numbered.match_id IS NOT NULL
+      AND numbered.match_date IS NOT NULL
+      AND (
+          t.match_id IS NULL
+          OR t.player_match_number <> numbered.player_match_number
+          OR t.matches_30d_before <> numbered.matches_30d_before
+      )
+)
+{% endif %}
 SELECT
     match_id,
     match_date,
@@ -121,6 +142,6 @@ FROM numbered
 WHERE match_id IS NOT NULL
   AND match_date IS NOT NULL
 {% if is_incremental() %}
-  AND match_id NOT IN (SELECT match_id FROM {{ this }})
+  AND player_id IN (SELECT player_id FROM changed_players)
 {% endif %}
 ORDER BY match_date, match_id, player_id

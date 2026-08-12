@@ -102,20 +102,35 @@ def main(argv: list[str] | None = None) -> None:
         main_default(enrich=args.enrich, force=args.force)
 
 
-def seed_rankings_and_enrichment(player_ids: list[str], enrich: bool, force: bool) -> None:
+def seed_rankings_and_enrichment(
+    player_ids: list[str],
+    enrich: bool,
+    force: bool,
+    match_rows: list[dict[str, Any]] | None = None,
+) -> None:
     """Import local official rank history for seeded players; enrich when asked.
 
     Rankings come only from the local archive (offline); the import is scoped
-    to the seeded set and is silent about players without rank coverage — never
-    name-matched. ATP_player_database.csv stays the primary IOC source; the
-    ranking-source atp_players.csv fallback fills only seeded profiles still
+    to the seeded set. Source ids absent from the reviewed map are auto-mapped
+    by normalized name (with deterministic activity/rank/id tie-breaks using
+    match_rows), and the returned summary prints seed coverage — covered /
+    seeded players with official top-200 history, auto-mapped source ids, and
+    unresolved identities. ATP_player_database.csv stays the primary IOC source;
+    the ranking-source atp_players.csv fallback fills only seeded profiles still
     missing an IOC (NULL/empty/UNK) and never overwrites a verified one.
     Wikipedia enrichment is gated on --enrich and idempotent unless --force is
     given: profiles that already have a summary are skipped, never overwritten.
     """
     if not player_ids:
         return
-    ingest_rankings(player_ids=set(player_ids), force=force)
+    summary = ingest_rankings(player_ids=set(player_ids), force=force, match_rows=match_rows)
+    coverage = (summary or {}).get("coverage")
+    if coverage:
+        print(
+            f"Rankings coverage: {coverage['covered']}/{coverage['seeded']} seeded players "
+            f"with official top-200 history; {coverage['auto_mapped']} auto-mapped source IDs; "
+            f"{coverage['unresolved']} unresolved."
+        )
     if enrich:
         # enrich_players emits its own per-player lines and batch summary.
         enrich_players(player_ids, force=force)
@@ -152,7 +167,7 @@ def main_default(enrich: bool = False, force: bool = False) -> None:
 
     player_ids = sorted(set(bronze["player1_id"]) | set(bronze["player2_id"]))
     load_profiles_for(player_ids, "seeded", force=force)
-    seed_rankings_and_enrichment(player_ids, enrich, force)
+    seed_rankings_and_enrichment(player_ids, enrich, force, match_rows=matches)
 
 
 def main_all(enrich: bool = False, force: bool = False) -> None:
@@ -181,7 +196,7 @@ def main_all(enrich: bool = False, force: bool = False) -> None:
 
     player_ids = sorted(set(bronze["player1_id"]) | set(bronze["player2_id"]))
     load_profiles_for(player_ids, "seeded", force=force)
-    seed_rankings_and_enrichment(player_ids, enrich, force)
+    seed_rankings_and_enrichment(player_ids, enrich, force, match_rows=matches)
 
 
 if __name__ == "__main__":

@@ -16,7 +16,13 @@ import {
   withAlpha,
 } from "../lib/charts";
 import { yearAxisDomain } from "../lib/rankHistoryAxis";
-import { ROUND_LABEL, TIER_LABEL, formatDelta, formatMetric, formatRate } from "../lib/format";
+import {
+  ROUND_LABEL,
+  TIER_LABEL,
+  formatDelta,
+  formatMetric,
+  formatRate,
+} from "../lib/format";
 
 const SURFACE_COLORS: Record<string, string> = {
   clay: "var(--clay)",
@@ -47,7 +53,7 @@ function Metric({
       {/* Delta cell always renders so the column stays aligned across rows;
           hidden (aria-hidden, invisible) when there is no benchmark. */}
       <span
-        className={`sr-delta num${deltaTone}`}
+        className={`sr-delta num${deltaTone} whitespace-pre`}
         aria-hidden={deltaText == null}
       >
         {deltaText ?? ""}

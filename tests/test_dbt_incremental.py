@@ -56,14 +56,23 @@ def test_incremental_models_configured():
         assert f"unique_key={rendered_key}" in sql, name
 
 
-def test_incremental_predicates_select_only_new_match_ids():
-    """The incremental WHERE is gated on is_incremental() and filters by the
-    bronze append identity (match_id) against the existing relation."""
-    for name, (sql_path, _unique_key) in INCREMENTAL_MODELS.items():
-        sql = _read(sql_path)
-        assert "{% if is_incremental() %}" in sql, name
-        assert "{{ this }}" in sql, name
-        assert "match_id NOT IN (SELECT match_id FROM {{ this }})" in sql, name
+def test_silver_incremental_predicates_rebuild_changed_players():
+    """Silver models compare composite keys and ordinals, then rebuild every
+    row for an affected player so historical inserts cannot leave stale windows."""
+    for name in ("player_matches", "rolling_features"):
+        sql = _read(INCREMENTAL_MODELS[name][0])
+        assert "{% if is_incremental() %}" in sql
+        assert "changed_players AS" in sql
+        assert "t.player_id" in sql
+        assert "t.match_id" in sql
+        assert "player_match_number <>" in sql
+        assert "player_id IN (SELECT player_id FROM changed_players)" in sql
+
+
+def test_gold_incremental_predicate_selects_new_matches():
+    sql = _read(INCREMENTAL_MODELS["match_features"][0])
+    assert "{% if is_incremental() %}" in sql
+    assert "match_id NOT IN (SELECT match_id FROM {{ this }})" in sql
 
 
 def test_aggregate_models_recompute_globally():
@@ -96,7 +105,6 @@ def test_demo_fixture_expansion_arithmetic():
     assert fixture.count(f"'{new_match_id}'") == 1
 
     def select_new(new_ids: set[str], existing: set[str]) -> set[str]:
-        # Mirror of `match_id NOT IN (SELECT match_id FROM {{ this }})`.
         return new_ids - existing
 
     new = select_new({new_match_id}, existing=set())

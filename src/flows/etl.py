@@ -9,6 +9,8 @@ Wikipedia bio enrichment happens at seed time via `just db-seed --enrich`
 (never after ETL); re-run `just db-etl` to pick up new summaries.
 """
 
+import argparse
+import json
 import os
 import re
 import subprocess
@@ -33,6 +35,7 @@ from src.db.conninfo import dbt_env
 from src.utils import load_env
 
 DBT_BUILD_CMD = ["uv", "run", "dbt", "build", "--project-dir", "dbt", "--profiles-dir", "dbt"]
+DBT_RUN_RESULTS = constants.ROOT / "dbt" / "target" / "run_results.json"
 
 ETL_DEPLOYMENT_NAME = "etl"
 # No cron: ETL is triggered by the scrape flow via run_deployment only when new
@@ -41,10 +44,12 @@ WORK_POOL_NAME = "tennis-pool"
 
 
 def run_dbt_build(
-    profiles_dir: str | Path = "dbt", log_file: Path | None = None
+    profiles_dir: str | Path = "dbt",
+    log_file: Path | None = None,
+    full_refresh: bool = False,
 ) -> subprocess.CompletedProcess:
     """Build dbt models, optionally streaming output to ``log_file``."""
-    cmd = DBT_BUILD_CMD
+    cmd = [*DBT_BUILD_CMD, "--full-refresh"] if full_refresh else DBT_BUILD_CMD
     if str(profiles_dir) != "dbt":
         cmd = [*DBT_BUILD_CMD[:-2], "--profiles-dir", str(profiles_dir)]
     env = {**os.environ, **dbt_env(constants.get_database_url())}
@@ -78,10 +83,12 @@ def _etl_log_file() -> Path:
     return LOGS / f"etl_dbt_{timestamp}.log"
 
 
-@task(retries=2, retry_delay_seconds=30)
-def bronze_to_gold() -> int:
+@task(retries=0)
+def bronze_to_gold(full_refresh: bool = False) -> int:
     log_file = _etl_log_file()
-    run_dbt_build(log_file=log_file)
+    mode = "full refresh" if full_refresh else "incremental"
+    print(f"dbt mode: {mode}")
+    run_dbt_build(log_file=log_file, full_refresh=full_refresh)
     with get_conn().cursor() as cur:
         counts = {
             "bronze.match_events": _table_count(cur, BRONZE_TABLE),
@@ -91,8 +98,15 @@ def bronze_to_gold() -> int:
             "gold.player_profiles": _table_count(cur, PROFILES_TABLE),
         }
     for table, count in counts.items():
-        print(f"{table}: {count} rows")
-    print(f"dbt: {_dbt_summary(log_file)}")
+        print(f"{table}: {count} current rows")
+    for model, rows in _dbt_model_rows().items():
+        action = (
+            "rebuilt"
+            if full_refresh or model in {"player_profiles", "tour_averages"}
+            else "inserted/replaced"
+        )
+        print(f"dbt {model}: {rows} rows {action}")
+    print(f"dbt ({mode}): {_dbt_summary(log_file)}")
     return counts[GOLD_TABLE]
 
 
@@ -110,13 +124,25 @@ def _dbt_summary(log_file: Path) -> str:
     return "(no summary line in dbt log)"
 
 
+def _dbt_model_rows() -> dict[str, int]:
+    """Return this invocation's dbt model write counts, not table totals."""
+    results = json.loads(DBT_RUN_RESULTS.read_text()).get("results", [])
+    return {
+        result["unique_id"].rsplit(".", maxsplit=1)[-1]: int(
+            result.get("adapter_response", {}).get("rows_affected") or 0
+        )
+        for result in results
+        if result.get("unique_id", "").startswith("model.")
+    }
+
+
 @flow(log_prints=True)
-def etl_flow():
+def etl_flow(full_refresh: bool = False):
     """Bronze → gold ETL: dbt build only. Enrichment is a seed-time step —
     run `just db-seed --enrich`, then re-run `just db-etl`.
     """
     load_env()
-    rows = bronze_to_gold()
+    rows = bronze_to_gold(full_refresh=full_refresh)
     print(f"ETL complete: {rows} gold rows")
 
 
@@ -148,4 +174,10 @@ def register_deployment() -> None:
 
 
 if __name__ == "__main__":
-    etl_flow()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--full-refresh",
+        action="store_true",
+        help="rebuild all dbt-managed silver/gold models from bronze",
+    )
+    etl_flow(full_refresh=parser.parse_args().full_refresh)

@@ -1419,6 +1419,8 @@ def test_ingest_rankings_upserts_only_mapped_canonical_ids(fake_ingest_conn, tmp
         "upserted": 1,
         "skipped_existing": 0,
         "unmapped": 1,
+        "auto_mapped": 0,
+        "unresolved": 1,
     }
     # Only the single mapped top-200 row is copied; the raw source id 999999
     # and the rank-300 row never reach the table.
@@ -1686,6 +1688,14 @@ def test_ingest_rankings_filtered_path_is_silent_and_seeded_scoped(
         "upserted": 2,
         "skipped_existing": 0,
         "unmapped": 0,
+        "auto_mapped": 0,
+        "unresolved": 1,
+        "coverage": {
+            "seeded": 2,
+            "covered": 1,
+            "auto_mapped": 0,
+            "unresolved": 0,
+        },
     }
     assert len(fake_ingest_conn.copied_rows) == 2
     assert {row[1] for row in fake_ingest_conn.copied_rows} == {"A0E2"}
@@ -1723,6 +1733,14 @@ def test_ingest_rankings_seeded_player_without_rank_rows_is_silent(
         "upserted": 0,
         "skipped_existing": 0,
         "unmapped": 0,
+        "auto_mapped": 0,
+        "unresolved": 0,
+        "coverage": {
+            "seeded": 1,
+            "covered": 0,
+            "auto_mapped": 0,
+            "unresolved": 0,
+        },
     }
     assert fake_ingest_conn.copied_rows == []
     out = capsys.readouterr().out
