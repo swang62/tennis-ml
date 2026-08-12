@@ -106,7 +106,9 @@ H2H_COLS: list[str] = [
 
 # ── Similarity-analysis serve/return percentages (NOT model features) ──
 #
-# Appended 10-match style signals for PlayerSimilarity, never FEATURE_COLS.
+# Appended per-side 10-match serve/return signals, never FEATURE_COLS. Order
+# matches the trailing gold.match_features columns and the snapshot contract;
+# PlayerSimilarity itself now reads lifetime gold.player_profiles aggregates.
 SIMILARITY_COLS: list[str] = [
     "player_first_serve_pct_10",
     "opponent_first_serve_pct_10",

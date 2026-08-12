@@ -278,47 +278,24 @@ WHERE player_id = %s
 ORDER BY ranking_date
 """
 
-# Keep the deepest round per tournament before applying the visible limit.
+# Individual match rows, newest first: no tournament dedup, so every round of
+# an occurrence appears (e.g. the Rome final and its earlier rounds) up to the
+# visible limit. bronze.match_date is the tournament start date, so
+# same-occurrence rows tie and are broken deterministically by match_id.
 _MATCH_HISTORY_SQL = f"""
-WITH per_match AS (
-    SELECT
-        pm.match_id, pm.match_date, br.tournament, br.tournament_name, pm.surface, br.round,
-        pm.opponent_id, pr.display_name AS opponent_name,
-        pm.player_ranking, pm.match_won,
-        pm.aces, pm.double_faults,
-        pm.first_serve_points_won, pm.second_serve_points_won,
-        pm.total_serve_points, pm.service_games,
-        pm.break_points_saved, pm.break_points_faced,
-        CASE br.round
-            WHEN 'r128' THEN 7
-            WHEN 'r64'  THEN 6
-            WHEN 'r32'  THEN 5
-            WHEN 'r16'  THEN 4
-            WHEN 'qf'   THEN 3
-            WHEN 'sf'   THEN 2
-            WHEN 'f'    THEN 1
-            ELSE 0
-        END AS round_depth
-    FROM {SILVER_PLAYER_MATCHES} pm
-    LEFT JOIN {BRONZE_TABLE} br ON br.match_id = pm.match_id
-    LEFT JOIN {BRONZE_PROFILES_TABLE} pr ON pr.player_id = pm.opponent_id
-    WHERE pm.player_id = %s
-),
-ranked AS (
-    SELECT per_match.*,
-        ROW_NUMBER() OVER (
-            PARTITION BY tournament_name
-            ORDER BY round_depth ASC, match_date DESC
-        ) AS rn
-    FROM per_match
-)
-SELECT match_id, match_date, tournament, tournament_name, surface, round,
-       opponent_id, opponent_name, player_ranking, match_won,
-       aces, double_faults, first_serve_points_won, second_serve_points_won,
-       total_serve_points, service_games, break_points_saved, break_points_faced
-FROM ranked
-WHERE rn = 1
-ORDER BY match_date DESC, match_id DESC
+SELECT
+    pm.match_id, pm.match_date, br.tournament, br.tournament_name, pm.surface, br.round,
+    pm.opponent_id, pr.display_name AS opponent_name,
+    pm.opponent_ranking, pm.match_won,
+    pm.aces, pm.double_faults,
+    pm.first_serve_points_won, pm.second_serve_points_won,
+    pm.total_serve_points, pm.service_games,
+    pm.break_points_saved, pm.break_points_faced
+FROM {SILVER_PLAYER_MATCHES} pm
+LEFT JOIN {BRONZE_TABLE} br ON br.match_id = pm.match_id
+LEFT JOIN {BRONZE_PROFILES_TABLE} pr ON pr.player_id = pm.opponent_id
+WHERE pm.player_id = %s
+ORDER BY pm.match_date DESC, pm.match_id DESC
 LIMIT %s
 """
 
@@ -543,7 +520,7 @@ def _match_history(request: Request) -> JSONResponse:
                 "round": r["round"],
                 "opponent_id": r["opponent_id"],
                 "opponent_name": r["opponent_name"],
-                "ranking": r["player_ranking"],
+                "opponent_ranking": r["opponent_ranking"],
                 "result": "won" if r["match_won"] == 1 else "lost",
                 "aces": r["aces"],
                 "double_faults": r["double_faults"],
@@ -699,6 +676,22 @@ def _model_info(_request: Request) -> JSONResponse:
     )
 
 
+def _health(_request: Request) -> JSONResponse:
+    """Liveness plus PostgreSQL reachability via an authenticated SELECT 1.
+
+    A 200 implies the service finished initializing (models loaded, schema
+    bootstrapped) — DATA_APP only answers once the service is serving — and
+    that PostgreSQL is reachable right now. The error body is a static
+    message so no connection details leak.
+    """
+    try:
+        execute_df("SELECT 1")
+    except Exception:
+        _log.warning("health check failed: database unreachable")
+        return _err(503, "database unavailable")
+    return _ok({"status": "healthy"})
+
+
 # Mounted at the service root; coexists with the POST-only @bentoml.api routes
 # (the SDK's server checks its own routes first, then falls through to mounts).
 
@@ -734,6 +727,7 @@ DATA_APP = Starlette(
         Route("/head_to_head", _head_to_head, methods=["GET"]),
         Route("/similar_players", _similar_players, methods=["GET"]),
         Route("/model_info", _model_info, methods=["GET"]),
+        Route("/health", _health, methods=["GET"]),
     ],
 )
 

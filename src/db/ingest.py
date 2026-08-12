@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, LiteralString, cast
 
 import pandas as pd
 import requests
 
-from src.constants import BRONZE_PROFILES_TABLE, ROOT
+from src.constants import BRONZE_PROFILES_TABLE, ENRICH_WORKERS, ROOT
 from src.countries import UNK, valid_ioc
 from src.db.client import get_conn, to_dataframe
 from src.features.columns import BRONZE_COLUMNS
@@ -19,6 +20,7 @@ from src.utils import load_env
 
 BRONZE_TABLE = "bronze.match_events"
 GOLD_TABLE = "gold.match_features"
+
 
 # ATP data provides player identity; Wikipedia adds missing enrichment.
 ATP_DATABASE_CSV = ROOT / "data" / "ATP_player_database.csv"
@@ -265,8 +267,12 @@ def _copy_df_into(
     *,
     conflict_col: str,
     update_cols: list[str] | None = None,
-) -> None:
-    """COPY via a transactional stage table so INSERT can apply ON CONFLICT."""
+) -> int:
+    """COPY via a transactional stage table so INSERT can apply ON CONFLICT.
+
+    Returns the number of rows actually inserted/updated, as reported by the
+    database (DO NOTHING skips existing PKs; DO UPDATE counts overwrites).
+    """
     columns = list(df.columns)
     columns_sql = ", ".join(columns)
     conn = get_conn()
@@ -294,10 +300,13 @@ def _copy_df_into(
                     f"ON CONFLICT ({conflict_col}) DO UPDATE SET {updates}",
                 )
             )
+        return int(cur.rowcount or 0)
 
 
 def insert_bronze_rows(df: pd.DataFrame, *, overwrite: bool = False) -> int:
-    """Insert bronze.match_events rows from a DataFrame; returns row count.
+    """Insert bronze.match_events rows from a DataFrame; returns the number of
+    rows actually inserted (0 when every row already exists and overwrite is
+    False).
 
     Shared by the ingest CLI and the dev seed so both paths use one INSERT.
     match_id is the PK: generic ingestion skips an existing match_id
@@ -319,26 +328,34 @@ def insert_bronze_rows(df: pd.DataFrame, *, overwrite: bool = False) -> int:
     if valid_df.empty:
         return 0
 
-    _copy_df_into(
+    return _copy_df_into(
         BRONZE_TABLE,
         cast(pd.DataFrame, valid_df[list(BRONZE_COLUMNS)]),
         conflict_col="match_id",
         update_cols=[c for c in BRONZE_COLUMNS if c != "match_id"] if overwrite else None,
     )
-    return len(valid_df)
 
 
-def load_profiles_for(player_ids: list[str], label: str) -> int:
+def load_profiles_for(player_ids: list[str], label: str, force: bool = False) -> int:
     """Load ATP identities for player_ids and print status (shared with seed).
 
     `label` names the caller in the status line ("seeded"/"ingested"). Returns
-    the number of profiles loaded (0 when the ATP database file is absent).
+    the number of profiles actually written (0 when the ATP database file is
+    absent). Idempotent by default (existing player_id rows are skipped);
+    force=True overwrites them.
     """
     if not ATP_DATABASE_CSV.exists():
         print(f"ATP database not found at {ATP_DATABASE_CSV}, skipping identity load")
         return 0
-    loaded = load_atp_profiles(ATP_DATABASE_CSV, player_ids=set(player_ids))
-    print(f"Loaded {loaded} player profiles for {len(set(player_ids))} {label} players")
+    loaded = load_atp_profiles(ATP_DATABASE_CSV, player_ids=set(player_ids), force=force)
+    requested = len(set(player_ids))
+    if force:
+        print(f"Loaded {loaded} player profiles for {requested} {label} players (overwrite)")
+    else:
+        skipped = requested - loaded
+        print(
+            f"Loaded {loaded} player profiles for {requested} {label} players ({skipped} skipped existing)"
+        )
     return loaded
 
 
@@ -395,9 +412,17 @@ def _parse_birthdate(series: pd.Series, player_ids: pd.Series) -> pd.Series:
 
 
 def load_atp_profiles(
-    csv_path: str | Path = ATP_DATABASE_CSV, player_ids: set[str] | None = None
+    csv_path: str | Path = ATP_DATABASE_CSV,
+    player_ids: set[str] | None = None,
+    force: bool = False,
 ) -> int:
-    """Load typed ATP identity metadata while preserving Wikipedia enrichment."""
+    """Load typed ATP identity metadata while preserving Wikipedia enrichment.
+
+    Idempotent by default: an existing player_id row is skipped (DO NOTHING).
+    Pass force=True to overwrite ATP identity fields of existing rows (DO
+    UPDATE) — enrichment fields (summary, enriched_at) are never touched.
+    Returns the number of profiles actually inserted/updated.
+    """
     atp = pd.read_csv(csv_path, dtype=str)
     if not {"id", "player", "atpname", "hand", "backhand", "ioc"} <= set(atp.columns):
         raise ValueError(f"ATP database CSV missing expected columns: {csv_path}")
@@ -438,15 +463,15 @@ def load_atp_profiles(
         }
     )
 
-    _copy_df_into(
+    inserted = _copy_df_into(
         BRONZE_PROFILES_TABLE,
         cast(pd.DataFrame, df[ATP_PROFILE_COLUMNS]),
         conflict_col="player_id",
-        update_cols=[c for c in ATP_PROFILE_COLUMNS if c != "player_id"],
+        update_cols=[c for c in ATP_PROFILE_COLUMNS if c != "player_id"] if force else None,
     )
     if unresolved:
         print(f"  IOC: {unresolved}/{len(df)} profiles unresolved (missing/invalid -> {UNK})")
-    return len(df)
+    return inserted
 
 
 # ── Ranking Identity Map ───────────────────────────────────────
@@ -769,6 +794,7 @@ def ingest_rankings(
     map_csv: Path = RANKING_PLAYER_MAP_CSV,
     players_csv: Path = ATP_PLAYERS_CSV,
     player_ids: set[str] | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
     """Official-rankings import; returns the import summary.
 
@@ -777,6 +803,9 @@ def ingest_rankings(
     the approved identity map, and unmapped top-200 rows are reported and
     skipped. Raises ValueError on malformed input or an invalid map before any
     database write.
+
+    Idempotent by default: an existing (ranking_date, player_id) row is skipped
+    (DO NOTHING). Pass force=True to overwrite existing rows (DO UPDATE).
 
     player_ids restricts the import to those canonical player ids — the seed
     passes its exact match-corpus player set; None imports every mapped top-200
@@ -793,7 +822,14 @@ def ingest_rankings(
     csv_paths = discover_ranking_csvs(rankings_dir)
     if not csv_paths:
         print("No atp_rankings_*.csv files found under data/raw/rankings; nothing to import")
-        return {"files": 0, "source_rows": 0, "top200": 0, "upserted": 0, "unmapped": 0}
+        return {
+            "files": 0,
+            "source_rows": 0,
+            "top200": 0,
+            "upserted": 0,
+            "skipped_existing": 0,
+            "unmapped": 0,
+        }
 
     rows = load_ranking_rows(csv_paths)
     top200 = cast(pd.DataFrame, rows[rows["rank"] <= 200])
@@ -825,13 +861,12 @@ def ingest_rankings(
 
     upserted = 0
     if not mapped.empty:
-        _copy_df_into(
+        upserted = _copy_df_into(
             BRONZE_RANKINGS_TABLE,
             mapped,
             conflict_col="ranking_date, player_id",
-            update_cols=["rank", "points"],
+            update_cols=["rank", "points"] if force else None,
         )
-        upserted = len(mapped)
 
     # The IOC fallback is scoped to one concrete player set: the selected seed
     # ids when supplied, otherwise every mapped canonical id (full import). It
@@ -840,14 +875,22 @@ def ingest_rankings(
     ioc_player_ids = player_ids if player_ids is not None else set(rank_map.values())
     backfill_profile_iocs(rank_map, ioc_player_ids, players_csv)
 
+    skipped_existing = 0 if force else len(mapped) - upserted
     summary = {
         "files": len(csv_paths),
         "source_rows": source_rows,
         "top200": retained_top200,
         "upserted": upserted,
+        "skipped_existing": skipped_existing,
         "unmapped": int(sum(u["count"] for u in unmapped)),
     }
-    print(f"Rankings import: {summary['upserted']} inserted/updated rows")
+    if force:
+        print(f"Rankings import: {summary['upserted']} inserted/updated rows (overwrite)")
+    else:
+        print(
+            f"Rankings import: {summary['upserted']} inserted/updated rows "
+            f"({summary['skipped_existing']} skipped existing)"
+        )
     for u in unmapped:
         print(
             f"  unmapped: source_id={u['ranking_player_id']} name={u['ranking_name']!r} "
@@ -975,22 +1018,27 @@ def clean_bio_paragraph(text: str) -> str:
     return cleaned[: last_period + 1] if last_period >= 0 else ""
 
 
-def enrich_player(name: str, player_id: str | None = None) -> bool:
-    """Upsert a usable Wikipedia bio, preferring the Playing style paragraph."""
-    pid = player_id or name
+def _fetch_wiki_bio(name: str, pid: str) -> tuple[str, str] | None:
+    """Fetch and parse a Wikipedia bio for one player; no DB access.
+
+    Returns ``(summary_text, page_title)`` when a usable bio is found, else
+    None (printing the per-player SKIP line). Pure HTTP + string parsing, so it
+    is safe to run from worker threads — the batch enricher parallelizes this
+    and performs the DB write on the main thread only.
+    """
     title = search_wikipedia(name)
     if not title:
         print(f"  SKIP {pid}: no Wikipedia match for {name!r}")
-        return False
+        return None
 
     page = fetch_summary(title)
     if not page:
         print(f"  SKIP {pid}: no page data for {title!r}")
-        return False
+        return None
 
     if not page["summary"].strip():
         print(f"  SKIP {pid}: empty Wikipedia summary for {title!r}")
-        return False
+        return None
 
     # Prefer Playing style; fall back to the lead paragraph.
     bio_paragraph = extract_playing_style_paragraph(page["summary"]) or extract_lead_paragraph(
@@ -998,14 +1046,19 @@ def enrich_player(name: str, player_id: str | None = None) -> bool:
     )
     if not bio_paragraph:
         print(f"  SKIP {pid}: no usable paragraph for {title!r}")
-        return False
+        return None
 
     # Prepared statement: None binds as NULL, apostrophes need no escaping.
     summary_text = clean_bio_paragraph(bio_paragraph)
     if not summary_text:
         print(f"  SKIP {pid}: no complete sentence within summary limit")
-        return False
+        return None
 
+    return summary_text, page["title"]
+
+
+def _write_summary(pid: str, summary_text: str, title: str) -> None:
+    """Write a fetched bio to bronze.player_profiles (main thread only)."""
     conn = get_conn()
     conn.execute(
         cast(
@@ -1016,18 +1069,36 @@ def enrich_player(name: str, player_id: str | None = None) -> bool:
         ),
         [summary_text, pid],
     )
-    print(f"  OK {pid}: wrote {len(summary_text)}-char summary from {page['title']}")
+    print(f"  OK {pid}: wrote {len(summary_text)}-char summary from {title}")
+
+
+def enrich_player(name: str, player_id: str | None = None) -> bool:
+    """Upsert a usable Wikipedia bio, preferring the Playing style paragraph."""
+    pid = player_id or name
+    fetched = _fetch_wiki_bio(name, pid)
+    if fetched is None:
+        return False
+    summary_text, title = fetched
+    _write_summary(pid, summary_text, title)
     return True
 
 
 def enrich_players(player_ids: list[str], force: bool = False) -> int:
-    """Best-effort enrich bronze profiles with Wikipedia summaries.
+    """Best-effort enrich of bronze profiles with Wikipedia bios.
 
-    Prints a per-player SKIP/ERROR line for each non-enriched profile and a
-    final summary of the batch outcome counts. Returns the number of profiles
-    enriched. Profiles that already have a summary are skipped unless force is
-    True — the seed's --enrich passes force=True so every selected profile's
-    summary is refreshed.
+    Idempotent by default: profiles that already have a non-empty summary are
+    counted as already enriched and silently skipped, never overwritten. Pass
+    force=True to re-fetch and overwrite every summary. Profiles without a
+    name are counted as no-name skips and never attempted.
+
+    The slow HTTP fetch + parse runs in a thread pool (ENRICH_WORKERS workers);
+    the DB write stays on the main thread because ``get_conn()`` is a
+    process-wide singleton connection that is not safe to share. Per-player
+    lines print only for currently enriching (OK) and failed (SKIP/ERROR)
+    players; pre-skip categories are summarized without per-player lines. The
+    final batch summary distinguishes attempted, already enriched, no name,
+    enriched, and failed (no usable bio or exception). Returns the number of
+    profiles enriched.
     """
     if not player_ids:
         return 0
@@ -1041,28 +1112,39 @@ def enrich_players(player_ids: list[str], force: bool = False) -> int:
         ),
         player_ids,
     ).fetchall()
-    attempted = enriched = skipped = failed = 0
+    enriched = failed = already_enriched = no_name = 0
+    to_enrich: list[tuple[str, str]] = []
     for pid, name, summary in rows:
-        attempted += 1
         if not name:
-            skipped += 1
-            print(f"  SKIP {pid}: no profile name for enrichment")
+            no_name += 1
             continue
         if not force and summary and summary.strip():
-            skipped += 1
-            print(f"  SKIP {pid}: already enriched")
+            already_enriched += 1
             continue
-        try:
-            if enrich_player(name, pid):
+        to_enrich.append((pid, name))
+    attempted = len(to_enrich)
+    if to_enrich:
+        with ThreadPoolExecutor(max_workers=min(ENRICH_WORKERS, len(to_enrich))) as pool:
+            futures = {
+                pool.submit(_fetch_wiki_bio, name, pid): (pid, name) for pid, name in to_enrich
+            }
+            for future in as_completed(futures):
+                pid, name = futures[future]
+                try:
+                    fetched = future.result()
+                except Exception as e:
+                    failed += 1
+                    print(f"  ERROR {pid} ({name}): {e}")
+                    continue
+                if fetched is None:
+                    failed += 1
+                    continue
+                summary_text, title = fetched
+                _write_summary(pid, summary_text, title)
                 enriched += 1
-            else:
-                skipped += 1
-        except Exception as e:
-            failed += 1
-            print(f"  ERROR {pid} ({name}): {e}")
     print(
-        f"Enrichment summary: {attempted} attempted, {enriched} enriched, "
-        f"{skipped} skipped, {failed} failed"
+        f"Enrichment summary: {attempted} attempted, {already_enriched} already enriched, "
+        f"{no_name} no name, {enriched} enriched, {failed} failed"
     )
     return enriched
 

@@ -14,7 +14,9 @@ models:
 
       Snapshot grain: exactly one row per (player_id, match_id); equivalently
       one per (player_id, player_match_number). snapshot_date is the completed
-      match date. Materialized as a table: it is expensive and reused by both
+      match date. Materialized incrementally (append-only by bronze match_id,
+      unique key (player_id, match_id)): old snapshots are fixed and only new
+      matches' snapshots are added; it is expensive and reused by both
       training and inference.
 
       Cold start: rates are computed over however many completed matches fall

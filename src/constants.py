@@ -17,54 +17,55 @@ load_env()
 # --- Environment Variables -----
 IMAGE_NAME = os.getenv("IMAGE_NAME")
 
+
 # --- PostgreSQL connection contract (single DATABASE_URL) ---
-# Applications and dbt derive all connection settings from DATABASE_URL.
-DATABASE_URL = os.getenv("DATABASE_URL")
-
-
-def build_database_url() -> str:
-    """Return DATABASE_URL or fail rather than selecting an implicit backend."""
+def get_database_url() -> str:
+    """Return DATABASE_URL or fail rather than selecting an empty db."""
+    DATABASE_URL = os.getenv("DATABASE_URL")
     if not DATABASE_URL:
-        raise RuntimeError(
-            "missing PostgreSQL configuration: set DATABASE_URL "
-            "(e.g. postgresql://user@127.0.0.1:5432/postgres for local trust or "
-            "postgresql://user:password@host:5432/db for the Compose stack)"
-        )
+        raise RuntimeError("missing PostgreSQL configuration: set DATABASE_URL")
     return DATABASE_URL
 
 
-# --- Core directories ---
+# --- Table names ---
+BRONZE_TABLE = "bronze.match_events"
+BRONZE_PROFILES_TABLE = "bronze.player_profiles"
+RANKINGS_TABLE = "bronze.rankings"
+
+SILVER_PLAYER_MATCHES = "silver.player_matches"
+SILVER_ROLLING_FEATURES = "silver.rolling_features"
+
+GOLD_TABLE = "gold.match_features"
+TOUR_AVERAGES_TABLE = "gold.tour_averages"
+PROFILES_TABLE = "gold.player_profiles"
+
+# ---- Config parameters ----
+ENRICH_WORKERS = 4
+BATCH_MAX_SIZE_ROWS = 1000
+
+# --- Core directories / files ---
 NOTEBOOKS = ROOT / "notebooks"
 PARAMS = NOTEBOOKS / "parameters"
 ARTIFACTS = ROOT / "artifacts"
 OUTPUTS = ARTIFACTS / "notebooks"
 LOGS = ARTIFACTS / "logs"
 DATA_PROCESSED = ROOT / "data" / "processed"
+INIT_SQL = ROOT / "infra" / "postgres" / "init.sql"
 
 # --- Candidate manifest ---
 CANDIDATE_MANIFEST = DATA_PROCESSED / "candidate_manifest.json"
 PRODUCTION_MODEL = "ensemble_lr_model"
 CHAMPION_ALIAS = "champion"
 
-# --- Deployed production Bento (incumbent) endpoint contract ---
-# Evaluation and drift make incumbent predictions only through the deploying
-# Bento's API-key-protected internal routes (host nginx), never by loading
-# incumbent MLflow artifacts. Routes are the nginx allowlist in web/nginx.conf.template.
+# --- Deployed production Bento endpoint ---
 PRODUCTION_BENTO_URL = os.getenv("PRODUCTION_BENTO_URL", "http://127.0.0.1:8187")
 MODEL_INFO_ROUTE = "/api/internal/model-info"
 PREDICT_BATCH_ROUTE = "/api/internal/predict-batch"
 DRIFT_API_KEY_HEADER = "X-Drift-API-Key"
 DRIFT_API_KEY = os.getenv("DRIFT_API_KEY", "")
-# Bento rejects batches above this cap (src/features/inference.BULK_MAX_ROWS);
-# incumbent scoring chunks to stay beneath it.
-INCUMBENT_BATCH_MAX_ROWS = 1000
+
 
 # --- Champion lineage tags (single source of truth for the tag schema) ---
-# 05_evaluate writes these onto the promoted ensemble model version before
-# assigning @champion; src/flows/deploy.py reads them back to resolve exact
-# base pins. Base models carry no aliases — exact version is the contract.
-
-
 def build_lineage_tags(base_pins: dict, aux_pins: dict) -> dict[str, str]:
     """Flatten base/aux pins into champion model version tags.
 
@@ -87,22 +88,3 @@ def build_lineage_tags(base_pins: dict, aux_pins: dict) -> dict[str, str]:
     ):
         tags[f"aux_{key}"] = str(aux_pins[key])
     return tags
-
-
-# --- Table names ---
-BRONZE_TABLE = "bronze.match_events"
-RANKINGS_TABLE = "bronze.rankings"
-SILVER_PLAYER_MATCHES = "silver.player_matches"
-SILVER_ROLLING_FEATURES = "silver.rolling_features"
-GOLD_TABLE = "gold.match_features"
-TOUR_AVERAGES_TABLE = "gold.tour_averages"
-# PROFILES_TABLE is the consumer-facing gold aggregate read: the
-# dbt-materialized, player_id + derived-aggregates-only gold.player_profiles.
-# Consumers needing metadata read BRONZE_PROFILES_TABLE and join it with this
-# table for aggregates (serving/similarity join; inference reads bronze only).
-PROFILES_TABLE = "gold.player_profiles"
-# BRONZE_PROFILES_TABLE is the ingest write target and metadata read: ATP
-# identity loading and Wikipedia enrichment UPSERT here (on player_id). dbt
-# derives gold.player_profiles from this source; gold never duplicates these
-# columns.
-BRONZE_PROFILES_TABLE = "bronze.player_profiles"

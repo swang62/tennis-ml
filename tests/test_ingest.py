@@ -32,6 +32,7 @@ class _FakeCopy:
 class _FakeCursor:
     def __init__(self, conn):
         self._conn = conn
+        self.rowcount = 0
 
     def __enter__(self):
         return self
@@ -41,6 +42,7 @@ class _FakeCursor:
 
     def execute(self, sql, params=None):
         self._conn.statements.append((sql, params))
+        self.rowcount = self._conn.rowcount
         return self
 
     def executemany(self, sql, seq_of_params):
@@ -66,12 +68,18 @@ class _FakeTxn:
 
 
 class _FakeConn:
-    """Minimal psycopg-like connection recording statements and COPY rows."""
+    """Minimal psycopg-like connection recording statements and COPY rows.
+
+    rowcount is the value reported after each execute — the fake's stand-in
+    for the database's actual affected-row count (default 1: everything
+    inserted). Tests exercising skip accounting set it explicitly.
+    """
 
     def __init__(self):
         self.statements: list[tuple[str, object | None]] = []
         self.copied_rows: list[tuple[object, ...]] = []
         self.fetchall_result: list[tuple[object, ...]] = []
+        self.rowcount = 1
 
     def cursor(self, row_factory=None):  # noqa: ARG002 — psycopg cursor API surface
         return _FakeCursor(self)
@@ -420,6 +428,18 @@ def test_insert_bronze_rows_generic_path_still_do_nothing(fake_ingest_conn):
     assert "DO UPDATE" not in insert_sql
 
 
+def test_insert_bronze_rows_returns_db_affected_count(fake_ingest_conn):
+    """The return value is the database's actual inserted count: when every
+    PK already exists the seed reports 0 inserted, not the input row count."""
+    df = ingest.atp_rows_to_bronze([_raw_row()])
+    fake_ingest_conn.rowcount = 0
+
+    assert ingest.insert_bronze_rows(df) == 0
+
+    # The row was still staged/attempted — the DB just skipped the conflict.
+    assert len(fake_ingest_conn.copied_rows) == 1
+
+
 # ── search_wikipedia / fetch_summary ──────────────────────────────
 
 
@@ -495,6 +515,34 @@ def test_fetch_summary_returns_none_for_missing_page(monkeypatch):
     assert ingest.fetch_summary("Missing") is None
 
 
+# ── load_profiles_for (seed status line) ─────────────────────────
+
+
+def test_load_profiles_for_reports_inserted_and_skipped(monkeypatch, tmp_path, capsys):
+    """The seed status line reports actual inserted vs skipped existing."""
+    csv = tmp_path / "atp.csv"
+    csv.write_text("x")
+    monkeypatch.setattr(ingest, "ATP_DATABASE_CSV", csv)
+    monkeypatch.setattr(ingest, "load_atp_profiles", lambda _path, **kwargs: 2)  # noqa: ARG005
+
+    assert ingest.load_profiles_for(["P1", "P2", "P3"], "seeded") == 2
+
+    out = capsys.readouterr().out
+    assert "Loaded 2 player profiles for 3 seeded players (1 skipped existing)" in out
+
+
+def test_load_profiles_for_force_prints_overwrite(monkeypatch, tmp_path, capsys):
+    csv = tmp_path / "atp.csv"
+    csv.write_text("x")
+    monkeypatch.setattr(ingest, "ATP_DATABASE_CSV", csv)
+    monkeypatch.setattr(ingest, "load_atp_profiles", lambda _path, **kwargs: 3)  # noqa: ARG005
+
+    ingest.load_profiles_for(["P1", "P2", "P3"], "seeded", force=True)
+
+    out = capsys.readouterr().out
+    assert "Loaded 3 player profiles for 3 seeded players (overwrite)" in out
+
+
 # ── load_atp_profiles ─────────────────────────────────────────────
 
 
@@ -537,11 +585,13 @@ def _write_profiles_csv(tmp_path: Path) -> Path:
 
 def test_load_atp_profiles_bulk_copies_base_columns(fake_ingest_conn, tmp_path):
     csv = _write_profiles_csv(tmp_path)
+    fake_ingest_conn.rowcount = 2
 
     assert ingest.load_atp_profiles(csv) == 2
 
     # COPY streams the rows into a temp stage, then a single INSERT ... SELECT
-    # applies the PK upsert — never a DuckDB relation scan.
+    # applies the idempotent PK insert (DO NOTHING without --force) — never a
+    # DuckDB relation scan.
     assert any(
         sql == f"COPY stage ({', '.join(ingest.ATP_PROFILE_COLUMNS)}) FROM STDIN"
         for sql, _ in fake_ingest_conn.statements
@@ -549,15 +599,23 @@ def test_load_atp_profiles_bulk_copies_base_columns(fake_ingest_conn, tmp_path):
     assert len(fake_ingest_conn.copied_rows) == 2
     insert_sql, _params = fake_ingest_conn.statements[-1]
     assert insert_sql.startswith(f"INSERT INTO {ingest.BRONZE_PROFILES_TABLE}")
-    assert "ON CONFLICT (player_id) DO UPDATE SET" in insert_sql
+    assert "ON CONFLICT (player_id) DO NOTHING" in insert_sql
 
 
-def test_load_atp_profiles_upsert_never_touches_enrichment(fake_ingest_conn, tmp_path):
-    """ATP upserts preserve Wikipedia enrichment fields."""
+def test_load_atp_profiles_default_never_overwrites(fake_ingest_conn, tmp_path):
+    """Without --force the profile load skips existing player_ids, never updates."""
+    ingest.load_atp_profiles(_write_profiles_csv(tmp_path))
+
+    assert not any("DO UPDATE SET" in s for s, _ in fake_ingest_conn.statements)
+
+
+def test_load_atp_profiles_force_upsert_never_touches_enrichment(fake_ingest_conn, tmp_path):
+    """--force overwrites ATP identity fields but preserves enrichment fields."""
     csv = _write_profiles_csv(tmp_path)
-    ingest.load_atp_profiles(csv)
+    ingest.load_atp_profiles(csv, force=True)
 
     update_sql = next(s for s, _ in fake_ingest_conn.statements if "DO UPDATE SET" in s)
+    assert "ON CONFLICT (player_id) DO UPDATE SET" in update_sql
     for col in ("summary", "enriched_at"):
         assert col not in update_sql
     for col in ("weight", "height", "birthplace", "ioc"):
@@ -770,13 +828,18 @@ def test_enrich_players_skips_already_enriched_and_nameless(monkeypatch, fake_in
         ("P2", "Player Two", "Already enriched."),
         ("P3", None, None),
     ]
-    calls: list[tuple[str, str]] = []
+    fetched: list[tuple[str, str]] = []
     monkeypatch.setattr(
-        ingest, "enrich_player", lambda name, pid: calls.append((pid, name)) or True
+        ingest,
+        "_fetch_wiki_bio",
+        lambda name, pid: fetched.append((pid, name)) or ("Bio for " + name, "Title"),
     )
 
     assert ingest.enrich_players(["P1", "P2", "P3"]) == 1
-    assert calls == [("P1", "Player One")]
+    # Only the not-yet-enriched, named profile is fetched and written.
+    assert fetched == [("P1", "Player One")]
+    update_sqls = [s for s, _ in fake_ingest_conn.statements if "UPDATE" in s]
+    assert len(update_sqls) == 1
 
     # The lookup must use %s placeholders with the ids bound as parameters,
     # and read from bronze metadata only — never gold (dbt-derived).
@@ -787,64 +850,93 @@ def test_enrich_players_skips_already_enriched_and_nameless(monkeypatch, fake_in
     assert params == ["P1", "P2", "P3"]
 
 
-def test_enrich_players_reports_success_skip_and_failure_counts(
+def test_enrich_players_reports_success_failure_and_error_counts(
     capsys, monkeypatch, fake_ingest_conn
 ):
-    """Batch enrichment counts OK/SKIP/ERROR outcomes and prints a summary."""
+    """Batch enrichment counts OK/no-bio/exception outcomes; no-bio and
+    exceptions both count as failed, never skipped."""
     fake_ingest_conn.fetchall_result = [
         ("P1", "Player One", None),
         ("P2", "Player Two", None),
         ("P3", "Player Three", None),
     ]
 
-    def fake_enrich_player(name, pid):
+    def fake_fetch(name, pid):
         if pid == "P1":
-            return True
+            return ("Bio for " + name, "Title")
         if pid == "P2":
             print(f"  SKIP {pid}: no Wikipedia match for {name!r}")
-            return False
+            return None
         raise RuntimeError("Wikipedia API timeout")
 
-    monkeypatch.setattr(ingest, "enrich_player", fake_enrich_player)
+    monkeypatch.setattr(ingest, "_fetch_wiki_bio", fake_fetch)
 
     assert ingest.enrich_players(["P1", "P2", "P3"]) == 1
 
     out = capsys.readouterr().out
+    # Per-player lines survive for failed players (no-bio SKIP, exception ERROR).
     assert "  SKIP P2: no Wikipedia match for 'Player Two'" in out
-    # Exception details are preserved on the per-player ERROR line.
     assert "  ERROR P3 (Player Three): Wikipedia API timeout" in out
-    assert "Enrichment summary: 3 attempted, 1 enriched, 1 skipped, 1 failed" in out
+    # 2 of 3 attempts failed (no match + exception); nothing was "skipped".
+    assert (
+        "Enrichment summary: 3 attempted, 0 already enriched, 0 no name, 1 enriched, 2 failed"
+        in out
+    )
 
 
-def test_enrich_players_counts_precheck_skips(capsys, monkeypatch, fake_ingest_conn):
-    """Profiles skipped before enrichment count as skipped in the summary."""
+def test_enrich_players_counts_precheck_skips_in_summary_only(
+    capsys, monkeypatch, fake_ingest_conn
+):
+    """Already-enriched and no-name profiles are pre-skips: no per-player
+    lines, counted in the summary, and excluded from attempted enrichment."""
     fake_ingest_conn.fetchall_result = [
         ("P1", "Player One", None),
         ("P2", "Player Two", "Already enriched."),
         ("P3", None, None),
     ]
-    monkeypatch.setattr(ingest, "enrich_player", lambda *_args: True)
+    monkeypatch.setattr(ingest, "_fetch_wiki_bio", lambda _name, _pid: ("Bio", "Title"))
 
     assert ingest.enrich_players(["P1", "P2", "P3"]) == 1
 
     out = capsys.readouterr().out
-    assert "  SKIP P2: already enriched" in out
-    assert "  SKIP P3: no profile name for enrichment" in out
-    assert "Enrichment summary: 3 attempted, 1 enriched, 2 skipped, 0 failed" in out
+    assert "  SKIP P2: already enriched" not in out
+    assert "  SKIP P3: no profile name for enrichment" not in out
+    # Only P1 was attempted; the other two are pre-skips in the summary.
+    assert (
+        "Enrichment summary: 1 attempted, 1 already enriched, 1 no name, 1 enriched, 0 failed"
+        in out
+    )
 
 
-def test_enrich_players_force_refreshes_existing_summaries(monkeypatch, fake_ingest_conn):
-    """force=True (the seed's --enrich) rewrites a profile's summary even when
-    one already exists — only nameless profiles are still skipped."""
+def test_enrich_players_all_no_match_players_count_as_failed(capsys, monkeypatch, fake_ingest_conn):
+    """7 no-match players report 7 attempted and 7 failed — never skipped."""
+    fake_ingest_conn.fetchall_result = [(f"P{i}", f"Player {i}", None) for i in range(1, 8)]
+    monkeypatch.setattr(ingest, "_fetch_wiki_bio", lambda _name, _pid: None)
+
+    assert ingest.enrich_players([f"P{i}" for i in range(1, 8)]) == 0
+
+    out = capsys.readouterr().out
+    assert (
+        "Enrichment summary: 7 attempted, 0 already enriched, 0 no name, 0 enriched, 7 failed"
+        in out
+    )
+
+
+def test_enrich_players_never_overwrites_existing_summaries(monkeypatch, fake_ingest_conn):
+    """Enrichment is idempotent: profiles with a summary are never re-fetched
+    or overwritten — only nameless profiles are skipped before the fetch."""
     fake_ingest_conn.fetchall_result = [
         ("P1", "Player One", "Old summary."),
         ("P2", "Player Two", "Another old summary."),
     ]
-    calls: list[str] = []
-    monkeypatch.setattr(ingest, "enrich_player", lambda _name, pid: calls.append(pid) or True)
+    fetched: list[str] = []
+    monkeypatch.setattr(
+        ingest, "_fetch_wiki_bio", lambda _name, pid: fetched.append(pid) or ("Bio", "Title")
+    )
 
-    assert ingest.enrich_players(["P1", "P2"], force=True) == 2
-    assert calls == ["P1", "P2"]
+    assert ingest.enrich_players(["P1", "P2"]) == 0
+    assert fetched == []
+    assert not [s for s, _ in fake_ingest_conn.statements if "UPDATE" in s]
     # The lookup still reads bronze metadata only, with ids bound as params.
     sql, params = fake_ingest_conn.statements[0]
     assert "FROM bronze.player_profiles" in sql
@@ -975,6 +1067,7 @@ def test_load_atp_profiles_normalizes_ioc_and_reports_unresolved(
         ]
     ).to_csv(csv, index=False)
 
+    fake_ingest_conn.rowcount = 4
     assert ingest.load_atp_profiles(csv) == 4
 
     copied = {row[0]: row[11] for row in fake_ingest_conn.copied_rows}
@@ -1324,6 +1417,7 @@ def test_ingest_rankings_upserts_only_mapped_canonical_ids(fake_ingest_conn, tmp
         "source_rows": 3,
         "top200": 2,
         "upserted": 1,
+        "skipped_existing": 0,
         "unmapped": 1,
     }
     # Only the single mapped top-200 row is copied; the raw source id 999999
@@ -1362,6 +1456,7 @@ def test_ingest_rankings_top200_boundary_keeps_200_drops_201(fake_ingest_conn, t
         tmp_path,
         [{"player_id": "100644", "name_first": "Alexander", "name_last": "Zverev", "ioc": ""}],
     )
+    fake_ingest_conn.rowcount = 2
 
     summary = ingest.ingest_rankings(
         tmp_path,
@@ -1372,10 +1467,12 @@ def test_ingest_rankings_top200_boundary_keeps_200_drops_201(fake_ingest_conn, t
     assert summary["source_rows"] == 3
     assert summary["top200"] == 2  # 201 is filtered out before mapping
     assert summary["upserted"] == 2
+    assert summary["skipped_existing"] == 0
     assert sorted(int(r[2]) for r in fake_ingest_conn.copied_rows) == [1, 200]
 
 
-def test_ingest_rankings_upsert_uses_on_conflict_do_update(fake_ingest_conn, tmp_path):
+def test_ingest_rankings_default_skips_existing_pk(fake_ingest_conn, tmp_path):
+    """No --force: an existing (ranking_date, player_id) row is skipped."""
     _write_ranking_csv(tmp_path, "atp_rankings_00s.csv", [["20260105", 1, "207989", "12050"]])
     _write_map_csv(
         tmp_path,
@@ -1397,6 +1494,33 @@ def test_ingest_rankings_upsert_uses_on_conflict_do_update(fake_ingest_conn, tmp
         if s.startswith(f"INSERT INTO {ingest.BRONZE_RANKINGS_TABLE}")
     )
     assert insert_sql.startswith(f"INSERT INTO {ingest.BRONZE_RANKINGS_TABLE}")
+    assert "ON CONFLICT (ranking_date, player_id) DO NOTHING" in insert_sql
+    assert not any("DO UPDATE SET" in s for s, _ in fake_ingest_conn.statements)
+
+
+def test_ingest_rankings_force_overwrites_existing_rows(fake_ingest_conn, tmp_path):
+    """--force: rank history upserts overwrite existing rows."""
+    _write_ranking_csv(tmp_path, "atp_rankings_00s.csv", [["20260105", 1, "207989", "12050"]])
+    _write_map_csv(
+        tmp_path,
+        [{"ranking_player_id": "207989", "ranking_name": "Carlos Alcaraz", "player_id": "A0E2"}],
+    )
+    _write_players_csv(
+        tmp_path, [{"player_id": "207989", "name_first": "C", "name_last": "A", "ioc": ""}]
+    )
+
+    ingest.ingest_rankings(
+        tmp_path,
+        map_csv=tmp_path / "ranking_player_map.csv",
+        players_csv=tmp_path / "atp_players.csv",
+        force=True,
+    )
+
+    insert_sql = next(
+        s
+        for s, _ in fake_ingest_conn.statements
+        if s.startswith(f"INSERT INTO {ingest.BRONZE_RANKINGS_TABLE}")
+    )
     assert "ON CONFLICT (ranking_date, player_id) DO UPDATE SET" in insert_sql
     assert "rank = excluded.rank" in insert_sql
     assert "points = excluded.points" in insert_sql
@@ -1429,6 +1553,31 @@ def test_ingest_rankings_reports_unmapped_rows(fake_ingest_conn, tmp_path, capsy
     assert summary["unmapped"] == 2
     out = capsys.readouterr().out
     assert "unmapped: source_id=999999 name='Nobody Here' rows=2" in out
+
+
+def test_ingest_rankings_print_reports_skipped_existing(fake_ingest_conn, tmp_path, capsys):
+    """A repeat run whose PKs all exist reports 0 inserted and N skipped."""
+    _write_ranking_csv(tmp_path, "atp_rankings_00s.csv", [["20260105", 1, "207989", "12050"]])
+    _write_map_csv(
+        tmp_path,
+        [{"ranking_player_id": "207989", "ranking_name": "Carlos Alcaraz", "player_id": "A0E2"}],
+    )
+    _write_players_csv(
+        tmp_path, [{"player_id": "207989", "name_first": "C", "name_last": "A", "ioc": ""}]
+    )
+    fake_ingest_conn.rowcount = 0  # the (date, player) PK already exists
+
+    summary = ingest.ingest_rankings(
+        tmp_path,
+        map_csv=tmp_path / "ranking_player_map.csv",
+        players_csv=tmp_path / "atp_players.csv",
+    )
+
+    assert summary["upserted"] == 0
+    assert summary["skipped_existing"] == 1
+    assert (
+        "Rankings import: 0 inserted/updated rows (1 skipped existing)" in capsys.readouterr().out
+    )
 
 
 def test_ingest_rankings_filters_to_requested_canonical_ids(fake_ingest_conn, tmp_path):
@@ -1477,7 +1626,14 @@ def test_ingest_rankings_no_archive_returns_zero_import(fake_ingest_conn, tmp_pa
     """An empty local ranking archive is a successful zero-import seed."""
     summary = ingest.ingest_rankings(tmp_path)
 
-    assert summary == {"files": 0, "source_rows": 0, "top200": 0, "upserted": 0, "unmapped": 0}
+    assert summary == {
+        "files": 0,
+        "source_rows": 0,
+        "top200": 0,
+        "upserted": 0,
+        "skipped_existing": 0,
+        "unmapped": 0,
+    }
     assert "No atp_rankings_*.csv files found under data/raw/rankings; nothing to import" in (
         capsys.readouterr().out
     )
@@ -1511,6 +1667,7 @@ def test_ingest_rankings_filtered_path_is_silent_and_seeded_scoped(
         ],
     )
 
+    fake_ingest_conn.rowcount = 2
     summary = ingest.ingest_rankings(
         tmp_path,
         map_csv=tmp_path / "ranking_player_map.csv",
@@ -1527,6 +1684,7 @@ def test_ingest_rankings_filtered_path_is_silent_and_seeded_scoped(
         "source_rows": 3,
         "top200": 2,
         "upserted": 2,
+        "skipped_existing": 0,
         "unmapped": 0,
     }
     assert len(fake_ingest_conn.copied_rows) == 2
@@ -1563,6 +1721,7 @@ def test_ingest_rankings_seeded_player_without_rank_rows_is_silent(
         "source_rows": 1,
         "top200": 0,
         "upserted": 0,
+        "skipped_existing": 0,
         "unmapped": 0,
     }
     assert fake_ingest_conn.copied_rows == []
@@ -1737,7 +1896,9 @@ def test_ingest_rankings_repeat_run_is_idempotent(fake_ingest_conn, tmp_path):
         if s.startswith(f"INSERT INTO {ingest.BRONZE_RANKINGS_TABLE}")
     ]
     assert len(inserts) == 2  # one COPY-stage INSERT per run
-    assert "ON CONFLICT (ranking_date, player_id) DO UPDATE SET" in inserts[0]
+    # Default (idempotent) ingest is DO NOTHING — an existing PK is never
+    # overwritten.
+    assert "ON CONFLICT (ranking_date, player_id) DO NOTHING" in inserts[0]
 
 
 def test_backfill_profile_iocs_updates_only_unk(fake_ingest_conn, tmp_path):

@@ -13,7 +13,7 @@ import papermill as pm
 from src.constants import LOGS, OUTPUTS, PARAMS
 from src.db import training
 from src.db.snapshot import SNAPSHOT_PATH, refresh_snapshot
-from src.utils import ensure_kernel, load_env
+from src.utils import ensure_kernel, load_env, suppress_insecure_tls_warning
 
 # Training notebooks (00-05), run in order.
 NB_ORDER = [
@@ -29,6 +29,7 @@ NB_ORDER = [
 
 # Kernels inherit this environment before their own load_env() cell runs.
 load_env()
+suppress_insecure_tls_warning()
 
 
 def run_notebook(name: str) -> None:
@@ -49,6 +50,17 @@ def run_notebook(name: str) -> None:
         kernel_name=ensure_kernel(),
     )
     print(f"  Done: {name}")
+
+
+def build_similarity_index() -> None:
+    """Rebuild the player similarity index from the fresh DuckDB snapshot.
+
+    Always rebuilds from scratch; training never reuses a previously saved
+    index, so a stale index can never leak into a training run.
+    """
+    from src.models.similarity import PlayerSimilarity
+
+    PlayerSimilarity().build(query=training.to_dataframe)
 
 
 class _Tee:
@@ -85,9 +97,7 @@ if __name__ == "__main__":
         # Build the player similarity index from the DuckDB snapshot so it is
         # always fresh and never depends on a running PostgreSQL.
         print("\nBuilding player similarity index (snapshot)...")
-        from src.models.similarity import PlayerSimilarity
-
-        PlayerSimilarity().build(query=training.to_dataframe)
+        build_similarity_index()
         print("  Similarity index built.")
 
         print(f"Pipeline starting — {len(NB_ORDER)} notebooks")

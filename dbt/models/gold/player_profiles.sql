@@ -12,6 +12,10 @@
 -- DOUBLE PRECISION and NULLIF — never averages of per-match percentages.
 -- Return metrics derive from opponent silver perspectives via self-join,
 -- not from widened silver columns.
+--
+-- Materialization: plain table, rebuilt in full on every ETL run. Career
+-- aggregates change with every new match, so this recomputes globally (never
+-- incremental) by design.
 
 WITH player_agg AS (
     SELECT

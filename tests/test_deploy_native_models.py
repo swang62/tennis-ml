@@ -84,6 +84,52 @@ def test_materialize_native_model_rejects_non_estimator(monkeypatch):
         _materialize("not-a-model", monkeypatch, name="linear_best")
 
 
+def test_materialize_native_model_reuse_keyed_by_exact_mlflow_version(monkeypatch):
+    """The BentoML store model is reused only when its recorded MLflow version
+    equals the pinned version; a different pinned version is re-materialized."""
+    import sys
+
+    from sklearn.linear_model import LogisticRegression
+
+    raw = LogisticRegression()
+    calls = []
+    stored = SimpleNamespace(
+        tag="linear_best:materialized",
+        info=SimpleNamespace(
+            metadata={"mlflow_version": "2", "mlflow_uri": "models:/linear_best/2"}
+        ),
+    )
+
+    def save_model(name_, _model, metadata=None):
+        calls.append((name_, dict(metadata or {})))
+        return SimpleNamespace(tag="linear_best:materialized-new")
+
+    fake_bentoml = SimpleNamespace(
+        models=SimpleNamespace(get=lambda _n: stored),
+        sklearn=SimpleNamespace(save_model=save_model),
+        xgboost=SimpleNamespace(save_model=lambda *_a, **_k: None),
+        lightgbm=SimpleNamespace(save_model=lambda *_a, **_k: None),
+    )
+    fake_mlflow = SimpleNamespace(
+        pyfunc=SimpleNamespace(load_model=lambda _uri: SimpleNamespace(get_raw_model=lambda: raw))
+    )
+    monkeypatch.setitem(sys.modules, "bentoml", fake_bentoml)
+    monkeypatch.setitem(sys.modules, "mlflow", fake_mlflow)
+
+    d = _deploy()
+    # Stored model was materialized from the same pinned MLflow version: reuse.
+    model, _ = d._materialize_native_model(_pin(name="linear_best", version="2"))
+    assert str(model.tag) == "linear_best:materialized"
+    assert calls == []
+
+    # Stored model came from a different MLflow version: re-materialize.
+    model, _ = d._materialize_native_model(_pin(name="linear_best", version="3"))
+    assert calls == [
+        ("linear_best", {"mlflow_uri": "models:/linear_best/3", "mlflow_version": "3"})
+    ]
+    assert str(model.tag) == "linear_best:materialized-new"
+
+
 # --- model_info.json records the GBDT framework, preserving existing fields ---
 
 

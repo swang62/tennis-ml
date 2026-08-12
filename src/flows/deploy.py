@@ -17,6 +17,7 @@ from src.constants import (
     ROOT,
     load_env,
 )
+from src.utils import suppress_insecure_tls_warning
 
 # --- Deploy-only paths and names ---
 TEMPLATE_BENTOFILE = ROOT / "bentofile.yaml"
@@ -27,6 +28,7 @@ STATE_FILE = DATA_PROCESSED / "bento_build_state.json"
 
 # .env is loaded by src.constants before the inline settings are read.
 load_env()
+suppress_insecure_tls_warning()
 
 assert IMAGE_NAME is not None, "IMAGE_NAME not set in env; load_env() must be called first"
 # Docker Hub uses only `latest`; MLflow pins determine the packaged model versions.

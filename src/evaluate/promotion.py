@@ -11,12 +11,13 @@ or HTTP calls and mutates nothing; the notebook owns both.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable, Sequence
 from datetime import date
-from typing import Any, Callable, Sequence
+from typing import Any
 
 import pandas as pd
 
-from src.constants import INCUMBENT_BATCH_MAX_ROWS, PRODUCTION_MODEL
+from src.constants import BATCH_MAX_SIZE_ROWS, PRODUCTION_MODEL
 
 # ── Frozen weighted metric/composite policy (unchanged by the incumbent path) ──
 METRIC_NAMES = [
@@ -160,7 +161,7 @@ def score_incumbent(
     contexts: Sequence[dict[str, object]],
     post_batch: Callable[[list[dict[str, object]]], list[dict[str, object]]],
     *,
-    chunk_size: int = INCUMBENT_BATCH_MAX_ROWS,
+    chunk_size: int = BATCH_MAX_SIZE_ROWS,
 ) -> list[float]:
     """Score raw contexts through the incumbent's private bulk endpoint.
 

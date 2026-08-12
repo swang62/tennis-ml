@@ -1,5 +1,6 @@
 #!/bin/sh
-# Start Bento and Vite against the Homebrew PostgreSQL target in .env.
+# Start Bento (with backend-only auto-reload) and Vite against the Homebrew
+# PostgreSQL target in .env.
 # Preflight never prints credentials and verifies:
 #   - .env exists and provides the single DATABASE_URL
 #   - DRIFT_API_KEY exists in .env (generated high-entropy, never displayed)
@@ -125,6 +126,14 @@ cleanup() {
         [ -n "$pid" ] || continue
         kill -9 "$pid" 2>/dev/null
     done
+    # Preflight guaranteed 3000/5173 were free, so any listener still on them
+    # is from this session (e.g. a worker the reloader respawned between the
+    # pkill above and the arbiter's death). Sweep them so the next run starts
+    # clean; the next preflight would otherwise report a stale port.
+    for port in 3000 5173; do
+        pid=$(port_pid "$port")
+        [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null
+    done
     echo "dev servers stopped" >&2
 }
 STOPPED_BY_SIGNAL=0
@@ -167,8 +176,14 @@ print("dev import complete")
 }
 
 echo "starting Bento on http://127.0.0.1:3000 and Vite on http://127.0.0.1:5173; Ctrl-C stops both"
+# --reload restarts only for files matched by bentofile.yaml include and
+# .bentoignore (src/**, infra/postgres/init.sql, data/processed/*); web/,
+# notebooks/, tests/, and mlruns/ are ignored, so Vite HMR edits never restart
+# Bento. The reloader is a circus plugin thread inside this process, so the
+# process tree and cleanup are unchanged.
 (
-    cd "$ROOT" && exec uv run bentoml serve src/serving/service.py:TennisPredictor --host 127.0.0.1 --port 3000
+    cd "$ROOT" && exec uv run bentoml serve src/serving/service.py:TennisPredictor \
+        --host 127.0.0.1 --port 3000 --reload --working-dir "$ROOT"
 ) &
 BENTO_PID=$!
 (

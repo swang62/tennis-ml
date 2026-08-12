@@ -7,6 +7,28 @@ export function pct(value: number | null): string {
   return `${Math.round(value * 1000) / 10}%`
 }
 
+// Profile serve/return metric card formatters. Percentages always carry one
+// decimal place ("80.0%", "▲ 9.0%") so decimal points line up vertically in
+// the right-aligned value and delta columns; rates keep two-decimal precision.
+
+export function formatMetric(value: number | null): string {
+  if (value == null) return "n/a"
+  return `${(Math.round(value * 1000) / 10).toFixed(1)}%`
+}
+
+export function formatRate(value: number | null): string {
+  if (value == null) return "n/a"
+  return (Math.round(value * 1000) / 1000).toFixed(2)
+}
+
+export function formatDelta(delta: number | null, rate?: boolean): string | null {
+  if (delta == null) return null
+  const change = rate
+    ? (Math.round(Math.abs(delta) * 1000) / 1000).toFixed(2)
+    : `${(Math.round(Math.abs(delta) * 1000) / 10).toFixed(1)}%`
+  return delta > 0 ? `▲ ${change}` : delta < 0 ? `▼ ${change}` : change
+}
+
 // Shared labels and client-side display derivations.
 
 export const TIER_LABEL: Record<TournamentTier, string> = {
@@ -21,13 +43,13 @@ export const TIER_LABEL: Record<TournamentTier, string> = {
 }
 
 export const ROUND_LABEL: Record<MatchRound, string> = {
-  r128: 'R128',
-  r64: 'R64',
-  r32: 'R32',
-  r16: 'R16',
-  qf: 'QF',
-  sf: 'SF',
-  f: 'F',
+  r128: 'Round of 128',
+  r64: 'Round of 64',
+  r32: 'Round of 32',
+  r16: 'Round of 16',
+  qf: 'Quarterfinal',
+  sf: 'Semifinal',
+  f: 'Final',
 }
 
 // Fair decimal odds implied by a zero-margin probability.

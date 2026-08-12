@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test tests/rankHistoryAxis.test.mjs tests/rankChartOption.test.mjs tests/roundLabels.test.mjs tests/profileMetrics.test.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.4",

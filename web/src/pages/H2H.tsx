@@ -216,8 +216,8 @@ export default function H2H() {
         label: "Current rank",
         a: r1,
         b: r2,
-        aText: r1 != null ? `#${r1}` : "n/a",
-        bText: r2 != null ? `#${r2}` : "n/a",
+        aText: r1 != null ? `#${r1}` : "-",
+        bText: r2 != null ? `#${r2}` : "-",
         invert: true,
       });
     }
@@ -487,7 +487,7 @@ export default function H2H() {
                   <div className="mirror-row" key={row.label}>
                     <div className="mirror-half is-left">
                       <span
-                        className={`mirror-value num${aLeads ? " is-grass" : ""}`}
+                        className={`mirror-value num${aLeads ? " is-ice" : ""}`}
                       >
                         {row.aText}
                       </span>
@@ -495,7 +495,7 @@ export default function H2H() {
                     <span className="mirror-label">{row.label}</span>
                     <div className="mirror-half is-right">
                       <span
-                        className={`mirror-value num${bLeads ? " is-grass" : ""}`}
+                        className={`mirror-value num${bLeads ? " is-ice" : ""}`}
                       >
                         {row.bText}
                       </span>
@@ -637,7 +637,7 @@ export default function H2H() {
                           <span className="meeting-winner-name">
                             {aWon ? name(playerA!) : name(playerB!)}
                           </span>
-                          <span className="meeting-won-label">won</span>
+                          <span className="meeting-won-label pl-1">won</span>
                         </span>
                       </div>
                     );

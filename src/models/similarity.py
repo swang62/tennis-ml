@@ -10,7 +10,7 @@ import faiss
 import numpy as np
 import pandas as pd
 
-from src.constants import BRONZE_PROFILES_TABLE, GOLD_TABLE, ROOT
+from src.constants import BRONZE_PROFILES_TABLE, PROFILES_TABLE, ROOT
 from src.db.client import to_dataframe
 
 MODEL_NAME = "BAAI/bge-small-en-v1.5"
@@ -21,92 +21,62 @@ DEFAULT_METADATA = ROOT / "data" / "processed" / "player_metadata.json"
 BIO_COL_PREFIX = "bio_"
 
 # Metadata (names/bios/handedness) comes from bronze.player_profiles; the
-# style state below comes from gold.match_features. Both go through the shared
-# query helper so live and snapshot builds use identical SQL.
-_PLAYER_STATE_SQL = f"""
-WITH player_side AS (
-    SELECT match_id, match_date, surface, player_id AS pid,
-           player_weighted_form_10 AS weighted_form_10,
-           player_first_serve_pct_10 AS first_serve_pct_10,
-           player_first_serve_win_pct_10 AS first_serve_win_pct_10,
-           player_second_serve_win_pct_10 AS second_serve_win_pct_10,
-           player_serve_win_pct_10 AS serve_win_pct_10,
-           player_return_points_won_pct_10 AS return_points_won_pct_10,
-           player_surface_win_rate_10 AS surface_win_rate_10
-    FROM {GOLD_TABLE}
-    UNION ALL
-    SELECT match_id, match_date, surface, opponent_id AS pid,
-           opponent_weighted_form_10 AS weighted_form_10,
-           opponent_first_serve_pct_10 AS first_serve_pct_10,
-           opponent_first_serve_win_pct_10 AS first_serve_win_pct_10,
-           opponent_second_serve_win_pct_10 AS second_serve_win_pct_10,
-           opponent_serve_win_pct_10 AS serve_win_pct_10,
-           opponent_return_points_won_pct_10 AS return_points_won_pct_10,
-           opponent_surface_win_rate_10 AS surface_win_rate_10
-    FROM {GOLD_TABLE}
-),
-latest_state AS (
-    SELECT pid, weighted_form_10,
-           first_serve_pct_10, first_serve_win_pct_10,
-           second_serve_win_pct_10, serve_win_pct_10,
-           return_points_won_pct_10
-    FROM (
-        SELECT pid, weighted_form_10,
-               first_serve_pct_10, first_serve_win_pct_10,
-               second_serve_win_pct_10, serve_win_pct_10,
-               return_points_won_pct_10,
-               ROW_NUMBER() OVER (
-                   PARTITION BY pid ORDER BY match_date DESC, match_id DESC
-               ) AS rn
-        FROM player_side
-    ) AS ranked_state
-    WHERE rn = 1
-),
-latest_surface AS (
-    SELECT pid, surface, surface_win_rate_10
-    FROM (
-        SELECT pid, surface, surface_win_rate_10,
-               ROW_NUMBER() OVER (
-                   PARTITION BY pid, surface ORDER BY match_date DESC, match_id DESC
-               ) AS rn
-        FROM player_side
-    ) AS ranked_surface
-    WHERE rn = 1
-)
-SELECT
-    st.pid AS player_id,
-    st.weighted_form_10,
-    st.first_serve_pct_10,
-    st.first_serve_win_pct_10,
-    st.second_serve_win_pct_10,
-    st.serve_win_pct_10,
-    st.return_points_won_pct_10,
-    MAX(CASE WHEN ls.surface = 'clay' THEN ls.surface_win_rate_10 END)
-        AS clay_win_rate_10,
-    MAX(CASE WHEN ls.surface = 'grass' THEN ls.surface_win_rate_10 END)
-        AS grass_win_rate_10,
-    MAX(CASE WHEN ls.surface = 'hard' THEN ls.surface_win_rate_10 END)
-        AS hard_win_rate_10
-FROM latest_state st
-LEFT JOIN latest_surface ls ON ls.pid = st.pid
-GROUP BY st.pid, st.weighted_form_10,
-         st.first_serve_pct_10, st.first_serve_win_pct_10,
-         st.second_serve_win_pct_10, st.serve_win_pct_10,
-         st.return_points_won_pct_10
+# lifetime playstyle aggregates below come from gold.player_profiles. Both go
+# through the shared query helper so live and snapshot builds use identical SQL.
+
+# Career lifetime playstyle aggregates per player (from gold.player_profiles).
+# Only how a player plays enters the vector: serve shape and aggression,
+# return strength, clutch, and surface preference. Recent rolling match
+# performance (win_rate_10, weighted_form_10, streak, and every *_10 signal
+# in gold.match_features) and identity/career attributes (rank, rank points,
+# match counts, height, age, turned_pro, birthplace, name, player_id) are
+# excluded.
+LIFETIME_PLAYSTYLE_COLS: list[str] = [
+    # Serve shape and points won.
+    "first_serve_in_pct",
+    "first_serve_points_won_pct",
+    "second_serve_points_won_pct",
+    "overall_serve_points_won_pct",
+    # Serve aggression/risk: aces and double faults.
+    "aces_per_first_serve",
+    "aces_per_service_game",
+    "double_faults_per_serve_point",
+    # Clutch serving.
+    "break_points_saved_pct",
+    # Return strength and aggression.
+    "return_points_won_pct",
+    "first_serve_return_points_won_pct",
+    "second_serve_return_points_won_pct",
+    "break_point_conversion_pct",
+    "break_point_opportunities_per_return_game",
+    # Surface preference (career win rate on each surface).
+    "hard_win_rate",
+    "clay_win_rate",
+    "grass_win_rate",
+]
+
+_PLAYER_LIFETIME_SQL = f"""
+SELECT player_id, {", ".join(LIFETIME_PLAYSTYLE_COLS)}
+FROM {PROFILES_TABLE}
 """
 
-# Latest rolling style signals; physical and career attributes are excluded.
-STYLE_COLS: list[str] = [
-    "weighted_form_10",
-    "clay_win_rate_10",
-    "grass_win_rate_10",
-    "hard_win_rate_10",
-    "first_serve_pct_10",
-    "first_serve_win_pct_10",
-    "second_serve_win_pct_10",
-    "serve_win_pct_10",
-    "return_points_won_pct_10",
-]
+# Fixed one-hot categories keep the vector layout stable across builds even
+# when a category never appears in the data (pd.get_dummies would drop it).
+HANDEDNESS_CATEGORIES = ["L", "R"]
+BACKHAND_CATEGORIES = ["1H", "2H"]
+
+
+def _one_hot(df: pd.DataFrame, column: str, categories: list[str]) -> pd.DataFrame:
+    """One-hot `column` into fixed `categories`, missing values all zero."""
+    out = pd.DataFrame(
+        0.0,
+        index=df.index,
+        columns=[f"{column}_{category}" for category in categories],
+        dtype=np.float32,
+    )
+    for category in categories:
+        out[f"{column}_{category}"] = (df[column] == category).astype(np.float32)
+    return out
 
 
 def embed_bio_summaries(profiles: pd.DataFrame, model_name: str = MODEL_NAME) -> pd.DataFrame:
@@ -159,18 +129,25 @@ class PlayerSimilarity:
         if profiles.empty:
             return
 
-        # Latest pre-match absolute state per player from gold.match_features:
-        # weighted form + serve/return percentages from the most recent match
-        # and clay/grass/hard win rates from the most recent match on each
-        # surface.
-        state = query(_PLAYER_STATE_SQL)
+        # Career lifetime playstyle aggregates per player from
+        # gold.player_profiles: serve shape/aggression, return strength,
+        # clutch, and surface preference. Recent rolling match performance
+        # and identity/career attributes are excluded.
+        state = query(_PLAYER_LIFETIME_SQL)
         df = profiles.merge(state, on="player_id", how="left")
-        # Style cells are NULL for players without a match, or without a match
-        # on a surface; impute 0.0 so every profiled player is still indexed.
-        df[STYLE_COLS] = df[STYLE_COLS].fillna(0.0).astype(np.float32)
+        # Career cells are NULL for players without a match; impute 0.0 so
+        # every profiled player is still indexed.
+        df[LIFETIME_PLAYSTYLE_COLS] = df[LIFETIME_PLAYSTYLE_COLS].fillna(0.0).astype(np.float32)
 
-        # One-hot encode categoricals, then stack with style stats and embeddings
-        encoded = pd.get_dummies(df[["backhand", "handedness"]]).astype(np.float32)
+        # One-hot handedness/backhand as playstyle descriptors. Fixed
+        # categories keep the layout deterministic across datasets and builds.
+        encoded = pd.concat(
+            [
+                _one_hot(df, "handedness", HANDEDNESS_CATEGORIES),
+                _one_hot(df, "backhand", BACKHAND_CATEGORIES),
+            ],
+            axis=1,
+        )
 
         # Shared embedding path (also used by the NN static features in 02_tune_nn).
         embeddings = embed_bio_summaries(pd.DataFrame(df[["player_id", "summary"]]))
@@ -180,7 +157,7 @@ class PlayerSimilarity:
             pd.concat(
                 [
                     encoded,
-                    df[STYLE_COLS],
+                    df[LIFETIME_PLAYSTYLE_COLS],
                     embeddings[bio_cols],
                 ],
                 axis=1,

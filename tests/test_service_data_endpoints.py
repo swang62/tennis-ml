@@ -309,7 +309,7 @@ def _match_history_df() -> pd.DataFrame:
                 "round": "r32",
                 "opponent_id": "p9",
                 "opponent_name": "Rival",
-                "player_ranking": 5,
+                "opponent_ranking": 5,
                 "match_won": 0,
                 "aces": 12,
                 "double_faults": 3,
@@ -329,7 +329,7 @@ def _match_history_df() -> pd.DataFrame:
                 "round": "qf",
                 "opponent_id": "p8",
                 "opponent_name": None,
-                "player_ranking": 4,
+                "opponent_ranking": 4,
                 "match_won": 1,
                 "aces": 8,
                 "double_faults": 1,
@@ -356,9 +356,74 @@ def test_match_history_shape_and_default_limit():
     assert matches[0]["match_id"] == "m2"
     assert matches[0]["result"] == "lost"
     assert matches[0]["opponent_name"] == "Rival"
+    assert matches[0]["opponent_ranking"] == 5
     assert matches[1]["result"] == "won"
     assert matches[1]["tournament_name"] is None
     assert matches[1]["opponent_name"] is None
+    assert matches[1]["opponent_ranking"] == 4
+    # The rank shown is the opponent's, never the profile player's, and the
+    # ambiguous old `ranking` field is gone.
+    assert "ranking" not in matches[0]
+    assert "player_ranking" not in matches[0]
+    # Rows are individual matches sorted deterministically; the limit is a
+    # parameter, never interpolated.
+    assert "opponent_ranking" in sql
+    assert "ORDER BY pm.match_date DESC, pm.match_id DESC" in sql
+    assert "LIMIT %s" in sql
+
+
+def test_match_history_returns_individual_matches_not_grouped_by_tournament():
+    """Same-occurrence rounds (Rome final + earlier rounds) all come back as
+    individual rows, newest first, up to the limit — no ROW_NUMBER dedup."""
+    rows = [
+        ("m4", "2026-05-25", "grand_slam", "Roland Garros", "r128", "p9"),
+        ("m3", "2026-05-17", "masters", "Rome", "f", "p8"),
+        ("m2", "2026-05-17", "masters", "Rome", "sf", "p7"),
+        ("m1", "2026-05-17", "masters", "Rome", "r16", "p6"),
+    ]
+    df = pd.DataFrame(
+        [
+            {
+                "match_id": mid,
+                "match_date": date,
+                "tournament": tier,
+                "tournament_name": name,
+                "surface": "clay",
+                "round": rnd,
+                "opponent_id": opp,
+                "opponent_name": opp,
+                "opponent_ranking": i,
+                "match_won": 1,
+                "aces": 0,
+                "double_faults": 0,
+                "first_serve_points_won": 0,
+                "second_serve_points_won": 0,
+                "total_serve_points": 0,
+                "service_games": 0,
+                "break_points_saved": 0,
+                "break_points_faced": 0,
+            }
+            for i, (mid, date, tier, name, rnd, opp) in enumerate(rows, start=1)
+        ]
+    )
+    with patch("src.serving.service.execute_df", return_value=df) as exec:
+        resp = client.get("/match_history?player_id=p1&limit=20")
+    assert resp.status_code == 200
+    sql, params = exec.call_args_list[0].args
+    assert params == ["p1", 20]
+    # No tournament-dedup constructs remain; order is deterministic and the
+    # limit still applies in SQL.
+    assert "ROW_NUMBER" not in sql
+    assert "PARTITION BY" not in sql
+    assert "rn = 1" not in sql
+    assert "round_depth" not in sql
+    assert "ORDER BY pm.match_date DESC, pm.match_id DESC" in sql
+    assert "LIMIT %s" in sql
+    # All three Rome rounds survive as individual matches, newest first.
+    matches = resp.json()["data"]["matches"]
+    assert [m["match_id"] for m in matches] == ["m4", "m3", "m2", "m1"]
+    rome = [m for m in matches if m["tournament_name"] == "Rome"]
+    assert [m["round"] for m in rome] == ["f", "sf", "r16"]
 
 
 def test_match_history_limit_clamped():

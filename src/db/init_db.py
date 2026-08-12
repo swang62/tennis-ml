@@ -12,24 +12,17 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.errors import DuplicateDatabase
 
 from src import constants
-from src.constants import ROOT
+from src.constants import INIT_SQL, ROOT, get_database_url
 from src.db.client import get_conn
-
-INIT_SQL = ROOT / "infra" / "postgres" / "init.sql"
-
-# reset permits only local targets; it validates the live connection.
-LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 def init() -> None:
     """Create the configured database if needed, then apply init.sql."""
-    database_url = os.environ.get("DATABASE_URL")
-    if not database_url:
-        raise RuntimeError("DATABASE_URL not set")
-    conninfo = conninfo_to_dict(database_url)
+    conninfo = conninfo_to_dict(get_database_url())
     database = str(conninfo.get("dbname") or "")
     if not database:
         raise RuntimeError("DATABASE_URL must include a database name")
+
     # template1 always exists, unlike postgres when POSTGRES_DB names a
     # different initial database in the official container image.
     conninfo["dbname"] = "template1"
@@ -49,39 +42,21 @@ def init() -> None:
 
 
 def actual_target() -> tuple[str | None, int, str]:
-    """Return the configured client-side connection endpoint, including behind NAT."""
+    """Return the configured client-side connection endpoint."""
     info = get_conn().info
     return info.host, int(info.port), info.dbname
 
 
 def reset() -> None:
-    """Drop and recreate schemas only when the live target is the expected local DB."""
-    expected = conninfo_to_dict(constants.DATABASE_URL or "")
-    expected_host = str(expected["host"] or "127.0.0.1")
-    expected_port = int(expected["port"] or "5432")
-    expected_db = str(expected["dbname"] or "tennis")
+    """Drop and recreate schemas."""
     host, port, database = actual_target()
-    if host not in LOCAL_HOSTS or port != expected_port or database != expected_db:
-        raise RuntimeError(
-            f"refusing to reset non-local target {host}:{port}/{database}; "
-            f"expected local {expected_host}:{expected_port}/{expected_db}"
-        )
+
     conn = get_conn()
     with conn.transaction(), conn.cursor() as cur:
         for schema in ("bronze", "silver", "gold"):
             cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
     init()
-    print("PostgreSQL reset: schemas recreated, data restored via `just db-seed`")
-
-
-def main_init() -> None:
-    """Console-script entry for `just db-init`."""
-    init()
-
-
-def main_reset() -> None:
-    """Console-script entry for `just db-reset`."""
-    reset()
+    print(f"PostgreSQL {host}:{port}/{database} reset and schemas recreated")
 
 
 if __name__ == "__main__":

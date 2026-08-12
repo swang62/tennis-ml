@@ -13,6 +13,19 @@
 -- Context stays in bronze except surface; consumers rebuild both sides from perspectives.
 --
 -- Return points are derived from the opponent's raw serve totals for similarity rates.
+--
+-- Incremental boundary: bronze match_events is immutable and append-only (new
+-- input matches are never historical inserts), so each ETL run appends exactly
+-- the two perspectives of bronze matches not yet materialized. Window values
+-- (player_match_number, matches_30d_before) are still evaluated over the full
+-- history, so new rows are correct and existing rows are untouched. Re-running
+-- with no new bronze matches inserts nothing (idempotent).
+
+{{ config(
+    materialized="incremental",
+    incremental_strategy="delete+insert",
+    unique_key=["player_id", "match_id"],
+) }}
 
 WITH expanded AS (
     SELECT
@@ -64,6 +77,21 @@ WITH expanded AS (
         player1_total_serve_points AS return_points_available,
         CASE WHEN winner_id = player2_id THEN 1 ELSE 0 END AS match_won
     FROM {{ source('bronze', 'match_events') }}
+),
+-- Activity windows over the FULL expanded history: player ordinals and
+-- strictly-prior 30-day counts depend on every one of a player's matches, so
+-- they must be computed before the incremental filter below trims the output.
+numbered AS (
+    SELECT
+        *,
+        ROW_NUMBER() OVER (
+            PARTITION BY player_id ORDER BY match_date, match_id
+        ) AS player_match_number,
+        COUNT(*) OVER (
+            PARTITION BY player_id ORDER BY match_date
+            RANGE BETWEEN INTERVAL '30 days' PRECEDING AND INTERVAL '1 day' PRECEDING
+        ) AS matches_30d_before
+    FROM expanded
 )
 SELECT
     match_id,
@@ -87,14 +115,12 @@ SELECT
     break_points_faced,
     return_points_won,
     return_points_available,
-    ROW_NUMBER() OVER (
-        PARTITION BY player_id ORDER BY match_date, match_id
-    ) AS player_match_number,
-    COUNT(*) OVER (
-        PARTITION BY player_id ORDER BY match_date
-        RANGE BETWEEN INTERVAL '30 days' PRECEDING AND INTERVAL '1 day' PRECEDING
-    ) AS matches_30d_before
-FROM expanded
+    player_match_number,
+    matches_30d_before
+FROM numbered
 WHERE match_id IS NOT NULL
   AND match_date IS NOT NULL
+{% if is_incremental() %}
+  AND match_id NOT IN (SELECT match_id FROM {{ this }})
+{% endif %}
 ORDER BY match_date, match_id, player_id

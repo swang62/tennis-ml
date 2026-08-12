@@ -8,13 +8,13 @@
 :root {
   color-scheme: dark;
 
-  /* ink / navy surfaces */
-  --bg: #0a0e1a;
-  --bg-soft: #0e1424;
-  --bg-raised: #111a2e;
-  --bg-inset: #0a0f1d;
-  --bg-hover: #17213a;
-  --bg-glow: rgba(56, 88, 148, 0.16);
+  /* ink / slate surfaces */
+  --bg: #0b0e16;
+  --bg-soft: #121623;
+  --bg-raised: #161c2c;
+  --bg-inset: #0e1119;
+  --bg-hover: #1f2638;
+  --bg-glow: rgba(84, 116, 170, 0.13);
 
   /* text */
   --text: #e8edf7;
@@ -22,8 +22,8 @@
   --text-faint: #616e8c;
 
   /* lines */
-  --line: #1c2742;
-  --line-strong: #2b3a5e;
+  --line: #222a3c;
+  --line-strong: #333f58;
 
   /* semantic signals: clay = betting accent only; grass/ice = data */
   --clay: #e0703a;
@@ -32,8 +32,8 @@
   --grass: #4cb98a;
   --grass-soft: rgba(76, 185, 138, 0.14);
   --down: #e87070;
-  --ice: #66a8d1;
-  --ice-soft: rgba(102, 168, 209, 0.14);
+  --ice: #7fb2d9;
+  --ice-soft: rgba(127, 178, 217, 0.14);
 
   /* court texture */
   --court-line: rgba(148, 178, 235, 0.045);
@@ -1353,10 +1353,10 @@ html.light {
   }
 
   .sr-metric {
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
     align-items: baseline;
-    justify-content: space-between;
-    gap: 0.75rem;
+    column-gap: 0.75rem;
     padding: 0.55rem 0;
     border-bottom: 1px solid var(--line);
   }
@@ -1371,17 +1371,13 @@ html.light {
     min-width: 0;
   }
 
-  .sr-value-row {
-    display: inline-flex;
-    align-items: baseline;
-    gap: 0.5rem;
-    flex: none;
-  }
-
+  /* Value and delta each own a right-aligned grid column, so they line up
+     vertically across every row in the card regardless of label width. */
   .sr-value {
     font-size: 1.125rem;
     font-weight: 800;
     font-variant-numeric: tabular-nums;
+    text-align: right;
   }
 
   .sr-delta {
@@ -1389,6 +1385,13 @@ html.light {
     font-weight: 700;
     font-variant-numeric: tabular-nums;
     color: var(--text-dim);
+    text-align: right;
+  }
+
+  /* Empty delta (no tour benchmark) still occupies its column so values keep
+     the same right edge; it is aria-hidden and invisible, not removed. */
+  .sr-delta:empty {
+    visibility: hidden;
   }
 
   .sr-delta.is-grass {
@@ -1401,18 +1404,69 @@ html.light {
 
   /* ---------- tournament table ---------- */
 
+  /* Native vertical scroll: about five full rows plus the (sticky) header
+     visible at once; every fetched row stays reachable by scrolling. The
+     scrollbar is styled with theme tokens (Firefox via scrollbar-color,
+     WebKit via ::-webkit-scrollbar); unsupported browsers fall back to the
+     default scrollbar untouched. */
   .tourney-table-wrap {
     overflow-x: auto;
+    overflow-y: auto;
+    max-height: 15rem;
     -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    scrollbar-color: var(--text-faint) var(--bg-inset);
+  }
+
+  html.light .tourney-table-wrap {
+    scrollbar-color: var(--text-dim) var(--bg-inset);
+  }
+
+  .tourney-table-wrap::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  .tourney-table-wrap::-webkit-scrollbar-track {
+    background: var(--bg-inset);
+    border-radius: 999px;
+  }
+
+  .tourney-table-wrap::-webkit-scrollbar-thumb {
+    background: var(--text-faint);
+    border-radius: 999px;
+    border: 2px solid var(--bg-inset);
+  }
+
+  html.light .tourney-table-wrap::-webkit-scrollbar-thumb {
+    background: var(--text-dim);
+  }
+
+  .tourney-table-wrap::-webkit-scrollbar-thumb:hover {
+    background: var(--text-dim);
+  }
+
+  html.light .tourney-table-wrap::-webkit-scrollbar-thumb:hover {
+    background: var(--text);
+  }
+
+  .tourney-table-wrap::-webkit-scrollbar-corner {
+    background: var(--bg-inset);
   }
 
   .tourney-table {
     width: 100%;
-    border-collapse: collapse;
+    table-layout: auto;
+    border-collapse: separate;
+    border-spacing: 0;
     font-size: 0.8125rem;
   }
 
-  .tourney-table thead {
+  .tourney-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--bg-raised);
     border-bottom: 2px solid var(--line);
   }
 
@@ -1436,6 +1490,10 @@ html.light {
 
   .tourney-table td {
     padding: 0.65rem 0.5rem 0.65rem 0;
+  }
+
+  /* Dates are compact; keep them on one line so they never break mid-value. */
+  .tourney-table td.num {
     white-space: nowrap;
   }
 
@@ -1452,9 +1510,7 @@ html.light {
 
   .tourney-name {
     font-weight: 700;
-    max-width: 14ch;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    overflow-wrap: break-word;
   }
 
   .tourney-round {
@@ -1471,6 +1527,56 @@ html.light {
     border: 1px solid;
     border-radius: 100px;
     padding: 0.1rem 0.55rem;
+  }
+
+  .opponent-vs {
+    font-size: 0.6875rem;
+    font-weight: 500;
+    letter-spacing: 0.12em;
+    color: var(--text-faint);
+  }
+
+  .opponent-rank {
+    font-weight: 500;
+    color: var(--text-faint);
+  }
+
+  .result-text {
+    font-weight: 700;
+  }
+
+  .result-text.is-win {
+    color: var(--grass);
+  }
+
+  .result-text.is-loss {
+    color: var(--clay);
+  }
+
+  /* Compact type/padding on small screens; the table still wraps before the
+     wrap container scrolls, which is reserved for genuinely narrow widths. */
+  @media (max-width: 640px) {
+    .tourney-table {
+      font-size: 0.75rem;
+    }
+
+    .tourney-table th {
+      padding: 0.55rem 0.4rem 0.45rem 0;
+      letter-spacing: 0.1em;
+    }
+
+    .tourney-table td {
+      padding: 0.55rem 0.4rem 0.55rem 0;
+    }
+
+    .surface-pill {
+      font-size: 0.625rem;
+      padding: 0.05rem 0.45rem;
+    }
+
+    .opponent-vs {
+      font-size: 0.625rem;
+    }
   }
 
   /* prediction panel — the clay betting signal */
@@ -1721,5 +1827,4 @@ html.light {
     color: var(--text-faint);
     white-space: nowrap;
   }
-
 }

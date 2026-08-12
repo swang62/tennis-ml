@@ -31,8 +31,33 @@
 --
 -- Model columns are metadata plus FEATURE_COLS. Height and current-match
 -- rates are not model features.
+--
+-- Incremental boundary: bronze is immutable and append-only, so each ETL run
+-- appends exactly one canonical row per new bronze match. New rows are
+-- computed against the FULL silver history (prior snapshots via
+-- player_match_number - 1, H2H over all strictly-prior meetings, the freshly
+-- rebuilt gold.tour_averages singleton), so a new match's row is exactly what
+-- a full rebuild would produce; existing rows are untouched. Re-running with
+-- no new bronze matches inserts nothing (idempotent).
 
-WITH player_match_enriched AS (
+{{ config(
+    materialized="incremental",
+    incremental_strategy="delete+insert",
+    unique_key="match_id",
+) }}
+
+WITH
+{% if is_incremental() %}
+-- Canonical rows not yet materialized, keyed on the bronze append identity.
+-- DISTINCT: player_matches carries one row per player perspective, so the
+-- same match_id appears twice.
+new_match_ids AS (
+    SELECT DISTINCT match_id
+    FROM {{ ref('player_matches') }}
+    WHERE match_id NOT IN (SELECT match_id FROM {{ this }})
+),
+{% endif %}
+player_match_enriched AS (
     SELECT
         pm.match_id,
         pm.match_date,
@@ -115,6 +140,10 @@ WITH player_match_enriched AS (
         ) AS years_pro
 
     FROM {{ ref('player_matches') }} pm
+{% if is_incremental() %}
+    JOIN new_match_ids nm
+        ON nm.match_id = pm.match_id
+{% endif %}
     LEFT JOIN {{ ref('rolling_features') }} pr
         ON pr.player_id = pm.player_id
        AND pr.player_match_number = pm.player_match_number - 1

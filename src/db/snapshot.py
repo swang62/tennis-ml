@@ -7,7 +7,7 @@ from pathlib import Path
 
 import duckdb
 
-from src.constants import DATA_PROCESSED, build_database_url
+from src.constants import DATA_PROCESSED, get_database_url
 from src.features.columns import FEATURE_COLS, SIMILARITY_COLS
 
 # Training's single, atomically replaced local input.
@@ -126,7 +126,7 @@ def refresh_snapshot(path: Path = SNAPSHOT_PATH, pg_url: str | None = None) -> P
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
-        _copy_tables(tmp, pg_url or build_database_url())
+        _copy_tables(tmp, pg_url or get_database_url())
         validate_snapshot(tmp)
         os.replace(tmp, path)
     finally:

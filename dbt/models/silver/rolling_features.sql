@@ -17,8 +17,39 @@
 -- Cast SUM numerators to double precision to avoid PostgreSQL integer division.
 --
 -- Only gold/inference inputs remain; activity and current-match rates are derived on demand.
+--
+-- Incremental boundary: this is a time snapshot — each row is the player's
+-- post-match state, and a snapshot's value depends only on matches up to its
+-- own (match_date, match_id). Because bronze is immutable and append-only,
+-- existing snapshots are fixed; a new ETL run adds exactly the snapshots of
+-- the new player_matches rows (two per new bronze match) and recomputes no
+-- history. The window CTEs below are still evaluated over the FULL
+-- player_matches history, so each new snapshot's rolling values are correct.
+--
+-- Caveat (snapshot boundary): if a mid-history bronze insert ever happened,
+-- windows after it would change and this incremental append would silently
+-- leave stale snapshots. The append-only contract forbids that; the escape
+-- hatch is `dbt build --full-refresh`.
 
-WITH player_surface_matches AS (
+{{ config(
+    materialized="incremental",
+    incremental_strategy="delete+insert",
+    unique_key=["player_id", "match_id"],
+) }}
+
+WITH
+{% if is_incremental() %}
+-- Snapshots not yet materialized: the (player, match) perspectives of bronze
+-- matches this run must add. Keyed on match_id so the boundary is exactly the
+-- bronze append identity. DISTINCT: player_matches carries one row per player
+-- perspective, so the same match_id appears twice.
+new_match_ids AS (
+    SELECT DISTINCT match_id
+    FROM {{ ref('player_matches') }}
+    WHERE match_id NOT IN (SELECT match_id FROM {{ this }})
+),
+{% endif %}
+player_surface_matches AS (
     -- Inclusive 10-match rate on each match's own surface.
     SELECT
         player_id,
@@ -54,6 +85,11 @@ surface_carry AS (
         ) AS hard_last_match_number
     FROM {{ ref('player_matches') }}
 ),
+-- Every snapshot is computed here over the FULL player_matches history:
+-- window values and surface carries for a row depend on all of a player's
+-- matches up to that row, so filtering earlier would silently corrupt the
+-- new rows' values. The incremental filter is applied only in the outermost
+-- SELECT, after every window has been evaluated.
 snapshots AS (
     SELECT
         pm.player_id,
@@ -89,7 +125,8 @@ snapshots AS (
     LEFT JOIN surface_carry sc
         ON sc.player_id = pm.player_id
        AND sc.match_id = pm.match_id
-)
+),
+computed AS (
 SELECT
     s.player_id,
     s.match_id,
@@ -201,4 +238,11 @@ LEFT JOIN player_surface_matches psm_hard
 WINDOW
     w10 AS (PARTITION BY s.player_id ORDER BY s.snapshot_date, s.match_id
             ROWS BETWEEN 9 PRECEDING AND CURRENT ROW)
-ORDER BY s.snapshot_date, s.match_id, s.player_id
+)
+-- Trim to the new snapshots only; every window above was evaluated over the
+-- full history, so these rows carry exactly the values a full rebuild gives.
+SELECT * FROM computed
+{% if is_incremental() %}
+WHERE match_id IN (SELECT match_id FROM new_match_ids)
+{% endif %}
+ORDER BY snapshot_date, match_id, player_id

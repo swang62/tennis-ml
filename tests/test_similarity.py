@@ -12,7 +12,12 @@ import pytest
 
 from src.db import client, training
 from src.models import similarity
-from src.models.similarity import STYLE_COLS, PlayerData, PlayerSimilarity, embed_bio_summaries
+from src.models.similarity import (
+    LIFETIME_PLAYSTYLE_COLS,
+    PlayerData,
+    PlayerSimilarity,
+    embed_bio_summaries,
+)
 
 
 class FakeTextEmbedding:
@@ -40,39 +45,37 @@ def _patch_embedding(monkeypatch: pytest.MonkeyPatch) -> FakeTextEmbedding:
     return fake
 
 
+# Included career lifetime playstyle aggregates (gold.player_profiles) plus
+# the excluded identity/career/recent-form fields that must never enter a
+# vector.
+_GOLD_PROFILE_COLS = [
+    "first_serve_in_pct",
+    "aces_per_first_serve",
+    "first_serve_points_won_pct",
+    "second_serve_points_won_pct",
+    "overall_serve_points_won_pct",
+    "double_faults_per_serve_point",
+    "aces_per_service_game",
+    "break_points_saved_pct",
+    "return_points_won_pct",
+    "first_serve_return_points_won_pct",
+    "second_serve_return_points_won_pct",
+    "break_point_conversion_pct",
+    "break_point_opportunities_per_return_game",
+    "hard_win_rate",
+    "clay_win_rate",
+    "grass_win_rate",
+    "match_count",
+    "career_win_rate",
+    "current_rank",
+    "win_rate_10",
+]
+
+
 def _create_two_table_fixture(con: duckdb.DuckDBPyConnection) -> None:
-    """Create match/profile fixtures including excluded physical attributes."""
+    """Create profile fixtures: bronze metadata + gold lifetime aggregates."""
     con.execute("CREATE SCHEMA gold")
     con.execute("CREATE SCHEMA bronze")
-    con.execute(
-        """
-        CREATE TABLE gold.match_features (
-            match_id VARCHAR,
-            match_date DATE,
-            surface VARCHAR,
-            player_id VARCHAR,
-            opponent_id VARCHAR,
-            player_weighted_form_10 DOUBLE,
-            player_surface_win_rate_10 DOUBLE,
-            opponent_weighted_form_10 DOUBLE,
-            opponent_surface_win_rate_10 DOUBLE,
-            player_first_serve_pct_10 DOUBLE,
-            player_first_serve_win_pct_10 DOUBLE,
-            player_second_serve_win_pct_10 DOUBLE,
-            player_serve_win_pct_10 DOUBLE,
-            player_return_points_won_pct_10 DOUBLE,
-            opponent_first_serve_pct_10 DOUBLE,
-            opponent_first_serve_win_pct_10 DOUBLE,
-            opponent_second_serve_win_pct_10 DOUBLE,
-            opponent_serve_win_pct_10 DOUBLE,
-            opponent_return_points_won_pct_10 DOUBLE,
-            player_age DOUBLE,
-            player_ranking DOUBLE,
-            opponent_age DOUBLE,
-            opponent_ranking DOUBLE
-        )
-        """
-    )
     con.execute(
         """
         CREATE TABLE bronze.player_profiles (
@@ -88,143 +91,142 @@ def _create_two_table_fixture(con: duckdb.DuckDBPyConnection) -> None:
         """
     )
     con.execute(
-        """
-        CREATE TABLE gold.player_profiles (
-            player_id VARCHAR,
-            matches_played INTEGER,
-            career_win_rate DOUBLE
-        )
-        """
-    )
-    # Match columns include style signals followed by excluded age/rank fields.
-    con.executemany(
-        "INSERT INTO gold.match_features VALUES "
-        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [
-            # m1 P1 vs P4 clay
-            (
-                "m1",
-                "2026-05-01",
-                "clay",
-                "P1",
-                "P4",
-                0.80,
-                0.55,
-                0.60,
-                0.30,
-                0.61,
-                0.71,
-                0.49,
-                0.63,
-                0.54,
-                0.56,
-                0.65,
-                0.43,
-                0.57,
-                0.48,
-                30.0,
-                5.0,
-                33.0,
-                20.0,
-            ),
-            # m2 P1 vs P2 grass
-            (
-                "m2",
-                "2026-06-01",
-                "grass",
-                "P1",
-                "P2",
-                0.78,
-                0.60,
-                0.40,
-                0.52,
-                0.60,
-                0.69,
-                0.47,
-                0.61,
-                0.52,
-                0.59,
-                0.68,
-                0.46,
-                0.60,
-                0.51,
-                30.0,
-                5.0,
-                25.0,
-                8.0,
-            ),
-            # m3 P2 vs P4 hard
-            (
-                "m3",
-                "2026-07-01",
-                "hard",
-                "P2",
-                "P4",
-                0.41,
-                0.52,
-                0.36,
-                0.45,
-                0.58,
-                0.67,
-                0.45,
-                0.59,
-                0.50,
-                0.57,
-                0.66,
-                0.44,
-                0.58,
-                0.49,
-                25.0,
-                8.0,
-                33.0,
-                20.0,
-            ),
-            # m4 P1 vs P2 clay (latest for P1 and P2)
-            (
-                "m4",
-                "2026-07-15",
-                "clay",
-                "P1",
-                "P2",
-                0.90,
-                0.58,
-                0.44,
-                0.48,
-                0.62,
-                0.72,
-                0.50,
-                0.64,
-                0.55,
-                0.60,
-                0.70,
-                0.48,
-                0.62,
-                0.53,
-                30.0,
-                5.0,
-                25.0,
-                8.0,
-            ),
-        ],
+        "CREATE TABLE gold.player_profiles (player_id VARCHAR, "
+        + ", ".join(f'"{c}" DOUBLE' for c in _GOLD_PROFILE_COLS)
+        + ")"
     )
     con.executemany(
         "INSERT INTO bronze.player_profiles VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         [
-            ("P1", "Alice", "one", "right", "Great server", 185.0, 2010, "Spain"),
-            ("P2", "Bob", "two", "left", "", 190.0, 2015, "Italy"),
-            ("P3", "Carol", "one", "right", "Solid returner", 178.0, 2020, "USA"),
-            ("P4", "Dave", "two", "right", None, 195.0, 2012, "France"),
-            ("", "Ghost", "one", "right", "No id", 180.0, 2018, "UK"),
+            ("P1", "Alice", "1H", "L", "Great server", 185.0, 2010, "Spain"),
+            ("P2", "Bob", "2H", "R", "", 190.0, 2015, "Italy"),
+            ("P3", "Carol", "1H", "R", "Solid returner", 178.0, 2020, "USA"),
+            ("P4", "Dave", "2H", "L", None, 195.0, 2012, "France"),
+            ("", "Ghost", "1H", "R", "No id", 180.0, 2018, "UK"),
         ],
     )
+    # P3 (and Ghost) have no match history: every playstyle cell is NULL and
+    # must impute to 0.0, while the excluded career fields stay populated.
     con.executemany(
-        "INSERT INTO gold.player_profiles VALUES (?, ?, ?)",
+        "INSERT INTO gold.player_profiles VALUES ("
+        + ", ".join(["?"] * (1 + len(_GOLD_PROFILE_COLS)))
+        + ")",
         [
-            ("P1", 400, 0.72),
-            ("P2", 300, 0.68),
-            ("P3", 100, 0.55),
-            ("P4", 350, 0.70),
-            ("", 50, 0.50),
+            (
+                "P1",
+                0.62,
+                0.20,
+                0.73,
+                0.51,
+                0.65,
+                0.04,
+                0.50,
+                0.62,
+                0.42,
+                0.30,
+                0.55,
+                0.40,
+                0.45,
+                0.55,
+                0.58,
+                0.60,
+                400,
+                0.72,
+                5,
+                0.80,
+            ),
+            (
+                "P2",
+                0.60,
+                0.15,
+                0.70,
+                0.53,
+                0.63,
+                0.06,
+                0.35,
+                0.58,
+                0.44,
+                0.33,
+                0.53,
+                0.42,
+                0.48,
+                0.52,
+                0.60,
+                0.35,
+                300,
+                0.68,
+                8,
+                0.60,
+            ),
+            (
+                "P3",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                0,
+                0.55,
+                50,
+                None,
+            ),
+            (
+                "P4",
+                0.58,
+                0.12,
+                0.68,
+                0.55,
+                0.61,
+                0.08,
+                0.25,
+                0.50,
+                0.46,
+                0.36,
+                0.51,
+                0.44,
+                0.52,
+                0.45,
+                0.30,
+                0.50,
+                350,
+                0.70,
+                20,
+                0.45,
+            ),
+            (
+                "",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                50,
+                0.50,
+                60,
+                0.40,
+            ),
         ],
     )
 
@@ -252,11 +254,11 @@ def _build_with_fixture(tmp_path: Path, monkeypatch) -> PlayerSimilarity:
         con.close()
     return finder
 
-    # One-hot identity precedes STYLE_COLS; bio embeddings follow.
 
-
+# One-hot playstyle descriptors precede LIFETIME_PLAYSTYLE_COLS; bio
+# embeddings follow.
 ONE_HOT = 4
-STYLE = STYLE_COLS
+STYLE = LIFETIME_PLAYSTYLE_COLS
 
 
 def _style_block(vector: object) -> np.ndarray:
@@ -265,35 +267,79 @@ def _style_block(vector: object) -> np.ndarray:
     return arr[ONE_HOT : ONE_HOT + len(STYLE)]
 
 
-def test_build_uses_latest_pre_match_absolute_state(tmp_path: Path, monkeypatch):
+def _style_values(vector: object) -> dict[str, float]:
+    block = _style_block(vector)
+    return {name: float(block[i]) for i, name in enumerate(LIFETIME_PLAYSTYLE_COLS)}
+
+
+def _assert_style(vector: object, expected: dict[str, float], reference: str) -> None:
+    """Check playstyle ratios against a common reference (L2 normalization preserves them)."""
+    values = _style_values(vector)
+    ref = values[reference]
+    assert ref > 0.0
+    for name, expected_value in expected.items():
+        if expected_value == 0.0:
+            assert values[name] == 0.0, f"{name} should impute to 0.0"
+        else:
+            assert np.isclose(
+                values[name] / ref, expected_value / expected[reference], atol=1e-6
+            ), f"ratio mismatch for {name}"
+
+
+def test_build_uses_lifetime_playstyle_aggregates(tmp_path: Path, monkeypatch):
     finder = _build_with_fixture(tmp_path, monkeypatch)
     index = finder.index
     assert index is not None
-    # 4 one-hot + 9 style stats + 4 bio dims.
+    # 4 one-hot + 16 lifetime playstyle stats + 4 bio dims.
     assert index.d == ONE_HOT + len(STYLE) + 4
 
-    p1 = index.reconstruct(finder.player_ids.index("P1"))
-    p1_style = _style_block(p1)
-    # Latest state wins; L2 normalization preserves within-vector ratios.
-    assert np.isclose(p1_style[0] / p1_style[1], 0.90 / 0.58)
-    assert np.isclose(p1_style[2], p1_style[1] * (0.60 / 0.58))
-    assert p1_style[3] == 0.0
-    assert np.isclose(p1_style[4] / p1_style[1], 0.62 / 0.58)
-    assert np.isclose(p1_style[5] / p1_style[1], 0.72 / 0.58)
-    assert np.isclose(p1_style[6] / p1_style[1], 0.50 / 0.58)
-    assert np.isclose(p1_style[7] / p1_style[1], 0.64 / 0.58)
-    assert np.isclose(p1_style[8] / p1_style[1], 0.55 / 0.58)
+    # The vector carries each player's career gold.player_profiles aggregates,
+    # not any recent rolling form.
+    _assert_style(
+        index.reconstruct(finder.player_ids.index("P1")),
+        {
+            "first_serve_in_pct": 0.62,
+            "aces_per_first_serve": 0.20,
+            "first_serve_points_won_pct": 0.73,
+            "second_serve_points_won_pct": 0.51,
+            "overall_serve_points_won_pct": 0.65,
+            "double_faults_per_serve_point": 0.04,
+            "aces_per_service_game": 0.50,
+            "break_points_saved_pct": 0.62,
+            "return_points_won_pct": 0.42,
+            "first_serve_return_points_won_pct": 0.30,
+            "second_serve_return_points_won_pct": 0.55,
+            "break_point_conversion_pct": 0.40,
+            "break_point_opportunities_per_return_game": 0.45,
+            "hard_win_rate": 0.55,
+            "clay_win_rate": 0.58,
+            "grass_win_rate": 0.60,
+        },
+        reference="overall_serve_points_won_pct",
+    )
 
-    p4 = index.reconstruct(finder.player_ids.index("P4"))
-    p4_style = _style_block(p4)
-    # P4 appears only on the opponent side: latest overall is the hard match
-    # (weighted 0.36, hard 0.45, serve fp .57 fw .66 sw .44 sv .58 rp .49)
-    # while clay comes from the only clay match (m1).
-    assert np.isclose(p4_style[0] / p4_style[1], 0.36 / 0.30)
-    assert np.isclose(p4_style[3], p4_style[1] * (0.45 / 0.30))
-    assert p4_style[2] == 0.0
-    assert np.isclose(p4_style[4] / p4_style[1], 0.57 / 0.30)
-    assert np.isclose(p4_style[8] / p4_style[1], 0.49 / 0.30)
+    _assert_style(
+        index.reconstruct(finder.player_ids.index("P4")),
+        {
+            "first_serve_in_pct": 0.58,
+            "aces_per_first_serve": 0.12,
+            "first_serve_points_won_pct": 0.68,
+            "second_serve_points_won_pct": 0.55,
+            "overall_serve_points_won_pct": 0.61,
+            "double_faults_per_serve_point": 0.08,
+            "aces_per_service_game": 0.25,
+            "break_points_saved_pct": 0.50,
+            "return_points_won_pct": 0.46,
+            "first_serve_return_points_won_pct": 0.36,
+            "second_serve_return_points_won_pct": 0.51,
+            "break_point_conversion_pct": 0.44,
+            "break_point_opportunities_per_return_game": 0.52,
+            "hard_win_rate": 0.45,
+            "clay_win_rate": 0.30,
+            "grass_win_rate": 0.50,
+        },
+        reference="overall_serve_points_won_pct",
+    )
 
 
 def test_build_players_on_either_side_included_exactly_once(tmp_path: Path, monkeypatch):
@@ -308,15 +354,13 @@ def test_build_null_and_cold_start_style_cells_imputed_zero(tmp_path: Path, monk
     index = finder.index
     assert index is not None
 
-    # P3 has a profile but no matches: every style stat imputes to 0.0.
+    # P3 has a profile but no matches: every playstyle stat imputes to 0.0.
     p3 = _style_block(index.reconstruct(finder.player_ids.index("P3")))
     assert np.all(p3 == 0.0)
 
-    # P2 never played hard on the winning side... its hard rate comes from m3;
-    # P1 never played hard at all -> 0.0 while other rates stay non-zero.
+    # Players with match history carry non-zero lifetime playstyle stats.
     p1 = _style_block(index.reconstruct(finder.player_ids.index("P1")))
-    assert p1[3] == 0.0
-    assert np.all(p1[:3] > 0.0)
+    assert np.all(p1 > 0.0)
 
 
 def test_build_embeds_bio_and_one_hot_identity(tmp_path: Path, monkeypatch):
@@ -335,13 +379,157 @@ def test_build_embeds_bio_and_one_hot_identity(tmp_path: Path, monkeypatch):
     # Every profiled player's summary is embedded (empty/None normalized to "").
     assert fake.embed_calls == [["Great server", "", "Solid returner", ""]]
     p2 = index.reconstruct(finder.player_ids.index("P2"))
-    # Bio block is ones (normalized); style stats are non-zero and present.
+    # Bio block is ones (normalized); lifetime playstyle stats are non-zero.
     assert np.all(p2[ONE_HOT + len(STYLE) :] > 0.0)
     assert np.all(_style_block(p2) > 0.0)
 
 
+def test_lifetime_playstyle_cols_are_playstyle_only():
+    """LIFETIME_PLAYSTYLE_COLS is exactly the lifetime playstyle signal set:
+    no recent rolling form and no identity/career attributes."""
+    assert LIFETIME_PLAYSTYLE_COLS == [
+        "first_serve_in_pct",
+        "first_serve_points_won_pct",
+        "second_serve_points_won_pct",
+        "overall_serve_points_won_pct",
+        "aces_per_first_serve",
+        "aces_per_service_game",
+        "double_faults_per_serve_point",
+        "break_points_saved_pct",
+        "return_points_won_pct",
+        "first_serve_return_points_won_pct",
+        "second_serve_return_points_won_pct",
+        "break_point_conversion_pct",
+        "break_point_opportunities_per_return_game",
+        "hard_win_rate",
+        "clay_win_rate",
+        "grass_win_rate",
+    ]
+    excluded_names = {
+        # Identity/bio metadata.
+        "player_id",
+        "display_name",
+        "name",
+        "height",
+        "age",
+        "player_age",
+        "turned_pro",
+        "years_pro",
+        "birthplace",
+        "birthdate",
+        "weight",
+        "ioc",
+        "country",
+        # Career/achievement attributes.
+        "ranking",
+        "player_ranking",
+        "rank_points",
+        "current_rank",
+        "latest_rank_points",
+        "rank_points_delta",
+        "match_count",
+        "matches_played",
+        "career_win_rate",
+        "hard_matches",
+        "clay_matches",
+        "grass_matches",
+        "latest_match_date",
+        "recent_snapshot_date",
+        # Recent rolling match performance.
+        "win_rate_10",
+        "weighted_form_10",
+        "streak",
+        "ace_rate_10",
+        "df_rate_10",
+        "aces_per_svc_game_10",
+        "first_serve_pct_10",
+        "first_serve_win_pct_10",
+        "second_serve_win_pct_10",
+        "serve_win_pct_10",
+        "break_points_saved_pct_10",
+        "return_points_won_pct_10",
+        "surface_win_rate_10",
+        "clay_win_rate_10",
+        "grass_win_rate_10",
+        "hard_win_rate_10",
+    }
+    for col in LIFETIME_PLAYSTYLE_COLS:
+        assert col not in excluded_names, col
+
+
+def test_build_is_deterministic_same_data_identical_vectors(tmp_path: Path, monkeypatch):
+    """Rebuilding from identical data yields bit-identical vectors and layout."""
+    _patch_embedding(monkeypatch)
+    monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
+    monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
+    con = duckdb.connect()
+    try:
+        _create_two_table_fixture(con)
+        first = PlayerSimilarity()
+        first.build(query=_duck_query(con))
+        second = PlayerSimilarity()
+        second.build(query=_duck_query(con))
+    finally:
+        con.close()
+    assert first.player_ids == second.player_ids
+    assert first.players == second.players
+    assert first.index is not None and second.index is not None
+    assert first.index.d == second.index.d
+    for i in range(first.index.ntotal):
+        assert np.array_equal(first.index.reconstruct(i), second.index.reconstruct(i))
+
+
+def test_build_one_hot_layout_fixed_when_category_missing(tmp_path: Path, monkeypatch):
+    """Missing one-hot categories must not change the vector dimension."""
+    _patch_embedding(monkeypatch)
+    monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
+    monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
+    con = duckdb.connect()
+    try:
+        _create_two_table_fixture(con)
+        finder = PlayerSimilarity()
+        finder.build(query=_duck_query(con))
+        assert finder.index is not None
+        baseline_dim = finder.index.d
+
+        # No left-handed players and no one-handed backhands anywhere.
+        con.execute("UPDATE bronze.player_profiles SET handedness = 'R', backhand = '2H'")
+        finder2 = PlayerSimilarity()
+        finder2.build(query=_duck_query(con))
+        assert finder2.index is not None
+        assert finder2.index.d == baseline_dim
+    finally:
+        con.close()
+
+
+def test_build_always_rebuilds_index_from_fresh_data(tmp_path: Path, monkeypatch):
+    """build() replaces any previously built index; stale vectors never persist."""
+    _patch_embedding(monkeypatch)
+    monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
+    monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
+    con = duckdb.connect()
+    try:
+        _create_two_table_fixture(con)
+        finder = PlayerSimilarity()
+        finder.build(query=_duck_query(con))
+        assert finder.index is not None
+        old_index = finder.index
+        base = np.array(old_index.reconstruct(0))
+
+        con.execute(
+            "UPDATE gold.player_profiles SET first_serve_points_won_pct = 0.99 "
+            "WHERE player_id = 'P1'"
+        )
+        finder.build(query=_duck_query(con))
+        assert finder.index is not old_index  # a fresh index, not a cached one
+        assert not np.array_equal(base, np.array(finder.index.reconstruct(0)))
+    finally:
+        con.close()
+
+
 def test_build_excludes_physical_and_resume_metrics(tmp_path: Path, monkeypatch):
-    """Excluded physical/career fields leave vectors unchanged; style fields do not."""
+    """Excluded identity/career/recent-form fields leave vectors unchanged;
+    lifetime playstyle fields do not."""
     _patch_embedding(monkeypatch)
     monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
     monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
@@ -353,20 +541,16 @@ def test_build_excludes_physical_and_resume_metrics(tmp_path: Path, monkeypatch)
         assert finder.index is not None
         base = [np.array(finder.index.reconstruct(i)) for i in range(finder.index.ntotal)]
 
-        # Mutate only excluded signals: physical (age, height, birthplace),
-        # résumé (turned_pro), rankings, and career totals/lifetime stats.
-        con.execute(
-            "UPDATE gold.match_features SET player_age = player_age + 10, "
-            "opponent_age = opponent_age + 10, player_ranking = player_ranking + 50, "
-            "opponent_ranking = opponent_ranking + 50"
-        )
+        # Mutate only excluded signals: physical/bio identity (height, turned_pro,
+        # birthplace, display_name), career achievements (match_count,
+        # career_win_rate, current_rank), and recent rolling form (win_rate_10).
         con.execute(
             "UPDATE bronze.player_profiles SET height = height + 5, "
-            "turned_pro = turned_pro - 3, birthplace = 'X'"
+            "turned_pro = turned_pro - 3, birthplace = 'X', display_name = 'X'"
         )
         con.execute(
-            "UPDATE gold.player_profiles SET matches_played = matches_played + 999, "
-            "career_win_rate = 0.99"
+            "UPDATE gold.player_profiles SET match_count = match_count + 999, "
+            "career_win_rate = 0.99, current_rank = 1, win_rate_10 = 0.99"
         )
         finder2 = PlayerSimilarity()
         finder2.build(query=_duck_query(con))
@@ -374,9 +558,11 @@ def test_build_excludes_physical_and_resume_metrics(tmp_path: Path, monkeypatch)
         for i in range(finder2.index.ntotal):
             assert np.array_equal(base[i], finder2.index.reconstruct(i))
 
-        # A real style signal (serve pct) must change the vectors.
+        # A lifetime playstyle signal (career first-serve points won) must
+        # change the vectors.
         con.execute(
-            "UPDATE gold.match_features SET player_first_serve_pct_10 = 0.99 WHERE match_id = 'm4'"
+            "UPDATE gold.player_profiles SET first_serve_points_won_pct = 0.99 "
+            "WHERE player_id = 'P1'"
         )
         finder3 = PlayerSimilarity()
         finder3.build(query=_duck_query(con))

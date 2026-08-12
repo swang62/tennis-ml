@@ -135,7 +135,7 @@ export interface MatchRow {
   round: string
   opponent_id: string
   opponent_name: string | null
-  ranking: number | null
+  opponent_ranking: number | null
   result: 'won' | 'lost'
   aces: number
   double_faults: number

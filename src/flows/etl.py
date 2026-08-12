@@ -47,7 +47,7 @@ def run_dbt_build(
     cmd = DBT_BUILD_CMD
     if str(profiles_dir) != "dbt":
         cmd = [*DBT_BUILD_CMD[:-2], "--profiles-dir", str(profiles_dir)]
-    env = {**os.environ, **dbt_env(constants.build_database_url())}
+    env = {**os.environ, **dbt_env(constants.get_database_url())}
     if log_file is None:
         return subprocess.run(cmd, cwd=constants.ROOT, check=True, env=env)
     log_file.parent.mkdir(parents=True, exist_ok=True)

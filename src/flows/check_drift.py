@@ -36,11 +36,11 @@ from sklearn.metrics import (
 from src import constants
 from src.constants import (
     ARTIFACTS,
+    BATCH_MAX_SIZE_ROWS,
     CHAMPION_ALIAS,
     DRIFT_API_KEY,
     DRIFT_API_KEY_HEADER,
     GOLD_TABLE,
-    INCUMBENT_BATCH_MAX_ROWS,
     MODEL_INFO_ROUTE,
     PREDICT_BATCH_ROUTE,
     PRODUCTION_BENTO_URL,
@@ -49,7 +49,7 @@ from src.constants import (
 from src.db.client import to_dataframe
 from src.evaluate.promotion import resolve_champion, verify_production_identity
 from src.flows.etl import run_dbt_build
-from src.utils import load_env
+from src.utils import load_env, suppress_insecure_tls_warning
 
 LOCK_FILE = ARTIFACTS / ".check_drift.lock"
 EXPERIMENT_NAME = "drift_monitoring"
@@ -92,7 +92,7 @@ def _ensure_experiment(client: MlflowClient) -> str:
 def _db_conn_params() -> dict[str, str | int | None]:
     from urllib.parse import unquote, urlsplit
 
-    raw = constants.build_database_url()
+    raw = constants.get_database_url()
     parts = urlsplit(raw)
     db_name = unquote(parts.path.lstrip("/")) if parts.path else None
     return {
@@ -136,8 +136,8 @@ def _post_batch(contexts: list[dict[str, object]]) -> list[dict[str, object]]:
 
 def _score_batches(contexts: list[dict[str, object]]) -> list[float]:
     probas: list[float] = []
-    for start in range(0, len(contexts), INCUMBENT_BATCH_MAX_ROWS):
-        chunk = contexts[start : start + INCUMBENT_BATCH_MAX_ROWS]
+    for start in range(0, len(contexts), BATCH_MAX_SIZE_ROWS):
+        chunk = contexts[start : start + BATCH_MAX_SIZE_ROWS]
         records = _post_batch(chunk)
         if len(records) != len(chunk):
             raise RuntimeError(f"row-count mismatch: sent {len(chunk)}, got {len(records)}")
@@ -256,6 +256,7 @@ def _drift_summary(
 
 def check_drift() -> int:
     load_env()
+    suppress_insecure_tls_warning()
     client = MlflowClient()
     experiment_id = _ensure_experiment(client)
     start_ts = datetime.now(UTC).isoformat()

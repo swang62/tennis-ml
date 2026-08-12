@@ -300,20 +300,64 @@ def test_build_without_force_rebuilds(monkeypatch):
     assert built["image_tags"] == [("tennis-bento:latest",)]
 
 
+# --- Every deploy packages the on-disk artifacts into the build context ---
+
+
+def test_pinned_bentofile_preserves_packaged_artifact_includes(monkeypatch, tmp_path):
+    """The pinned bentofile keeps every packaged artifact in `include`, so each
+    deploy rebuilds the Bento from the current data/processed files on disk."""
+    d = _deploy()
+    pinned = tmp_path / "bentofile.pinned.yaml"
+    monkeypatch.setattr(d, "PINNED_BENTOFILE", pinned)
+
+    d._write_pinned_bentofile(
+        {"linear": "linear_best:v3", "gbdt": "gbdt_best:v2", "production": "ensemble_lr_model:v7"}
+    )
+
+    import yaml
+
+    config = yaml.safe_load(pinned.read_text())
+    # nn_best is served via the ONNX artifact, not as a BentoModel dep.
+    assert config["models"] == ["linear_best:v3", "gbdt_best:v2", "ensemble_lr_model:v7"]
+    for artifact in [*d.AUX_FILES, d.MODEL_INFO_FILE]:
+        assert artifact.relative_to(d.ROOT).as_posix() in config["include"]
+
+
+def test_check_aux_files_requires_every_packaged_artifact(monkeypatch, tmp_path):
+    """Deploy fails fast when any packaged artifact is missing from disk."""
+    d = _deploy()
+    monkeypatch.setattr(d, "ROOT", tmp_path)
+    files = [tmp_path / "a.pkl", tmp_path / "b.npz", tmp_path / "c.json"]
+    for f in files:
+        f.write_bytes(b"x")
+    monkeypatch.setattr(d, "AUX_FILES", files)
+
+    d._check_aux_files()  # all present: no error
+
+    files[1].unlink()
+    import pytest
+
+    with pytest.raises(RuntimeError, match=r"b\.npz"):
+        d._check_aux_files()
+
+
+# --- Task 2: exact champion lineage; base models carry no aliases ---
+
+
 def test_build_database_url_returns_passwordless_local_url(monkeypatch):
     """Homebrew trust path: the passwordless DATABASE_URL is returned verbatim."""
     import src.constants as c
 
-    monkeypatch.setattr(c, "DATABASE_URL", "postgresql://steve@127.0.0.1:5432/postgres")
-    assert c.build_database_url() == "postgresql://steve@127.0.0.1:5432/postgres"
+    monkeypatch.setenv("DATABASE_URL", "postgresql://steve@127.0.0.1:5432/postgres")
+    assert c.get_database_url() == "postgresql://steve@127.0.0.1:5432/postgres"
 
 
 def test_build_database_url_returns_password_bearing_compose_url(monkeypatch):
     """Compose path: the password-bearing DATABASE_URL is returned verbatim."""
     import src.constants as c
 
-    monkeypatch.setattr(c, "DATABASE_URL", "postgresql://postgres:password@postgres:5432/tennis")
-    assert c.build_database_url() == "postgresql://postgres:password@postgres:5432/tennis"
+    monkeypatch.setenv("DATABASE_URL", "postgresql://postgres:password@postgres:5432/tennis")
+    assert c.get_database_url() == "postgresql://postgres:password@postgres:5432/tennis"
 
 
 def test_build_database_url_missing_contract_fails_fast(monkeypatch):
@@ -323,9 +367,9 @@ def test_build_database_url_missing_contract_fails_fast(monkeypatch):
 
     import src.constants as c
 
-    monkeypatch.setattr(c, "DATABASE_URL", None)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
     with pytest.raises(RuntimeError, match="missing PostgreSQL configuration"):
-        c.build_database_url()
+        c.get_database_url()
 
 
 # --- Task 2: exact champion lineage; base models carry no aliases ---
@@ -521,6 +565,23 @@ def test_build_lineage_tags_flattens_exact_pins():
 
 
 # --- Task 2: static notebook/deploy contracts ---
+
+
+def test_similarity_artifacts_are_fingerprinted_build_inputs():
+    """The on-disk similarity index and metadata are build inputs: changing
+    them changes the fingerprint even when the MLflow lineage is unchanged."""
+    d = _deploy()
+    assert d.SIMILARITY_INDEX in d.SOURCE_FINGERPRINT_FILES
+    assert d.SIMILARITY_METADATA in d.SOURCE_FINGERPRINT_FILES
+
+
+def test_deploy_module_is_not_a_prefect_flow():
+    """Deploy is deliberately manual: the module never imports Prefect or
+    decorates anything with @flow, so running it can never register a run."""
+    src = (_deploy().ROOT / "src" / "flows" / "deploy.py").read_text()
+    assert "import prefect" not in src
+    assert "from prefect" not in src
+    assert "@flow" not in src
 
 
 def test_deploy_source_never_mutates_mlflow_or_resolves_base_aliases():

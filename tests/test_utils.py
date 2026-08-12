@@ -1,8 +1,11 @@
 import json
 import os
 import sys
+import warnings
 
-from src.utils import ensure_kernel, load_env
+import urllib3
+
+from src.utils import ensure_kernel, load_env, suppress_insecure_tls_warning
 
 
 def test_ensure_kernel_registers_repo_local_kernelspec(monkeypatch, tmp_path):
@@ -51,3 +54,36 @@ def test_load_env_is_idempotent(monkeypatch, tmp_path):
     load_env()
 
     assert os.environ.get("FOO") == "bar"
+
+
+def _has_insecure_ignore() -> bool:
+    return any(
+        action == "ignore" and category is urllib3.exceptions.InsecureRequestWarning
+        for action, _message, category, _module, _lineno in warnings.filters
+    )
+
+
+def test_suppress_insecure_tls_warning_requires_opted_in_env(monkeypatch):
+    """No insecure-TLS env setting -> no urllib3 warning is suppressed."""
+    monkeypatch.delenv("MLFLOW_TRACKING_INSECURE_TLS", raising=False)
+    monkeypatch.delenv("PREFECT_API_TLS_INSECURE_SKIP_VERIFY", raising=False)
+
+    with warnings.catch_warnings():
+        suppress_insecure_tls_warning()
+        assert not _has_insecure_ignore()
+
+
+def test_suppress_insecure_tls_warning_opt_in_via_mlflow_env(monkeypatch):
+    monkeypatch.setenv("MLFLOW_TRACKING_INSECURE_TLS", "true")
+
+    with warnings.catch_warnings():
+        suppress_insecure_tls_warning()
+        assert _has_insecure_ignore()
+
+
+def test_suppress_insecure_tls_warning_opt_in_via_prefect_env(monkeypatch):
+    monkeypatch.setenv("PREFECT_API_TLS_INSECURE_SKIP_VERIFY", "True")
+
+    with warnings.catch_warnings():
+        suppress_insecure_tls_warning()
+        assert _has_insecure_ignore()

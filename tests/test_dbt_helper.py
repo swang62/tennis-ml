@@ -18,7 +18,7 @@ def test_run_dbt_build_invokes_dbt_build_with_exact_args(monkeypatch):
         return "fake-result"
 
     monkeypatch.setattr("src.flows.etl.subprocess.run", fake_run)
-    monkeypatch.setattr(etl.constants, "DATABASE_URL", "postgresql://u:p@db:5432/tennis")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@db:5432/tennis")
 
     result = run_dbt_build()
 

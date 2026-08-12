@@ -11,6 +11,10 @@
 -- aggregate over ALL silver.rolling_features snapshots and ALL
 -- silver.player_matches rows.
 --
+-- Materialization: plain table, rebuilt in full on every ETL run. This is a
+-- global aggregate — every new match shifts the pool, so it is recomputed
+-- globally (never incremental) by design.
+--
 -- Fallback semantics (identical destinations to the former feature_defaults):
 --   - Rank / rank-points / streak-like values use the (rounded) median.
 --   - Continuous rates, age, years-pro, and handedness rate use the mean.

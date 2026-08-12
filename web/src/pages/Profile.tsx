@@ -1,27 +1,22 @@
 import ReactECharts from "echarts-for-react";
 import type { EChartsOption } from "echarts";
 import type {
+  MatchHistory,
   PlayerProfile,
   RankHistory,
   ReturnMetrics,
   ServeMetrics,
   SimilarPlayersResponse,
 } from "../api";
-import {
-  Card,
-  Empty,
-  Kicker,
-  Loading,
-  PlayerFlag,
-  ResultBadge,
-} from "../components";
+import { Card, Empty, Kicker, Loading, PlayerFlag } from "../components";
 import {
   axisOption,
   baseChartOption,
   chartTokens,
   withAlpha,
 } from "../lib/charts";
-import { ROUND_LABEL, TIER_LABEL } from "../lib/format";
+import { yearAxisDomain } from "../lib/rankHistoryAxis";
+import { ROUND_LABEL, TIER_LABEL, formatDelta, formatMetric, formatRate } from "../lib/format";
 
 const SURFACE_COLORS: Record<string, string> = {
   clay: "var(--clay)",
@@ -29,24 +24,6 @@ const SURFACE_COLORS: Record<string, string> = {
   hard: "var(--ice)",
   carpet: "var(--text-dim)",
 };
-
-function formatMetric(value: number | null): string {
-  if (value == null) return "n/a";
-  return `${Math.round(value * 1000) / 10}%`;
-}
-
-function formatRate(value: number | null): string {
-  if (value == null) return "n/a";
-  return (Math.round(value * 1000) / 1000).toFixed(2);
-}
-
-function formatDelta(delta: number | null, rate?: boolean): string | null {
-  if (delta == null) return null;
-  const change = rate
-    ? (Math.round(Math.abs(delta) * 1000) / 1000).toFixed(2)
-    : `${Math.round(Math.abs(delta) * 1000) / 10}%`;
-  return delta > 0 ? `▲ ${change}` : delta < 0 ? `▼ ${change}` : change;
-}
 
 function Metric({
   label,
@@ -66,11 +43,14 @@ function Metric({
   return (
     <div className="sr-metric">
       <span className="sr-label">{label}</span>
-      <span className="sr-value-row">
-        <span className="sr-value num">{fmt}</span>
-        {deltaText != null && (
-          <span className={`sr-delta num${deltaTone}`}>{deltaText}</span>
-        )}
+      <span className="sr-value num">{fmt}</span>
+      {/* Delta cell always renders so the column stays aligned across rows;
+          hidden (aria-hidden, invisible) when there is no benchmark. */}
+      <span
+        className={`sr-delta num${deltaTone}`}
+        aria-hidden={deltaText == null}
+      >
+        {deltaText ?? ""}
       </span>
     </div>
   );
@@ -79,16 +59,19 @@ function Metric({
 const serveMetrics: { label: string; key: keyof ServeMetrics }[] = [
   { label: "1st serve points won", key: "first_serve_points_won_pct" },
   { label: "2nd serve points won", key: "second_serve_points_won_pct" },
-  { label: "Aces per game", key: "aces_per_service_game" },
   { label: "Break points saved", key: "break_points_saved_pct" },
+  { label: "Aces per game", key: "aces_per_service_game" },
 ];
 const serveRates = new Set(["aces_per_service_game"]);
 
 const returnMetrics: { label: string; key: keyof ReturnMetrics }[] = [
   { label: "1st serve returns won", key: "first_serve_return_points_won_pct" },
   { label: "2nd serve returns won", key: "second_serve_return_points_won_pct" },
-  { label: "Break point opportunities", key: "break_point_opportunities_per_return_game" },
   { label: "Break points converted", key: "break_point_conversion_pct" },
+  {
+    label: "Break point chances per game",
+    key: "break_point_opportunities_per_return_game",
+  },
 ];
 const returnRates = new Set(["break_point_opportunities_per_return_game"]);
 
@@ -107,7 +90,7 @@ export default function ProfileContent({
   directoryRank?: number | null;
   rankHistory: RankHistory | undefined;
   rankLoading: boolean;
-  matchHistory: { matches: Array<any> } | undefined;
+  matchHistory: MatchHistory | undefined;
   matchesLoading: boolean;
   similarQ: {
     isLoading: boolean;
@@ -150,14 +133,10 @@ export default function ProfileContent({
   const rankPoints = (rankHistory?.rank_history ?? []).filter(
     (p) => p.rank != null,
   );
-  const firstRankYear = Number(rankPoints[0]?.rank_date.slice(0, 4));
-  const lastRankYear = Number(rankPoints.at(-1)?.rank_date.slice(0, 4));
-  const rankYears =
-    Number.isFinite(firstRankYear) && Number.isFinite(lastRankYear)
-      ? Array.from({ length: lastRankYear - firstRankYear + 1 }, (_, index) =>
-          String(firstRankYear + index),
-        )
-      : [];
+  // Deterministic calendar-year axis: one Jan-1 tick per year lying within
+  // the data domain (which starts at the earliest rank date, no padding),
+  // pinned via customValues instead of echarts' width-dependent tick heuristics.
+  const rankAxis = yearAxisDomain(rankPoints.map((p) => p.rank_date));
   // Final label is the profile's official rank; the directory rank only backs
   // it while the profile query is loading.
   const currentRank = profile.rank.current_rank ?? directoryRank ?? null;
@@ -204,41 +183,57 @@ export default function ProfileContent({
   );
 
   const matches = matchHistory?.matches ?? [];
+  // Newest first; the API already caps the fetch at 20 (Home requests limit=20).
+  // All fetched rows render; the wrap container scrolls natively (~5 rows
+  // visible at once) so later matches stay reachable without a widget.
   const sortedMatches = [...matches].sort((a, b) =>
     b.match_date.localeCompare(a.match_date),
   );
-  const recentMatches = sortedMatches.slice(0, 5);
 
   const tourneyTable = (
     <Card title="Recent tournaments">
       {matchesLoading ? (
         <Loading label="Loading tournaments" />
-      ) : recentMatches.length === 0 ? (
+      ) : sortedMatches.length === 0 ? (
         <Empty message="No tournament history" />
       ) : (
-        <div className="tourney-table-wrap">
+        <div
+          className="tourney-table-wrap"
+          role="region"
+          tabIndex={0}
+          aria-label={`Recent tournaments for ${profile.display_name}`}
+        >
           <table className="tourney-table">
+            <colgroup>
+              <col style={{ width: "12%" }} />
+              <col style={{ width: "15%" }} />
+              <col style={{ width: "10%" }} />
+              <col style={{ width: "12%" }} />
+              <col />
+              <col style={{ width: "8%" }} />
+            </colgroup>
             <thead>
               <tr>
+                <th>Date</th>
                 <th>Tournament</th>
-                <th className="tourney-th-c">Round</th>
                 <th className="tourney-th-c">Surface</th>
+                <th className="tourney-th-c">Round</th>
+                <th>Opponent</th>
                 <th className="tourney-th-c">Result</th>
-                <th className="tourney-th-r">Date</th>
               </tr>
             </thead>
             <tbody>
-              {recentMatches.map((m: any) => {
+              {sortedMatches.map((m) => {
                 const roundLabel =
                   ROUND_LABEL[m.round as keyof typeof ROUND_LABEL] ?? m.round;
                 return (
                   <tr key={m.match_id}>
+                    <td className="num">{m.match_date}</td>
                     <td className="tourney-name">
                       {m.tournament_name ||
                         (TIER_LABEL[m.tournament as keyof typeof TIER_LABEL] ??
                           m.tournament)}
                     </td>
-                    <td className="tourney-td-c">{roundLabel}</td>
                     <td className="tourney-td-c">
                       <span
                         className="surface-pill"
@@ -251,10 +246,25 @@ export default function ProfileContent({
                         {m.surface}
                       </span>
                     </td>
-                    <td className="tourney-td-c">
-                      <ResultBadge won={m.result === "won"} />
+                    <td className="tourney-td-c">{roundLabel}</td>
+                    <td className="tourney-name">
+                      <span className="opponent-vs">VS</span>{" "}
+                      {m.opponent_name ?? m.opponent_id}{" "}
+                      <span className="opponent-rank pl-1 num">
+                        {m.opponent_ranking != null
+                          ? `#${m.opponent_ranking}`
+                          : "N/A"}
+                      </span>
                     </td>
-                    <td className="tourney-td-r num">{m.match_date}</td>
+                    <td className="tourney-td-c">
+                      <span
+                        className={`result-text ${
+                          m.result === "won" ? "is-win" : "is-loss"
+                        }`}
+                      >
+                        {m.result === "won" ? "Win" : "Loss"}
+                      </span>
+                    </td>
                   </tr>
                 );
               })}
@@ -279,24 +289,27 @@ export default function ProfileContent({
     grid: { left: 50, right: 24, top: 16, bottom: 28, containLabel: false },
     xAxis: {
       type: "time",
+      min: rankAxis?.min,
+      max: rankAxis?.max,
       axisLine: ax.axisLine,
-      axisTick: { show: false },
+      axisTick: { show: false, customValues: rankAxis?.ticks },
       axisLabel: {
         ...ax.axisLabel,
         margin: 8,
+        customValues: rankAxis?.ticks,
         formatter: (value: number) => {
           const d = new Date(value);
           return String(d.getFullYear());
         },
       },
-      splitLine: { show: false },
+      splitLine: { ...ax.splitLine, show: true },
     },
     yAxis: {
       type: "value",
       inverse: true,
       min: 1,
       max: 200,
-      minInterval: 1,
+      minInterval: 50,
       name: "Rank",
       nameLocation: "middle",
       nameGap: 36,
@@ -317,14 +330,9 @@ export default function ProfileContent({
         data: rankPoints.map((p) => [p.rank_date, p.rank]),
         smooth: true,
         showSymbol: false,
-        lineStyle: { color: t.grass, width: 2.5 },
-        markLine: {
-          silent: true,
-          symbol: "none",
-          label: { show: false },
-          lineStyle: { color: t.line, type: "dashed" },
-          data: rankYears.map((year) => ({ xAxis: `${year}-01-01` })),
-        },
+        // Hardcourt blue token (--ice), the same color the surface legend and
+        // current-rank stat use; green signals win data, not rank position.
+        lineStyle: { color: t.ice, width: 2.5 },
         areaStyle: {
           color: {
             type: "linear",
@@ -333,8 +341,8 @@ export default function ProfileContent({
             x2: 0,
             y2: 1,
             colorStops: [
-              { offset: 0, color: withAlpha(t.grass, 0.28) },
-              { offset: 1, color: withAlpha(t.grass, 0.02) },
+              { offset: 0, color: withAlpha(t.ice, 0.28) },
+              { offset: 1, color: withAlpha(t.ice, 0.02) },
             ],
           },
         },

@@ -1,12 +1,10 @@
-"""Seed selection and reset-safety tests."""
+"""Seed selection and idempotent-write tests."""
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import pandas as pd
-import pytest
 
-from src.db import ingest, init_db, seed
+from src.db import ingest, seed
 
 TOP_PLAYERS = seed.TOP_PLAYERS
 RECENT = seed.RECENT
@@ -88,17 +86,65 @@ def test_select_matches_uses_latest_rank_not_earliest():
     assert {"TD1", "TD2", "TZ"}.isdisjoint(tourneys)
 
 
-def test_select_matches_trims_to_most_recent_recent():
+def test_select_matches_trims_prior_year_to_most_recent_recent():
+    # Prior-year (non-default-year) matches stay bounded at the RECENT tail.
     matches = [
-        _match("big", "opp", 1, 500, f"T{d}", f"202601{d:02d}", 1) for d in range(1, 2 * RECENT + 2)
+        _match("big", "opp", 1, 500, f"T{d}", f"202501{d:02d}", 1) for d in range(1, 2 * RECENT + 2)
     ]
 
     selected = select_matches(matches)
 
     assert len(selected) == RECENT
     assert [m["tourney_date"] for m in selected] == [
-        f"202601{d:02d}" for d in range(RECENT + 2, 2 * RECENT + 2)
+        f"202501{d:02d}" for d in range(RECENT + 2, 2 * RECENT + 2)
     ]
+
+
+def test_select_matches_includes_full_default_year_history_for_top_player():
+    matches = [
+        _match("big", "opp", 1, 500, f"T{d}", f"202601{d:02d}", 1) for d in range(1, 2 * RECENT + 2)
+    ]
+
+    selected = select_matches(matches)
+
+    assert len(selected) == 2 * RECENT + 1
+    assert [m["tourney_date"] for m in selected] == [
+        f"202601{d:02d}" for d in range(1, 2 * RECENT + 2)
+    ]
+
+
+def test_select_matches_mixed_years_full_default_year_bounded_prior_years():
+    prior = [
+        _match("big", "opp", 1, 500, f"O{d}", f"202501{d:02d}", 1) for d in range(1, RECENT + 2)
+    ]
+    default_year = [
+        _match("big", "opp", 1, 500, f"N{d}", f"202601{d:02d}", 1) for d in range(1, 2 * RECENT + 1)
+    ]
+
+    selected = select_matches(prior + default_year)
+
+    # Every default-year match plus only the RECENT prior-year tail, in
+    # chronological order across years (2025 before 2026).
+    assert [(m["tourney_id"], m["tourney_date"]) for m in selected] == [
+        *[(f"O{d}", f"202501{d:02d}") for d in range(2, RECENT + 2)],
+        *[(f"N{d}", f"202601{d:02d}") for d in range(1, 2 * RECENT + 1)],
+    ]
+
+
+def test_select_matches_non_top_players_enter_only_through_top_player_matches():
+    # "side" (rank 500) and "other"/"outsider" (ranks 998/999) all fall outside
+    # the top-10 cut; only their matches against top players enter the selection.
+    fillers = [_match(f"f{i}", "opp", 2, 999, f"TF{i}", "20260101", 1) for i in range(9)]
+    matches = [
+        *fillers,
+        _match("big", "side", 1, 500, "T1", "20260101", 1),
+        _match("side", "big", 500, 1, "T2", "20260102", 1),
+        _match("outsider", "other", 999, 998, "T3", "20260103", 1),
+    ]
+
+    selected = select_matches(matches)
+
+    assert {m["tourney_id"] for m in selected} == {"T1", "T2", *[f"TF{i}" for i in range(9)]}
 
 
 def test_select_matches_empty_input():
@@ -246,24 +292,36 @@ def test_main_dispatches_without_network(monkeypatch):
     calls = []
 
     monkeypatch.setattr(
-        seed, "main_default", lambda enrich=False: calls.append(("default", enrich))
+        seed,
+        "main_default",
+        lambda enrich=False, force=False: calls.append(("default", enrich, force)),
     )
-    monkeypatch.setattr(seed, "main_all", lambda enrich=False: calls.append(("all", enrich)))
+    monkeypatch.setattr(
+        seed, "main_all", lambda enrich=False, force=False: calls.append(("all", enrich, force))
+    )
 
     seed.main([])
-    assert calls == [("default", False)]
+    assert calls == [("default", False, False)]
 
     calls.clear()
     seed.main(["--all"])
-    assert calls == [("all", False)]
+    assert calls == [("all", False, False)]
 
     calls.clear()
     seed.main(["--enrich"])
-    assert calls == [("default", True)]
+    assert calls == [("default", True, False)]
 
     calls.clear()
     seed.main(["--all", "--enrich"])
-    assert calls == [("all", True)]
+    assert calls == [("all", True, False)]
+
+    calls.clear()
+    seed.main(["--force"])
+    assert calls == [("default", False, True)]
+
+    calls.clear()
+    seed.main(["--all", "--force", "--enrich"])
+    assert calls == [("all", True, True)]
 
 
 def test_seed_rankings_and_enrichment_imports_only_seeded_players(monkeypatch):
@@ -274,24 +332,37 @@ def test_seed_rankings_and_enrichment_imports_only_seeded_players(monkeypatch):
         seed, "enrich_players", lambda _ids, _force=False: calls.append("enrich") or 0
     )
 
-    seed.seed_rankings_and_enrichment(["A0E2", "Z355"], enrich=False)
+    seed.seed_rankings_and_enrichment(["A0E2", "Z355"], enrich=False, force=False)
 
     # The seed scopes the rankings import (and its IOC fallback) to exactly its
     # match-corpus player set; the fallback is not suppressed.
-    assert calls == [{"player_ids": {"A0E2", "Z355"}}]
+    assert calls == [{"player_ids": {"A0E2", "Z355"}, "force": False}]
 
 
 def test_seed_rankings_and_enrichment_enriches_only_when_flag(monkeypatch):
-    """--enrich adds forced Wikipedia enrichment for the exact seeded player set."""
+    """--enrich adds idempotent Wikipedia enrichment for the exact seeded set."""
     calls = []
     monkeypatch.setattr(seed, "ingest_rankings", lambda **_: calls.append("rankings") or {})
     monkeypatch.setattr(
         seed, "enrich_players", lambda ids, force=False: calls.append(("enrich", ids, force)) or 2
     )
 
-    seed.seed_rankings_and_enrichment(["A0E2"], enrich=True)
+    seed.seed_rankings_and_enrichment(["A0E2"], enrich=True, force=False)
 
-    assert calls == ["rankings", ("enrich", ["A0E2"], True)]
+    assert calls == ["rankings", ("enrich", ["A0E2"], False)]
+
+
+def test_seed_rankings_and_enrichment_force_propagates(monkeypatch):
+    """--force reaches both rankings and enrichment."""
+    calls = []
+    monkeypatch.setattr(seed, "ingest_rankings", lambda **kwargs: calls.append(kwargs) or {})
+    monkeypatch.setattr(
+        seed, "enrich_players", lambda ids, force=False: calls.append(("enrich", ids, force)) or 2
+    )
+
+    seed.seed_rankings_and_enrichment(["A0E2"], enrich=True, force=True)
+
+    assert calls == [{"player_ids": {"A0E2"}, "force": True}, ("enrich", ["A0E2"], True)]
 
 
 def test_seed_rankings_and_enrichment_skips_empty_corpus(monkeypatch):
@@ -299,7 +370,7 @@ def test_seed_rankings_and_enrichment_skips_empty_corpus(monkeypatch):
     monkeypatch.setattr(seed, "ingest_rankings", lambda **_: calls.append(1))
     monkeypatch.setattr(seed, "enrich_players", lambda _ids, force=False: calls.append(2) or force)
 
-    seed.seed_rankings_and_enrichment([], enrich=True)
+    seed.seed_rankings_and_enrichment([], enrich=True, force=False)
 
     assert calls == []
 
@@ -309,15 +380,20 @@ def test_seed_enrich_output_is_the_batch_summary_only(monkeypatch, capsys):
     monkeypatch.setattr(seed, "ingest_rankings", lambda **_: None)
 
     def fake_enrich(_ids, force=False):  # noqa: ARG001
-        print("Enrichment summary: 1 attempted, 0 enriched, 1 skipped, 0 failed")
+        print(
+            "Enrichment summary: 1 attempted, 1 already enriched, 0 no name, 0 enriched, 0 failed"
+        )
         return 0
 
     monkeypatch.setattr(seed, "enrich_players", fake_enrich)
 
-    seed.seed_rankings_and_enrichment(["A0E2"], enrich=True)
+    seed.seed_rankings_and_enrichment(["A0E2"], enrich=True, force=False)
 
     out = capsys.readouterr().out
-    assert "Enrichment summary: 1 attempted, 0 enriched, 1 skipped, 0 failed" in out
+    assert (
+        "Enrichment summary: 1 attempted, 1 already enriched, 0 no name, 0 enriched, 0 failed"
+        in out
+    )
     assert "seeded player profiles" not in out  # old success-only line is gone
 
 
@@ -344,33 +420,44 @@ def _patch_seed_writes(monkeypatch, calls):
     monkeypatch.setattr(
         seed, "insert_bronze_rows", lambda _df, overwrite=False: calls.append(overwrite) or 0
     )
-    monkeypatch.setattr(seed, "load_profiles_for", lambda _ids, _src: None)
+    monkeypatch.setattr(seed, "load_profiles_for", lambda _ids, _src, **_kwargs: None)
     monkeypatch.setattr(
         seed,
         "seed_rankings_and_enrichment",
-        lambda ids, enrich: calls.append((ids, enrich)),
+        lambda ids, enrich, force: calls.append((ids, enrich, force)),
     )
 
 
-def test_main_default_overwrites_selected_bronze_rows(monkeypatch):
-    """The default miniset seed overwrites its selected rows (no DO NOTHING)."""
+def test_main_default_skips_existing_rows_by_default(monkeypatch):
+    """The default miniset seed is idempotent: DO NOTHING on an existing match_id."""
     calls = []
     _patch_seed_writes(monkeypatch, calls)
 
     seed.main_default()
 
-    assert calls == [True, (["A0E2", "Z355"], False)]
+    assert calls == [False, (["A0E2", "Z355"], False, False)]
 
 
-def test_main_all_overwrites_selected_bronze_rows(monkeypatch):
-    """`--all` seed also overwrites its selected rows (no DO NOTHING)."""
+def test_main_all_skips_existing_rows_by_default(monkeypatch):
+    """`--all` seed is also idempotent without --force."""
     calls = []
     monkeypatch.setattr(seed, "discover_atp_csvs", lambda _dir: [Path("2026.csv")])
     _patch_seed_writes(monkeypatch, calls)
 
     seed.main_all(enrich=True)
 
-    assert calls == [True, (["A0E2", "Z355"], True)]
+    assert calls == [False, (["A0E2", "Z355"], True, False)]
+
+
+def test_main_force_overwrites_everywhere(monkeypatch):
+    """--force propagates to matches, profiles, rankings, and enrichment."""
+    calls = []
+    monkeypatch.setattr(seed, "discover_atp_csvs", lambda _dir: [Path("2026.csv")])
+    _patch_seed_writes(monkeypatch, calls)
+
+    seed.main_all(enrich=True, force=True)
+
+    assert calls == [True, (["A0E2", "Z355"], True, True)]
 
 
 def test_main_default_imports_rank_history_only_for_miniset_players(monkeypatch):
@@ -380,7 +467,7 @@ def test_main_default_imports_rank_history_only_for_miniset_players(monkeypatch)
 
     seed.main_default()
 
-    assert calls == [True, (["A0E2", "Z355"], False)]
+    assert calls == [False, (["A0E2", "Z355"], False, False)]
 
 
 def test_main_all_imports_rank_history_for_every_seeded_player(monkeypatch):
@@ -391,7 +478,7 @@ def test_main_all_imports_rank_history_for_every_seeded_player(monkeypatch):
 
     seed.main_all(enrich=True)
 
-    assert calls == [True, (["A0E2", "Z355"], True)]
+    assert calls == [False, (["A0E2", "Z355"], True, False)]
 
 
 def test_main_all_without_csvs_is_a_noop(monkeypatch, capsys):
@@ -406,98 +493,32 @@ def test_main_all_without_csvs_is_a_noop(monkeypatch, capsys):
     assert "nothing to seed" in capsys.readouterr().out
 
 
-# ── Destructive reset: hard actual-target safety check ────────────────────
+def test_main_default_prints_actual_inserted_and_skipped_counts(monkeypatch, capsys):
+    """The seed line reports what the database actually inserted, not the input
+    row count: 1 inserted of 2 attempted means 1 existing PK was skipped."""
+    monkeypatch.setattr(seed, "load_raw_atp_rows", lambda _path: [])
+    monkeypatch.setattr(seed, "select_matches", lambda _matches: [])
+    monkeypatch.setattr(seed, "atp_rows_to_bronze", _fake_bronze)  # 2 rows
+    monkeypatch.setattr(seed, "insert_bronze_rows", lambda _df, **kwargs: 1)  # noqa: ARG005
+    monkeypatch.setattr(seed, "load_profiles_for", lambda _ids, _src, **_kwargs: None)
+    monkeypatch.setattr(seed, "seed_rankings_and_enrichment", lambda _ids, _enrich, _force: None)
 
+    seed.main_default()
 
-class _TargetCursor:
-    def __init__(self, conn, target_row):
-        self._conn = conn
-        self._row = target_row
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        return False
-
-    def execute(self, sql, params=None):  # noqa: ARG002
-        self._conn.statements.append(sql)
-        return self
-
-    def fetchone(self):
-        return self._row
-
-
-class _TargetTxn:
-    def __init__(self, conn):
-        self._conn = conn
-
-    def __enter__(self):
-        return self._conn.cursor(None)
-
-    def __exit__(self, *_exc):
-        return False
-
-
-class _TargetConn:
-    """Fake connection that reports a fixed client-side target (psycopg
-    ``conn.info`` — the same source init_db.actual_target reads) and records
-    every SQL statement."""
-
-    def __init__(self, host, port, dbname):
-        self.info = SimpleNamespace(host=host, port=port, dbname=dbname)
-        self.statements: list[str] = []
-
-    def cursor(self, row_factory=None):  # noqa: ARG002
-        return _TargetCursor(self, None)
-
-    def transaction(self):
-        return _TargetTxn(self)
-
-
-@pytest.fixture
-def reset_env(monkeypatch):
-    """Pin the expected dev target so tests only vary the ACTUAL target."""
-    monkeypatch.setattr(
-        init_db.constants, "DATABASE_URL", "postgresql://steve@127.0.0.1:6543/tennis"
+    assert (
+        "Inserted 1 rows into bronze.match_events (1 skipped existing)" in capsys.readouterr().out
     )
 
 
-def test_reset_refuses_non_local_target(monkeypatch, reset_env):  # noqa: ARG001
-    """A remote address must never authorize a reset, even with ENVIRONMENT set."""
-    conn = _TargetConn("203.0.113.7", 6543, "tennis")
-    monkeypatch.setattr(init_db, "get_conn", lambda: conn)
+def test_main_force_prints_inserted_overwrite_count(monkeypatch, capsys):
+    """--force reports the overwritten count without a skipped-existing tail."""
+    monkeypatch.setattr(seed, "discover_atp_csvs", lambda _dir: [Path("2026.csv")])
+    monkeypatch.setattr(seed, "load_all_raw_atp_rows", lambda _paths: [])
+    monkeypatch.setattr(seed, "atp_rows_to_bronze", _fake_bronze)
+    monkeypatch.setattr(seed, "insert_bronze_rows", lambda _df, **kwargs: 2)  # noqa: ARG005
+    monkeypatch.setattr(seed, "load_profiles_for", lambda _ids, _src, **_kwargs: None)
+    monkeypatch.setattr(seed, "seed_rankings_and_enrichment", lambda _ids, _enrich, _force: None)
 
-    with pytest.raises(RuntimeError, match="refusing to reset non-local target"):
-        init_db.reset()
+    seed.main_all(enrich=True, force=True)
 
-    assert not any("DROP SCHEMA" in s for s in conn.statements)
-
-
-def test_reset_refuses_wrong_database_or_port(monkeypatch, reset_env):  # noqa: ARG001
-    """Wrong port or database name must refuse even on a local-looking host."""
-    for target in [("127.0.0.1", 5432, "tennis"), ("127.0.0.1", 6543, "prod")]:
-        conn = _TargetConn(*target)
-        monkeypatch.setattr(init_db, "get_conn", lambda conn=conn: conn)
-
-        with pytest.raises(RuntimeError, match="refusing to reset non-local target"):
-            init_db.reset()
-
-        assert not any("DROP SCHEMA" in s for s in conn.statements)
-
-
-def test_reset_allowed_only_on_local_dev_target(monkeypatch, reset_env):  # noqa: ARG001
-    """The exact expected local target proceeds: DROP the three schemas, then
-    re-apply the structure-only init.sql."""
-    conn = _TargetConn("127.0.0.1", 6543, "tennis")
-    monkeypatch.setattr(init_db, "get_conn", lambda: conn)
-
-    init_db.reset()
-
-    drops = [s for s in conn.statements if s.startswith("DROP SCHEMA")]
-    assert drops == [
-        "DROP SCHEMA IF EXISTS bronze CASCADE",
-        "DROP SCHEMA IF EXISTS silver CASCADE",
-        "DROP SCHEMA IF EXISTS gold CASCADE",
-    ]
-    assert any(s == init_db.INIT_SQL.read_text() for s in conn.statements)
+    assert "Inserted 2 rows into bronze.match_events (overwrite)" in capsys.readouterr().out
