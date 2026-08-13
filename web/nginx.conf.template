@@ -48,6 +48,13 @@ server {
 
     # --- Allowlisted SPA data routes (GET) ---
 
+    location /api/directory_info {
+        limit_req zone=api_req burst=10 nodelay;
+        limit_conn api_conn 10;
+        proxy_pass ${BENTO_API_URL}/directory_info;
+        proxy_http_version 1.1;
+    }
+
     location /api/players {
         limit_req zone=api_req burst=10 nodelay;
         limit_conn api_conn 10;
