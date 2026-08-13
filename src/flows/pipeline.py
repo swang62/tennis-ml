@@ -22,9 +22,8 @@ NB_ORDER = [
     "02_tune_gbdt.ipynb",
     "02_tune_linear.ipynb",
     "02_tune_nn.ipynb",
-    "03_ensemble_split.ipynb",
-    "04_ensemble_stack.ipynb",
-    "05_evaluate.ipynb",
+    "03_train_ensemble.ipynb",
+    "04_evaluate.ipynb",
 ]
 
 # Kernels inherit this environment before their own load_env() cell runs.

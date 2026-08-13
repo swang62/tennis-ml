@@ -14,15 +14,16 @@ import torch.nn as nn
 
 
 class TabularBioMLP(L.LightningModule):
-    """Tabular + bio-embedding MLP over the canonical match row.
+    """Tabular + bio-embedding MLP over a directional player-perspective row.
 
-    Tabular branch encodes the balanced FEATURE_COLS row (player + opponent
-    rolling stats, differentials, context). A shared bio branch encodes the
-    canonical player's and opponent's bio embeddings. The fusion head gets
+    Tabular branch encodes the balanced FEATURE_COLS row (supplied player +
+    opponent rolling stats, differentials, context). A shared bio branch
+    encodes the player's and opponent's bio embeddings. The fusion head gets
     concat(tabular, bio_p, bio_o, bio_p - bio_o), where the difference term
-    is the symmetric matchup signal. Order-invariance comes from the
-    canonical ATP-id-ordered row: swapping player/opponent flips the diff
-    term and the target, so predictions stay consistent.
+    carries the matchup signal. The model is trained on directional rows and
+    is not intrinsically antisymmetric: reversing the input does not negate
+    the logit. Antisymmetrization happens downstream in the stacker, which
+    scores both directions and projects to a symmetric probability.
     """
 
     def __init__(self, tab_dim, bio_dim, hidden_dim=64, dropout=0.0, lr=1e-3):  # noqa: ARG002 — lr is persisted via save_hyperparameters()

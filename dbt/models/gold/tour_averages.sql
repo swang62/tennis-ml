@@ -21,7 +21,7 @@
 --   - An empty snapshot pool falls back to explicit deterministic constants so
 --     every fallback column is finite and non-null (ranking 100, rank points
 --     500, age 26, streak 0, rates/forms 0, average ranks 100, days since 365,
---     matches in 30d 0, rate 0, left-handed 0, years-pro 8).
+--     matches in 30d 0, rate 0.5, left-handed 0, years-pro 8).
 --
 -- Limited historical leakage is intentional and documented: old cold-start or
 -- otherwise missing cells use the same full-pool singleton as current rows.
@@ -176,7 +176,7 @@ SELECT
     COALESCE(a.median_matches_30d, 0)::DOUBLE PRECISION AS matches_30d_default,
 
     -- Explicit fixed constants and static profile-pool means.
-    0.0 AS rate_default,
+    0.5 AS rate_default,
     COALESCE(pa.left_handed_rate, 0.0) AS left_handed_rate,
     COALESCE(pa.avg_years_pro, 8.0) AS avg_years_pro,
 

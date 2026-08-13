@@ -10,13 +10,20 @@ import faiss
 import numpy as np
 import pandas as pd
 
-from src.constants import BRONZE_PROFILES_TABLE, PROFILES_TABLE, ROOT
+from src.constants import (
+    BRONZE_PROFILES_TABLE,
+    DEPLOY_ARTIFACTS,
+    PROFILES_TABLE,
+)
 from src.db.client import to_dataframe
 
 MODEL_NAME = "BAAI/bge-small-en-v1.5"
 
-DEFAULT_INDEX = ROOT / "data" / "processed" / "player_similarity.index"
-DEFAULT_METADATA = ROOT / "data" / "processed" / "player_metadata.json"
+# The similarity index is independent of the prediction models (a dashboard
+# feature rebuilt from the fresh snapshot on every train), so it is written
+# directly into the frozen deploy folder and is never promotion-gated.
+DEFAULT_INDEX = DEPLOY_ARTIFACTS / "player_similarity.index"
+DEFAULT_METADATA = DEPLOY_ARTIFACTS / "player_metadata.json"
 
 BIO_COL_PREFIX = "bio_"
 
@@ -173,6 +180,7 @@ class PlayerSimilarity:
         ]
         self.player_ids = df["player_id"].tolist()
 
+        DEFAULT_INDEX.parent.mkdir(parents=True, exist_ok=True)
         faiss.write_index(self.index, str(DEFAULT_INDEX))
         with open(DEFAULT_METADATA, "w") as f:
             json.dump(self.players, f)
@@ -182,7 +190,7 @@ class PlayerSimilarity:
     # ── Load saved index ────────────────────────────
 
     def load(self) -> None:
-        """Load a previously saved index from disk."""
+        """Load a previously saved index from the frozen deploy folder."""
         if not DEFAULT_INDEX.exists():
             raise FileNotFoundError(f"Index not found at {DEFAULT_INDEX}. Call build() first.")
 

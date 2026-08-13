@@ -377,6 +377,8 @@ def test_build_database_url_missing_contract_fails_fast(monkeypatch):
 
 def _lineage_tags():
     """The exact tag set 05_evaluate writes onto the promoted ensemble version."""
+    import src.constants as c
+
     return {
         "base_linear_registered_model_name": "linear_best",
         "base_linear_version": "3",
@@ -616,7 +618,7 @@ def test_promotion_tags_lineage_before_champion_alias():
     """05 tags the promoted version with exact lineage BEFORE assigning @champion,
     and the only alias in the training path is the ensemble @champion."""
     root = _deploy().ROOT
-    src = (root / "notebooks" / "parameters" / "05_evaluate.ipynb").read_text()
+    src = (root / "notebooks" / "parameters" / "04_evaluate.ipynb").read_text()
     assert src.index("set_model_version_tag") < src.index("set_registered_model_alias")
     assert "build_lineage_tags" in src
     assert src.count("set_registered_model_alias") == 1

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import ReactECharts from "echarts-for-react";
 import type { EChartsOption } from "echarts";
@@ -8,7 +8,6 @@ import {
   getPlayerProfile,
   getPlayers,
   predictFromIds,
-  type H2HMeeting,
   type MatchRound,
   type Surface,
   type TournamentTier,
@@ -23,11 +22,7 @@ import {
   PlayerPicker,
 } from "../components";
 import { axisOption, baseChartOption, chartTokens } from "../lib/charts";
-import {
-  orientH2H,
-  pickerPreferenceEdge,
-  probabilityForPlayer,
-} from "../lib/h2hOrientation";
+import { orientH2H, preferenceEdge } from "../lib/h2hOrientation";
 import {
   ROUND_LABEL,
   TIER_LABEL,
@@ -63,18 +58,19 @@ const ROUNDS: { value: MatchRound; label: string }[] = [
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 const today = () => new Date().toLocaleDateString("en-CA");
 
-// Join known meeting metadata; retain unknown labels rather than ids.
-function meetingMeta(m: H2HMeeting): string {
-  const parts = [
-    m.tournament
-      ? (TIER_LABEL[m.tournament as keyof typeof TIER_LABEL] ?? m.tournament)
-      : "",
-    m.surface ? cap(m.surface) : "",
-    m.round
-      ? (ROUND_LABEL[m.round as keyof typeof ROUND_LABEL] ?? m.round)
-      : "",
-  ];
-  return parts.filter(Boolean).join(" · ");
+// Chart side margins are fixed in px for desktop player-name labels; on
+// narrow screens the plot area shrinks to almost nothing. Track the breakpoint
+// so grid margins and axis labels can compact.
+function useIsNarrow(): boolean {
+  const mq = "(max-width: 720px)";
+  const [narrow, setNarrow] = useState(() => window.matchMedia(mq).matches);
+  useEffect(() => {
+    const media = window.matchMedia(mq);
+    const fn = (e: MediaQueryListEvent) => setNarrow(e.matches);
+    media.addEventListener("change", fn);
+    return () => media.removeEventListener("change", fn);
+  }, []);
+  return narrow;
 }
 
 // Latest non-null rank is this page's sole rank signal; the picker directory
@@ -93,10 +89,19 @@ interface MirrorRow {
   aText: string;
   bText: string;
   invert?: boolean;
+  color?: string;
 }
+
+const SURFACE_COLORS: Record<string, string> = {
+  clay: "var(--clay)",
+  grass: "var(--grass)",
+  hard: "var(--ice)",
+  carpet: "var(--text-dim)",
+};
 
 export default function H2H() {
   const { theme } = useTheme();
+  const narrow = useIsNarrow();
   const { playerA: searchPlayerA } = h2hRoute.useSearch();
   const [playerA, setPlayerA] = useState<string | null>(searchPlayerA ?? null);
   const [playerB, setPlayerB] = useState<string | null>(null);
@@ -155,12 +160,8 @@ export default function H2H() {
   );
 
   const pred = predict.data;
-  const orientA = pred
-    ? probabilityForPlayer(pred.p_win, pred.player_id, playerA!)
-    : 0;
+  const orientA = pred ? pred.p_win : 0;
   const winnerP = pred ? Math.max(pred.p_win, 1 - pred.p_win) : 0;
-  const preferenceEdge = (p: number) =>
-    pickerPreferenceEdge(p, pred!.player_id, playerA!);
 
   const rankOf = (id: string) =>
     lastRank(players.find((p) => p.player_id === id));
@@ -181,26 +182,34 @@ export default function H2H() {
           },
         },
         grid: {
-          left: 120,
-          right: 120,
+          left: narrow ? 44 : 120,
+          right: narrow ? 44 : 120,
           top: 40,
           bottom: 24,
           containLabel: false,
         },
         xAxis: {
           type: "value",
-          min: -0.5,
-          max: 0.5,
+          min: -1,
+          max: 1,
           axisLine: ax.axisLine,
-          axisTick: { show: false },
+          axisTick: {
+            show: true,
+            length: 4,
+            customValues: [1, 0.8, 0.6, 0.4, 0.2, 0, -0.2, -0.4, -0.6, -0.8, -1],
+            lineStyle: { color: t.line },
+          },
           axisLabel: {
             ...ax.axisLabel,
+            customValues: [0.8, 0.4, 0, -0.4, -0.8],
             formatter: (v: number) => {
               const edge = v as number;
+              const sign = Math.round(Math.abs(edge) * 100);
               if (edge === 0) return "Even";
+              if (narrow) return `+${sign}`;
               return edge < 0
-                ? `${name(playerA!)} +${Math.round(-edge * 100)}`
-                : `${name(playerB!)} +${Math.round(edge * 100)}`;
+                ? `${name(playerA!)} +${sign}`
+                : `${name(playerB!)} +${sign}`;
             },
           },
           splitLine: ax.splitLine,
@@ -228,7 +237,7 @@ export default function H2H() {
             data: [pred.p_linear, pred.p_gbdt, pred.p_nn].map((probability) => {
               const edge = preferenceEdge(probability);
               return {
-                value: edge,
+                value: edge * 2,
                 label: { position: edge <= 0 ? "left" : "right" },
               };
             }),
@@ -243,11 +252,23 @@ export default function H2H() {
               label: {
                 color: t.clay,
                 fontSize: 11,
-                formatter: `Ensemble ${pct(winnerP)}`,
+                formatter: `Ensemble`,
                 position: "end",
                 rotate: 0,
               },
-              data: [{ xAxis: preferenceEdge(pred.p_win) }],
+              data: [
+                { xAxis: preferenceEdge(pred.p_win) * 2 },
+                {
+                  xAxis: 0.2,
+                  lineStyle: { color: t.line, type: "dotted", width: 1 },
+                  label: { show: false },
+                },
+                {
+                  xAxis: 0.6,
+                  lineStyle: { color: t.line, type: "dotted", width: 1 },
+                  label: { show: false },
+                },
+              ],
             },
           },
         ],
@@ -272,7 +293,7 @@ export default function H2H() {
       });
     }
     mirrorRows.push({
-      label: "All-time",
+      label: "All-time Wins",
       a: summary.player1_wins,
       b: summary.player2_wins,
       aText: String(summary.player1_wins),
@@ -287,6 +308,7 @@ export default function H2H() {
         b: list.length - w1,
         aText: String(w1),
         bText: String(list.length - w1),
+        color: SURFACE_COLORS[s],
       });
     }
   }
@@ -450,7 +472,10 @@ export default function H2H() {
                   <span className="pred-winner">
                     {name(pred.predicted_winner)} wins
                   </span>
-                  <span className="pred-pct num">{pct(winnerP)}</span>
+                  <span className="pred-pct num">+{pct(2 * winnerP - 1)}</span>
+                  <span className="pred-caption num">
+                    {pct(orientA)} : {pct(1 - orientA)}
+                  </span>
                 </div>
                 <div className="odds-row">
                   <div className="odds">
@@ -506,74 +531,81 @@ export default function H2H() {
         <>
           {/* Matchup comparison */}
           <div className="grid gap-5 lg:grid-cols-2">
-          <Card title="Matchup comparison">
-            <div className="mirror">
-              <div className="mirror-head">
-                <span className="mirror-name">
-                  <PlayerFlag
-                    iso2={playerById.get(h2h.player1_id)?.iso2}
-                    countryName={playerById.get(h2h.player1_id)?.country_name}
-                  />
-                  {p1}
-                </span>
-                <span className="mirror-vs">vs</span>
-                <span className="mirror-name">
-                  {p2}
-                  <PlayerFlag
-                    iso2={playerById.get(h2h.player2_id)?.iso2}
-                    countryName={playerById.get(h2h.player2_id)?.country_name}
-                  />
-                </span>
+            <Card title="Matchup comparison">
+              <div className="mirror">
+                <div className="mirror-head">
+                  <span className="mirror-name">
+                    <PlayerFlag
+                      iso2={playerById.get(h2h.player1_id)?.iso2}
+                      countryName={playerById.get(h2h.player1_id)?.country_name}
+                    />
+                    {p1}
+                  </span>
+                  <span className="mirror-vs">vs</span>
+                  <span className="mirror-name">
+                    {p2}
+                    <PlayerFlag
+                      iso2={playerById.get(h2h.player2_id)?.iso2}
+                      countryName={playerById.get(h2h.player2_id)?.country_name}
+                    />
+                  </span>
+                </div>
+                {mirrorRows.map((row) => {
+                  return (
+                    <div className="mirror-row" key={row.label}>
+                      <div className="mirror-half is-left">
+                        <span className="mirror-value num">{row.aText}</span>
+                      </div>
+                      <span
+                        className="mirror-label"
+                        style={
+                          row.color ? { color: row.color } : undefined
+                        }
+                      >
+                        {row.label}
+                      </span>
+                      <div className="mirror-half is-right">
+                        <span className="mirror-value num">{row.bText}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+                <p className="sr-only">{mirrorSummary}</p>
               </div>
-              {mirrorRows.map((row) => {
-                return (
-                  <div className="mirror-row" key={row.label}>
-                    <div className="mirror-half is-left">
-                      <span className="mirror-value num">{row.aText}</span>
-                    </div>
-                    <span className="mirror-label">{row.label}</span>
-                    <div className="mirror-half is-right">
-                      <span className="mirror-value num">{row.bText}</span>
-                    </div>
-                  </div>
-                );
-              })}
-              <p className="sr-only">{mirrorSummary}</p>
-            </div>
-          </Card>
-          <Card title="Strength comparison">
+            </Card>
+            <Card title="Strength comparison">
               {profileAQ.isLoading || profileBQ.isLoading ? (
                 <Loading label="Loading player strengths" />
               ) : profileAQ.data && profileBQ.data ? (
                 (() => {
                   const radarMetrics = [
                     [
-                      "1st serve won",
+                      "1st serves won",
                       profileAQ.data.serve.first_serve_points_won_pct,
                       profileBQ.data.serve.first_serve_points_won_pct,
                     ],
                     [
-                      "1st return won",
+                      "1st returns won",
                       profileAQ.data.return.first_serve_return_points_won_pct,
                       profileBQ.data.return.first_serve_return_points_won_pct,
                     ],
                     [
-                      "2nd serve won",
+                      "2nd serves won",
                       profileAQ.data.serve.second_serve_points_won_pct,
                       profileBQ.data.serve.second_serve_points_won_pct,
                     ],
                     [
-                      "2nd return won",
+                      "2nd returns won",
                       profileAQ.data.return.second_serve_return_points_won_pct,
                       profileBQ.data.return.second_serve_return_points_won_pct,
                     ],
                     [
-                      "Break saved",
+                      "Breaks saved",
                       profileAQ.data.serve.break_points_saved_pct,
                       profileBQ.data.serve.break_points_saved_pct,
                     ],
                     [
-                      "Break converted",
+                      "Breaks converted",
                       profileAQ.data.return.break_point_conversion_pct,
                       profileBQ.data.return.break_point_conversion_pct,
                     ],
@@ -601,7 +633,7 @@ export default function H2H() {
                       center: ["50%", "55%"],
                       radius: "62%",
                       indicator: radarMetrics.map(([metric, a, b]) => ({
-                        name: `{metric|${metric}}\n{grass|${pct(a)}} {clay|${pct(b)}}`,
+                        name: `{metric|${metric}}\n{grass|${Math.round((a ?? 0) * 100)}%} {clay|${Math.round((b ?? 0) * 100)}%}`,
                         max: 1,
                       })),
                       axisName: {
@@ -657,141 +689,183 @@ export default function H2H() {
           </div>
 
           <Card title="H2H History">
-              {meetings.length === 0 ? (
-                <Empty message="No prior meetings" />
-              ) : (
-                <>
-                  {(() => {
-                    const chrono = [...meetings].sort((a, b) =>
-                      a.match_date.localeCompare(b.match_date),
-                    );
-                    const dates = chrono.map((m) => m.match_date);
-                    let p1Cum = 0;
-                    let p2Cum = 0;
-                    const p1Data: number[] = [];
-                    const p2Data: number[] = [];
-                    for (const m of chrono) {
-                      if (m.player1_won) p1Cum++;
-                      else p2Cum++;
-                      p1Data.push(p1Cum);
-                      p2Data.push(p2Cum);
-                    }
-                    const trendOption: EChartsOption = {
-                      ...baseChartOption(t),
-                      legend: {
-                        top: 0,
-                        left: "center",
-                        textStyle: { color: t.dim, fontSize: 11 },
+            {meetings.length === 0 ? (
+              <Empty message="No prior meetings" />
+            ) : (
+              <>
+                {(() => {
+                  const chrono = [...meetings].sort((a, b) =>
+                    a.match_date.localeCompare(b.match_date),
+                  );
+                  const dates = chrono.map((m) => m.match_date);
+                  let p1Cum = 0;
+                  let p2Cum = 0;
+                  const p1Data: number[] = [];
+                  const p2Data: number[] = [];
+                  for (const m of chrono) {
+                    if (m.player1_won) p1Cum++;
+                    else p2Cum++;
+                    p1Data.push(p1Cum);
+                    p2Data.push(p2Cum);
+                  }
+                  const trendOption: EChartsOption = {
+                    ...baseChartOption(t),
+                    aria: { enabled: false },
+                    legend: {
+                      top: 0,
+                      left: "center",
+                      textStyle: { color: t.dim, fontSize: 11 },
+                    },
+                    tooltip: {
+                      ...baseChartOption(t).tooltip,
+                      trigger: "axis",
+                      formatter: (params: any) => {
+                        const items = params as Array<{
+                          name: string;
+                          seriesName: string;
+                          value: number;
+                        }>;
+                        return [
+                          items[0]?.name ?? "",
+                          ...items.map(
+                            (s) =>
+                              `${s.seriesName}: ${s.value} win${s.value === 1 ? "" : "s"}`,
+                          ),
+                        ].join("<br/>");
                       },
-                      tooltip: {
-                        ...baseChartOption(t).tooltip,
-                        trigger: "axis",
-                        formatter: (params: any) => {
-                          const items = params as Array<{
-                            name: string;
-                            seriesName: string;
-                            value: number;
-                          }>;
-                          return [
-                            items[0]?.name ?? "",
-                            ...items.map(
-                              (s) =>
-                                `${s.seriesName}: ${s.value} win${s.value === 1 ? "" : "s"}`,
-                            ),
-                          ].join("<br/>");
+                    },
+                    grid: {
+                      left: narrow ? 40 : 56,
+                      right: narrow ? 40 : 56,
+                      top: 38,
+                      bottom: 28,
+                      containLabel: false,
+                    },
+                    xAxis: {
+                      type: "category",
+                      data: dates,
+                      axisLine: ax.axisLine,
+                      axisTick: { show: false },
+                      axisLabel: {
+                        ...ax.axisLabel,
+                        margin: 8,
+                        formatter: (value: string) => {
+                          const [y, mo, d] = value.split("-");
+                          return `${y}-${Number(mo)}-${Number(d)}`;
                         },
                       },
-                      grid: {
-                        left: 50,
-                        right: 112,
-                        top: 38,
-                        bottom: 28,
-                        containLabel: false,
+                    },
+                    yAxis: {
+                      type: "value",
+                      minInterval: 1,
+                      max: Math.max(p1Cum, p2Cum, 1),
+                      name: "Cumulative Wins",
+                      nameLocation: "middle",
+                      nameGap: 36,
+                      nameTextStyle: { color: t.dim, fontSize: 11 },
+                      axisLabel: { ...ax.axisLabel, margin: 8 },
+                      splitLine: ax.splitLine,
+                    },
+                    series: [
+                      {
+                        name: p1,
+                        type: "line",
+                        data: p1Data,
+                        lineStyle: { color: t.grass, width: 2.5 },
+                        itemStyle: { color: t.grass },
+                        symbol: "circle",
+                        symbolSize: 7,
                       },
-                      xAxis: {
-                        type: "category",
-                        data: dates,
-                        axisLine: ax.axisLine,
-                        axisTick: { show: false },
-                        axisLabel: {
-                          ...ax.axisLabel,
-                          margin: 8,
-                          formatter: (value: string) => {
-                            const [y, mo, d] = value.split("-");
-                            return `${y}-${Number(mo)}-${Number(d)}`;
-                          },
-                        },
+                      {
+                        name: p2,
+                        type: "line",
+                        data: p2Data,
+                        lineStyle: { color: t.clay, width: 2.5 },
+                        itemStyle: { color: t.clay },
+                        symbol: "circle",
+                        symbolSize: 7,
                       },
-                      yAxis: {
-                        type: "value",
-                        minInterval: 1,
-                        max: Math.max(p1Cum, p2Cum, 1),
-                        name: "Cumulative Wins",
-                        nameLocation: "middle",
-                        nameGap: 36,
-                        nameTextStyle: { color: t.dim, fontSize: 11 },
-                        axisLabel: { ...ax.axisLabel, margin: 8 },
-                        splitLine: ax.splitLine,
-                      },
-                      series: [
-                        {
-                          name: p1,
-                          type: "line",
-                          data: p1Data,
-                          lineStyle: { color: t.grass, width: 2.5 },
-                          itemStyle: { color: t.grass },
-                          symbol: "circle",
-                          symbolSize: 7,
-                        },
-                        {
-                          name: p2,
-                          type: "line",
-                          data: p2Data,
-                          lineStyle: { color: t.clay, width: 2.5 },
-                          itemStyle: { color: t.clay },
-                          symbol: "circle",
-                          symbolSize: 7,
-                        },
-                      ],
-                    };
+                    ],
+                  };
+                  return (
+                    <div className="h2h-trend">
+                      <ReactECharts
+                        key={`trend-${theme}`}
+                        option={trendOption}
+                        style={{ height: 160, width: "100%" }}
+                        className="chart-frame"
+                        aria-label={`Cumulative head-to-head wins: ${p1} vs ${p2}`}
+                      />
+                    </div>
+                  );
+                })()}
+                <div className="h2h-meetings-wrap">
+                  {sortedMeetings.map((m) => {
+                    // player1_won is canonical lower-id, not picker order.
+                    const aWon =
+                      m.player1_won === (playerA === h2h.player1_id);
+                    const winnerName = aWon ? p1 : p2;
+                    const tourney =
+                      m.tournament_name ??
+                      (m.tournament
+                        ? (TIER_LABEL[
+                            m.tournament as keyof typeof TIER_LABEL
+                          ] ?? m.tournament)
+                        : "");
+                    const roundLabel = m.round
+                      ? (ROUND_LABEL[m.round as keyof typeof ROUND_LABEL] ??
+                        m.round)
+                      : "";
                     return (
-                      <div className="h2h-trend">
-                        <ReactECharts
-                          key={`trend-${theme}`}
-                          option={trendOption}
-                          style={{ height: 160, width: "100%" }}
-                          className="chart-frame"
-                          aria-label={`Cumulative head-to-head wins: ${p1} vs ${p2}`}
-                        />
+                      <div
+                        key={`${m.match_date}-${m.winner_id}`}
+                        className="meeting"
+                      >
+                        <span className="meeting-date">{m.match_date}</span>
+                        <span className="meeting-surface">
+                          <span
+                            className="surface-pill"
+                            style={{
+                              color:
+                                SURFACE_COLORS[m.surface] ??
+                                "var(--text-dim)",
+                              borderColor:
+                                SURFACE_COLORS[m.surface] ??
+                                "var(--text-dim)",
+                            }}
+                          >
+                            {m.surface}
+                          </span>
+                        </span>
+                        <span className="meeting-tourney">{tourney}</span>
+                        <span className="meeting-sep" aria-hidden="true">
+                          ·
+                        </span>
+                        <span
+                          className={`meeting-winner result-text ${
+                            aWon ? "is-win" : "is-loss"
+                          }`}
+                        >
+                          {winnerName}
+                        </span>
+                        <span className="meeting-round-note">
+                          {roundLabel ? (
+                            <>
+                              WON in{" "}
+                              <span className="meeting-round-strong">
+                                {roundLabel}
+                              </span>
+                            </>
+                          ) : (
+                            "WON"
+                          )}
+                        </span>
                       </div>
                     );
-                  })()}
-                  <div className="meetings-list">
-                    {sortedMeetings.map((m) => {
-                      // player1_won is canonical lower-id, not picker order.
-                      const aWon =
-                        m.player1_won === (playerA === h2h.player1_id);
-                      return (
-                        <div
-                          key={`${m.match_date}-${m.winner_id}`}
-                          className="meeting"
-                        >
-                          <span className="meeting-date mono">
-                            {m.match_date}
-                          </span>
-                          <span className="meeting-meta">{meetingMeta(m)}</span>
-                          <span className="meeting-result">
-                            <span className="meeting-winner-name">
-                              {aWon ? name(playerA!) : name(playerB!)}
-                            </span>
-                            <span className="meeting-won-label pl-1">won</span>
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </>
-              )}
+                  })}
+                </div>
+              </>
+            )}
           </Card>
         </>
       )}

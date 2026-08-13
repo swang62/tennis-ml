@@ -1,6 +1,19 @@
 # Create the local k3d cluster.
-create:
+cluster-create:
     ./infra/k3d/start.sh
+
+# Delete the local k3d cluster.
+cluster-destroy:
+    k3d cluster delete tennis-ml
+
+# Restart Kubernetes workloads.
+cluster-restart:
+    kubectl rollout restart deployment
+    kubectl rollout restart daemonset
+    kubectl rollout restart statefulset
+
+# Create the cluster, manifests, and database.
+cluster-setup: deps cluster-create db-init
 
 # Run bronze-to-gold ETL; pass --full-refresh to rebuild silver/gold from bronze.
 db-etl *args:
@@ -18,7 +31,7 @@ db-reset:
 db-seed *args:
     uv run python src/db/seed.py {{ args }}
 
-# Export an atomic PostgreSQL training snapshot.
+# Export an atomic PostgreSQL training snapshot, optional as the training pipeline always snapshots first.
 db-snapshot:
     uv run python src/db/snapshot.py
 
@@ -32,55 +45,27 @@ deploy *args:
 deps:
     uv sync
 
-# Delete the local k3d cluster.
-destroy:
-    k3d cluster delete tennis-ml
-
 # Run Bento and Vite with local preflight checks.
 dev:
     ./scripts/dev.sh
 
-# Start the Compose production stack.
-docker-up:
-    docker compose up -d --build
-
-# Trigger the Prefect scrape deployment; pass Prefect CLI args through unchanged.
-scrape *args:
-    uv run prefect deployment run scrape-flow/scrape {{ args }}
+# Run production drift monitoring.
+drift:
+    uv run python src/flows/check_drift.py
 
 # Run all configured linters.
 lint:
     uv run pre-commit run --all-files
 
-# Restart Kubernetes workloads.
-restart:
-    kubectl rollout restart deployment
-    kubectl rollout restart daemonset
-    kubectl rollout restart statefulset
+# Trigger the Prefect scrape deployment; pass Prefect CLI args through unchanged (see scrape_flow docstring).
+scrape *args:
+    uv run prefect deployment run scrape-flow/scrape {{ args }}
 
-# Create the cluster, manifests, and database.
-setup: deps create setup-base db-init
-
-# Apply Kubernetes manifests.
-setup-base: validate
-    kubectl apply -f infra/manifests/default/
-
-# Stop the local k3d cluster.
-stop:
-    k3d cluster stop tennis-ml
-
-# Run the Python test suite.
+# Run the Python and web test suites.
 test:
     uv run pytest
+    pnpm --dir web test
 
 # Run the notebook training pipeline.
 train:
     uv run python src/flows/pipeline.py
-
-# Validate Kubernetes manifests.
-validate:
-    kubeconform -ignore-missing-schemas -summary infra/manifests/
-
-# Run production drift monitoring.
-check-drift:
-    uv run python src/flows/check_drift.py

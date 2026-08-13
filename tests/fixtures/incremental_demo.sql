@@ -6,7 +6,7 @@
 --   bronze.match_events      +1  (this row)
 --   silver.player_matches    +2  (one perspective per player)
 --   silver.rolling_features  +2  (one post-match snapshot per perspective)
---   gold.match_features      +1  (one canonical row per match)
+--   gold.match_features      +2  (two directional rows per match)
 --   gold.tour_averages       refreshed (still exactly 1 singleton row)
 --   gold.player_profiles     refreshed (recomputed globally)
 --

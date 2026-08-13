@@ -21,7 +21,7 @@ SNAPSHOT_TABLES = (
     ("bronze", "player_profiles"),
 )
 
-# gold.match_features metadata columns preceding the 36 feature columns.
+# gold.match_features metadata columns preceding the 39 feature columns.
 META_COLS = (
     "match_id",
     "match_date",
@@ -59,7 +59,7 @@ def _copy_tables(tmp_path: Path, pg_url: str) -> None:
 
 
 def validate_snapshot(path: Path) -> None:
-    """Validate required tables, order, non-empty content, and unique keys."""
+    """Validate required tables, order, non-empty content, and the directional row contract."""
     con = duckdb.connect(str(path), read_only=True)
     try:
         tables = {
@@ -89,7 +89,6 @@ def validate_snapshot(path: Path) -> None:
                 raise SnapshotError(f'snapshot table "{schema}"."{table}" is empty')
 
         for schema, table, key in (
-            ("gold", "match_features", "match_id"),
             ("gold", "player_profiles", "player_id"),
             ("bronze", "player_profiles", "player_id"),
         ):
@@ -102,6 +101,52 @@ def validate_snapshot(path: Path) -> None:
                 raise SnapshotError(
                     f'snapshot table "{schema}"."{table}" has {dupes_row[0]} duplicate "{key}" rows'
                 )
+
+        # Directional row contract for gold.match_features: match_id is the
+        # physical-match group key and (match_id, player_id) identifies one
+        # directional row. Every match must have exactly two rows (one per
+        # player) with reciprocal opponent ids and complementary labels.
+        bad_groups = con.execute(
+            "SELECT COUNT(*) FROM ("
+            " SELECT match_id FROM gold.match_features"
+            " GROUP BY match_id HAVING COUNT(*) != 2)"
+        ).fetchone()
+        assert bad_groups is not None
+        if bad_groups[0]:
+            raise SnapshotError(
+                f"gold.match_features has {bad_groups[0]} match_id groups with "
+                "!= 2 rows; expected exactly 2 directional rows per match_id"
+            )
+
+        dup_keys = con.execute(
+            "SELECT COUNT(*) FROM ("
+            " SELECT match_id, player_id FROM gold.match_features"
+            " GROUP BY match_id, player_id HAVING COUNT(*) > 1)"
+        ).fetchone()
+        assert dup_keys is not None
+        if dup_keys[0]:
+            raise SnapshotError(
+                f'gold.match_features has {dup_keys[0]} duplicate "(match_id, player_id)" rows'
+            )
+
+        bad_pairs = con.execute(
+            "SELECT COUNT(*) FROM ("
+            " SELECT a.match_id FROM gold.match_features a"
+            " JOIN gold.match_features b"
+            "   ON a.match_id = b.match_id AND a.player_id < b.player_id"
+            " WHERE NOT ("
+            "   a.opponent_id = b.player_id"
+            "   AND b.opponent_id = a.player_id"
+            "   AND a.match_won IN (0, 1) AND b.match_won IN (0, 1)"
+            "   AND a.match_won <> b.match_won))"
+        ).fetchone()
+        assert bad_pairs is not None
+        if bad_pairs[0]:
+            raise SnapshotError(
+                f"gold.match_features has {bad_pairs[0]} match_id groups whose two rows "
+                "are not a valid reciprocal pair (mismatched opponent/player ids "
+                "or non-complementary labels)"
+            )
 
         # Contract: every FEATURE_COLS cell is non-null and finite. dbt already
         # enforces this in gold; the snapshot re-checks it so training can never

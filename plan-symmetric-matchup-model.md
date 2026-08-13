@@ -45,7 +45,7 @@ Repair the identified training-pipeline integrity problems, add the missing retu
 
 ## Tasks
 
-### [ ] Task 1: Define the new directional feature and row-identity contract
+### [x] Task 1: Define the new directional feature and row-identity contract
 
 - **Description**: Update the shared feature definitions to replace canonical H2H fields, add return-strength differential and rate-exposure fields, and define a single immutable row identity contract: `match_id` is the group; `(match_id, player_id)` identifies a directional row. Document each feature’s swap behavior: signed features negate, paired features exchange, invariant context remains equal.
 - **Files**:
@@ -60,7 +60,7 @@ Repair the identified training-pipeline integrity problems, add the missing retu
   - No feature name or documentation describes a model side as canonical/lower-ID.
 - **Guardrails**: Do not add current-match statistics; every added feature remains strictly pre-match and has an inference equivalent.
 
-### [ ] Task 2: Produce two gold player-perspective rows per match
+### [x] Task 2: Produce two gold player-perspective rows per match
 
 - **Description**: Change `gold.match_features` from one lower-ID row to both enriched player perspectives. Replace the gold incremental/primary key and dbt tests accordingly. Compute feature pairs in requested/player perspective, including complementary H2H advantage. Ensure each side is fully imputed before differences are calculated.
 - **Files**:
@@ -78,7 +78,7 @@ Repair the identified training-pipeline integrity problems, add the missing retu
   - Incremental reruns remain idempotent and changed/new rows do not leave only one perspective materialized.
 - **Guardrails**: Preserve `silver.player_matches` as the existing two-perspective source; do not duplicate it again upstream.
 
-### [ ] Task 3: Repair rolling feature derivation and fallbacks
+### [x] Task 3: Repair rolling feature derivation and fallbacks
 
 - **Description**: Add return-strength and rate-exposure calculations to silver rolling features. Apply fixed smoothing consistently for sparse rates; carry needed exposure columns to gold. Make gold’s prior snapshot join strictly before `match_date`, matching inference. Give carpet surface form a neutral/overall fallback rather than a constant zero. Correct tour-average contract checks so every fallback column is validated.
 - **Files**:
@@ -97,7 +97,7 @@ Repair the identified training-pipeline integrity problems, add the missing retu
   - Aggregate tests fail for invalid values in any fallback column, not only the first checked column.
 - **Guardrails**: Do not redesign full-history fallback/default architecture; it is intentionally out of scope.
 
-### [ ] Task 4: Make inference directional and paired
+### [x] Task 4: Make inference directional and paired
 
 - **Description**: Remove lower-ID sorting from feature orientation. Build one row for supplied `player_id` versus supplied `opponent_id`; build the reverse row from the same context for paired scoring. Keep unordered pair normalization only in H2H SQL lookup and convert its canonical winner count to the requested player’s direction. Apply the same behavior to scalar and bulk builders. Validate `is_indoor` as exactly `0` or `1` when supplied.
 - **Files**:
@@ -111,7 +111,7 @@ Repair the identified training-pipeline integrity problems, add the missing retu
   - Historical train/inference parity covers both gold perspectives of one match.
 - **Guardrails**: Preserve existing parameter validation and as-of-date semantics.
 
-### [ ] Task 5: Update snapshot and chronological split artifacts for groups
+### [x] Task 5: Update snapshot and chronological split artifacts for groups
 
 - **Description**: Change snapshot assumptions from one row per `match_id` to directional row identity. Have notebook 01 preserve `match_id` and directional row IDs in all feature/label/info artifacts, order deterministically by date/match/player, and make chronological partitions at physical-match granularity.
 - **Files**:
@@ -126,7 +126,7 @@ Repair the identified training-pipeline integrity problems, add the missing retu
   - Split metadata records match counts and directional-row counts.
 - **Guardrails**: Keep the test split untouched by tuning, early stopping, feature selection, and calibration.
 
-### [ ] Task 6: Correct base-model tuning, grouped OOF, and exact model lineage
+### [x] Task 6: Correct base-model tuning, grouped OOF, and exact model lineage
 
 - **Description**: Refactor each tuning notebook around a shared persisted fold assignment keyed by `match_id`. Fit linear/NN scalers inside every OOF fold. Repair NN validation to use `X_val/y_val`, repair its test predictions to use test tensors, and prevent any test use during Optuna/pruning/early stopping. Generate and persist paired directional base OOF/test probabilities with row IDs and fold IDs. Ensure registered base pins identify the exact fitted artifacts that produced those predictions; remove/replace any old-version retention behavior that violates this lineage.
 - **Files**:
@@ -145,7 +145,7 @@ Repair the identified training-pipeline integrity problems, add the missing retu
   - Each base’s OOF/test artifact records model run/version/hash used to generate it, and those exact pins become ensemble lineage.
 - **Guardrails**: Do not add a quality/promotion guard for weak or inverted base AUC; user explicitly excluded it.
 
-### [ ] Task 7: Centralize exact antisymmetry and rebuild ensemble stacking
+### [x] Task 7: Centralize exact antisymmetry and rebuild ensemble stacking
 
 - **Description**: Add a shared numerical helper for finite-probability validation, symmetric clipping, logit/sigmoid conversion, and paired antisymmetric evidence. Use it when converting each base’s directional OOF and test predictions. Assemble named DataFrames, validate row/group/fold/model lineage, train a no-intercept named stacker, and log both coefficients and intercept (asserted zero/no-intercept) as model metadata.
 - **Files**:
@@ -163,7 +163,7 @@ Repair the identified training-pipeline integrity problems, add the missing retu
   - The exact base pins that generated OOF/test predictions are copied to the promoted ensemble tags.
 - **Guardrails**: Do not average raw `P(A|B)` and `1-P(B|A)` as the primary score path. Keep it only as a measured alternative if future calibration evidence requires it.
 
-### [ ] Task 8: Score both directions in Bento and simplify response semantics
+### [x] Task 8: Score both directions in Bento and simplify response semantics
 
 - **Description**: Update serving to build and batch both orientation rows per request; run each base for both, antisymmetrize each base score, stack the three evidence values, and return the supplied player’s result. Reverse calls must be constructed through the same pair calculation and be complementary. Update service diagnostics to call sides requested/directional, not canonical.
 - **Files**:
@@ -178,7 +178,7 @@ Repair the identified training-pipeline integrity problems, add the missing retu
   - Bulk prediction preserves input order and provides the same scalar-equivalent directional result.
 - **Guardrails**: Do not expose canonical IDs or frontend-only remapping fields in the public prediction response.
 
-### [ ] Task 9: Remove frontend lower-ID probability hacks
+### [x] Task 9: Remove frontend lower-ID probability hacks
 
 - **Description**: Treat backend prediction values as Player A / requested player directly. Remove `probabilityForPlayer` and canonical probability edge remapping; calculate Player A/Player B bars and odds directly from `p` and `1-p`. Keep `orientH2H` only if `/head_to_head` remains unordered/canonical; it is independent from model prediction orientation.
 - **Files**:
@@ -193,7 +193,7 @@ Repair the identified training-pipeline integrity problems, add the missing retu
   - Canonical probability helpers and their tests are removed; remaining H2H orientation tests cover only H2H response display.
 - **Guardrails**: Do not change picker UX, historical H2H semantics, or unrelated visual design.
 
-### [ ] Task 10: Enforce migration and retrain safely
+### [x] Task 10: Enforce migration and retrain safely
 
 - **Description**: Version the feature/model contract in candidate manifest and serving/deploy validation. Reject or clearly fail deployment when a champion’s contract does not match the symmetric feature and scorer contract. Rebuild dbt gold, refresh local training snapshot, train all notebooks, promote only through the existing promotion process, and deploy only the retrained champion.
 - **Files**:

@@ -161,7 +161,7 @@ function Layout() {
         <span>Courtside — model-driven tennis intelligence.</span>
         {directoryInfoQ.data?.latest_match_date && (
           <span>
-            Updated {formatLongDate(directoryInfoQ.data.latest_match_date)}
+            Last updated {formatLongDate(directoryInfoQ.data.latest_match_date)}
           </span>
         )}
       </footer>

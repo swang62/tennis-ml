@@ -1,8 +1,14 @@
-"""Build canonical, as-of-dated inference rows from PostgreSQL.
+"""Build directional, as-of-dated inference rows from PostgreSQL.
 
+The supplied player_id is the ``player_*`` side and the supplied opponent_id is
+the ``opponent_*`` side (request order preserved; no lower-id canonicalization).
 Rolling values use snapshots strictly before the requested date. Missing values
 use the materialized gold.tour_averages singleton (never on-demand
 AVG/PERCENTILE); SQL values are always passed as parameters.
+
+H2H SQL canonicalizes the pair to an unordered (a, b) lookup only (a_won is the
+lower-id side's outcome); the shared meeting list is then oriented to the
+requested player for wins/h2h_advantage.
 """
 
 from __future__ import annotations
@@ -80,7 +86,7 @@ WHERE player_id = %s
   AND match_date < %s::date
 """
 
-# Last five distinct, strictly-prior meetings for the canonical pair.
+# Last five distinct, strictly-prior meetings for the unordered pair lookup.
 _H2H_PRIOR_SQL = f"""
 SELECT match_id, a_won
 FROM (
@@ -238,6 +244,7 @@ def _side_values(
         "first_serve_win_pct_10": cell("first_serve_win_pct_10", "first_serve_win_pct_10"),
         "second_serve_win_pct_10": cell("second_serve_win_pct_10", "second_serve_win_pct_10"),
         "serve_win_pct_10": cell("serve_win_pct_10", "serve_win_pct_10"),
+        "return_points_won_pct_10": cell("return_points_won_pct_10", "return_points_won_pct_10"),
         "df_rate_10": cell("df_rate_10", "df_rate_10"),
         "aces_per_svc_game_10": cell("aces_per_svc_game_10", "aces_per_svc_game_10"),
         "rank_trend_10": avg_rank_10 - ranking,
@@ -246,6 +253,9 @@ def _side_values(
         "days_since_last_match": days_since,
         "matches_30d": matches_30d,
         "surface_win_rate_10": surface_win_rate,
+        # Matches observed in the 10-match rolling window; cold start is literal 0
+        # (no tour_averages fallback), matching gold.match_features.
+        "matches_10": int(float(cast(Real, row["matches_10"]))) if row is not None else 0,
     }
 
 
@@ -289,7 +299,7 @@ def _profile_values(pid: str, as_of_date: date, defaults: dict[str, float]) -> d
 
 
 class _RowContext(NamedTuple):
-    """Validated + canonicalized inputs shared by the scalar and bulk builders."""
+    """Validated + directionally-oriented inputs shared by the builders."""
 
     raw_player_id: str
     raw_opponent_id: str
@@ -299,8 +309,8 @@ class _RowContext(NamedTuple):
     tournament_level: int
     round_encoded: int
     is_indoor: int
-    lower_id: str
-    higher_id: str
+    player_id: str
+    opponent_id: str
 
 
 def _normalize_inputs(
@@ -315,9 +325,10 @@ def _normalize_inputs(
     round: str | None = None,
     is_indoor: int | None = None,
 ) -> _RowContext:
-    """Validate and canonicalize one request; shared by both builders."""
+    """Validate one request; shared by both builders.
 
-    # ── Boundary validation ──
+    The requested id order is preserved: player_id stays the ``player_*`` side.
+    """
     if surface not in VALID_SURFACES:
         raise ValueError(f"surface must be one of {sorted(VALID_SURFACES)}, got {surface!r}")
     if tournament is not None:
@@ -346,6 +357,10 @@ def _normalize_inputs(
             f"round_encoded must be an int in {sorted(VALID_ROUND_ENCODINGS)}, "
             f"got {round_encoded!r}"
         )
+    if isinstance(is_indoor, bool) or (
+        is_indoor is not None and (not isinstance(is_indoor, int) or is_indoor not in (0, 1))
+    ):
+        raise ValueError(f"is_indoor must be exactly 0 or 1, got {is_indoor!r}")
     if not isinstance(player_id, str) or not player_id.strip():
         raise ValueError(f"player_id must be a non-empty string, got {player_id!r}")
     if not isinstance(opponent_id, str) or not opponent_id.strip():
@@ -358,30 +373,49 @@ def _normalize_inputs(
     elif not isinstance(as_of_date, date):
         raise TypeError(f"as_of_date must be a datetime.date (or datetime), got {as_of_date!r}")
 
-    # ── Canonicalization: lower id is the player_* side ──
-    lower_id, higher_id = sorted([player_id.strip(), opponent_id.strip()])
+    # ── No id sorting: the requested order is the model-side orientation ──
+    player_id = player_id.strip()
+    opponent_id = opponent_id.strip()
     return _RowContext(
-        raw_player_id=player_id.strip(),
-        raw_opponent_id=opponent_id.strip(),
+        raw_player_id=player_id,
+        raw_opponent_id=opponent_id,
         surface=surface,
         as_of_date=as_of_date,
         as_of_iso=as_of_date.isoformat(),
         tournament_level=tournament_level,
         round_encoded=round_encoded,
         is_indoor=is_indoor if is_indoor is not None else 0,
-        lower_id=lower_id,
-        higher_id=higher_id,
+        player_id=player_id,
+        opponent_id=opponent_id,
     )
+
+
+def _h2h_wins_for_requested(player_id: str, opponent_id: str, a_won_values: list[int]) -> int:
+    """Orient the unordered-pair H2H lookup to the requested player.
+
+    The H2H SQL returns ``a_won`` — the outcome of the lexicographically LOWER
+    id (internal canonicalization for the shared pair lookup only). The lower
+    side uses a_won as-is; the higher side uses its complement.
+    """
+    if not a_won_values:
+        return 0
+    if player_id < opponent_id:
+        return sum(a_won_values)
+    return sum(1 - v for v in a_won_values)
 
 
 def _assemble_row(
     ctx: _RowContext,
     player_side: dict[str, int | float],
     opponent_side: dict[str, int | float],
-    h2h_matches: int,
-    h2h_player_wins: int,
+    h2h_exposure: int,
+    h2h_wins_for_requested_player: int,
 ) -> dict[str, int | float | str]:
-    """Assemble one canonical row in FEATURE_COLS order (shared by builders)."""
+    """Assemble one directional row in FEATURE_COLS order (shared by builders).
+
+    ``player_*`` is the requested player, ``opponent_*`` the requested opponent;
+    h2h_advantage uses the Beta(1,1)-smoothed formula applied in gold.
+    """
     row: dict[str, int | float | str] = {}
 
     def side(name: str, p: dict[str, int | float], o: dict[str, int | float]) -> int | float:
@@ -392,7 +426,7 @@ def _assemble_row(
             name.removeprefix("player_").removeprefix("opponent_")
         ]
 
-    # Matchup differences (canonical side minus opponent).
+    # Matchup differences (requested player side minus opponent).
     row["rank_diff"] = player_side["ranking"] - opponent_side["ranking"]
     row["rank_points_diff"] = player_side["rank_points"] - opponent_side["rank_points"]
     row["age_diff"] = player_side["age"] - opponent_side["age"]
@@ -411,6 +445,9 @@ def _assemble_row(
         player_side["second_serve_win_pct_10"] - opponent_side["second_serve_win_pct_10"]
     )
     row["serve_win_pct_diff"] = player_side["serve_win_pct_10"] - opponent_side["serve_win_pct_10"]
+    row["return_points_won_pct_diff"] = (
+        player_side["return_points_won_pct_10"] - opponent_side["return_points_won_pct_10"]
+    )
     row["df_rate_diff"] = player_side["df_rate_10"] - opponent_side["df_rate_10"]
     row["aces_per_svc_game_diff"] = (
         player_side["aces_per_svc_game_10"] - opponent_side["aces_per_svc_game_10"]
@@ -431,6 +468,8 @@ def _assemble_row(
         "opponent_matches_30d",
         "player_surface_win_rate_10",
         "opponent_surface_win_rate_10",
+        "player_matches_10",
+        "opponent_matches_10",
         "player_is_left_handed",
         "opponent_is_left_handed",
         "player_years_pro",
@@ -438,9 +477,9 @@ def _assemble_row(
     ):
         row[name] = side(name, player_side, opponent_side)
 
-    # Canonical-player head-to-head history.
-    row["player_h2h_matches"] = h2h_matches
-    row["player_h2h_wins"] = h2h_player_wins
+    # Pair-level head-to-head: shared exposure + signed smoothed advantage.
+    row["h2h_exposure"] = h2h_exposure
+    row["h2h_advantage"] = (h2h_wins_for_requested_player + 1.0) / (h2h_exposure + 2.0) - 0.5
 
     # Numeric match context (one-hot surface).
     row["is_clay"] = int(ctx.surface == "clay")
@@ -451,9 +490,9 @@ def _assemble_row(
     row["tournament_level"] = ctx.tournament_level
     row["round_encoded"] = ctx.round_encoded
 
-    # Preserve the canonical ids, not the raw input order.
-    row["player_id"] = ctx.lower_id
-    row["opponent_id"] = ctx.higher_id
+    # Preserve the requested ids, not a sorted order.
+    row["player_id"] = ctx.player_id
+    row["opponent_id"] = ctx.opponent_id
     return row
 
 
@@ -469,7 +508,7 @@ def _build_inference_features_with_meta(
     round: str | None = None,
     is_indoor: int | None = None,
 ) -> tuple[pd.DataFrame, dict[str, object]]:
-    """Build one NaN-free canonical row in the FEATURE_COLS contract."""
+    """Build one NaN-free directional row in the FEATURE_COLS contract."""
     started_at = perf_counter()
     ctx = _normalize_inputs(
         player_id,
@@ -493,24 +532,27 @@ def _build_inference_features_with_meta(
             return None
         return first_row_dict(df)
 
-    player_snapshot = _latest_snapshot(ctx.lower_id)
-    opponent_snapshot = _latest_snapshot(ctx.higher_id)
+    player_snapshot = _latest_snapshot(ctx.player_id)
+    opponent_snapshot = _latest_snapshot(ctx.opponent_id)
 
     player_side = _side_values(player_snapshot, ctx.as_of_date, ctx.surface, defaults)
     opponent_side = _side_values(opponent_snapshot, ctx.as_of_date, ctx.surface, defaults)
-    player_side.update(_profile_values(ctx.lower_id, ctx.as_of_date, defaults))
-    opponent_side.update(_profile_values(ctx.higher_id, ctx.as_of_date, defaults))
+    player_side.update(_profile_values(ctx.player_id, ctx.as_of_date, defaults))
+    opponent_side.update(_profile_values(ctx.opponent_id, ctx.as_of_date, defaults))
 
-    # ── Head-to-head: last five prior meetings for the canonical pair ──
+    # ── Head-to-head: last five strictly-prior meetings for the unordered pair.
+    #    The SQL canonicalizes the pair internally (a_won = lower-id outcome) for
+    #    the shared lookup only; orientation happens in _h2h_wins_for_requested.
     h2h_df = execute_df(
         _H2H_PRIOR_SQL,
-        [ctx.lower_id, ctx.higher_id, ctx.lower_id, ctx.higher_id, ctx.as_of_iso],
+        [ctx.player_id, ctx.opponent_id, ctx.player_id, ctx.opponent_id, ctx.as_of_iso],
     )
-    h2h_matches = len(h2h_df)
-    h2h_player_wins = int(h2h_df["a_won"].sum()) if h2h_matches else 0
+    a_won_values = [int(v) for v in h2h_df["a_won"].tolist()] if not h2h_df.empty else []
+    h2h_exposure = len(a_won_values)
+    h2h_wins = _h2h_wins_for_requested(ctx.player_id, ctx.opponent_id, a_won_values)
 
-    # ── Assemble the canonical row in FEATURE_COLS order ──
-    row = _assemble_row(ctx, player_side, opponent_side, h2h_matches, h2h_player_wins)
+    # ── Assemble the directional row in FEATURE_COLS order ──
+    row = _assemble_row(ctx, player_side, opponent_side, h2h_exposure, h2h_wins)
 
     final_cols = [*FEATURE_COLS, "player_id", "opponent_id"]
     out = pd.DataFrame({col: [row[col]] for col in final_cols})
@@ -519,8 +561,8 @@ def _build_inference_features_with_meta(
     meta: dict[str, object] = {
         "raw_player_id": ctx.raw_player_id,
         "raw_opponent_id": ctx.raw_opponent_id,
-        "canonical_player_id": ctx.lower_id,
-        "canonical_opponent_id": ctx.higher_id,
+        "player_id": ctx.player_id,
+        "opponent_id": ctx.opponent_id,
         "surface": ctx.surface,
         "as_of_date": ctx.as_of_iso,
         "tournament_level": ctx.tournament_level,
@@ -551,7 +593,7 @@ def _build_inference_features_with_meta(
         "opponent_matches_30d": int(opponent_side["matches_30d"]),
         "player_days_since_last_match": int(player_side["days_since_last_match"]),
         "opponent_days_since_last_match": int(opponent_side["days_since_last_match"]),
-        "h2h_prior_meetings": h2h_matches,
+        "h2h_prior_meetings": h2h_exposure,
         "build_ms": builtins.round((perf_counter() - started_at) * 1000, 3),
     }
     return out, meta
@@ -584,7 +626,7 @@ def build_inference_features(
 
 
 def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame:
-    """Build canonical rows for many matches in one set-oriented pass.
+    """Build directional rows for many matches in one set-oriented pass.
 
     Each row accepts the same fields and validation as
     `build_inference_features` (including its own historical `as_of_date`).
@@ -605,7 +647,7 @@ def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame
     defaults = cast(dict[str, float], ta)
 
     # Distinct (player, as-of) pairs drive the set-oriented snapshot queries.
-    pairs = list({(pid, c.as_of_date) for c in ctxs for pid in (c.lower_id, c.higher_id)})
+    pairs = list({(pid, c.as_of_date) for c in ctxs for pid in (c.player_id, c.opponent_id)})
     pair_pids = [p for p, _ in pairs]
     pair_dates = [d for _, d in pairs]
 
@@ -625,12 +667,19 @@ def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame
         matches_30d[(rec["req_player_id"], _to_date(rec["as_of_iso"]))] = int(rec["n"])
 
     profiles: dict[str, dict[str, object]] = {}
-    players = sorted({p for c in ctxs for p in (c.lower_id, c.higher_id)})
+    players = sorted({p for c in ctxs for p in (c.player_id, c.opponent_id)})
     for rec in execute_df(_PROFILES_BULK_SQL, [players]).to_dict("records"):
         profiles[str(rec["player_id"])] = cast(dict[str, object], rec)
 
+    # H2H lookup is keyed on the unordered pair (LEAST/GREATEST) for the shared
+    # prior-meeting store; orientation to each requested player happens below.
     h2h: dict[tuple[str, str, str], list[tuple[str, int]]] = {}
-    h2h_triples = list({(c.lower_id, c.higher_id, c.as_of_iso) for c in ctxs})
+    h2h_triples = list(
+        {
+            (min(c.player_id, c.opponent_id), max(c.player_id, c.opponent_id), c.as_of_iso)
+            for c in ctxs
+        }
+    )
     h2h_rows = execute_df(
         _H2H_PRIOR_BULK_SQL,
         [
@@ -647,36 +696,44 @@ def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame
 
     out_rows: list[dict[str, int | float | str]] = []
     for ctx in ctxs:
-        player_snapshot = snapshots.get((ctx.lower_id, ctx.as_of_date))
-        opponent_snapshot = snapshots.get((ctx.higher_id, ctx.as_of_date))
+        player_snapshot = snapshots.get((ctx.player_id, ctx.as_of_date))
+        opponent_snapshot = snapshots.get((ctx.opponent_id, ctx.as_of_date))
         player_side = _side_values(
             player_snapshot,
             ctx.as_of_date,
             ctx.surface,
             defaults,
-            matches_30d.get((ctx.lower_id, ctx.as_of_date)),
+            matches_30d.get((ctx.player_id, ctx.as_of_date)),
         )
         opponent_side = _side_values(
             opponent_snapshot,
             ctx.as_of_date,
             ctx.surface,
             defaults,
-            matches_30d.get((ctx.higher_id, ctx.as_of_date)),
+            matches_30d.get((ctx.opponent_id, ctx.as_of_date)),
         )
         player_side.update(
-            _profile_values_from_row(profiles.get(ctx.lower_id), ctx.as_of_date, defaults)
+            _profile_values_from_row(profiles.get(ctx.player_id), ctx.as_of_date, defaults)
         )
         opponent_side.update(
-            _profile_values_from_row(profiles.get(ctx.higher_id), ctx.as_of_date, defaults)
+            _profile_values_from_row(profiles.get(ctx.opponent_id), ctx.as_of_date, defaults)
         )
-        meetings = h2h.get((ctx.lower_id, ctx.higher_id, ctx.as_of_iso), [])
+        meetings = h2h.get(
+            (
+                min(ctx.player_id, ctx.opponent_id),
+                max(ctx.player_id, ctx.opponent_id),
+                ctx.as_of_iso,
+            ),
+            [],
+        )
+        a_won_values = [w for _, w in meetings]
         out_rows.append(
             _assemble_row(
                 ctx,
                 player_side,
                 opponent_side,
-                len(meetings),
-                sum(a_won for _, a_won in meetings),
+                len(a_won_values),
+                _h2h_wins_for_requested(ctx.player_id, ctx.opponent_id, a_won_values),
             )
         )
 

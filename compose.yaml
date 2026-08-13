@@ -1,6 +1,6 @@
 # Required env vars:
 #   POSTGRES_PASSWORD  (also used by bento's DATABASE_URL)
-#   DRIFT_API_KEY      (authenticates the /api/internal/* nginx routes)
+#   BENTO_API_KEY      (authenticates the /api/internal/* nginx routes)
 
 services:
   web:
@@ -16,7 +16,7 @@ services:
       - "127.0.0.1:8187:80"
     environment:
       BENTO_API_URL: ${BENTO_API_URL:-http://bento:3000}
-      DRIFT_API_KEY: ${DRIFT_API_KEY:?DRIFT_API_KEY is required}
+      BENTO_API_KEY: ${BENTO_API_KEY:?BENTO_API_KEY is required}
     healthcheck:
       test: wget -q -O /dev/null http://127.0.0.1/ || exit 1
       interval: 60s

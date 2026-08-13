@@ -1,21 +1,8 @@
 import type { H2HResponse } from "../api";
 
-export function probabilityForPlayer(
-  probability: number,
-  canonicalPlayerId: string,
-  playerId: string,
-): number {
-  return canonicalPlayerId === playerId ? probability : 1 - probability;
-}
-
-/** Signed chart edge: negative favors Player A (left), positive Player B (right). */
-export function pickerPreferenceEdge(
-  canonicalProbability: number,
-  canonicalPlayerId: string,
-  playerAId: string,
-): number {
-  const canonicalEdge = canonicalProbability - 0.5;
-  return canonicalPlayerId === playerAId ? -canonicalEdge : canonicalEdge;
+/** Signed chart edge vs even: negative favors Player A (left), positive Player B (right). */
+export function preferenceEdge(p: number): number {
+  return 0.5 - p;
 }
 
 /** Map the API's lower-id canonical H2H response into picker order. */

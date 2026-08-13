@@ -4,7 +4,7 @@ No live database: these tests read the dbt model SQL, yml contracts, and the
 incremental demo fixture from disk and assert the boundaries statically (the
 same approach as test_no_live_db.py). The demo arithmetic — 1 new bronze
 match -> 2 silver.player_matches -> 2 silver.rolling_features snapshots ->
-1 gold.match_features row, aggregates recomputed — is pinned against the
+2 gold.match_features rows, aggregates recomputed — is pinned against the
 fixture and the expansion-factor tests dbt enforces at build time.
 """
 
@@ -18,7 +18,7 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 INCREMENTAL_MODELS = {
     "player_matches": ("models/silver/player_matches.sql", ["player_id", "match_id"]),
     "rolling_features": ("models/silver/rolling_features.sql", ["player_id", "match_id"]),
-    "match_features": ("models/gold/match_features.sql", "match_id"),
+    "match_features": ("models/gold/match_features.sql", ["player_id", "match_id"]),
 }
 AGGREGATE_MODELS = {
     "tour_averages": "models/gold/tour_averages.sql",
@@ -97,8 +97,8 @@ def test_expansion_factor_tests_exist():
 
 def test_demo_fixture_expansion_arithmetic():
     """The fixture adds exactly one bronze match; the append boundary then
-    yields +2 player_matches, +2 rolling snapshots, +1 match_features row,
-    and the selection predicate is idempotent on re-runs."""
+    yields +2 player_matches, +2 rolling snapshots, +2 gold match_features
+    rows, and the selection predicate is idempotent on re-runs."""
     fixture = (FIXTURES / "incremental_demo.sql").read_text()
     assert fixture.count("INSERT INTO bronze.match_events") == 1
     new_match_id = "20260714-2026-316-011"
@@ -113,8 +113,8 @@ def test_demo_fixture_expansion_arithmetic():
     # with no new bronze matches selects nothing.
     assert select_new({new_match_id}, existing={new_match_id}) == set()
 
-    # One new match -> exactly two player perspectives, two snapshots, one
-    # canonical row; the singleton aggregates stay one row and refresh.
+    # One new match -> exactly two player perspectives, two snapshots, two
+    # directional gold rows; the singleton aggregates stay one row and refresh.
     assert len(new) * 2 == 2  # silver.player_matches
     assert len(new) * 2 == 2  # silver.rolling_features
-    assert len(new) == 1  # gold.match_features
+    assert len(new) * 2 == 2  # gold.match_features

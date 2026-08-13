@@ -13,6 +13,7 @@ from src.features.columns import (
     H2H_COLS,
     MATCH_STATS_COLS,
     PROFILE_COLS,
+    RATE_EXPOSURE_COLS,
     SILVER_ROLLING_COLS,
     SIMILARITY_COLS,
 )
@@ -28,6 +29,7 @@ FINAL_DIFFS = [
     "first_serve_win_pct_diff",
     "second_serve_win_pct_diff",
     "serve_win_pct_diff",
+    "return_points_won_pct_diff",
     "df_rate_diff",
     "aces_per_svc_game_diff",
     "rank_trend_diff",
@@ -37,8 +39,8 @@ FINAL_DIFFS = [
 
 
 def test_feature_col_counts():
-    assert len(FEATURE_COLS) == 36
-    assert len(DIFF_COLS) == 15
+    assert len(FEATURE_COLS) == 39
+    assert len(DIFF_COLS) == 16
     assert len(CONTEXT_COLS) == 7
 
 
@@ -118,20 +120,51 @@ def test_profile_cols_keep_handedness_and_years_pro_only():
     assert "opponent_years_pro" in FEATURE_COLS
 
 
-def test_h2h_keeps_counts_only():
-    """Task 6: H2H keeps the canonical-player counts (matches + wins); the win
-    rate and opponent perspective are derived on demand."""
-    assert H2H_COLS == ["h2h_matches", "h2h_wins"]
-    assert "player_h2h_matches" in FEATURE_COLS
-    assert "player_h2h_wins" in FEATURE_COLS
-    assert "player_h2h_win_rate" not in FEATURE_COLS
-    assert "opponent_h2h_matches" not in FEATURE_COLS
-    assert "opponent_h2h_wins" not in FEATURE_COLS
-    assert "opponent_h2h_win_rate" not in FEATURE_COLS
+def test_h2h_pair_level_exposure_and_advantage():
+    """H2H is pair-level: shared strictly-prior exposure + signed smoothed
+    advantage; no player_/opponent_ prefixed variants remain."""
+    assert H2H_COLS == ["h2h_exposure", "h2h_advantage"]
+    assert "h2h_exposure" in FEATURE_COLS
+    assert "h2h_advantage" in FEATURE_COLS
+    for col in (
+        "player_h2h_matches",
+        "player_h2h_wins",
+        "opponent_h2h_matches",
+        "opponent_h2h_wins",
+        "h2h_matches",
+        "h2h_wins",
+        "player_h2h_win_rate",
+        "opponent_h2h_win_rate",
+        "h2h_win_rate",
+    ):
+        assert col not in FEATURE_COLS
+    # Pair-level names never carry a player_/opponent_ prefix.
+    for col in H2H_COLS:
+        assert not col.startswith(("player_", "opponent_"))
+
+
+def test_rate_exposure_cols_minimal_pair():
+    """One per-side 10-match window count backs all smoothed 10-match rates;
+    no per-rate exposure columns exist."""
+    assert RATE_EXPOSURE_COLS == ["player_matches_10", "opponent_matches_10"]
+    for col in RATE_EXPOSURE_COLS:
+        assert col in FEATURE_COLS
+    assert len(RATE_EXPOSURE_COLS) == 2
+    assert "player_matches_30d" in FEATURE_COLS  # distinct 30-day count kept
+    assert "matches_10" not in FEATURE_COLS  # never a pair-level shared count
+
+
+def test_return_strength_diff_position():
+    """return_points_won_pct_diff sits immediately after serve_win_pct_diff,
+    matching silver rolling order (return_points_won_pct_10 follows
+    serve_win_pct_10)."""
+    i = DIFF_COLS.index("serve_win_pct_diff")
+    assert DIFF_COLS[i + 1] == "return_points_won_pct_diff"
+    assert "return_points_won_pct_diff" in FEATURE_COLS
 
 
 def test_feature_cols_exact_final_contract():
-    """The exact 36-column FEATURE_COLS contract (plan lines 186-231)."""
+    """The exact 39-column FEATURE_COLS contract."""
     assert [
         *DIFF_COLS,
         "player_weighted_form_10",
@@ -142,14 +175,25 @@ def test_feature_cols_exact_final_contract():
         "opponent_matches_30d",
         "player_surface_win_rate_10",
         "opponent_surface_win_rate_10",
+        *RATE_EXPOSURE_COLS,
         "player_is_left_handed",
         "opponent_is_left_handed",
         "player_years_pro",
         "opponent_years_pro",
-        "player_h2h_matches",
-        "player_h2h_wins",
+        *H2H_COLS,
         *CONTEXT_COLS,
     ] == FEATURE_COLS
+
+
+def test_swap_behavior_classification():
+    """Every FEATURE_COL is signed, paired, or invariant, with no gaps."""
+    signed = {*DIFF_COLS, "h2h_advantage"}
+    invariant = {"h2h_exposure", *CONTEXT_COLS}
+    paired = set(FEATURE_COLS) - signed - invariant
+    assert all(c.startswith(("player_", "opponent_")) for c in paired)
+    assert {c.removeprefix("player_") for c in paired if c.startswith("player_")} == {
+        c.removeprefix("opponent_") for c in paired if c.startswith("opponent_")
+    }
 
 
 def test_no_current_match_raw_stats_in_feature_cols():
@@ -202,8 +246,8 @@ def test_no_old_99_column_shape_columns():
         assert col not in FEATURE_COLS, col
 
 
-def test_no_duplicate_names_across_the_38_column_row():
-    assert len({*FEATURE_COLS, "player_id", "opponent_id"}) == 38
+def test_no_duplicate_names_across_the_row():
+    assert len({*FEATURE_COLS, "player_id", "opponent_id"}) == len(FEATURE_COLS) + 2
 
 
 def test_naming_conventions():

@@ -4,8 +4,15 @@
 --
 -- Windows are post-match, inclusive, and never include future matches.
 --
--- Partial windows use available matches. Rates remain NULL for zero denominators
--- or unseen surfaces; the training source never silently zero-fills.
+-- Partial windows use available matches. Every [0,1] probability rate is
+-- smoothed with a fixed Beta(1,1) prior, (successes + 1) / (opportunities + 2),
+-- so a first-match window yields the neutral 0.5 and a zero-opportunity window
+-- is never NULL; `matches_10` exposes how many matches actually back the
+-- 10-match rates (1 for the first match, up to 10). Surface rates are smoothed
+-- the same way; they remain NULL for unseen surfaces (no surface match yet).
+-- aces_per_svc_game_10, weighted_form_10, streak, and the rank averages are
+-- NOT probabilities and are deliberately left unsmoothed. The training source
+-- never silently zero-fills.
 --
 -- Per-surface windows are carried forward with conditional MAX because
 -- PostgreSQL lacks LAST_VALUE IGNORE NULLS.
@@ -14,7 +21,9 @@
 --
 -- match_features derives rank trend; AVG skips unranked NULL values.
 --
--- Cast SUM numerators to double precision to avoid PostgreSQL integer division.
+-- The smoothed rates use `+ 1.0`/`+ 2.0` numeric literals, so no integer
+-- division applies; only the unsmoothed aces_per_svc_game_10 keeps its
+-- explicit CAST + NULLIF guard.
 --
 -- Only gold/inference inputs remain; activity and current-match rates are derived on demand.
 --
@@ -51,17 +60,22 @@ changed_players AS (
 ),
 {% endif %}
 player_surface_matches AS (
-    -- Inclusive 10-match rate on each match's own surface.
+    -- Inclusive 10-match rate on each match's own surface, Beta(1,1)-smoothed:
+    -- (SUM(match_won) + 1) / (COUNT(*) + 2); a first surface match yields 0.5.
     SELECT
         player_id,
         match_id,
         player_match_number,
         surface,
-        AVG(match_won) OVER (
+        (SUM(match_won) OVER (
             PARTITION BY player_id, surface
             ORDER BY match_date, match_id
             ROWS BETWEEN 9 PRECEDING AND CURRENT ROW
-        ) AS surface_win_rate_10
+        ) + 1.0) / (COUNT(*) OVER (
+            PARTITION BY player_id, surface
+            ORDER BY match_date, match_id
+            ROWS BETWEEN 9 PRECEDING AND CURRENT ROW
+        ) + 2.0) AS surface_win_rate_10
     FROM {{ ref('player_matches') }}
 ),
 surface_carry AS (
@@ -144,47 +158,50 @@ SELECT
     SUM(s.match_won * POW(0.9, s.match_rn_rev)) OVER w10
         / NULLIF(SUM(POW(0.9, s.match_rn_rev)) OVER w10, 0) AS weighted_form_10,
 
-    -- Rolling win rate over the last 10 matches, including this one
-    AVG(s.match_won) OVER w10 AS win_rate_10,
+    -- Rolling win rate over the last 10 matches, including this one, smoothed
+    -- with the fixed Beta(1,1) prior: (wins + 1) / (matches + 2). The first
+    -- match yields the neutral 0.5, never 0 or 1.
+    (SUM(s.match_won) OVER w10 + 1.0) / (COUNT(*) OVER w10 + 2.0) AS win_rate_10,
 
-    -- Ace rate: aces / first serves made, last 10 including this one. The
-    -- numerator cast defeats PostgreSQL integer division (BIGINT/BIGINT
-    -- truncates); the NULLIF zero-denominator convention is unchanged.
-    CAST(SUM(s.aces) OVER w10 AS DOUBLE PRECISION)
-        / NULLIF(SUM(s.first_serves_made) OVER w10, 0) AS ace_rate_10,
+    -- Ace rate: (aces + 1) / (first serves made + 2), last 10 incl. this one.
+    -- Smoothed so a zero-opportunity window is never NULL (>= 2 denominator).
+    (SUM(s.aces) OVER w10 + 1.0) / (SUM(s.first_serves_made) OVER w10 + 2.0)
+        AS ace_rate_10,
 
-    -- First-serve percentage: first serves made / total serve points, 10
-    CAST(SUM(s.first_serves_made) OVER w10 AS DOUBLE PRECISION)
-        / NULLIF(SUM(s.total_serve_points) OVER w10, 0) AS first_serve_pct_10,
+    -- First-serve percentage: (first serves made + 1) / (total serve points + 2)
+    (SUM(s.first_serves_made) OVER w10 + 1.0)
+        / (SUM(s.total_serve_points) OVER w10 + 2.0) AS first_serve_pct_10,
 
-    -- Break-point save rate: break points saved / faced, last 10 incl. this
-    CAST(SUM(s.break_points_saved) OVER w10 AS DOUBLE PRECISION)
-        / NULLIF(SUM(s.break_points_faced) OVER w10, 0) AS break_points_saved_pct_10,
+    -- Break-point save rate: (saved + 1) / (faced + 2), last 10 incl. this one
+    (SUM(s.break_points_saved) OVER w10 + 1.0)
+        / (SUM(s.break_points_faced) OVER w10 + 2.0) AS break_points_saved_pct_10,
 
-    -- First-serve win rate: first-serve points won / first serves made, 10
-    CAST(SUM(s.first_serve_points_won) OVER w10 AS DOUBLE PRECISION)
-        / NULLIF(SUM(s.first_serves_made) OVER w10, 0) AS first_serve_win_pct_10,
+    -- First-serve win rate: (first-serve points won + 1) / (first serves made + 2)
+    (SUM(s.first_serve_points_won) OVER w10 + 1.0)
+        / (SUM(s.first_serves_made) OVER w10 + 2.0) AS first_serve_win_pct_10,
 
-    -- Second-serve win rate: second-serve points won / second serves made
-    -- (total serve points minus first serves made), 10
-    CAST(SUM(s.second_serve_points_won) OVER w10 AS DOUBLE PRECISION)
-        / NULLIF(SUM(s.total_serve_points - s.first_serves_made) OVER w10, 0)
+    -- Second-serve win rate: (second-serve points won + 1) / (second serves
+    -- made + 2), where second serves made = total serve points - first serves
+    (SUM(s.second_serve_points_won) OVER w10 + 1.0)
+        / (SUM(s.total_serve_points - s.first_serves_made) OVER w10 + 2.0)
         AS second_serve_win_pct_10,
 
-    -- Serve win rate: (first + second serve points won) / total serve points, 10
-    CAST(SUM(s.first_serve_points_won + s.second_serve_points_won) OVER w10 AS DOUBLE PRECISION)
-        / NULLIF(SUM(s.total_serve_points) OVER w10, 0) AS serve_win_pct_10,
+    -- Serve win rate: ((first + second serve points won) + 1) / (total + 2)
+    (SUM(s.first_serve_points_won + s.second_serve_points_won) OVER w10 + 1.0)
+        / (SUM(s.total_serve_points) OVER w10 + 2.0) AS serve_win_pct_10,
 
-    -- Return points won over opponent serve points, with the standard NULLIF guard.
-    CAST(SUM(s.return_points_won) OVER w10 AS DOUBLE PRECISION)
-        / NULLIF(SUM(s.return_points_available) OVER w10, 0)
+    -- Return points won: (return_points_won + 1) / (return_points_available + 2)
+    (SUM(s.return_points_won) OVER w10 + 1.0)
+        / (SUM(s.return_points_available) OVER w10 + 2.0)
         AS return_points_won_pct_10,
 
-    -- Double-fault rate: double faults / total serve points, 10 (same
-    -- NULLIF convention as the other serve rates — NULL when the window has
-    -- no serve points)
-    CAST(SUM(s.double_faults) OVER w10 AS DOUBLE PRECISION)
-        / NULLIF(SUM(s.total_serve_points) OVER w10, 0) AS df_rate_10,
+    -- Double-fault rate: (double faults + 1) / (total serve points + 2)
+    (SUM(s.double_faults) OVER w10 + 1.0)
+        / (SUM(s.total_serve_points) OVER w10 + 2.0) AS df_rate_10,
+
+    -- Number of matches in the last-10 window backing the smoothed rates;
+    -- 1 for the first match, up to 10. Carried to gold as matches_10 exposure.
+    COUNT(*) OVER w10 AS matches_10,
 
     -- Aces per service game, 10
     CAST(SUM(s.aces) OVER w10 AS DOUBLE PRECISION)

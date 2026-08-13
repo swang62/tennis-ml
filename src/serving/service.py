@@ -32,16 +32,18 @@ from starlette.routing import Route
 from src.constants import (
     BRONZE_PROFILES_TABLE,
     BRONZE_TABLE,
+    DEPLOY_ARTIFACTS,
     PRODUCTION_MODEL,
     PROFILES_TABLE,
     RANKINGS_TABLE,
-    ROOT,
     SILVER_PLAYER_MATCHES,
+    STACK_ORDER,
     TOUR_AVERAGES_TABLE,
 )
 from src.countries import resolve_ioc, valid_ioc
 from src.db.client import execute_df, first_row_dict
 from src.db.init_db import init as init_db
+from src.evaluate.symmetry import antisymmetric_evidence, evidence_to_probability
 from src.features.columns import FEATURE_COLS
 from src.features.inference import (
     _build_inference_features_with_meta,
@@ -51,7 +53,7 @@ from src.features.inference import (
 from src.models.similarity import PlayerSimilarity
 from src.utils import load_env
 
-AUX_DIR = ROOT / "data" / "processed"
+AUX_DIR = DEPLOY_ARTIFACTS
 
 # Canonical champion manifest baked at deploy time (written by deploy.py from
 # the champion's exact lineage tags; packaged via bentofile.yaml).
@@ -187,6 +189,33 @@ def _positive_class_probability(model: Any, features: Any) -> np.ndarray:
     return np.asarray(model.predict_proba(features))[:, matches[0]]
 
 
+def _stack_evidence(
+    pairs: dict[str, tuple[float, float]],
+    stacker: Any,
+    stack_order: list[str] | None = None,
+) -> dict[str, float]:
+    """Per-base antisymmetric evidence -> stacked p_win + symmetric base probs.
+
+    `pairs` maps each base name to its two directional probabilities (p_ab,
+    p_ba) in the requested orientation. Each base's paired scores are projected
+    to antisymmetric evidence, the three evidence values are stacked in fixed
+    order and run through the no-intercept logistic stacker, and the symmetric
+    base probabilities are returned alongside p_win. Pure numpy/sklearn — no
+    Bento/DB state — so it is unit-testable in isolation.
+    """
+    order = list(stack_order) if stack_order is not None else list(STACK_ORDER)
+    if list(pairs.keys()) != order:
+        raise ValueError(
+            f"evidence pairs must be keyed in stack order {order}, got {list(pairs.keys())}"
+        )
+    evidence = {name: antisymmetric_evidence(ab, ba) for name, (ab, ba) in pairs.items()}
+    stack = pd.DataFrame([[evidence[name] for name in order]], columns=order, dtype=float)
+    p_win = float(_positive_class_probability(stacker, stack)[0])
+    probs = {name: float(evidence_to_probability(evidence[name])) for name in order}
+    probs["p_win"] = p_win
+    return probs
+
+
 def _predict_from_ids_bulk_impl(
     rows: list[dict[str, object]], predict_proba: object
 ) -> pd.DataFrame:
@@ -194,8 +223,10 @@ def _predict_from_ids_bulk_impl(
 
     Each row accepts the same fields as `predict_from_ids` (including its own
     historical `as_of_date`); the endpoint's `indoor` field maps to the
-    builder's `is_indoor`. Returns a DataFrame with the finalized FEATURE_COLS
-    plus ids and the four probability columns, in input order.
+    builder's `is_indoor`. Both orientation rows are built per context (forward
+    and reversed), paired, and stacked through the shared ensemble. Returns a
+    DataFrame with the finalized FEATURE_COLS plus ids and the four probability
+    columns, in input order with the REQUESTED ids.
     """
     started_at = perf_counter()
     normalized: list[dict[str, object]] = []
@@ -207,9 +238,16 @@ def _predict_from_ids_bulk_impl(
         if r.get("as_of_date") is not None:
             r["as_of_date"] = _to_date(r["as_of_date"])
         normalized.append(r)
-    feature_df = build_inference_features_bulk(normalized)
-    proba_df = cast(Callable[[pd.DataFrame], pd.DataFrame], predict_proba)(feature_df)
-    out = feature_df.copy()
+    # Reversed contexts swap the requested ids; surface/as_of_date/etc. stay put.
+    reversed_ = [
+        {**r, "player_id": r["opponent_id"], "opponent_id": r["player_id"]} for r in normalized
+    ]
+    feature_ab = build_inference_features_bulk(normalized)
+    feature_ba = build_inference_features_bulk(reversed_)
+    proba_df = cast(Callable[[pd.DataFrame, pd.DataFrame], pd.DataFrame], predict_proba)(
+        feature_ab, feature_ba
+    )
+    out = feature_ab.copy()
     for col in ("p_linear", "p_gbdt", "p_nn", "p_win"):
         out[col] = proba_df[col].to_numpy()
     _log.debug(
@@ -323,7 +361,7 @@ LIMIT %s
 
 # Direct bronze pair read: one row per meeting, no silver expansion or dedup.
 _H2H_MEETINGS_SQL = f"""
-SELECT match_id, match_date, tournament, round, surface,
+SELECT match_id, match_date, tournament, tournament_name, round, surface,
        player1_id, player2_id, winner_id
 FROM {BRONZE_TABLE}
 WHERE (player1_id = %s AND player2_id = %s)
@@ -611,6 +649,7 @@ def _head_to_head(request: Request) -> JSONResponse:
                 "match_date": r["match_date"],
                 "surface": r["surface"],
                 "tournament": r["tournament"],
+                "tournament_name": r["tournament_name"] or None,
                 "round": r["round"],
                 "winner_id": winner_id,
                 "loser_id": higher if player1_won else lower,
@@ -814,6 +853,8 @@ class TennisPredictor:
         init_db()
         self.linear: Any = bentoml.sklearn.load_model(self.bento_linear)
         manifest = json.loads(MODEL_INFO_FILE.read_text())
+        # Fixed evidence stack order shared by training and serving.
+        self._stack_order: list[str] = list(STACK_ORDER)
         gbdt_framework = manifest["bases"]["gbdt"]["framework"]
         # xgboost/lightgbm use OpenMP, which can deadlock inside BentoML's
         # forked worker processes. Force single-threaded during model load.
@@ -841,52 +882,90 @@ class TennisPredictor:
         self.bio_by_player = {pid: i for i, pid in enumerate(bio_data["player_ids"])}
         self.bio_array = bio_data["vectors"].astype(np.float32)
 
-    def _predict_proba(self, input: pd.DataFrame) -> pd.DataFrame:
-        """Run the stacked ensemble without recursively calling the HTTP endpoint."""
+    def _predict_proba(self, row_ab: pd.DataFrame, row_ba: pd.DataFrame) -> pd.DataFrame:
+        """Run the stacked ensemble without recursively calling the HTTP endpoint.
+
+        Both paired directional rows must be supplied: `row_ab` carries the
+        requested orientation (player_id vs opponent_id) and `row_ba` the
+        reversed orientation (opponent_id vs player_id). Each base scores both,
+        the pairs are projected to antisymmetric evidence, and the evidence is
+        stacked through the production logistic stacker. Output rows preserve
+        the requested (row_ab) ids and orientation.
+        """
         started_at = perf_counter()
-        features = input[FEATURE_COLS]
+        if len(row_ab) != len(row_ba):
+            raise ValueError("paired orientations must have equal length")
+        features_ab = row_ab[FEATURE_COLS]
+        features_ba = row_ba[FEATURE_COLS]
 
         # Linear + NN paths share the persisted train-fit scaler
         # (StandardScaler().fit(X_train), same contract the NN was trained on).
         scale_started_at = perf_counter()
-        features_scaled = self.scaler.transform(features)
+        scaled_ab = self.scaler.transform(features_ab)
+        scaled_ba = self.scaler.transform(features_ba)
         scale_ms = (perf_counter() - scale_started_at) * 1000
         # Linear path: finalized row -> persisted scaler -> classifier.
         linear_started_at = perf_counter()
-        p_linear = _positive_class_probability(self.linear, features_scaled)
+        p_linear_ab = _positive_class_probability(self.linear, scaled_ab)
+        p_linear_ba = _positive_class_probability(self.linear, scaled_ba)
         linear_ms = (perf_counter() - linear_started_at) * 1000
         # GBDT path: raw finalized row.
         gbdt_started_at = perf_counter()
-        p_gbdt = _positive_class_probability(self.gbdt, features)
+        p_gbdt_ab = _positive_class_probability(self.gbdt, features_ab)
+        p_gbdt_ba = _positive_class_probability(self.gbdt, features_ba)
         gbdt_ms = (perf_counter() - gbdt_started_at) * 1000
         # ONNX inputs match the training forward signature.
-        nn_inputs = {
-            "tab": features_scaled.astype(np.float32),
-            "bio_p": self._row_bio_np(input["player_id"].to_numpy()),
-            "bio_o": self._row_bio_np(input["opponent_id"].to_numpy()),
+        nn_inputs_ab = {
+            "tab": scaled_ab.astype(np.float32),
+            "bio_p": self._row_bio_np(row_ab["player_id"].to_numpy()),
+            "bio_o": self._row_bio_np(row_ab["opponent_id"].to_numpy()),
+        }
+        nn_inputs_ba = {
+            "tab": scaled_ba.astype(np.float32),
+            "bio_p": self._row_bio_np(row_ba["player_id"].to_numpy()),
+            "bio_o": self._row_bio_np(row_ba["opponent_id"].to_numpy()),
         }
         nn_started_at = perf_counter()
-        nn_logits = np.asarray(self.nn_session.run(None, nn_inputs)[0])
-        p_nn = 1.0 / (1.0 + np.exp(-nn_logits.reshape(-1)))
+        nn_ab = np.asarray(self.nn_session.run(None, nn_inputs_ab)[0])
+        nn_ba = np.asarray(self.nn_session.run(None, nn_inputs_ba)[0])
+        p_nn_ab = 1.0 / (1.0 + np.exp(-nn_ab.reshape(-1)))
+        p_nn_ba = 1.0 / (1.0 + np.exp(-nn_ba.reshape(-1)))
         nn_ms = (perf_counter() - nn_started_at) * 1000
 
-        # LR head: stack of base-model probabilities.
-        stack = np.column_stack([p_linear, p_gbdt, p_nn])
+        # Stack antisymmetric evidence per row through the no-intercept stacker.
+        n = len(row_ab)
+        p_linear = np.empty(n)
+        p_gbdt = np.empty(n)
+        p_nn = np.empty(n)
+        p_win = np.empty(n)
         ensemble_started_at = perf_counter()
-        p_win = _positive_class_probability(self.production, stack)
+        for i in range(n):
+            probs = _stack_evidence(
+                {
+                    "linear": (p_linear_ab[i], p_linear_ba[i]),
+                    "gbdt": (p_gbdt_ab[i], p_gbdt_ba[i]),
+                    "nn": (p_nn_ab[i], p_nn_ba[i]),
+                },
+                self.production,
+                self._stack_order,
+            )
+            p_linear[i] = probs["linear"]
+            p_gbdt[i] = probs["gbdt"]
+            p_nn[i] = probs["nn"]
+            p_win[i] = probs["p_win"]
         ensemble_ms = (perf_counter() - ensemble_started_at) * 1000
 
         # Aggregate-only observability: means (no per-row dumps). A single row
-        # additionally logs its ids, preserving the scalar path's detail.
-        first = input.iloc[0] if not input.empty else None
+        # additionally logs its requested ids, preserving the scalar path's detail.
+        first = row_ab.iloc[0] if not row_ab.empty else None
         first_ident = (
             f" player_id={first['player_id']} opponent_id={first['opponent_id']}"
-            if first is not None and len(input) == 1
+            if first is not None and len(row_ab) == 1
             else ""
         )
         _log.debug(
             "predict_observability"
-            f" rows={len(input)}"
+            f" rows={len(row_ab)}"
             f" feature_count={len(FEATURE_COLS)}"
             f" scale_ms={scale_ms:.3f}"
             f" linear_ms={linear_ms:.3f}"
@@ -903,14 +982,14 @@ class TennisPredictor:
 
         return pd.DataFrame(
             {
-                "player_id": input["player_id"].to_numpy(),
-                "opponent_id": input["opponent_id"].to_numpy(),
+                "player_id": row_ab["player_id"].to_numpy(),
+                "opponent_id": row_ab["opponent_id"].to_numpy(),
                 "p_win": p_win,
                 "p_linear": p_linear,
                 "p_gbdt": p_gbdt,
                 "p_nn": p_nn,
             },
-            index=input.index,
+            index=row_ab.index,
         )
 
     @bentoml.api
@@ -929,7 +1008,7 @@ class TennisPredictor:
     ) -> dict[str, object]:
         """Build an as-of-dated feature row from player ids, then predict."""
         started_at = perf_counter()
-        row, meta = _build_inference_features_with_meta(
+        row_ab, meta = _build_inference_features_with_meta(
             player_id,
             opponent_id,
             surface,
@@ -940,10 +1019,21 @@ class TennisPredictor:
             as_of_date=as_of_date,
             is_indoor=indoor,
         )
+        row_ba, _meta_ba = _build_inference_features_with_meta(
+            opponent_id,
+            player_id,
+            surface,
+            tournament_level=tournament_level,
+            round_encoded=round_encoded,
+            tournament=tournament,
+            round=round,
+            as_of_date=as_of_date,
+            is_indoor=indoor,
+        )
         # Reuse the shared prediction path (no nested HTTP — see _predict_proba).
-        out_df = self._predict_proba(row)
+        out_df = self._predict_proba(row_ab, row_ba)
         # One row in, one row out — return the first record as a flat dict for
-        # ergonomic JSON over HTTP.
+        # ergonomic JSON over HTTP. ids come from row_ab (requested order).
         rec = first_row_dict(out_df)
         rec["p_win"] = builtins.round(float(rec["p_win"]), 4)
         rec["p_linear"] = builtins.round(float(rec["p_linear"]), 4)
@@ -955,10 +1045,8 @@ class TennisPredictor:
         rec["response_ms"] = (perf_counter() - started_at) * 1000
         _log.debug(
             "predict_from_ids_observability"
-            f" raw_player_id={meta['raw_player_id']}"
-            f" raw_opponent_id={meta['raw_opponent_id']}"
-            f" canonical_player_id={meta['canonical_player_id']}"
-            f" canonical_opponent_id={meta['canonical_opponent_id']}"
+            f" requested_player_id={meta['player_id']}"
+            f" requested_opponent_id={meta['opponent_id']}"
             f" surface={meta['surface']}"
             f" as_of_date={meta['as_of_date']}"
             f" tournament_level={meta['tournament_level']}"

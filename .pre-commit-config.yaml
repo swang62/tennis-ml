@@ -22,7 +22,7 @@ repos:
         types: [python]
 
       - id: tests
-        name: tests
+        name: pytest
         description: Run only pytest tests affected by the changed files (coverage-based)
         language: system
         entry: scripts/run_tests.sh
@@ -30,7 +30,7 @@ repos:
         files: ^(src|tests|infra/duckdb|dbt)/
 
       - id: web-checks
-        name: web checks
+        name: pnpm test
         description: TypeScript typecheck and unit tests for the web dashboard
         language: system
         entry: scripts/web_checks.sh

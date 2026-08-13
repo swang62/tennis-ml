@@ -467,6 +467,7 @@ def _h2h_df() -> pd.DataFrame:
                 "match_id": mid,
                 "match_date": date,
                 "tournament": "masters",
+                "tournament_name": "Indian Wells Masters",
                 "round": "qf",
                 "surface": "hard",
                 "player1_id": p1,
@@ -512,6 +513,7 @@ def test_head_to_head_meetings_and_summary():
     assert meetings[1]["player1_won"] is False
     assert meetings[1]["loser_id"] == "a"
     assert "match_id" in meetings[0]
+    assert meetings[0]["tournament_name"] == "Indian Wells Masters"
     assert data["summary"] == {
         "meetings": 6,
         "player1_wins": 3,

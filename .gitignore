@@ -9,6 +9,7 @@ __pycache__/
 
 # Data
 **/data/processed/*
+**/data/deploy/*
 artifacts/*
 
 # MLflow

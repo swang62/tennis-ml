@@ -51,6 +51,14 @@ OUTPUTS = ARTIFACTS / "notebooks"
 LOGS = ARTIFACTS / "logs"
 DATA_PROCESSED = ROOT / "data" / "processed"
 INIT_SQL = ROOT / "infra" / "postgres" / "init.sql"
+DEPLOY_ARTIFACTS = ROOT / "data" / "deploy"
+
+# Model-tied serving artifacts frozen into DEPLOY_ARTIFACTS on promotion
+FROZEN_ARTIFACTS = (
+    "linear_scaler.pkl",
+    "bio_embeddings.npz",
+    "bio_feature_cols.json",
+)
 
 # --- Candidate manifest ---
 CANDIDATE_MANIFEST = DATA_PROCESSED / "candidate_manifest.json"
@@ -61,12 +69,18 @@ CHAMPION_ALIAS = "champion"
 PRODUCTION_BENTO_URL = os.getenv("PRODUCTION_BENTO_URL", "http://127.0.0.1:8187")
 MODEL_INFO_ROUTE = "/api/internal/model-info"
 PREDICT_BATCH_ROUTE = "/api/internal/predict-batch"
-DRIFT_API_KEY_HEADER = "X-Drift-API-Key"
-DRIFT_API_KEY = os.getenv("DRIFT_API_KEY", "")
+BENTO_API_KEY_HEADER = "X-API-Key"
+BENTO_API_KEY = os.getenv("BENTO_API_KEY", "")
+
+
+# Fixed base-model order for the ensemble stacker (training and serving).
+STACK_ORDER = ("linear", "gbdt", "nn")
 
 
 # --- Champion lineage tags (single source of truth for the tag schema) ---
-def build_lineage_tags(base_pins: dict, aux_pins: dict) -> dict[str, str]:
+def build_lineage_tags(
+    base_pins: dict[str, dict[str, str]], aux_pins: dict[str, str]
+) -> dict[str, str]:
     """Flatten base/aux pins into champion model version tags.
 
     base_pins is the {name: pin} map consolidated by 03 (registered_model_name,

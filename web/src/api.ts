@@ -157,6 +157,7 @@ export interface H2HMeeting {
   match_date: string
   surface: string
   tournament: string
+  tournament_name: string | null
   round: string
   winner_id: string
   loser_id: string

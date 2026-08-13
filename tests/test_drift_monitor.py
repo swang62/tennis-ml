@@ -81,7 +81,7 @@ def _stub_batch_response(ctxs, base_prob=0.65):
 
 
 def _setup_model_info_stub(monkeypatch, mode="production", version="3", run_id="champ-run-id"):
-    monkeypatch.setattr(cd, "DRIFT_API_KEY", "")
+    monkeypatch.setattr(cd, "BENTO_API_KEY", "")
     monkeypatch.setattr(cd, "PRODUCTION_BENTO_URL", "http://127.0.0.1:8187")
     monkeypatch.setattr(cd, "MODEL_INFO_ROUTE", "/api/internal/model-info")
     monkeypatch.setattr(

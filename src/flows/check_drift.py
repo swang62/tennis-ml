@@ -37,9 +37,9 @@ from src import constants
 from src.constants import (
     ARTIFACTS,
     BATCH_MAX_SIZE_ROWS,
+    BENTO_API_KEY,
+    BENTO_API_KEY_HEADER,
     CHAMPION_ALIAS,
-    DRIFT_API_KEY,
-    DRIFT_API_KEY_HEADER,
     GOLD_TABLE,
     MODEL_INFO_ROUTE,
     PREDICT_BATCH_ROUTE,
@@ -122,8 +122,8 @@ def _champion_cutoff_date(client: MlflowClient) -> date | None:
 def _post_batch(contexts: list[dict[str, object]]) -> list[dict[str, object]]:
     url = f"{PRODUCTION_BENTO_URL}{PREDICT_BATCH_ROUTE}"
     headers = {"Content-Type": "application/json"}
-    if DRIFT_API_KEY:
-        headers[DRIFT_API_KEY_HEADER] = DRIFT_API_KEY
+    if BENTO_API_KEY:
+        headers[BENTO_API_KEY_HEADER] = BENTO_API_KEY
     resp = requests.post(url, json=contexts, headers=headers, timeout=120)  # type: ignore[arg-type]
     resp.raise_for_status()
     body: object = resp.json()
@@ -157,8 +157,8 @@ def _validate_production(client: MlflowClient) -> Any:
         )
     model_info_url = f"{PRODUCTION_BENTO_URL}{MODEL_INFO_ROUTE}"
     headers = {}
-    if DRIFT_API_KEY:
-        headers[DRIFT_API_KEY_HEADER] = DRIFT_API_KEY
+    if BENTO_API_KEY:
+        headers[BENTO_API_KEY_HEADER] = BENTO_API_KEY
     resp = requests.get(model_info_url, headers=headers, timeout=30)
     resp.raise_for_status()
     model_info: object = resp.json()

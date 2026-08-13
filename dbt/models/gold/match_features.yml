@@ -3,27 +3,33 @@ version: 2
 models:
   - name: match_features
     description: >
-      ONE ROW PER MATCH, lower-id player_* side, built by pairing each
-      player_match row with that player's immediately preceding post-match
-      snapshot (player_match_number - 1) from silver.rolling_features,
-      then collapsing the two perspectives into one canonical row. Every
+      TWO DIRECTIONAL ROWS PER MATCH, one per player, keyed by
+      (match_id, player_id), built by pairing each player_match row with that
+      player's immediately preceding post-match snapshot
+      (player_match_number - 1) from silver.rolling_features. The two rows of
+      a physical match share match_id and match context, exchange the paired
+      player_*/opponent_* side values, negate the signed differences and
+      h2h_advantage, and carry complementary match_won labels. Every
       side-level value is imputed from the single-row gold.tour_averages
       singleton (CROSS JOIN) BEFORE matchup differences are calculated, so
       every FEATURE_COLS cell is non-null and finite; dbt fails when the
-      contract is violated (match_features_no_null_model_features).
-      Ranking, rank points, and age come from the PRIOR snapshot, never a
-      same-day one. `match_won` = 1 iff the canonical player_* side won.
-      Output columns are the 36 FEATURE_COLS preceded by the metadata block
-      (match_id, match_date, player_id, opponent_id, tournament, round,
-      surface, match_won). Current-match serve/break analysis rates are
-      intentionally absent (derived on demand from bronze).
+      contract is violated (match_features_no_null_model_features). Ranking,
+      rank points, and age come from the PRIOR snapshot (strictly before
+      match_date), never a same-day one. `match_won` = 1 iff the row's player
+      side won. Output columns are all 39 FEATURE_COLS preceded by the metadata
+      block (match_id, match_date, player_id, opponent_id, tournament, round,
+      surface, match_won); the per-side rate-exposure columns
+      player_matches_10/opponent_matches_10 carry the prior snapshot's
+      matches_10 count (0 for cold start).
+      Current-match serve/break analysis rates are intentionally
+      absent (derived on demand from bronze).
     tests:
       - unique:
           arguments:
-            column_name: "match_id"
+            column_name: "player_id || '_' || match_id"
     columns:
       - name: match_id
-        description: Unique match identifier.
+        description: Immutable group key for one physical match; exactly two directional rows (one per player) share it.
         tests:
           - not_null
       - name: match_date
@@ -31,11 +37,11 @@ models:
         tests:
           - not_null
       - name: player_id
-        description: Canonical player (lower/stable ATP id).
+        description: The player whose perspective this directional row represents; player_* features and match_won belong to this side.
         tests:
           - not_null
       - name: opponent_id
-        description: Opponent (higher ATP id).
+        description: The opposing player, from the row player's perspective.
         tests:
           - not_null
       - name: tournament
@@ -50,20 +56,20 @@ models:
               arguments:
                 values: [clay, grass, hard, carpet, "0"]
       - name: match_won
-        description: 1 if the canonical player_* side won, else 0 (the label).
+        description: 1 if the row's player side won this match, else 0 (the label); the two directional rows of a match carry complementary values.
         tests:
           - not_null
           - accepted_values:
               arguments:
                 values: [0, 1]
 
-      # Matchup differences: canonical side minus opponent side (imputed).
+      # Matchup differences: row player side minus opponent side (imputed).
       - name: rank_diff
-        description: player ranking minus opponent ranking (prior snapshot, imputed).
+        description: Player ranking minus opponent ranking (prior snapshot, imputed).
       - name: rank_points_diff
-        description: player rank points minus opponent rank points (prior snapshot, imputed).
+        description: Player rank points minus opponent rank points (prior snapshot, imputed).
       - name: age_diff
-        description: player age minus opponent age (prior snapshot, imputed).
+        description: Player age minus opponent age (prior snapshot, imputed).
       - name: win_rate_diff
         description: player_win_rate_10 - opponent_win_rate_10.
       - name: ace_rate_diff
@@ -78,6 +84,8 @@ models:
         description: player_second_serve_win_pct_10 - opponent_second_serve_win_pct_10.
       - name: serve_win_pct_diff
         description: player_serve_win_pct_10 - opponent_serve_win_pct_10.
+      - name: return_points_won_pct_diff
+        description: player_return_points_won_pct_10 - opponent_return_points_won_pct_10.
       - name: df_rate_diff
         description: player_df_rate_10 - opponent_df_rate_10.
       - name: aces_per_svc_game_diff
@@ -91,35 +99,45 @@ models:
 
       # Absolute state values where both sides matter.
       - name: player_weighted_form_10
-        description: Canonical player exponentially-decayed win form, last 10 matches before this one.
+        description: Player exponentially-decayed win form, last 10 matches before this one.
       - name: opponent_weighted_form_10
         description: Opponent exponentially-decayed win form, last 10 matches before this one.
       - name: player_days_since_last_match
-        description: Days since canonical player's last match (prior-snapshot gap; pool median when none).
+        description: Days since the row player's last match (prior-snapshot gap; pool median when none).
       - name: opponent_days_since_last_match
-        description: Days since opponent's last match (prior-snapshot gap; pool median when none).
+        description: Days since the opponent's last match (prior-snapshot gap; pool median when none).
       - name: player_matches_30d
-        description: Canonical player matches in the 30 days before this match (strictly-prior count; pool median when none).
+        description: Row player's matches in the 30 days before this match (strictly-prior count; pool median when none).
       - name: opponent_matches_30d
-        description: Opponent matches in the 30 days before this match (strictly-prior count; pool median when none).
+        description: Opponent's matches in the 30 days before this match (strictly-prior count; pool median when none).
       - name: player_surface_win_rate_10
-        description: Canonical player win rate on this surface, last 10 matches (prior snapshot, imputed; carpet and unknown/0 use the fixed rate default).
+        description: Row player's win rate on this surface, last 10 matches (prior snapshot, imputed; carpet and unknown/0 use the fixed rate default).
       - name: opponent_surface_win_rate_10
-        description: Opponent win rate on this surface, last 10 matches (prior snapshot, imputed; carpet and unknown/0 use the fixed rate default).
+        description: Opponent's win rate on this surface, last 10 matches (prior snapshot, imputed; carpet and unknown/0 use the fixed rate default).
+
+      # Per-side exposure counts backing the smoothed 10-match rates
+      # (fixed Beta(1,1) prior: smoothed_rate = (successes + 1) / (opportunities + 2)).
+      # Deferred (Task 3): not yet emitted by gold.match_features.
+      - name: player_matches_10
+        description: Matches actually observed in the row player's 10-match window backing its 10-match rates (0 for cold start). Not yet emitted (deferred).
+      - name: opponent_matches_10
+        description: Matches actually observed in the opponent's 10-match window backing its 10-match rates (0 for cold start). Not yet emitted (deferred).
       - name: player_is_left_handed
-        description: 1 if the canonical player is left-handed (handedness = L), 0 if right-handed (R); pool left-handed rate when missing or non-L/R.
+        description: 1 if the row player is left-handed (handedness = L), 0 if right-handed (R); pool left-handed rate when missing or non-L/R.
       - name: opponent_is_left_handed
         description: 1 if the opponent is left-handed, 0 if right-handed; pool left-handed rate when missing or non-L/R.
       - name: player_years_pro
-        description: Years the canonical player has been pro as of the match date (match year - turned_pro); pool mean when missing.
+        description: Years the row player has been pro as of the match date (match year - turned_pro); pool mean when missing.
       - name: opponent_years_pro
         description: Years the opponent has been pro as of the match date (match year - turned_pro); pool mean when missing.
 
-      # Canonical-player head-to-head history (0/0 when never met before).
-      - name: player_h2h_matches
-        description: Prior meetings between the canonical player and opponent (most recent 5, strictly before this match); 0 when never met before.
-      - name: player_h2h_wins
-        description: Canonical player wins in those prior meetings; 0 when never met before.
+      # Pair-level head-to-head history (no player_/opponent_ prefix): both
+      # directional rows of a match share the same exposure; advantage is
+      # signed and complementary across the pair.
+      - name: h2h_exposure
+        description: Prior meetings between the two players, strictly before this match (0 when never met). Invariant across the match's two directional rows.
+      - name: h2h_advantage
+        description: Smoothed directional advantage (row player's prior wins + 1) / (prior meetings + 2) - 0.5 from those strictly-prior meetings; negates on side swap and is 0.0 when never met.
 
       # Numeric match context (one-hot surface for linear and neural models).
       # is_clay/is_grass/is_hard/is_carpet derive directly from the surface
@@ -152,22 +170,22 @@ models:
       # features: they are appended for PlayerSimilarity and are excluded from
       # the non-null/finite model-feature contract.
       - name: player_first_serve_pct_10
-        description: Canonical player first-serve percentage, last 10 (similarity-only).
+        description: Row player's first-serve percentage, last 10 (similarity-only).
       - name: opponent_first_serve_pct_10
-        description: Opponent first-serve percentage, last 10 (similarity-only).
+        description: Opponent's first-serve percentage, last 10 (similarity-only).
       - name: player_first_serve_win_pct_10
-        description: Canonical player first-serve win percentage, last 10 (similarity-only).
+        description: Row player's first-serve win percentage, last 10 (similarity-only).
       - name: opponent_first_serve_win_pct_10
-        description: Opponent first-serve win percentage, last 10 (similarity-only).
+        description: Opponent's first-serve win percentage, last 10 (similarity-only).
       - name: player_second_serve_win_pct_10
-        description: Canonical player second-serve win percentage, last 10 (similarity-only).
+        description: Row player's second-serve win percentage, last 10 (similarity-only).
       - name: opponent_second_serve_win_pct_10
-        description: Opponent second-serve win percentage, last 10 (similarity-only).
+        description: Opponent's second-serve win percentage, last 10 (similarity-only).
       - name: player_serve_win_pct_10
-        description: Canonical player serve win percentage, last 10 (similarity-only).
+        description: Row player's serve win percentage, last 10 (similarity-only).
       - name: opponent_serve_win_pct_10
-        description: Opponent serve win percentage, last 10 (similarity-only).
+        description: Opponent's serve win percentage, last 10 (similarity-only).
       - name: player_return_points_won_pct_10
-        description: Canonical player return points won percentage, last 10 (similarity-only).
+        description: Row player's return points won percentage, last 10 (similarity-only).
       - name: opponent_return_points_won_pct_10
-        description: Opponent return points won percentage, last 10 (similarity-only).
+        description: Opponent's return points won percentage, last 10 (similarity-only).

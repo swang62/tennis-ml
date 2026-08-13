@@ -1,10 +1,20 @@
 -- Assert every snapshot-backed feature of each match_features row comes from
--- the player's PRIOR snapshot only (player_match_number = current match
--- number - 1) — or, when that prior state is missing (cold start), from the
--- single-row gold.tour_averages singleton. This holds for both the canonical
--- player and the opponent side. Any mismatch means the row used a current-match
--- snapshot (leakage), its current-match raw stats, a wrong snapshot, or the
--- wrong default.
+-- the player's PRIOR snapshot only — the latest rolling_features snapshot
+-- strictly before the match date (snapshot_date < match_date, the same
+-- date-strict semantics match_features and inference use; a same-date snapshot
+-- of another match can never supply it) — or, when that prior state is missing
+-- (cold start), from the single-row gold.tour_averages singleton. This holds
+-- for both sides (row player and opponent) of each directional row; the
+-- per-row re-derivation joins on mf.player_id and mf.opponent_id, so both
+-- mirrors of a match are checked independently. Any mismatch means the row
+-- used a current-match snapshot (leakage), its current-match raw stats, a
+-- wrong snapshot, or the wrong default.
+--
+-- Silver now STORES the Beta(1,1)-smoothed rates ((successes+1)/(opportunities+2)),
+-- and match_features consumes those stored values directly, so the
+-- re-derived prior values below simply read the same stored smoothed columns
+-- (win_rate_10, the surface rates, etc.) from the prior snapshot — the
+-- comparison holds by construction as long as the prior snapshot join matches.
 --
 -- Fallback cells (prior value NULL, imputed from the singleton) are excluded
 -- from comparison: match_features is incremental, so existing rows keep the
@@ -13,8 +23,8 @@
 -- comparison is guarded on the RAW prior values it re-derives from; the
 -- leakage check still has full teeth wherever a prior snapshot value exists.
 --
--- The finalized 36-col contract keeps most rolling values as DIFFS (canonical
--- minus opponent), so the strongest leakage check re-derives each diff from the
+-- The finalized contract keeps most rolling values as DIFFS (row player minus
+-- opponent), so the strongest leakage check re-derives each diff from the
 -- two prior snapshots (COALESCE'd to the singleton defaults row) and compares
 -- it with the stored value. Per-side absolute values (weighted_form_10,
 -- surface_win_rate_10, days_since_last_match, matches_30d) are compared
@@ -28,19 +38,22 @@
 --   diff serve/bk:  ace_rate_diff, first_serve_pct_diff,
 --                    break_points_saved_pct_diff, first_serve_win_pct_diff,
 --                    second_serve_win_pct_diff, serve_win_pct_diff,
---                    df_rate_diff, aces_per_svc_game_diff
+--                    return_points_won_pct_diff, df_rate_diff,
+--                    aces_per_svc_game_diff
 --   diff strength:  avg_rank_faced_diff, rank_trend_diff
 --   per-side:       player/opponent_weighted_form_10,
 --                    player/opponent_surface_win_rate_10,
 --                    player/opponent_days_since_last_match,
---                    player/opponent_matches_30d
+--                    player/opponent_matches_30d,
+--                    player/opponent_matches_10 (exposure, from prior snapshot)
 --   as-of-date:     player/opponent_ranking, player/opponent_age,
 --                    rank_points_diff (prior snapshot)
 {% set diff_cols = [
     "win_rate_10", "ace_rate_10", "first_serve_pct_10",
     "break_points_saved_pct_10", "first_serve_win_pct_10",
     "second_serve_win_pct_10", "serve_win_pct_10",
-    "df_rate_10", "aces_per_svc_game_10", "avg_rank_faced_10",
+    "return_points_won_pct_10", "df_rate_10", "aces_per_svc_game_10",
+    "avg_rank_faced_10",
 ] %}
 {% set diff_stored = {
     "win_rate_10": "win_rate_diff", "ace_rate_10": "ace_rate_diff",
@@ -49,6 +62,7 @@
     "first_serve_win_pct_10": "first_serve_win_pct_diff",
     "second_serve_win_pct_10": "second_serve_win_pct_diff",
     "serve_win_pct_10": "serve_win_pct_diff",
+    "return_points_won_pct_10": "return_points_won_pct_diff",
     "df_rate_10": "df_rate_diff",
     "aces_per_svc_game_10": "aces_per_svc_game_diff",
     "avg_rank_faced_10": "avg_rank_faced_diff",
@@ -65,6 +79,7 @@ WITH prior_snapshot AS (
         mf.ace_rate_diff, mf.first_serve_pct_diff,
         mf.break_points_saved_pct_diff, mf.first_serve_win_pct_diff,
         mf.second_serve_win_pct_diff, mf.serve_win_pct_diff,
+        mf.return_points_won_pct_diff,
         mf.df_rate_diff, mf.aces_per_svc_game_diff,
         mf.avg_rank_faced_diff, mf.rank_trend_diff,
         mf.rank_diff, mf.rank_points_diff, mf.age_diff,
@@ -144,18 +159,34 @@ WITH prior_snapshot AS (
         po.matches_30d_before AS opponent_cur_matches_30d,
         fd.days_since_default,
         fd.matches_30d_default,
-        fd.rate_default
+        fd.rate_default,
+        -- Stored exposure values (0 for cold start) and the prior snapshot's
+        -- matches_10 backing the smoothed 10-match rates.
+        mf.player_matches_10,
+        mf.opponent_matches_10,
+        prp.matches_10 AS player_raw_matches_10,
+        pro.matches_10 AS opponent_raw_matches_10,
+        COALESCE(prp.matches_10, 0) AS player_prior_matches_10,
+        COALESCE(pro.matches_10, 0) AS opponent_prior_matches_10
     FROM {{ ref('match_features') }} mf
     JOIN {{ ref('player_matches') }} pm
       ON pm.match_id = mf.match_id AND pm.player_id = mf.player_id
     JOIN {{ ref('player_matches') }} po
       ON po.match_id = mf.match_id AND po.player_id = mf.opponent_id
-    LEFT JOIN {{ ref('rolling_features') }} prp
-      ON prp.player_id = mf.player_id
-     AND prp.player_match_number = pm.player_match_number - 1
-    LEFT JOIN {{ ref('rolling_features') }} pro
-      ON pro.player_id = mf.opponent_id
-     AND pro.player_match_number = po.player_match_number - 1
+    LEFT JOIN LATERAL (
+        SELECT * FROM {{ ref('rolling_features') }} rfp
+        WHERE rfp.player_id = mf.player_id
+          AND rfp.snapshot_date < pm.match_date
+        ORDER BY rfp.player_match_number DESC
+        LIMIT 1
+    ) prp ON true
+    LEFT JOIN LATERAL (
+        SELECT * FROM {{ ref('rolling_features') }} rfo
+        WHERE rfo.player_id = mf.opponent_id
+          AND rfo.snapshot_date < po.match_date
+        ORDER BY rfo.player_match_number DESC
+        LIMIT 1
+    ) pro ON true
     CROSS JOIN {{ ref('tour_averages') }} fd
 ),
 comparisons AS (
@@ -225,6 +256,16 @@ comparisons AS (
            opponent_prior_snapshot_date IS NOT NULL AS guard
     FROM prior_snapshot
     UNION ALL
+    SELECT match_id, 'player_matches_10' AS feature,
+           player_matches_10 AS mf_val, player_prior_matches_10 AS prior_val,
+           player_raw_matches_10 IS NOT NULL AS guard
+    FROM prior_snapshot
+    UNION ALL
+    SELECT match_id, 'opponent_matches_10' AS feature,
+           opponent_matches_10 AS mf_val, opponent_prior_matches_10 AS prior_val,
+           opponent_raw_matches_10 IS NOT NULL AS guard
+    FROM prior_snapshot
+    UNION ALL
     SELECT match_id, 'player_surface_win_rate_10' AS feature,
            player_surface_win_rate_10 AS mf_val,
            CASE match_surface
@@ -237,7 +278,7 @@ comparisons AS (
                WHEN 'clay'  THEN player_raw_clay_win_rate_10 IS NOT NULL
                WHEN 'grass' THEN player_raw_grass_win_rate_10 IS NOT NULL
                WHEN 'hard'  THEN player_raw_hard_win_rate_10 IS NOT NULL
-               ELSE TRUE  -- rate_default is the fixed constant 0.0
+               ELSE TRUE  -- rate_default is the fixed neutral constant 0.5
            END AS guard
     FROM prior_snapshot
     UNION ALL
@@ -253,7 +294,7 @@ comparisons AS (
                WHEN 'clay'  THEN opponent_raw_clay_win_rate_10 IS NOT NULL
                WHEN 'grass' THEN opponent_raw_grass_win_rate_10 IS NOT NULL
                WHEN 'hard'  THEN opponent_raw_hard_win_rate_10 IS NOT NULL
-               ELSE TRUE  -- rate_default is the fixed constant 0.0
+               ELSE TRUE  -- rate_default is the fixed neutral constant 0.5
            END AS guard
     FROM prior_snapshot
     UNION ALL

@@ -9,7 +9,7 @@ from src.db import snapshot, training
 from src.db.snapshot import EXPECTED_FEATURE_ORDER, META_COLS, SNAPSHOT_TABLES
 from src.features.columns import FEATURE_COLS, SIMILARITY_COLS
 
-# The one expected match_features metadata column that is not in FEATURE_COLS.
+# The metadata columns of a gold match_features row that are not in FEATURE_COLS.
 _META = (
     "match_id",
     "match_date",
@@ -22,8 +22,33 @@ _META = (
 )
 
 
+def _feature_row(match_id, player_id, opponent_id, match_won, columns):
+    """One full gold row in `columns` order; identity/label from args, all
+    remaining columns 1 (non-null, finite)."""
+    identity = {
+        "match_id": match_id,
+        "player_id": player_id,
+        "opponent_id": opponent_id,
+        "match_won": match_won,
+    }
+    return tuple(identity.get(c, 1) for c in columns)
+
+
+def _reciprocal_rows(columns):
+    """The two directional rows of one match: reciprocal ids, complementary labels."""
+    return [
+        _feature_row(1, 1, 2, 1, columns),  # player 1 beats player 2
+        _feature_row(1, 2, 1, 0, columns),  # mirrored perspective
+    ]
+
+
 def _write_valid_snapshot(
-    path, *, extra_table: str | None = None, bad_columns: bool = False, empty: bool = False
+    path,
+    *,
+    extra_table: str | None = None,
+    bad_columns: bool = False,
+    empty: bool = False,
+    rows: list[tuple] | None = None,
 ) -> None:
     """Write a DuckDB file that passes (or breaks) validate_snapshot."""
     if bad_columns:
@@ -41,8 +66,10 @@ def _write_valid_snapshot(
         if extra_table:
             con.execute(f"CREATE TABLE gold.{extra_table} (x INTEGER)")
         if not empty:
-            con.execute(
-                "INSERT INTO gold.match_features VALUES (" + ", ".join(["1"] * len(columns)) + ")"
+            placeholders = ", ".join(["?"] * len(columns))
+            con.executemany(
+                f"INSERT INTO gold.match_features VALUES ({placeholders})",
+                rows if rows is not None else _reciprocal_rows(columns),
             )
         con.execute("INSERT INTO gold.player_profiles (player_id) VALUES ('p1')")
         con.execute("INSERT INTO bronze.player_profiles (player_id) VALUES ('p1')")
@@ -54,12 +81,12 @@ def test_meta_cols_precede_feature_cols() -> None:
     """Snapshot order is metadata, model features, then similarity columns."""
     assert META_COLS == _META
     assert len(META_COLS) == 8
-    assert len(FEATURE_COLS) == 36
+    assert len(FEATURE_COLS) == 39
     assert len(SIMILARITY_COLS) == 10
-    assert len(EXPECTED_FEATURE_ORDER) == 54
+    assert len(EXPECTED_FEATURE_ORDER) == 57
     assert EXPECTED_FEATURE_ORDER[:8] == _META
-    assert EXPECTED_FEATURE_ORDER[8:44] == tuple(FEATURE_COLS)
-    assert EXPECTED_FEATURE_ORDER[44:] == tuple(SIMILARITY_COLS)
+    assert EXPECTED_FEATURE_ORDER[8:47] == tuple(FEATURE_COLS)
+    assert EXPECTED_FEATURE_ORDER[47:] == tuple(SIMILARITY_COLS)
 
 
 def test_validate_accepts_valid_snapshot(tmp_path) -> None:
@@ -83,14 +110,59 @@ def test_validate_rejects_malformed_snapshot(tmp_path, kw, message) -> None:
         snapshot.validate_snapshot(p)
 
 
-def test_validate_rejects_duplicate_match_ids(tmp_path) -> None:
+def test_validate_rejects_not_exactly_two_rows_per_match(tmp_path) -> None:
+    """A lone directional row per match_id fails the two-rows contract."""
     p = tmp_path / "snap.duckdb"
-    _write_valid_snapshot(p)
-    con = duckdb.connect(str(p))
-    extra = ", ".join(["1"] * len(EXPECTED_FEATURE_ORDER))  # same match_id as first row
-    con.execute(f"INSERT INTO gold.match_features VALUES ({extra})")
-    con.close()
-    with pytest.raises(snapshot.SnapshotError, match='duplicate "match_id" rows'):
+    _write_valid_snapshot(p, rows=[_feature_row(1, 1, 2, 1, EXPECTED_FEATURE_ORDER)])
+    with pytest.raises(snapshot.SnapshotError, match="exactly 2"):
+        snapshot.validate_snapshot(p)
+
+
+def test_validate_rejects_three_rows_per_match(tmp_path) -> None:
+    """More than two rows for one match_id also fails the two-rows contract."""
+    p = tmp_path / "snap.duckdb"
+    rows = [
+        *_reciprocal_rows(EXPECTED_FEATURE_ORDER),
+        _feature_row(1, 3, 1, 1, EXPECTED_FEATURE_ORDER),
+    ]
+    _write_valid_snapshot(p, rows=rows)
+    with pytest.raises(snapshot.SnapshotError, match="exactly 2"):
+        snapshot.validate_snapshot(p)
+
+
+def test_validate_rejects_duplicate_directional_row(tmp_path) -> None:
+    """Duplicate (match_id, player_id) is rejected even with two rows total."""
+    p = tmp_path / "snap.duckdb"
+    rows = [
+        _feature_row(1, 1, 2, 1, EXPECTED_FEATURE_ORDER),
+        _feature_row(1, 1, 3, 0, EXPECTED_FEATURE_ORDER),  # same player_id
+    ]
+    _write_valid_snapshot(p, rows=rows)
+    with pytest.raises(snapshot.SnapshotError, match=r'duplicate "\(match_id, player_id\)"'):
+        snapshot.validate_snapshot(p)
+
+
+def test_validate_rejects_non_reciprocal_pairs(tmp_path) -> None:
+    """Row A's opponent must be row B's player and vice versa."""
+    p = tmp_path / "snap.duckdb"
+    rows = [
+        _feature_row(1, 1, 2, 1, EXPECTED_FEATURE_ORDER),
+        _feature_row(1, 2, 3, 0, EXPECTED_FEATURE_ORDER),  # opponent not the other player
+    ]
+    _write_valid_snapshot(p, rows=rows)
+    with pytest.raises(snapshot.SnapshotError, match="reciprocal"):
+        snapshot.validate_snapshot(p)
+
+
+def test_validate_rejects_non_complementary_labels(tmp_path) -> None:
+    """Both orientations of a match cannot share the same label."""
+    p = tmp_path / "snap.duckdb"
+    rows = [
+        _feature_row(1, 1, 2, 1, EXPECTED_FEATURE_ORDER),
+        _feature_row(1, 2, 1, 1, EXPECTED_FEATURE_ORDER),  # same label
+    ]
+    _write_valid_snapshot(p, rows=rows)
+    with pytest.raises(snapshot.SnapshotError, match="complementary"):
         snapshot.validate_snapshot(p)
 
 
@@ -184,7 +256,7 @@ def test_training_reads_snapshot_not_postgres(tmp_path, monkeypatch) -> None:
     _write_valid_snapshot(p)
     monkeypatch.setattr(training, "SNAPSHOT_PATH", p)
     training.close()
-    assert training.to_dataframe("SELECT COUNT(*) AS n FROM gold.match_features").iloc[0, 0] == 1
+    assert training.to_dataframe("SELECT COUNT(*) AS n FROM gold.match_features").iloc[0, 0] == 2
 
     monkeypatch.setattr(training, "SNAPSHOT_PATH", tmp_path / "missing.duckdb")
     training.close()

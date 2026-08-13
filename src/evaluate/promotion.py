@@ -84,9 +84,9 @@ def ordered_incumbent_contexts(info: pd.DataFrame) -> list[dict[str, object]]:
     """Minimal raw inference contexts in the exact held-out row order.
 
     Each context carries only what the production inference builder needs —
-    canonical ids, match date, surface, tournament/round encodings, and indoor
-    state — never candidate feature rows, so the incumbent independently
-    rebuilds every row against its own baked contract.
+    requested-orientation ids, match date, surface, tournament/round encodings,
+    and indoor state — never candidate feature rows, so the incumbent
+    independently rebuilds every row against its own baked contract.
     """
     if info.empty:
         raise ValueError("holding out an empty evaluation set — nothing to compare")
@@ -172,10 +172,11 @@ def score_incumbent(
 
     `post_batch` posts one chunk of contexts and returns the parsed response
     records. Each chunk is verified: exact row count, per-row identity and
-    input order against the canonical ids, and finite `p_win`. Any mismatch
-    raises, so the gate fails before promotion instead of comparing shifted
-    probabilities. Probability columns can be missing (old served shape), in
-    which case `p_win` is required.
+    input order against the REQUESTED ids (player_id, opponent_id, in order —
+    no sorting), and finite `p_win`. Any mismatch raises, so the gate fails
+    before promotion instead of comparing shifted probabilities. Probability
+    columns can be missing (old served shape), in which case `p_win` is
+    required.
     """
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
@@ -192,12 +193,12 @@ def score_incumbent(
         for i, (ctx, rec) in enumerate(zip(chunk, records, strict=False)):
             if not isinstance(rec, dict):
                 raise TypeError(f"incumbent row {i} is {type(rec).__name__}, expected a dict")
-            expected_ids = tuple(sorted([str(ctx["player_id"]), str(ctx["opponent_id"])]))
+            expected_ids = (str(ctx["player_id"]), str(ctx["opponent_id"]))
             got_ids = (str(rec["player_id"]), str(rec["opponent_id"]))
             if expected_ids != got_ids:
                 raise RuntimeError(
-                    f"incumbent order/identity mismatch at row {i}: "
-                    f"expected canonical ids {expected_ids!r}, got {got_ids!r}"
+                    f"incumbent orientation/identity mismatch at row {i}: "
+                    f"expected requested ids {expected_ids!r}, got {got_ids!r}"
                 )
             p_win = rec.get("p_win")
             if isinstance(p_win, bool) or not isinstance(p_win, (int, float)):

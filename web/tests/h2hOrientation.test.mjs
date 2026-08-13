@@ -1,12 +1,8 @@
 import assert from "node:assert";
 import test from "node:test";
-import {
-  orientH2H,
-  pickerPreferenceEdge,
-  probabilityForPlayer,
-} from "../src/lib/h2hOrientation.ts";
+import { orientH2H, preferenceEdge } from "../src/lib/h2hOrientation.ts";
 
-const canonical = {
+const h2hResponse = {
   player1_id: "a",
   player2_id: "b",
   meetings: [{ match_id: "1", player1_won: true }],
@@ -20,7 +16,7 @@ const canonical = {
 };
 
 test("orients canonical H2H stats into Player A's picker position", () => {
-  const oriented = orientH2H(canonical, "b");
+  const oriented = orientH2H(h2hResponse, "b");
 
   assert.equal(oriented.player1_id, "b");
   assert.equal(oriented.player2_id, "a");
@@ -34,12 +30,8 @@ test("orients canonical H2H stats into Player A's picker position", () => {
   });
 });
 
-test("keeps a canonical model probability attached to the same player", () => {
-  assert.equal(probabilityForPlayer(0.2, "alcaraz", "alcaraz"), 0.2);
-  assert.equal(probabilityForPlayer(0.2, "alcaraz", "sinner"), 0.8);
-});
-
-test("maps canonical probability edge to left Player A and right Player B", () => {
-  assert.ok(Math.abs(pickerPreferenceEdge(0.8, "alcaraz", "alcaraz") + 0.3) < 1e-10);
-  assert.ok(Math.abs(pickerPreferenceEdge(0.8, "alcaraz", "sinner") - 0.3) < 1e-10);
+test("preferenceEdge is negative when Player A is favored, positive when Player B is", () => {
+  assert.ok(Math.abs(preferenceEdge(0.52) + 0.02) < 1e-10);
+  assert.ok(Math.abs(preferenceEdge(0.48) - 0.02) < 1e-10);
+  assert.equal(preferenceEdge(0.5), 0);
 });

@@ -142,6 +142,14 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+  # Upstream deprecations we can't fix: bentoml/prefect/dbt lag pydantic 2.11+
+  # (PydanticDeprecatedSince211) and pathspec 1.0 (GitWildMatchPattern rename).
+  "ignore:.*GitWildMatchPattern.*:DeprecationWarning",
+  "ignore:.*__get_pydantic_core_schema__.*:DeprecationWarning",
+  # starlette.testclient deprecation (httpx2 migration) — test-only, upstream.
+  "ignore:.*starlette\\.testclient.*:UserWarning",
+]
 
 [tool.pytest_env]
 KMP_DUPLICATE_LIB_OK = "TRUE"

@@ -95,6 +95,20 @@ def test_invalid_round_encoded_raises(round_encoded):
         build_inference_features("A", "B", "clay", round_encoded=round_encoded)
 
 
+@pytest.mark.parametrize("is_indoor", [2, -1, True, "1", 1.0])
+def test_invalid_is_indoor_raises(is_indoor):
+    with pytest.raises(ValueError):
+        build_inference_features("A", "B", "clay", is_indoor=is_indoor)
+
+
+def test_valid_is_indoor_accepted_with_empty_pool(empty_pool):  # noqa: ARG001 — fixture applied for its side effects only
+    """is_indoor=0/1 build successfully (no pre-DB ValueError)."""
+    out = build_inference_features("A", "B", "clay", is_indoor=0)
+    assert out.iloc[0]["is_indoor"] == 0
+    out = build_inference_features("A", "B", "clay", is_indoor=1)
+    assert out.iloc[0]["is_indoor"] == 1
+
+
 def test_tournament_alias_non_str_raises():
     with pytest.raises(TypeError):
         build_inference_features("A", "B", "clay", tournament=cast(str, 4))

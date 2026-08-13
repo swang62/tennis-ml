@@ -1,7 +1,7 @@
 # Production SPA config; Bento is reachable only through allowlisted /api routes.
 # Rendered at container start by the official nginx image's envsubst template
 # mechanism (/etc/nginx/templates/*.template). Substitution is allowlisted to
-# DRIFT_API_KEY and BENTO_API_URL via NGINX_ENVSUBST_FILTER in the Dockerfile,
+# BENTO_API_KEY and BENTO_API_URL via NGINX_ENVSUBST_FILTER in the Dockerfile,
 # so all native nginx $variables below are preserved verbatim.
 # BENTO_API_URL defaults to http://bento:3000 (see compose.yaml).
 
@@ -120,7 +120,7 @@ server {
         proxy_http_version 1.1;
     }
 
-    # --- Authenticated operational routes (header X-Drift-API-Key) ---
+    # --- Authenticated operational routes (header X-API-Key) ---
 
     location /api/internal/model-info {
         limit_req zone=api_req burst=5 nodelay;
@@ -131,7 +131,7 @@ server {
             deny all;
         }
 
-        if ($http_x_drift_api_key != "${DRIFT_API_KEY}") {
+        if ($http_x_api_key != "${BENTO_API_KEY}") {
             return 401 '{"ok":false,"error":"unauthorized"}';
         }
 
@@ -149,7 +149,7 @@ server {
             deny all;
         }
 
-        if ($http_x_drift_api_key != "${DRIFT_API_KEY}") {
+        if ($http_x_api_key != "${BENTO_API_KEY}") {
             return 401 '{"ok":false,"error":"unauthorized"}';
         }
 

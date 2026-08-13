@@ -1,10 +1,11 @@
 """Prefect flow: ATP site scraping (currently weekly rankings catch-up).
 
 The database is the self-healing watermark (``MAX(bronze.rankings.ranking_date)``).
-Runs with no params fetch only the most recent completed Monday (the previous
-week). Manual backfills pass ``--param end_date=YYYY-MM-DD`` to fetch every
-missing Monday after the watermark through that date, oldest first; an
-``end_date`` at or before the watermark fetches nothing. Weeks are fetched from
+Runs with no params fetch every missing Monday from the watermark through the
+most recent completed Monday. Manual backfills pass ``--param end_date=YYYY-MM-DD``
+to fetch missing Mondays after the watermark through that date, or both
+``--param start_date`` and ``--param end_date`` to fetch every Monday in that
+explicit range regardless of the watermark. Weeks are fetched from
 the ATP Tour site with the CloakBrowser Python library (an interactive
 stealth-Chromium Playwright wrapper) — never the CloakBrowser MCP server.
 
@@ -32,6 +33,7 @@ independently.
 
 Run once (manual/local):  ``just scrape``
 Backfill to a date:       ``just scrape --param end_date=YYYY-MM-DD``
+Backfill a range:         ``just scrape --param start_date=YYYY-MM-DD --param end_date=YYYY-MM-DD``
 """
 
 from __future__ import annotations
@@ -146,32 +148,38 @@ def stored_ranking_mondays() -> set[date]:
 
 
 @task
-def missing_ranking_mondays(end_date: date | None = None) -> tuple[date | None, list[date]]:
-    """Weeks to fetch: every missing Monday through ``end_date`` (default previous week).
+def missing_ranking_mondays(
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> tuple[date | None, list[date]]:
+    """Weeks to fetch: every missing Monday in the requested range.
 
     Returns ``(watermark, weeks)``; ``watermark`` is None when the table is
-    empty (initial historical backfill not complete) and ``weeks`` is then
-    empty because the flow must not scrape history from scratch.
+    empty and ``weeks`` is then empty because the flow must not scrape history
+    from scratch (run ``just db-seed`` first).
 
-    The scan always starts at the watermark and moves one week into the future
-    at a time. With no ``end_date`` it stops at the most recent completed
-    Monday (the previous week); with ``end_date`` it is the inclusive upper
-    bound, so a backfill naturally quits when ``end_date`` is at or before the
-    watermark. Every Monday through that end that is not already stored is
-    returned oldest first — already-present weeks and interior gaps are handled
-    by the same stored-set scan.
+    With no ``start_date`` the scan starts one week after the watermark (the
+    max stored Monday); with an explicit ``start_date`` it starts there (snapped
+    forward to the next Monday), so a manual backfill covers an arbitrary
+    historical window regardless of the watermark. The upper bound is
+    ``end_date`` when given, else the most recent completed Monday. Already-
+    stored Mondays in the window are skipped; weeks come back oldest first.
     """
     stored = stored_ranking_mondays()
     if not stored:
         return None, []
     watermark = max(stored)
     end = end_date or latest_completed_monday(date.today())
+    if start_date is None:
+        start = watermark + timedelta(days=7)
+    else:
+        start = start_date + timedelta(days=(7 - start_date.weekday()) % 7)
     weeks: list[date] = []
-    m = watermark + timedelta(days=7)
-    while m <= end:
-        if m not in stored:
-            weeks.append(m)
-        m += timedelta(days=7)
+    monday = start
+    while monday <= end:
+        if monday not in stored:
+            weeks.append(monday)
+        monday += timedelta(days=7)
     return watermark, weeks
 
 
@@ -384,21 +392,23 @@ def fetch_and_upsert_week(page, week: date, rank_map: dict[str, str]) -> int:
 
 
 @flow(log_prints=True)
-def scrape_flow(end_date: date | None = None):
-    """Scrape missing ranking weeks: previous week (no params) or backfill to a date.
+def scrape_flow(start_date: date | None = None, end_date: date | None = None):
+    """Scrape missing ranking weeks: watermark-to-today (no params) or a date range.
 
-    With no ``end_date`` only the most recent completed Monday (the previous
-    week) is fetched — the same for scheduled cron runs, ``prefect deployment
-    run`` without params, and direct local calls, so a bare run never silently
-    backfills far history. With an explicit ``end_date`` every missing Monday
-    from the watermark through that date is fetched oldest first; an
-    ``end_date`` at or before the watermark naturally fetches nothing. Launches
-    exactly one CloakBrowser session, processes every missing week inside a try
-    block, and closes the browser in finally — even when a week fails, the
-    session is always released before the flow returns/raises.
+    With no params every missing Monday from the watermark through the most
+    recent completed Monday is fetched — the same for scheduled cron runs,
+    ``prefect deployment run`` without params, and direct local calls, so a
+    bare run never silently backfills far history. With only ``end_date`` every
+    missing Monday from the watermark through that date is fetched oldest
+    first; with both ``start_date`` and ``end_date`` every Monday in that
+    explicit range is fetched regardless of the watermark (for historical
+    backfills). An ``end_date`` at or before the watermark naturally fetches
+    nothing. Launches exactly one CloakBrowser session, processes every missing
+    week inside a try block, and closes the browser in finally — even when a
+    week fails, the session is always released before the flow returns/raises.
     """
     load_env()
-    watermark, weeks = missing_ranking_mondays(end_date)
+    watermark, weeks = missing_ranking_mondays(start_date, end_date)
     if watermark is None:
         print(
             "bronze.rankings is empty — initial seed not complete; "
@@ -458,8 +468,8 @@ def register_deployment() -> None:
     repo_root = Path(__file__).resolve().parent.parent.parent
     # No static parameter defaults here: deployment parameters are frozen at
     # registration, so a baked-in date would go stale for later cron runs. The
-    # flow defaults to the previous week itself (see scrape_flow); pass an
-    # explicit --param end_date to override for a manual backfill.
+    # flow defaults to the watermark itself (see scrape_flow); pass explicit
+    # --param start_date/end_date to override for a manual backfill.
     # prefect's async_dispatch stubs from_source() as a Coroutine union, but in
     # a sync context it returns the Flow itself; cast to Any sidesteps that.
     deployment = cast(

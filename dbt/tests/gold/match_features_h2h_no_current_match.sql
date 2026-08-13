@@ -2,16 +2,19 @@
 -- meetings, so no row's H2H counts include the current match itself:
 --   * matches strictly before the row's match_date (same-date excluded),
 --   * deduped to distinct match_ids (silver has 2 rows per match),
---   * restricted to the most recent 5 (match_date DESC, match_id DESC).
--- The final contract keeps only the canonical player side's counts
--- (player_h2h_matches / player_h2h_wins); the opponent perspective and win
--- rate are derived on demand. Any returned row is a violation.
+--   * restricted to the most recent 5 (match_date DESC, match_id DESC),
+--   * oriented per directional row, keyed on (match_id, player_id).
+-- h2h_exposure is the shared unordered-pair meeting count (identical for both
+-- mirrors); h2h_advantage is the Beta(1,1)-smoothed directional value
+-- (row player's prior wins + 1) / (prior meetings + 2) - 0.5 and negates
+-- across mirrors. Any returned row is a violation.
 WITH pair_meetings AS (
-    -- One row per distinct match between a canonical pair; a_won is the
-    -- canonical a-side's outcome (both perspective rows agree, so MAX is safe).
+    -- One row per distinct match between an unordered pair; a_won is the
+    -- lower-id (LEAST/GREATEST canonicalization for lookup only) side's
+    -- outcome (both perspective rows agree, so MAX is safe).
     SELECT
-        CASE WHEN player_id < opponent_id THEN player_id ELSE opponent_id END AS a,
-        CASE WHEN player_id < opponent_id THEN opponent_id ELSE player_id END AS b,
+        LEAST(player_id, opponent_id) AS a,
+        GREATEST(player_id, opponent_id) AS b,
         match_id,
         match_date,
         MAX(CASE WHEN player_id < opponent_id THEN match_won
@@ -22,35 +25,44 @@ WITH pair_meetings AS (
 prior_meeting_rows AS (
     SELECT
         mf.match_id,
+        mf.player_id,
+        mf.opponent_id,
         meeting.a_won,
         ROW_NUMBER() OVER (
-            PARTITION BY mf.match_id
+            PARTITION BY mf.match_id, mf.player_id
             ORDER BY meeting.match_date DESC, meeting.match_id DESC
         ) AS rn
     FROM {{ ref('match_features') }} mf
     JOIN pair_meetings meeting
-        ON meeting.a = mf.player_id
-       AND meeting.b = mf.opponent_id
+        ON meeting.a = LEAST(mf.player_id, mf.opponent_id)
+       AND meeting.b = GREATEST(mf.player_id, mf.opponent_id)
        AND meeting.match_date < mf.match_date
 ),
 derived AS (
     SELECT
         match_id,
-        COUNT(*) AS exp_matches,
-        COALESCE(SUM(a_won), 0) AS exp_player_wins
+        player_id,
+        COUNT(*) AS exp_exposure,
+        SUM(CASE WHEN player_id < opponent_id THEN a_won
+                 ELSE 1 - a_won END) AS exp_player_wins
     FROM prior_meeting_rows
     WHERE rn <= 5
-    GROUP BY match_id
+    GROUP BY match_id, player_id
 )
 SELECT
     mf.match_id,
     mf.player_id,
     mf.opponent_id,
-    mf.player_h2h_matches,
-    mf.player_h2h_wins,
-    COALESCE(d.exp_matches, 0) AS exp_matches,
-    COALESCE(d.exp_player_wins, 0) AS exp_player_wins
+    mf.h2h_exposure,
+    mf.h2h_advantage,
+    COALESCE(d.exp_exposure, 0) AS exp_exposure,
+    COALESCE(d.exp_player_wins, 0) AS exp_player_wins,
+    (COALESCE(d.exp_player_wins, 0) + 1.0) / (COALESCE(d.exp_exposure, 0) + 2.0) - 0.5
+        AS exp_advantage
 FROM {{ ref('match_features') }} mf
-LEFT JOIN derived d USING (match_id)
-WHERE mf.player_h2h_matches IS DISTINCT FROM COALESCE(d.exp_matches, 0)
-   OR mf.player_h2h_wins IS DISTINCT FROM COALESCE(d.exp_player_wins, 0)
+LEFT JOIN derived d
+    ON d.match_id = mf.match_id
+   AND d.player_id = mf.player_id
+WHERE mf.h2h_exposure IS DISTINCT FROM COALESCE(d.exp_exposure, 0)
+   OR mf.h2h_advantage IS DISTINCT FROM
+      ((COALESCE(d.exp_player_wins, 0) + 1.0) / (COALESCE(d.exp_exposure, 0) + 2.0) - 0.5)

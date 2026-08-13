@@ -10,4 +10,5 @@ else
   k3d cluster create --config infra/k3d/config.yaml
 fi
 
+kubectl apply -f infra/manifests/default/
 kubectl cluster-info

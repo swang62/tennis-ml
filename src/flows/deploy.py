@@ -11,6 +11,8 @@ from typing import Any, TextIO
 from src.constants import (
     CHAMPION_ALIAS,
     DATA_PROCESSED,
+    DEPLOY_ARTIFACTS,
+    FROZEN_ARTIFACTS,
     IMAGE_NAME,
     LOGS,
     PRODUCTION_MODEL,
@@ -47,20 +49,21 @@ _AUX_TAG_KEYS = (
 )
 
 # Packaged artifacts; serving reads PostgreSQL live, never training data.
-NN_ONNX_FILE = DATA_PROCESSED / "nn_best.onnx"
+# Everything serving reads from disk lives in the frozen DEPLOY_ARTIFACTS folder
+# (populated by 05 on promotion), so deploy never depends on the mutable
+# training folder.
+NN_ONNX_FILE = DEPLOY_ARTIFACTS / "nn_best.onnx"
 # Packaged index for offline /similar_players requests.
-SIMILARITY_INDEX = DATA_PROCESSED / "player_similarity.index"
-SIMILARITY_METADATA = DATA_PROCESSED / "player_metadata.json"
+SIMILARITY_INDEX = DEPLOY_ARTIFACTS / "player_similarity.index"
+SIMILARITY_METADATA = DEPLOY_ARTIFACTS / "player_metadata.json"
 # Baked into the image; written at build time from the champion's exact lineage
 # tags (see _write_model_info). Excluded from the build-input fingerprint.
-MODEL_INFO_FILE = DATA_PROCESSED / "model_info.json"
+MODEL_INFO_FILE = DEPLOY_ARTIFACTS / "model_info.json"
 AUX_FILES = [
-    DATA_PROCESSED / "linear_scaler.pkl",
-    DATA_PROCESSED / "bio_embeddings.npz",
-    DATA_PROCESSED / "bio_feature_cols.json",
-    NN_ONNX_FILE,
+    *[DEPLOY_ARTIFACTS / name for name in FROZEN_ARTIFACTS],
     SIMILARITY_INDEX,
     SIMILARITY_METADATA,
+    NN_ONNX_FILE,
 ]
 
 # Files whose content is a build input but is NOT pinned in champion lineage.

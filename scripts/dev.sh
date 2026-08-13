@@ -3,7 +3,7 @@
 # PostgreSQL target in .env.
 # Preflight never prints credentials and verifies:
 #   - .env exists and provides the single DATABASE_URL
-#   - DRIFT_API_KEY exists in .env (generated high-entropy, never displayed)
+#   - BENTO_API_KEY exists in .env (generated high-entropy, never displayed)
 #   - the database is reachable and is the configured/expected database
 #   - the required application schemas/tables exist
 #   - the target is not the Compose database (127.0.0.1:6543)
@@ -22,16 +22,16 @@ if [ ! -f .env ]; then
     exit 1
 fi
 
-# --- Ensure DRIFT_API_KEY exists in .env (never printed) -------------------
+# --- Ensure BENTO_API_KEY exists in .env (never printed) -------------------
 # Compose requires a non-empty key at startup. Preserve every existing entry;
 # only generate a high-entropy key when none is present (an empty placeholder
 # is replaced). The value is never displayed or committed.
-if ! grep -Eq '^DRIFT_API_KEY=.+' .env; then
+if ! grep -Eq '^BENTO_API_KEY=.+' .env; then
     key=$(openssl rand -hex 32) || { echo "error: 'openssl rand' failed (is openssl installed?)" >&2; exit 1; }
-    sed -i '' '/^DRIFT_API_KEY=$/d' .env
-    printf '\n# Drift/operational API key for the production Nginx internal routes.\nDRIFT_API_KEY=%s\n' "$key" >> .env
+    sed -i '' '/^BENTO_API_KEY=$/d' .env
+    printf '\n# Operational API key for the production Nginx internal routes.\nBENTO_API_KEY=%s\n' "$key" >> .env
     unset key
-    echo "generated DRIFT_API_KEY in .env (value not displayed)"
+    echo "generated BENTO_API_KEY in .env (value not displayed)"
 fi
 
 set -a

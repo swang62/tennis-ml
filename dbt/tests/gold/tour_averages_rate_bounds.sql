@@ -53,6 +53,10 @@ SELECT singleton_id, 'left_handed_rate', left_handed_rate
 FROM {{ ref('tour_averages') }}
 WHERE left_handed_rate IS NOT NULL AND (left_handed_rate < 0 OR left_handed_rate > 1)
 UNION ALL
+SELECT singleton_id, 'rate_default', rate_default
+FROM {{ ref('tour_averages') }}
+WHERE rate_default IS NOT NULL AND (rate_default < 0 OR rate_default > 1)
+UNION ALL
 SELECT singleton_id, 'tour_ace_rate', tour_ace_rate
 FROM {{ ref('tour_averages') }}
 WHERE tour_ace_rate IS NOT NULL AND (tour_ace_rate < 0 OR tour_ace_rate > 1)

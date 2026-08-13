@@ -81,6 +81,28 @@ def test_missing_weeks_quits_when_end_date_at_watermark(monkeypatch):
     assert weeks == []
 
 
+def test_missing_weeks_explicit_range_snaps_start_and_skips_stored(monkeypatch):
+    # start_date 2026-01-06 (Tue) snaps forward to 2026-01-12; stored 2026-01-19
+    # is skipped; end_date 2026-02-02 is inclusive.
+    monkeypatch.setattr(scrape, "stored_ranking_mondays", lambda: {date(2026, 1, 19)})
+    watermark, weeks = scrape.missing_ranking_mondays.fn(
+        start_date=date(2026, 1, 6), end_date=date(2026, 2, 2)
+    )
+    assert watermark == date(2026, 1, 19)
+    assert weeks == [date(2026, 1, 12), date(2026, 1, 26), date(2026, 2, 2)]
+
+
+def test_missing_weeks_explicit_range_backfills_before_watermark(monkeypatch):
+    # Watermark 2026-01-26; an explicit historical range before it still yields
+    # the missing Mondays in that window (interior-gap backfill).
+    monkeypatch.setattr(scrape, "stored_ranking_mondays", lambda: {date(2026, 1, 26)})
+    watermark, weeks = scrape.missing_ranking_mondays.fn(
+        start_date=date(2026, 1, 5), end_date=date(2026, 1, 19)
+    )
+    assert watermark == date(2026, 1, 26)
+    assert weeks == [date(2026, 1, 5), date(2026, 1, 12), date(2026, 1, 19)]
+
+
 def test_fetch_week_skips_on_failure(monkeypatch, capsys):
     def fail_fetch(*_):
         raise TimeoutError("selector timed out")

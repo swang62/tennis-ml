@@ -96,7 +96,11 @@ models:
 
       # Explicit fixed constants and static profile-pool means.
       - name: rate_default
-        description: Fixed rate constant (0.0) used for the unknown/0 surface win rate and empty-pool rates.
+        description: >
+          Fixed rate constant (0.5, the neutral Beta(1,1) prior) used for the
+          unknown/0 surface win rate and empty-pool rates, so carpet and
+          unknown-surface matches get a finite, non-degenerate surface win rate
+          instead of a constant zero.
       - name: left_handed_rate
         description: Mean left-handed rate over profiles with known L/R handedness; 0.0 when none exist.
       - name: avg_years_pro
