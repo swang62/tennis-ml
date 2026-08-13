@@ -22,6 +22,7 @@ import {
   formatDelta,
   formatMetric,
   formatRate,
+  scoreSegments,
 } from "../lib/format";
 
 const SURFACE_COLORS: Record<string, string> = {
@@ -215,7 +216,8 @@ export default function ProfileContent({
               <col style={{ width: "15%" }} />
               <col style={{ width: "10%" }} />
               <col style={{ width: "12%" }} />
-              <col />
+              <col style={{ width: "29%" }} />
+              <col style={{ width: "14%" }} />
               <col style={{ width: "8%" }} />
             </colgroup>
             <thead>
@@ -225,6 +227,7 @@ export default function ProfileContent({
                 <th className="tourney-th-c">Surface</th>
                 <th className="tourney-th-c">Round</th>
                 <th>Opponent</th>
+                <th className="tourney-th-c">Score</th>
                 <th className="tourney-th-c">Result</th>
               </tr>
             </thead>
@@ -261,6 +264,18 @@ export default function ProfileContent({
                           ? `#${m.opponent_ranking}`
                           : "N/A"}
                       </span>
+                    </td>
+                    <td className="tourney-td-c num">
+                      {scoreSegments(
+                        m.score,
+                        m.result === "won" ? "winner" : "loser",
+                      )?.map((s, i) =>
+                        s.bold ? (
+                          <strong key={i}>{s.text}</strong>
+                        ) : (
+                          <span key={i}>{s.text}</span>
+                        ),
+                      ) ?? "—"}
                     </td>
                     <td className="tourney-td-c">
                       <span

@@ -29,6 +29,7 @@ import {
   fairOdds,
   pct,
   sanitizeErrorMessage,
+  scoreSegments,
 } from "../lib/format";
 import { h2hRoute } from "../router";
 import { useTheme } from "../theme";
@@ -859,6 +860,18 @@ export default function H2H() {
                           ) : (
                             "WON"
                           )}
+                          {m.score ? (
+                            <span className="meeting-score">
+                              {" "}
+                              {scoreSegments(m.score, "winner")?.map((s, i) =>
+                                s.bold ? (
+                                  <strong key={i}>{s.text}</strong>
+                                ) : (
+                                  <span key={i}>{s.text}</span>
+                                ),
+                              )}
+                            </span>
+                          ) : null}
                         </span>
                       </div>
                     );

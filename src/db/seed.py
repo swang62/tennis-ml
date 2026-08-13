@@ -92,8 +92,12 @@ def select_matches(
 
 
 def latest_official_ranks() -> dict[str, int]:
-    """Latest archived official ATP ranks, resolved into canonical player ids."""
-    rows = load_ranking_rows(discover_ranking_csvs())
+    """Latest archived official ATP ranks, resolved into canonical player ids.
+
+    Only the top-200 archive rows are needed — the global top-10 the miniseed
+    selects are always within the top 200 — so the sub-200 archive is skipped.
+    """
+    rows = load_ranking_rows(discover_ranking_csvs(), rank_limit=200)
     if rows.empty:
         raise ValueError("miniseed selection requires archived official rankings")
     latest = rows[rows["ranking_date"] == rows["ranking_date"].max()]

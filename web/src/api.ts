@@ -137,6 +137,7 @@ export interface MatchRow {
   opponent_name: string | null
   opponent_ranking: number | null
   result: 'won' | 'lost'
+  score: string | null
   aces: number
   double_faults: number
   first_serve_points_won: number
@@ -161,6 +162,7 @@ export interface H2HMeeting {
   round: string
   winner_id: string
   loser_id: string
+  score: string | null
   player1_won: boolean
 }
 

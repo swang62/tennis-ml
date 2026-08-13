@@ -311,6 +311,7 @@ def _match_history_df() -> pd.DataFrame:
                 "opponent_name": "Rival",
                 "opponent_ranking": 5,
                 "match_won": 0,
+                "score": "4-6 6-4 6-7",
                 "aces": 12,
                 "double_faults": 3,
                 "first_serve_points_won": 50,
@@ -331,6 +332,7 @@ def _match_history_df() -> pd.DataFrame:
                 "opponent_name": None,
                 "opponent_ranking": 4,
                 "match_won": 1,
+                "score": "6-4 7-6",
                 "aces": 8,
                 "double_faults": 1,
                 "first_serve_points_won": 40,
@@ -357,6 +359,7 @@ def test_match_history_shape_and_default_limit():
     assert matches[0]["result"] == "lost"
     assert matches[0]["opponent_name"] == "Rival"
     assert matches[0]["opponent_ranking"] == 5
+    assert matches[0]["score"] == "4-6 6-4 6-7"
     assert matches[1]["result"] == "won"
     assert matches[1]["tournament_name"] is None
     assert matches[1]["opponent_name"] is None
@@ -396,6 +399,7 @@ def test_match_history_returns_individual_matches_not_grouped_by_tournament():
                 "opponent_name": opp,
                 "opponent_ranking": i,
                 "match_won": 1,
+                "score": "6-0 6-0",
                 "aces": 0,
                 "double_faults": 0,
                 "first_serve_points_won": 0,
@@ -473,6 +477,7 @@ def _h2h_df() -> pd.DataFrame:
                 "player1_id": p1,
                 "player2_id": p2,
                 "winner_id": winner,
+                "score": "6-4 6-4",
             }
             for mid, date, p1, p2, winner in rows
         ]
@@ -512,6 +517,7 @@ def test_head_to_head_meetings_and_summary():
     assert meetings[0]["loser_id"] == "b"
     assert meetings[1]["player1_won"] is False
     assert meetings[1]["loser_id"] == "a"
+    assert meetings[0]["score"] == "6-4 6-4"
     assert "match_id" in meetings[0]
     assert meetings[0]["tournament_name"] == "Indian Wells Masters"
     assert data["summary"] == {

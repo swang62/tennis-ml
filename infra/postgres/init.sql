@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS bronze.match_events (
     tournament_name            VARCHAR,
     round                      VARCHAR,
     surface                    VARCHAR NOT NULL,
+    score                      VARCHAR,
     is_indoor                  SMALLINT,
     player1_ranking            INTEGER,
     player2_ranking            INTEGER,
@@ -94,6 +95,9 @@ CREATE TABLE IF NOT EXISTS bronze.match_events (
     ),
     CONSTRAINT match_events_check_indoor CHECK (is_indoor IS NULL OR is_indoor IN (0, 1))
 );
+
+-- Upgrade existing local databases created before match score was ingested.
+ALTER TABLE bronze.match_events ADD COLUMN IF NOT EXISTS score VARCHAR;
 
 -- Upgrade existing local databases created before unknown ranks became NULL.
 ALTER TABLE bronze.match_events ALTER COLUMN player1_ranking DROP NOT NULL;

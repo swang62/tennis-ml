@@ -64,6 +64,7 @@ RAW_ATP_COLUMNS = [
     "tourney_level",
     "round",
     "surface",
+    "score",
     "indoor",
     "w_ace",
     "w_df",
@@ -154,6 +155,22 @@ def _normalize_indoor(value: Any) -> int | None:
     return None
 
 
+def _score(m: dict[str, Any]) -> str | None:
+    """Winner-perspective set score with tiebreak digits stripped.
+
+    Raw CSVs put the winner's games first in every set (``6-4 7-6(5)``); the
+    tiebreak point total in parentheses is display noise, so it is removed at
+    ingest (``6-4 7-6``). Empty/0 cells mean no score recorded and map to NULL.
+    """
+    value = m.get("score")
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    text = str(value).strip()
+    if text in ("", "0", "0.0", "nan"):
+        return None
+    return re.sub(r"\(\d+\)", "", text).strip()
+
+
 def player_history(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     """Each player's full match history, oldest -> newest."""
     history: dict[str, list[dict[str, Any]]] = {}
@@ -204,6 +221,7 @@ def atp_rows_to_bronze(
                 "tournament_name": str(m["tourney_name"]),
                 "round": str(m["round"]).lower(),
                 "surface": str(m["surface"]).lower(),
+                "score": _score(m),
                 "is_indoor": _normalize_indoor(m.get("indoor")),
                 "player1_ranking": _rank(m, "winner_rank"),
                 "player2_ranking": _rank(m, "loser_rank"),
@@ -508,6 +526,20 @@ def _normalize_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
+def _normalize_name_variants(name: str) -> list[str]:
+    """Normalized-name variants: original and reversed token order.
+
+    Surname-first sources ("Wu Yibing") normalize differently from the
+    canonical given-first form ("Yibing Wu"), so identity matching tries both
+    orientations. Single-token names yield only the original.
+    """
+    tokens = [t for t in name.split() if t]
+    variants = [_normalize_name(" ".join(tokens))]
+    if len(tokens) >= 2:
+        variants.append(_normalize_name(" ".join(reversed(tokens))))
+    return variants
+
+
 def load_ranking_player_map(
     csv_path: str | Path = RANKING_PLAYER_MAP_CSV,
     canonical_ids: set[str] | None = None,
@@ -675,13 +707,17 @@ def resolve_ranking_identities(
     stats = corpus_stats or {}
     resolved: dict[str, str] = {}
     for src_id in sorted({str(s).strip() for s in source_ids}):
-        source_name = _normalize_name(source_names.get(src_id, ""))
-        candidates = norm_index.get(source_name, [])
+        variants = _normalize_name_variants(source_names.get(src_id, ""))
+        candidates: list[str] = []
+        for norm in variants:
+            candidates = norm_index.get(norm, [])
+            if candidates:
+                break
         if not candidates:
-            if not source_name:
+            if not any(variants):
                 continue
             scores = {
-                pid: SequenceMatcher(None, source_name, _normalize_name(name)).ratio()
+                pid: max(SequenceMatcher(None, v, _normalize_name(name)).ratio() for v in variants)
                 for pid, name in canonical.items()
             }
             best_score = max(scores.values(), default=0.0)
@@ -728,13 +764,19 @@ def discover_ranking_csvs(rankings_dir: Path = RANKINGS_DIR) -> list[Path]:
     return sorted(p for p in rankings_dir.glob(RANKINGS_GLOB) if p.is_file())
 
 
-def load_ranking_rows(csv_paths: list[Path]) -> pd.DataFrame:
+def load_ranking_rows(
+    csv_paths: list[Path],
+    rank_limit: int | None = None,
+) -> pd.DataFrame:
     """Read and combine ranking CSVs into one validated, typed frame.
 
     Raises ValueError on any malformed input before a row is returned: a file
     missing the exact four documented columns, an empty/unparseable
     ranking_date (YYYYMMDD), a non-integer or non-positive rank, a non-integer
     player id, or non-empty non-integer points. Empty points are allowed (NULL).
+
+    rank_limit drops rows with rank > limit before validation; dropped rows are
+    outside the requested scope and never validated.
     """
     frames: list[pd.DataFrame] = []
     for path in csv_paths:
@@ -745,6 +787,9 @@ def load_ranking_rows(csv_paths: list[Path]) -> pd.DataFrame:
             )
         for col in RANKINGS_COLUMNS:
             df[col] = df[col].fillna("").astype(str).str.strip()
+        if rank_limit is not None:
+            rank_num = pd.to_numeric(df["rank"].mask(df["rank"].eq("")), errors="coerce")
+            df = df.loc[rank_num.notna() & rank_num.le(rank_limit)]
         frames.append(df)
     raw = pd.concat(frames, ignore_index=True)
     if raw.empty:
@@ -895,15 +940,16 @@ def ingest_rankings(
     """Official-rankings import; returns the import summary.
 
     Discover -> validate -> filter rank <= 200 -> map to canonical ids -> upsert.
-    Raw ranking source ids never reach the table: player_id is resolved through
-    the approved identity map, and source ids absent from the map are auto-mapped
-    by normalized name (deterministic: unique candidate, else greatest match
+    Only the archive's top-200 rows are read (ranks > 200 are ignored). Raw
+    ranking source ids never reach the table: player_id is resolved through the
+    approved identity map, and source ids absent from the map are auto-mapped by
+    normalized name (deterministic: unique candidate, else greatest match
     activity, then lower best rank, then lexicographic player_id, using
-    match_rows for the activity/rank tie-break). Explicit map entries always win;
-    auto-mapping only chooses identity and never invents ranking values — only
-    official rank <= 200 archive rows are ingested. Source ids that still cannot
-    be resolved are reported and skipped. Raises ValueError on malformed input
-    or an invalid map before any database write.
+    match_rows for the activity/rank tie-break). Explicit map entries always
+    win; auto-mapping only chooses identity and never invents ranking values —
+    only official rank <= 200 archive rows are ingested. Source ids that still
+    cannot be resolved are reported and skipped. Raises ValueError on malformed
+    input or an invalid map before any database write.
 
     Idempotent by default: an existing (ranking_date, player_id) row is skipped
     (DO NOTHING). Pass force=True to overwrite existing rows (DO UPDATE).
@@ -932,8 +978,8 @@ def ingest_rankings(
             "unmapped": 0,
         }
 
-    rows = load_ranking_rows(csv_paths)
-    top200 = cast(pd.DataFrame, rows[rows["rank"] <= 200])
+    rows = load_ranking_rows(csv_paths, rank_limit=200)
+    top200 = cast(pd.DataFrame, rows)
     source_rows = len(rows)
     top200_count = len(top200)
 
@@ -1066,6 +1112,20 @@ def _normalized_wiki_name(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
 
 
+def _normalized_wiki_variants(value: str) -> list[str]:
+    """Normalized wiki-name variants: original and reversed token order.
+
+    Surname-first article titles ("Wu Yibing") normalize differently from the
+    given-first player name ("Yibing Wu"), so enrichment tries both.
+    """
+    base = _normalized_wiki_name(value)
+    tokens = base.split()
+    variants = [base]
+    if len(tokens) >= 2:
+        variants.append(" ".join(reversed(tokens)))
+    return variants
+
+
 def search_wikipedia(name: str) -> str | None:
     params = {
         "action": "query",
@@ -1077,10 +1137,10 @@ def search_wikipedia(name: str) -> str | None:
     resp = requests.get(WIKI_API, params=params, headers={"User-Agent": USER_AGENT}, timeout=10)
     data = resp.json()
     pages = data.get("query", {}).get("search", [])
-    expected = _normalized_wiki_name(name)
+    expected_variants = _normalized_wiki_variants(name)
     for page in pages:
         title = str(page.get("title", ""))
-        if _normalized_wiki_name(title) == expected:
+        if _normalized_wiki_name(title) in expected_variants:
             return title
     return None
 

@@ -188,6 +188,7 @@ def _raw_row(match_num=1, tourney_date="20260105", level="G") -> dict[str, objec
         "tourney_name": "Test Open",
         "round": "QF",
         "surface": "Hard",
+        "score": "6-4 7-6(4)",
         "indoor": "O",
         "w_ace": 5,
         "w_df": 2,
@@ -221,6 +222,7 @@ def test_atp_rows_to_bronze_maps_raw_columns():
     assert row["tournament_name"] == "Test Open"
     assert row["round"] == "qf"
     assert row["surface"] == "hard"
+    assert row["score"] == "6-4 7-6"
     assert row["winner_id"] == row["player1_id"]
     assert row["player1_break_points_saved"] == 3
     assert row["player1_break_points_faced"] == 6
@@ -236,6 +238,21 @@ def test_atp_rows_to_bronze_maps_raw_columns():
     assert row["player2_rank_points"] == 3000
     assert row["player1_age"] == 24.41  # fractional years preserved, not rounded
     assert row["player2_age"] == 28.75
+
+
+def test_atp_rows_to_bronze_score_strips_tiebreak_and_null_for_missing():
+    def scored(value):
+        row = _raw_row()
+        row["score"] = value
+        return ingest.atp_rows_to_bronze([row]).iloc[0]["score"]
+
+    assert scored("6-4 7-6(4)") == "6-4 7-6"
+    assert scored("6-7(5) 7-5 7-6(1)") == "6-7 7-5 7-6"
+    assert scored("6-4 6-7(4) RET") == "6-4 6-7 RET"
+    assert scored("W/O") == "W/O"
+    assert scored(None) is None
+    assert scored(0) is None
+    assert scored("") is None
 
 
 def test_atp_rows_to_bronze_float_parses_age_and_defaults_missing_stats():
@@ -292,6 +309,7 @@ def _raw_atp_df() -> pd.DataFrame:
                 "tourney_name": "Test Open",
                 "round": "QF",
                 "surface": "Hard",
+                "score": "6-4 7-6(4)",
                 "indoor": "O",
                 "w_ace": 1,
                 "w_df": 0,
@@ -484,6 +502,25 @@ def test_search_wikipedia_rejects_tournament_result_for_player(monkeypatch):
     )
 
     assert ingest.search_wikipedia("Carlos Alcaraz") == "Carlos Alcaraz"
+
+
+def test_search_wikipedia_matches_surname_first_title(monkeypatch):
+    """Surname-first article titles match given-first player names (fallback)."""
+    _patch_wiki_get(
+        monkeypatch, {"query": {"search": [{"title": "Wu Yibing"}, {"title": "Other"}]}}
+    )
+
+    assert ingest.search_wikipedia("Yibing Wu") == "Wu Yibing"
+
+
+def test_resolve_ranking_identities_matches_reversed_name_order():
+    """Surname-first source names match given-first canonical names (fallback)."""
+    source_names = {"212275": "Wu Yibing"}
+    canonical = {"Y0001": "Yibing Wu"}
+
+    resolved = ingest.resolve_ranking_identities({"212275"}, source_names, canonical)
+
+    assert resolved == {"212275": "Y0001"}
 
 
 def test_clean_bio_paragraph_truncates_at_last_period(monkeypatch):
@@ -1381,6 +1418,27 @@ def test_load_ranking_rows_rejects_malformed_points(tmp_path):
         ingest.load_ranking_rows([csv])
 
 
+def test_load_ranking_rows_filters_rank_limit_before_validation(tmp_path):
+    """rank_limit drops rows before validation, so malformed rows outside the
+    requested rank scope never raise."""
+    _write_ranking_csv(
+        tmp_path,
+        "atp_rankings_00s.csv",
+        [
+            ["20260105", 1, "207989", "12050"],  # kept
+            ["20260105", 150, "207989", "1000"],  # kept
+            ["20260105", 201, "207989", "500"],  # dropped (rank > 200)
+            ["20260105", 300, "999999", "abc"],  # dropped before points validation
+        ],
+    )
+
+    rows = ingest.load_ranking_rows(ingest.discover_ranking_csvs(tmp_path), rank_limit=200)
+
+    assert len(rows) == 2
+    assert rows["rank"].tolist() == [1, 150]
+    assert (rows["player_id"] == "207989").all()
+
+
 def test_ingest_rankings_upserts_only_mapped_canonical_ids(fake_ingest_conn, tmp_path):
     """Raw ranking source ids never reach the table: only canonical ids from the
     approved map are copied, and unmapped top-200 rows are skipped."""
@@ -1413,7 +1471,7 @@ def test_ingest_rankings_upserts_only_mapped_canonical_ids(fake_ingest_conn, tmp
 
     assert summary == {
         "files": 1,
-        "source_rows": 3,
+        "source_rows": 2,  # the rank-300 row is skipped before validation
         "top200": 2,
         "upserted": 1,
         "skipped_existing": 0,
@@ -1465,7 +1523,7 @@ def test_ingest_rankings_top200_boundary_keeps_200_drops_201(fake_ingest_conn, t
         players_csv=tmp_path / "atp_players.csv",
     )
 
-    assert summary["source_rows"] == 3
+    assert summary["source_rows"] == 2  # the rank-201 row is skipped before validation
     assert summary["top200"] == 2  # 201 is filtered out before mapping
     assert summary["upserted"] == 2
     assert summary["skipped_existing"] == 0
@@ -1617,6 +1675,7 @@ def test_ingest_rankings_filters_to_requested_canonical_ids(fake_ingest_conn, tm
         player_ids={"A0E2"},
     )
 
+    # Both archive rows are top-200; only the seeded player's row is imported.
     assert summary["source_rows"] == 2
     assert summary["upserted"] == 1
     assert len(fake_ingest_conn.copied_rows) == 1

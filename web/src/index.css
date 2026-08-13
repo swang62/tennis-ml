@@ -1415,10 +1415,19 @@ html.light {
     max-height: 15rem;
     -webkit-overflow-scrolling: touch;
     scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+  }
+
+  /* Show the scrollbar only while hovering the table. Firefox and WebKit
+     both default to a fully transparent bar here, then repaint with theme
+     tokens on :hover. */
+  .tourney-table-wrap:hover,
+  .tourney-table-wrap:focus-within {
     scrollbar-color: var(--text-faint) var(--bg-inset);
   }
 
-  html.light .tourney-table-wrap {
+  html.light .tourney-table-wrap:hover,
+  html.light .tourney-table-wrap:focus-within {
     scrollbar-color: var(--text-dim) var(--bg-inset);
   }
 
@@ -1428,35 +1437,54 @@ html.light {
   }
 
   .tourney-table-wrap::-webkit-scrollbar-track {
-    background: var(--bg-inset);
+    background: transparent;
     border-radius: 999px;
   }
 
   .tourney-table-wrap::-webkit-scrollbar-thumb {
-    background: var(--text-faint);
+    background: transparent;
     border-radius: 999px;
-    border: 2px solid var(--bg-inset);
+    border: 2px solid transparent;
   }
 
-  html.light .tourney-table-wrap::-webkit-scrollbar-thumb {
+  .tourney-table-wrap:hover::-webkit-scrollbar-track,
+  .tourney-table-wrap:focus-within::-webkit-scrollbar-track {
+    background: var(--bg-inset);
+  }
+
+  .tourney-table-wrap:hover::-webkit-scrollbar-thumb,
+  .tourney-table-wrap:focus-within::-webkit-scrollbar-thumb {
+    background: var(--text-faint);
+    border-color: var(--bg-inset);
+  }
+
+  html.light .tourney-table-wrap:hover::-webkit-scrollbar-thumb,
+  html.light .tourney-table-wrap:focus-within::-webkit-scrollbar-thumb {
     background: var(--text-dim);
   }
 
-  .tourney-table-wrap::-webkit-scrollbar-thumb:hover {
+  .tourney-table-wrap:hover::-webkit-scrollbar-thumb:hover,
+  .tourney-table-wrap:focus-within::-webkit-scrollbar-thumb:hover {
     background: var(--text-dim);
   }
 
-  html.light .tourney-table-wrap::-webkit-scrollbar-thumb:hover {
+  html.light .tourney-table-wrap:hover::-webkit-scrollbar-thumb:hover,
+  html.light .tourney-table-wrap:focus-within::-webkit-scrollbar-thumb:hover {
     background: var(--text);
   }
 
   .tourney-table-wrap::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  .tourney-table-wrap:hover::-webkit-scrollbar-corner,
+  .tourney-table-wrap:focus-within::-webkit-scrollbar-corner {
     background: var(--bg-inset);
   }
 
   .tourney-table {
     width: 100%;
-    table-layout: auto;
+    table-layout: fixed;
     border-collapse: separate;
     border-spacing: 0;
     font-size: 0.8125rem;
@@ -1777,6 +1805,12 @@ html.light {
 
   .meeting-round-strong {
     font-weight: 600;
+  }
+
+  .meeting-score {
+    font-family: var(--font-data);
+    font-weight: 400;
+    color: var(--text);
   }
 
   .chart-frame {

@@ -336,6 +336,7 @@ ORDER BY ranking_date
 _MATCH_HISTORY_SQL = f"""
 SELECT
     pm.match_id, pm.match_date, br.tournament, br.tournament_name, pm.surface, br.round,
+    br.score,
     pm.opponent_id, pr.display_name AS opponent_name,
     COALESCE(pm.opponent_ranking, historical_rank.rank) AS opponent_ranking, pm.match_won,
     (pr.player_id IS NOT NULL) AS opponent_known,
@@ -361,7 +362,7 @@ LIMIT %s
 
 # Direct bronze pair read: one row per meeting, no silver expansion or dedup.
 _H2H_MEETINGS_SQL = f"""
-SELECT match_id, match_date, tournament, tournament_name, round, surface,
+SELECT match_id, match_date, tournament, tournament_name, round, surface, score,
        player1_id, player2_id, winner_id
 FROM {BRONZE_TABLE}
 WHERE (player1_id = %s AND player2_id = %s)
@@ -598,6 +599,7 @@ def _match_history(request: Request) -> JSONResponse:
                 "tournament_name": r["tournament_name"] or None,
                 "surface": r["surface"],
                 "round": r["round"],
+                "score": r["score"],
                 "opponent_id": r["opponent_id"],
                 "opponent_name": r["opponent_name"],
                 "opponent_ranking": ranking,
@@ -651,6 +653,7 @@ def _head_to_head(request: Request) -> JSONResponse:
                 "tournament": r["tournament"],
                 "tournament_name": r["tournament_name"] or None,
                 "round": r["round"],
+                "score": r["score"],
                 "winner_id": winner_id,
                 "loser_id": higher if player1_won else lower,
                 "player1_won": bool(player1_won),

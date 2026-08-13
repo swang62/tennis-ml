@@ -208,6 +208,7 @@ def test_load_all_raw_atp_rows_sorts_chronologically(tmp_path):
         "tourney_name",
         "round",
         "surface",
+        "score",
         "indoor",
         "w_ace",
         "w_df",

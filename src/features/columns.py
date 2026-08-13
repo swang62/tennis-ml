@@ -64,6 +64,7 @@ BRONZE_COLUMNS: tuple[str, ...] = (
     "tournament_name",
     "round",
     "surface",
+    "score",
     "is_indoor",
     "player1_ranking",
     "player2_ranking",

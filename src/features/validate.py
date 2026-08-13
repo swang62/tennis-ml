@@ -19,6 +19,7 @@ from src.features.columns import (
 BRONZE_COLUMNS_NULLABLE: tuple[str, ...] = (
     "is_indoor",
     "tournament_name",
+    "score",
     "player1_ranking",
     "player2_ranking",
 )
