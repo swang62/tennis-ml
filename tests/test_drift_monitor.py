@@ -10,7 +10,7 @@ import mlflow
 import pandas as pd
 import pytest
 
-import src.flows.check_drift as cd
+from src.flows import drift
 
 
 class _FakeModelVersion:
@@ -81,11 +81,11 @@ def _stub_batch_response(ctxs, base_prob=0.65):
 
 
 def _setup_model_info_stub(monkeypatch, mode="production", version="3", run_id="champ-run-id"):
-    monkeypatch.setattr(cd, "BENTO_API_KEY", "")
-    monkeypatch.setattr(cd, "PRODUCTION_BENTO_URL", "http://127.0.0.1:8187")
-    monkeypatch.setattr(cd, "MODEL_INFO_ROUTE", "/api/internal/model-info")
+    monkeypatch.setattr(drift, "BENTO_API_KEY", "")
+    monkeypatch.setattr(drift, "PRODUCTION_BENTO_URL", "http://127.0.0.1:8187")
+    monkeypatch.setattr(drift, "MODEL_INFO_ROUTE", "/api/internal/model-info")
     monkeypatch.setattr(
-        cd,
+        drift,
         "_db_conn_params",
         lambda: {"server_address": None, "server_port": None, "database_name": None},
     )
@@ -105,13 +105,13 @@ def _setup_model_info_stub(monkeypatch, mode="production", version="3", run_id="
     }
     fake_resp = MagicMock()
     fake_resp.json.return_value = fake_model_info
-    monkeypatch.setattr(cd.requests, "get", lambda _url, **__kwargs: fake_resp)
+    monkeypatch.setattr(drift.requests, "get", lambda _url, **__kwargs: fake_resp)
 
 
 def test_no_champion_fails():
     client = _FakeMlflowClient(champion=None)
     with pytest.raises(RuntimeError, match="no champion found"):
-        cd._validate_production(client)  # type: ignore[arg-type]
+        drift._validate_production(client)  # type: ignore[arg-type]
 
 
 def test_production_identity_mismatch_fails(monkeypatch):
@@ -120,22 +120,22 @@ def test_production_identity_mismatch_fails(monkeypatch):
     client = _FakeMlflowClient(champion=_FakeModelVersion(version="3", run_id="champ-run-id"))
 
     with pytest.raises(RuntimeError, match="production Bento is not in production mode"):
-        cd._validate_production(client)  # type: ignore[arg-type]
+        drift._validate_production(client)  # type: ignore[arg-type]
 
 
 def test_empty_population_insufficient_data(monkeypatch, tmp_path):
-    monkeypatch.setattr(cd, "ARTIFACTS", tmp_path)
-    monkeypatch.setattr(cd, "run_dbt_build", lambda **__kwargs: None)
-    monkeypatch.setattr(cd, "load_env", lambda: None)
+    monkeypatch.setattr(drift, "ARTIFACTS", tmp_path)
+    monkeypatch.setattr(drift, "run_dbt_build", lambda **__kwargs: None)
+    monkeypatch.setattr(drift, "load_env", lambda: None)
     _setup_model_info_stub(monkeypatch)
 
     champion = _FakeModelVersion(
         version="3", run_id="champ-run-id", creation_timestamp=1700000000000
     )
     client = _FakeMlflowClient(champion=champion)
-    monkeypatch.setattr(cd, "MlflowClient", lambda: client)
+    monkeypatch.setattr(drift, "MlflowClient", lambda: client)
 
-    monkeypatch.setattr(cd, "to_dataframe", lambda _sql: pd.DataFrame())
+    monkeypatch.setattr(drift, "to_dataframe", lambda _sql: pd.DataFrame())
 
     mlflow_runs = []
 
@@ -147,9 +147,9 @@ def test_empty_population_insufficient_data(monkeypatch, tmp_path):
             info=SimpleNamespace(run_id=run_id), __enter__=MagicMock(), __exit__=MagicMock()
         )
 
-    monkeypatch.setattr(cd.mlflow, "start_run", fake_start_run)
+    monkeypatch.setattr(drift.mlflow, "start_run", fake_start_run)
 
-    result = cd.check_drift()
+    result = drift.check_drift()
     assert result == 0
     assert any(
         r.get("tags") and r["tags"].get("status") == "insufficient_data" for r in mlflow_runs
@@ -157,16 +157,16 @@ def test_empty_population_insufficient_data(monkeypatch, tmp_path):
 
 
 def test_normal_flow_creates_baseline_and_check(monkeypatch, tmp_path):
-    monkeypatch.setattr(cd, "ARTIFACTS", tmp_path)
-    monkeypatch.setattr(cd, "run_dbt_build", lambda **__kwargs: None)
-    monkeypatch.setattr(cd, "load_env", lambda: None)
+    monkeypatch.setattr(drift, "ARTIFACTS", tmp_path)
+    monkeypatch.setattr(drift, "run_dbt_build", lambda **__kwargs: None)
+    monkeypatch.setattr(drift, "load_env", lambda: None)
     _setup_model_info_stub(monkeypatch)
 
     champion = _FakeModelVersion(
         version="3", run_id="champ-run-id", creation_timestamp=1700000000000
     )
     client = _FakeMlflowClient(champion=champion)
-    monkeypatch.setattr(cd, "MlflowClient", lambda: client)
+    monkeypatch.setattr(drift, "MlflowClient", lambda: client)
 
     y_true = [1, 0, 1, 1, 0]
     fake_df = pd.DataFrame(
@@ -182,7 +182,7 @@ def test_normal_flow_creates_baseline_and_check(monkeypatch, tmp_path):
             "match_won": y_true,
         }
     )
-    monkeypatch.setattr(cd, "to_dataframe", lambda _sql: fake_df)
+    monkeypatch.setattr(drift, "to_dataframe", lambda _sql: fake_df)
 
     batch_calls = []
 
@@ -194,7 +194,7 @@ def test_normal_flow_creates_baseline_and_check(monkeypatch, tmp_path):
         fake_resp.json.return_value = _stub_batch_response(json or [], base_prob=0.65)
         return fake_resp
 
-    monkeypatch.setattr(cd.requests, "post", fake_post_batch)
+    monkeypatch.setattr(drift.requests, "post", fake_post_batch)
 
     mlflow_runs = []
 
@@ -206,9 +206,9 @@ def test_normal_flow_creates_baseline_and_check(monkeypatch, tmp_path):
             info=SimpleNamespace(run_id=run_id), __enter__=MagicMock(), __exit__=MagicMock()
         )
 
-    monkeypatch.setattr(cd.mlflow, "start_run", fake_start_run)
+    monkeypatch.setattr(drift.mlflow, "start_run", fake_start_run)
 
-    result = cd.check_drift()
+    result = drift.check_drift()
     assert result == 0
 
     run_names = [r["name"] for r in mlflow_runs]
@@ -220,9 +220,9 @@ def test_normal_flow_creates_baseline_and_check(monkeypatch, tmp_path):
 
 
 def test_repeat_check_reuses_existing_runs(monkeypatch, tmp_path):
-    monkeypatch.setattr(cd, "ARTIFACTS", tmp_path)
-    monkeypatch.setattr(cd, "run_dbt_build", lambda **__kwargs: None)
-    monkeypatch.setattr(cd, "load_env", lambda: None)
+    monkeypatch.setattr(drift, "ARTIFACTS", tmp_path)
+    monkeypatch.setattr(drift, "run_dbt_build", lambda **__kwargs: None)
+    monkeypatch.setattr(drift, "load_env", lambda: None)
     _setup_model_info_stub(monkeypatch)
 
     baseline_artifact = {
@@ -240,7 +240,7 @@ def test_repeat_check_reuses_existing_runs(monkeypatch, tmp_path):
         version="3", run_id="champ-run-id", creation_timestamp=1700000000000
     )
     client = _FakeMlflowClient(champion=champion, runs=[baseline_run], download_dir=str(art_dir))
-    monkeypatch.setattr(cd, "MlflowClient", lambda: client)
+    monkeypatch.setattr(drift, "MlflowClient", lambda: client)
 
     y_true = [1, 0, 1, 1, 0, 0, 1]
     fake_df = pd.DataFrame(
@@ -256,7 +256,7 @@ def test_repeat_check_reuses_existing_runs(monkeypatch, tmp_path):
             "match_won": y_true,
         }
     )
-    monkeypatch.setattr(cd, "to_dataframe", lambda _sql: fake_df)
+    monkeypatch.setattr(drift, "to_dataframe", lambda _sql: fake_df)
 
     def fake_post_batch(url, json=None, headers=None, timeout=None):
         del url, headers, timeout
@@ -265,7 +265,7 @@ def test_repeat_check_reuses_existing_runs(monkeypatch, tmp_path):
         fake_resp.json.return_value = _stub_batch_response(json or [], base_prob=0.68)
         return fake_resp
 
-    monkeypatch.setattr(cd.requests, "post", fake_post_batch)
+    monkeypatch.setattr(drift.requests, "post", fake_post_batch)
 
     mlflow_runs = []
 
@@ -277,9 +277,9 @@ def test_repeat_check_reuses_existing_runs(monkeypatch, tmp_path):
             info=SimpleNamespace(run_id=run_id), __enter__=MagicMock(), __exit__=MagicMock()
         )
 
-    monkeypatch.setattr(cd.mlflow, "start_run", fake_start_run)
+    monkeypatch.setattr(drift.mlflow, "start_run", fake_start_run)
 
-    result = cd.check_drift()
+    result = drift.check_drift()
     assert result == 0
 
     run_names = [r["name"] for r in mlflow_runs]

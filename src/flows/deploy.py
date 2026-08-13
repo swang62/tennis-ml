@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
@@ -46,6 +47,10 @@ _AUX_TAG_KEYS = (
     "embeddings_hash",
     "bio_feature_cols_uri",
     "bio_feature_cols_hash",
+    "similarity_index_uri",
+    "similarity_index_hash",
+    "similarity_metadata_uri",
+    "similarity_metadata_hash",
 )
 
 # Packaged artifacts; serving reads PostgreSQL live, never training data.
@@ -67,17 +72,16 @@ AUX_FILES = [
 ]
 
 # Files whose content is a build input but is NOT pinned in champion lineage.
-# Lineage-pinned artifacts (bases, scaler, embeddings) enter the fingerprint
-# through the champion's exact tags instead of their mutable data/processed
-# copies. nn_best.onnx is a deploy-time export of the pinned nn version and
-# model_info.json is generated from the fingerprint itself, so both are excluded
-# too. The packaged runtime feature inputs below can change predictions without
-# changing service.py, so they are fingerprinted directly.
+# Lineage-pinned artifacts (bases, scaler, embeddings, similarity index and
+# metadata) enter the fingerprint through the champion's exact tags instead of
+# their mutable data/processed copies. nn_best.onnx is a deploy-time export of
+# the pinned nn version and model_info.json is generated from the fingerprint
+# itself, so both are excluded too. The packaged runtime feature inputs below
+# can change predictions without changing service.py, so they are fingerprinted
+# directly.
 SOURCE_FINGERPRINT_FILES = [
     TEMPLATE_BENTOFILE,
     SERVICE_FILE,
-    SIMILARITY_INDEX,
-    SIMILARITY_METADATA,
     # Added: these packaged runtime inputs can change predictions without changing service.py.
     ROOT / "src" / "features" / "columns.py",
     ROOT / "src" / "features" / "inference.py",
@@ -91,16 +95,6 @@ SOURCE_FINGERPRINT_FILES = [
     ROOT / "src" / "models" / "similarity.py",
     ROOT / "src" / "models" / "nn.py",
 ]
-
-
-def deploy_flow() -> None:
-    """Deploy the promoted model, rebuilding the Bento image every time.
-
-    Deliberately NOT a Prefect flow: deployment is a manual, gated decision
-    (train -> investigate drift/metrics -> deploy only if it holds up), so
-    running it must never register a Prefect flow run.
-    """
-    deploy_bento()
 
 
 def _latest_production_version(client: Any) -> Any:
@@ -200,16 +194,61 @@ def _write_model_info(
     return MODEL_INFO_FILE
 
 
-def _check_aux_files() -> None:
-    """The serving artifacts packaged into the Bento must exist on disk."""
-    missing = [str(p.relative_to(ROOT)) for p in AUX_FILES if not p.exists()]
-    if missing:
-        raise RuntimeError(
-            "required serving artifacts missing: "
-            + ", ".join(missing)
-            + " — run the training pipeline (00/02 write these to data/processed; "
-            "eda/01_player_similarity builds the similarity index)"
-        )
+def _download_aux_artifacts(client: Any, tags: dict[str, str]) -> None:  # noqa: ARG001 — tags carry everything; client kept for the caller contract
+    """Download the champion's lineage-pinned aux artifacts into DEPLOY_ARTIFACTS.
+
+    Five serving artifacts are pinned on the champion model version via
+    URI+hash lineage tags. A local copy is reused when its content hash
+    already matches the pin; otherwise the artifact is downloaded from its
+    exact URI (one retry on a transient download failure) and verified
+    against its content hash before the build proceeds. A champion missing
+    any required tag is not deployable and must be re-promoted from a full
+    training run.
+    """
+    import mlflow
+
+    specs = [
+        ("base_linear_scaler_uri", "base_linear_scaler_hash", "linear_scaler.pkl"),
+        ("aux_embeddings_uri", "aux_embeddings_hash", "bio_embeddings.npz"),
+        ("aux_bio_feature_cols_uri", "aux_bio_feature_cols_hash", "bio_feature_cols.json"),
+        ("aux_similarity_index_uri", "aux_similarity_index_hash", "player_similarity.index"),
+        ("aux_similarity_metadata_uri", "aux_similarity_metadata_hash", "player_metadata.json"),
+    ]
+    DEPLOY_ARTIFACTS.mkdir(parents=True, exist_ok=True)
+    for uri_tag, hash_tag, filename in specs:
+        missing = [tag for tag in (uri_tag, hash_tag) if tag not in tags]
+        if missing:
+            raise RuntimeError(
+                f"champion {PRODUCTION_MODEL} is missing lineage tags {missing} — "
+                "re-promote from a full training run (`just train`)"
+            )
+        local = DEPLOY_ARTIFACTS / filename
+        if local.exists() and _file_hash(local) == tags[hash_tag]:
+            print(f"Reusing {filename} (hash ok)")
+            continue
+        download_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                local = Path(
+                    mlflow.artifacts.download_artifacts(  # type: ignore[reportPrivateImportUsage]  # conditional export
+                        tags[uri_tag], dst_path=str(DEPLOY_ARTIFACTS)
+                    )
+                )
+                break
+            except Exception as exc:
+                download_error = exc
+                if attempt == 0:
+                    print(f"Download of {filename} from {tags[uri_tag]} failed; retrying once")
+        else:
+            raise RuntimeError(
+                f"failed to download {filename} from {tags[uri_tag]}: {download_error}"
+            ) from download_error
+        actual = _file_hash(local)
+        if actual != tags[hash_tag]:
+            raise RuntimeError(
+                f"sha256 mismatch for {filename}: expected {tags[hash_tag]}, got {actual}"
+            )
+        print(f"Downloaded {filename} from {tags[uri_tag]} (sha256 ok)")
 
 
 def _detect_gbdt_framework(raw: Any) -> str:
@@ -465,6 +504,22 @@ def _docker_login() -> None:
         raise RuntimeError(f"docker login failed (exit {proc.returncode})")
 
 
+class _Tee:
+    """Write to two streams: the real console and a capture file."""
+
+    def __init__(self, console: TextIO, log: TextIO) -> None:
+        self.console = console
+        self.log = log
+
+    def write(self, s: str) -> int:
+        self.log.write(s)
+        return self.console.write(s)
+
+    def flush(self) -> None:
+        self.console.flush()
+        self.log.flush()
+
+
 def _run_teed(
     cmd: list[str], log: TextIO, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess:
@@ -475,6 +530,10 @@ def _run_teed(
     assert proc.stdout is not None
     for line in proc.stdout:
         text = line.decode(errors="replace")
+        # Docker push re-renders the full layer status table on every change,
+        # spamming `Waiting` for layers that are already cached; drop those.
+        if text.strip().endswith(": Waiting"):
+            continue
         sys.stdout.write(text)
         sys.stdout.flush()
         log.write(text)
@@ -498,7 +557,8 @@ def build_bento_image() -> tuple[str, int]:
     state = _read_state()
     pins = _lineage_pins(client, production)
     _reuse_or_materialize_nn_onnx(state, pins["nn"])
-    _check_aux_files()
+    version_tags = client.get_model_version(PRODUCTION_MODEL, production.version).tags
+    _download_aux_artifacts(client, version_tags)
     fingerprint = build_input_fingerprint(client, production)
     _write_model_info(client, production, pins, fingerprint)
 
@@ -524,24 +584,32 @@ def build_bento_image() -> tuple[str, int]:
 
 
 def deploy_bento() -> None:
-    """Build then push the promoted image; token login uses stdin."""
-    local_image, production_version = build_bento_image()
+    """Build then push the promoted image; token login uses stdin.
 
-    latest = f"{DOCKER_REPO}/{IMAGE_NAME}:latest"
-    # BentoML tags the local image without the Docker Hub repo prefix;
-    # retag so `docker push` targets the correct registry.
-    subprocess.run(
-        ["docker", "tag", local_image, latest], cwd=ROOT, capture_output=True, check=True
-    )
-    _docker_login()
+    Build prints and push output both stream to the console and to a single
+    deploy_<timestamp>.log opened before the build, so a failed build still
+    leaves a log of the attempt.
+    """
     LOGS.mkdir(parents=True, exist_ok=True)
     deploy_log = LOGS / f"deploy_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-    try:
-        with deploy_log.open("w") as log:
+    with deploy_log.open("w") as log:
+        with (
+            redirect_stdout(_Tee(sys.stdout, log)),
+            redirect_stderr(_Tee(sys.stderr, log)),
+        ):
+            local_image, production_version = build_bento_image()
+        try:
+            latest = f"{DOCKER_REPO}/{IMAGE_NAME}:latest"
+            # BentoML tags the local image without the Docker Hub repo prefix;
+            # retag so `docker push` targets the correct registry.
+            subprocess.run(
+                ["docker", "tag", local_image, latest], cwd=ROOT, capture_output=True, check=True
+            )
+            _docker_login()
             _run_teed(["docker", "push", latest], log)
-    except subprocess.CalledProcessError as exc:
-        print(f"Deploy step failed ({exc}); image was not published: {local_image}")
-        raise
+        except subprocess.CalledProcessError as exc:
+            print(f"Deploy step failed ({exc}); image was not published: {local_image}")
+            raise
 
     state = _read_state()
     _write_state({**state, "deployed_version": production_version, "deployed_image": latest})
@@ -549,4 +617,4 @@ def deploy_bento() -> None:
 
 
 if __name__ == "__main__":
-    deploy_flow()
+    deploy_bento()

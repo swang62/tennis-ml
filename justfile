@@ -51,11 +51,15 @@ dev:
 
 # Run production drift monitoring.
 drift:
-    uv run python src/flows/check_drift.py
+    uv run python src/flows/drift.py
 
 # Run all configured linters.
 lint:
     uv run pre-commit run --all-files
+
+# Delete every registered model and non-default experiment from MLflow.
+mlflow-clean:
+    uv run python scripts/reset_mlflow.py
 
 # Trigger the Prefect scrape deployment; pass Prefect CLI args through unchanged (see scrape_flow docstring).
 scrape *args:

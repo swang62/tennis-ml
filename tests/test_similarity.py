@@ -673,6 +673,11 @@ def test_build_load_round_trip(tmp_path: Path, monkeypatch):
     _patch_embedding(monkeypatch)
     monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
     monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
+    # build() writes to DEFAULT_* (data/processed); load() reads from
+    # SERVING_* (data/deploy). Point both at the same tmp file for the
+    # round-trip.
+    monkeypatch.setattr(similarity, "SERVING_INDEX", tmp_path / "idx")
+    monkeypatch.setattr(similarity, "SERVING_METADATA", tmp_path / "meta.json")
     con = duckdb.connect()
     try:
         _create_two_table_fixture(con)
@@ -695,8 +700,8 @@ def test_build_load_round_trip(tmp_path: Path, monkeypatch):
 
 
 def test_load_missing_index_raises(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "missing.index")
-    monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
+    monkeypatch.setattr(similarity, "SERVING_INDEX", tmp_path / "missing.index")
+    monkeypatch.setattr(similarity, "SERVING_METADATA", tmp_path / "meta.json")
 
     with pytest.raises(FileNotFoundError):
         PlayerSimilarity().load()

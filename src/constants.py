@@ -99,6 +99,10 @@ def build_lineage_tags(
         "embeddings_hash",
         "bio_feature_cols_uri",
         "bio_feature_cols_hash",
+        "similarity_index_uri",
+        "similarity_index_hash",
+        "similarity_metadata_uri",
+        "similarity_metadata_hash",
     ):
         tags[f"aux_{key}"] = str(aux_pins[key])
     return tags

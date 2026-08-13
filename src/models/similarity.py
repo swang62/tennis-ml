@@ -12,6 +12,7 @@ import pandas as pd
 
 from src.constants import (
     BRONZE_PROFILES_TABLE,
+    DATA_PROCESSED,
     DEPLOY_ARTIFACTS,
     PROFILES_TABLE,
 )
@@ -20,10 +21,15 @@ from src.db.client import to_dataframe
 MODEL_NAME = "BAAI/bge-small-en-v1.5"
 
 # The similarity index is independent of the prediction models (a dashboard
-# feature rebuilt from the fresh snapshot on every train), so it is written
-# directly into the frozen deploy folder and is never promotion-gated.
-DEFAULT_INDEX = DEPLOY_ARTIFACTS / "player_similarity.index"
-DEFAULT_METADATA = DEPLOY_ARTIFACTS / "player_metadata.json"
+# feature rebuilt from the fresh snapshot on every train). Training writes it
+# to data/processed (DEFAULT_*) and pipeline.py logs it to MLflow as run
+# artifacts; the deploy flow then downloads the pinned artifacts into
+# data/deploy and packages them into the Bento, where load() reads them back
+# from the SERVING_* paths.
+DEFAULT_INDEX = DATA_PROCESSED / "player_similarity.index"
+DEFAULT_METADATA = DATA_PROCESSED / "player_metadata.json"
+SERVING_INDEX = DEPLOY_ARTIFACTS / "player_similarity.index"
+SERVING_METADATA = DEPLOY_ARTIFACTS / "player_metadata.json"
 
 BIO_COL_PREFIX = "bio_"
 
@@ -190,12 +196,12 @@ class PlayerSimilarity:
     # ── Load saved index ────────────────────────────
 
     def load(self) -> None:
-        """Load a previously saved index from the frozen deploy folder."""
-        if not DEFAULT_INDEX.exists():
-            raise FileNotFoundError(f"Index not found at {DEFAULT_INDEX}. Call build() first.")
+        """Load a previously saved index from the packaged deploy folder."""
+        if not SERVING_INDEX.exists():
+            raise FileNotFoundError(f"Index not found at {SERVING_INDEX}. Call build() first.")
 
-        self.index = faiss.read_index(str(DEFAULT_INDEX))
-        with open(DEFAULT_METADATA) as f:
+        self.index = faiss.read_index(str(SERVING_INDEX))
+        with open(SERVING_METADATA) as f:
             self.players = json.load(f)
         self.player_ids = [p["player_id"] for p in self.players]
 

@@ -1,8 +1,7 @@
 """Production drift monitor against the deployed champion Bento.
 
-Entry point for `just check-drift` (or `uv run python src/flows/check_drift.py`).
 Runs dbt build to refresh gold data, resolves the MLflow champion, scores all
-new matches through the production Bento, and logs drift metrics to MLflow.
+new untrained matches through the production Bento, and logs drift metrics to MLflow.
 
 Exit 0 on success (including insufficient_data), 1 on failure.
 """

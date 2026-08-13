@@ -151,6 +151,10 @@ def _lineage_tags():
         "aux_embeddings_hash": "bbb",
         "aux_bio_feature_cols_uri": "runs:/run-aux/bio_feature_cols.json",
         "aux_bio_feature_cols_hash": "ccc",
+        "aux_similarity_index_uri": "runs:/run-aux/player_similarity.index",
+        "aux_similarity_index_hash": "ddd",
+        "aux_similarity_metadata_uri": "runs:/run-aux/player_metadata.json",
+        "aux_similarity_metadata_hash": "eee",
     }
 
 
@@ -193,6 +197,10 @@ def test_lineage_pins_and_manifest_record_gbdt_framework(monkeypatch, tmp_path):
     assert manifest["bases"]["gbdt"]["version"] == "2"
     assert manifest["bases"]["linear"]["registered_model_name"] == "linear_best"
     assert manifest["aux_artifacts"]["embeddings_uri"] == "runs:/run-aux/bio_embeddings.npz"
+    assert (
+        manifest["aux_artifacts"]["similarity_index_uri"] == "runs:/run-aux/player_similarity.index"
+    )
+    assert manifest["aux_artifacts"]["similarity_metadata_hash"] == "eee"
     assert manifest["champion"]["version"] == "7"
     assert manifest["build_input_fingerprint"] == "fp"
 

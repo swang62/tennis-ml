@@ -3,6 +3,7 @@
 import importlib
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 
@@ -185,6 +186,62 @@ def test_deploy_bento_fails_when_push_fails(monkeypatch, tmp_path):
         d.deploy_bento()
 
 
+# --- Whole deploy tees build + push into one deploy_<timestamp>.log ---
+
+
+def test_deploy_bento_logs_build_and_push_to_single_file(monkeypatch, tmp_path):
+    """Build prints and push output go into one deploy_*.log that exists
+    before the build starts, while the console still sees them."""
+    d = _deploy()
+    monkeypatch.setattr(d, "LOGS", tmp_path)
+    monkeypatch.setattr(d, "DOCKER_REPO", "acme")
+    monkeypatch.setattr(d, "IMAGE_NAME", "tennis-bento")
+    monkeypatch.setattr(d, "_docker_login", lambda: None)
+    monkeypatch.setattr(d, "_read_state", lambda: {})
+    monkeypatch.setattr(d, "_write_state", lambda _s: None)
+    _stub_subprocess(monkeypatch)
+
+    build_output = {}
+
+    def fake_build():
+        build_output["log_at_build_start"] = sorted(p.name for p in tmp_path.glob("deploy_*.log"))
+        print("building bento image")
+        return "tennis-bento:latest", 5
+
+    monkeypatch.setattr(d, "build_bento_image", fake_build)
+    monkeypatch.setattr(d, "_run_teed", lambda _cmd, log: (log.write("push output\n"), log.flush()))
+
+    d.deploy_bento()
+
+    logs = sorted(tmp_path.glob("deploy_*.log"))
+    assert len(logs) == 1
+    # The log file already existed when the build started.
+    assert build_output["log_at_build_start"] == [logs[0].name]
+    content = logs[0].read_text()
+    assert "building bento image" in content
+    assert "push output" in content
+
+
+def test_deploy_bento_leaves_log_when_build_fails(monkeypatch, tmp_path):
+    """A raising build still leaves a non-empty deploy_*.log with its output."""
+    d = _deploy()
+    monkeypatch.setattr(d, "LOGS", tmp_path)
+
+    def fail_build():
+        print("champion missing lineage tags")
+        raise RuntimeError("no champion to build")
+
+    monkeypatch.setattr(d, "build_bento_image", fail_build)
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="no champion"):
+        d.deploy_bento()
+
+    (log,) = tmp_path.glob("deploy_*.log")
+    assert "champion missing lineage tags" in log.read_text()
+
+
 # --- Force behavior (removed — deployments always rebuild) ---
 
 
@@ -226,7 +283,7 @@ def _stub_bento_build(monkeypatch):
         },
     )
     monkeypatch.setattr(d, "_reuse_or_materialize_nn_onnx", lambda _state, _nn: False)
-    monkeypatch.setattr(d, "_check_aux_files", lambda: None)
+    monkeypatch.setattr(d, "_download_aux_artifacts", lambda _client, _tags: None)
     monkeypatch.setattr(d, "build_input_fingerprint", lambda _client, _prod: "fp")
     monkeypatch.setattr(d, "_read_state", lambda: {"fingerprint": "fp"})
     monkeypatch.setattr(
@@ -323,22 +380,166 @@ def test_pinned_bentofile_preserves_packaged_artifact_includes(monkeypatch, tmp_
         assert artifact.relative_to(d.ROOT).as_posix() in config["include"]
 
 
-def test_check_aux_files_requires_every_packaged_artifact(monkeypatch, tmp_path):
-    """Deploy fails fast when any packaged artifact is missing from disk."""
+def _aux_tags_and_files(monkeypatch, tmp_path, d, pre_populate=True):
+    """Full URI/hash lineage tag set whose hashes match real source files, plus
+    a stubbed mlflow.artifacts.download_artifacts that copies the matching
+    source into the staging dir. Returns (specs, tags, downloaded, artifacts_dir)."""
+    src_dir = tmp_path / "remote"
+    src_dir.mkdir()
+    artifacts_dir = tmp_path / "artifacts"
+    artifacts_dir.mkdir()
+    specs = [
+        ("base_linear_scaler_uri", "base_linear_scaler_hash", "linear_scaler.pkl"),
+        ("aux_embeddings_uri", "aux_embeddings_hash", "bio_embeddings.npz"),
+        ("aux_bio_feature_cols_uri", "aux_bio_feature_cols_hash", "bio_feature_cols.json"),
+        ("aux_similarity_index_uri", "aux_similarity_index_hash", "player_similarity.index"),
+        ("aux_similarity_metadata_uri", "aux_similarity_metadata_hash", "player_metadata.json"),
+    ]
+    tags = {}
+    for uri_tag, hash_tag, name in specs:
+        src = src_dir / name
+        src.write_bytes(f"content-{name}".encode())
+        tags[uri_tag] = f"runs:/run-aux/{name}"
+        tags[hash_tag] = d._file_hash(src)
+    if pre_populate:
+        for _, _, name in specs:
+            (artifacts_dir / name).write_bytes((src_dir / name).read_bytes())
+
+    downloaded = []
+
+    def fake_download(uri, dst_path=""):
+        downloaded.append(uri)
+        dest = Path(dst_path) / uri.rsplit("/", 1)[-1]
+        dest.write_bytes((src_dir / uri.rsplit("/", 1)[-1]).read_bytes())
+        return str(dest)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "mlflow",
+        SimpleNamespace(artifacts=SimpleNamespace(download_artifacts=fake_download)),
+    )
+    return specs, tags, downloaded, artifacts_dir
+
+
+def test_download_aux_artifacts_reuses_matching_local_files(monkeypatch, tmp_path):
+    """An existing local artifact whose hash matches the pin is reused: no download."""
     d = _deploy()
-    monkeypatch.setattr(d, "ROOT", tmp_path)
-    files = [tmp_path / "a.pkl", tmp_path / "b.npz", tmp_path / "c.json"]
-    for f in files:
-        f.write_bytes(b"x")
-    monkeypatch.setattr(d, "AUX_FILES", files)
+    _specs, tags, downloaded, artifacts_dir = _aux_tags_and_files(
+        monkeypatch, tmp_path, d, pre_populate=True
+    )
+    monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", artifacts_dir)
 
-    d._check_aux_files()  # all present: no error
+    d._download_aux_artifacts(None, tags)
 
-    files[1].unlink()
+    assert downloaded == []  # all five reused
+    assert sorted(p.name for p in artifacts_dir.iterdir()) == sorted(name for _, _, name in _specs)
+
+
+def test_download_aux_artifacts_downloads_missing_files(monkeypatch, tmp_path):
+    """Missing artifacts are downloaded once each and verified against the pin."""
+    d = _deploy()
+    specs, tags, downloaded, artifacts_dir = _aux_tags_and_files(
+        monkeypatch, tmp_path, d, pre_populate=False
+    )
+    monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", artifacts_dir)
+
+    d._download_aux_artifacts(None, tags)
+
+    assert sorted(downloaded) == sorted(tags[uri_tag] for uri_tag, _, _ in specs)
+    for _, _, name in specs:
+        assert (artifacts_dir / name).exists()
+
+
+def test_download_aux_artifacts_missing_tag_fails(monkeypatch, tmp_path):
+    """A lineage tag missing from the champion is a hard failure: the artifact
+    is never silently skipped."""
+    d = _deploy()
+    _specs, tags, _downloaded, artifacts_dir = _aux_tags_and_files(monkeypatch, tmp_path, d)
+    monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", artifacts_dir)
+    del tags["aux_similarity_index_uri"]
+
     import pytest
 
-    with pytest.raises(RuntimeError, match=r"b\.npz"):
-        d._check_aux_files()
+    with pytest.raises(RuntimeError, match="aux_similarity_index_uri"):
+        d._download_aux_artifacts(None, tags)
+
+
+def test_download_aux_artifacts_hash_mismatch_redownloads_then_fails(monkeypatch, tmp_path):
+    """A local artifact with a stale hash is re-downloaded; a re-download whose
+    content still mismatches the pin is rejected before the build proceeds."""
+    d = _deploy()
+    _specs, tags, downloaded, artifacts_dir = _aux_tags_and_files(
+        monkeypatch, tmp_path, d, pre_populate=True
+    )
+    monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", artifacts_dir)
+    tags["base_linear_scaler_hash"] = "0" * 64  # wrong pin
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match=r"linear_scaler.pkl"):
+        d._download_aux_artifacts(None, tags)
+
+    # The stale local copy was NOT reused; a fresh download was attempted.
+    assert downloaded == [tags["base_linear_scaler_uri"]]
+
+
+def test_download_aux_artifacts_retries_once_on_transient_failure(monkeypatch, tmp_path):
+    """A failing download is retried once; the file is present and verified after."""
+    d = _deploy()
+    _specs, tags, _downloaded, artifacts_dir = _aux_tags_and_files(
+        monkeypatch, tmp_path, d, pre_populate=True
+    )
+    monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", artifacts_dir)
+    name = "bio_embeddings.npz"
+    (artifacts_dir / name).unlink()  # missing -> needs a download
+    attempts = []
+
+    def flaky_download(uri, dst_path=""):
+        attempts.append(uri)
+        if len(attempts) == 1:
+            raise ConnectionError("transient fetch failure")
+        dest = Path(dst_path) / name
+        dest.write_bytes((tmp_path / "remote" / name).read_bytes())
+        return str(dest)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "mlflow",
+        SimpleNamespace(artifacts=SimpleNamespace(download_artifacts=flaky_download)),
+    )
+
+    d._download_aux_artifacts(None, tags)
+
+    assert attempts == [tags["aux_embeddings_uri"]] * 2
+    assert (artifacts_dir / name).exists()
+
+
+def test_download_aux_artifacts_raises_after_retry_fails(monkeypatch, tmp_path):
+    """Two failed downloads re-raise with a clear error naming the file and URI."""
+    d = _deploy()
+    _specs, tags, _downloaded, artifacts_dir = _aux_tags_and_files(
+        monkeypatch, tmp_path, d, pre_populate=True
+    )
+    monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", artifacts_dir)
+    name = "bio_embeddings.npz"
+    (artifacts_dir / name).unlink()  # missing -> needs a download
+    calls = []
+
+    def always_fail(uri, dst_path=""):  # noqa: ARG001 — signature matches download_artifacts
+        calls.append(uri)
+        raise ConnectionError("network down")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "mlflow",
+        SimpleNamespace(artifacts=SimpleNamespace(download_artifacts=always_fail)),
+    )
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match=r"bio_embeddings.npz"):
+        d._download_aux_artifacts(None, tags)
+    assert len(calls) == 2  # initial attempt + one retry, then no more
 
 
 # --- Task 2: exact champion lineage; base models carry no aliases ---
@@ -398,6 +599,10 @@ def _lineage_tags():
         "aux_embeddings_hash": "bbb",
         "aux_bio_feature_cols_uri": "runs:/run-aux/bio_feature_cols.json",
         "aux_bio_feature_cols_hash": "ccc",
+        "aux_similarity_index_uri": "runs:/run-aux/player_similarity.index",
+        "aux_similarity_index_hash": "ddd",
+        "aux_similarity_metadata_uri": "runs:/run-aux/player_metadata.json",
+        "aux_similarity_metadata_hash": "eee",
     }
 
 
@@ -554,6 +759,10 @@ def test_build_lineage_tags_flattens_exact_pins():
         "embeddings_hash": "bbb",
         "bio_feature_cols_uri": "runs:/run-aux/bio_feature_cols.json",
         "bio_feature_cols_hash": "ccc",
+        "similarity_index_uri": "runs:/run-aux/player_similarity.index",
+        "similarity_index_hash": "ddd",
+        "similarity_metadata_uri": "runs:/run-aux/player_metadata.json",
+        "similarity_metadata_hash": "eee",
     }
     tags = c.build_lineage_tags(base_pins, aux_pins)
 
@@ -564,17 +773,21 @@ def test_build_lineage_tags_flattens_exact_pins():
     assert tags["base_nn_model_uri"] == "runs:/run-nn/nn_model"
     assert tags["aux_embeddings_hash"] == "bbb"
     assert tags["aux_bio_feature_cols_uri"] == "runs:/run-aux/bio_feature_cols.json"
+    assert tags["aux_similarity_index_uri"] == "runs:/run-aux/player_similarity.index"
+    assert tags["aux_similarity_index_hash"] == "ddd"
+    assert tags["aux_similarity_metadata_uri"] == "runs:/run-aux/player_metadata.json"
+    assert tags["aux_similarity_metadata_hash"] == "eee"
 
 
 # --- Task 2: static notebook/deploy contracts ---
 
 
-def test_similarity_artifacts_are_fingerprinted_build_inputs():
-    """The on-disk similarity index and metadata are build inputs: changing
-    them changes the fingerprint even when the MLflow lineage is unchanged."""
+def test_similarity_artifacts_are_lineage_pinned_not_fingerprint_inputs():
+    """The similarity index and metadata are pinned in the champion lineage
+    tags (aux_similarity_*), not hashed as standalone build-input files."""
     d = _deploy()
-    assert d.SIMILARITY_INDEX in d.SOURCE_FINGERPRINT_FILES
-    assert d.SIMILARITY_METADATA in d.SOURCE_FINGERPRINT_FILES
+    assert d.SIMILARITY_INDEX not in d.SOURCE_FINGERPRINT_FILES
+    assert d.SIMILARITY_METADATA not in d.SOURCE_FINGERPRINT_FILES
 
 
 def test_deploy_module_is_not_a_prefect_flow():

@@ -75,7 +75,7 @@ export function fairOdds(p: number): string {
 // Split a stored set score into boldable segments. The score is always
 // winner-first ("6-4 7-6 RET"), so the first game count is the winner's and
 // the second the loser's. `perspective` is the displayed player: "winner"
-// bolds the winner's games in sets they won; "loser" bolds the loser's games
+// bolds the whole set token in sets they won; "loser" bolds the whole token
 // in sets they won. Non-set tokens (W/O, RET) stay plain.
 export interface ScoreSegment {
   text: string;
@@ -87,27 +87,15 @@ export function scoreSegments(
   perspective: "winner" | "loser",
 ): ScoreSegment[] | null {
   if (!score) return null;
-  const segments: ScoreSegment[] = [];
-  score.trim().split(/\s+/).forEach((token, i) => {
-    if (i > 0) segments.push({ text: " ", bold: false });
+  return score.trim().split(/\s+/).map((token, i) => {
     const match = /^(\d+)-(\d+)$/.exec(token);
-    if (!match) {
-      segments.push({ text: token, bold: false });
-      return;
-    }
-    const winnerWonSet = Number(match[1]) > Number(match[2]);
-    const loserWonSet = Number(match[2]) > Number(match[1]);
-    if (perspective === "winner") {
-      segments.push({ text: match[1], bold: winnerWonSet });
-      segments.push({ text: "-", bold: false });
-      segments.push({ text: match[2], bold: false });
-    } else {
-      segments.push({ text: match[1], bold: false });
-      segments.push({ text: "-", bold: false });
-      segments.push({ text: match[2], bold: loserWonSet });
-    }
+    const playerWonSet =
+      match &&
+      (perspective === "winner"
+        ? Number(match[1]) > Number(match[2])
+        : Number(match[2]) > Number(match[1]));
+    return { text: i > 0 ? ` ${token}` : token, bold: Boolean(playerWonSet) };
   });
-  return segments;
 }
 
 const escapeRegExp = (s: string): string =>
