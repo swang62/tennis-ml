@@ -1,4 +1,4 @@
-import ReactECharts from "echarts-for-react";
+import ReactECharts from "../lib/echarts";
 import type { EChartsOption } from "echarts";
 import type {
   MatchHistory,

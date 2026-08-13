@@ -5,16 +5,6 @@ metadata:
 spec:
   ingressClassName: traefik
   rules:
-    - host: mlflow.macsteve.lan
-      http:
-        paths:
-          - pathType: Prefix
-            path: "/"
-            backend:
-              service:
-                name: mlflow
-                port:
-                  number: 5000
     - host: prefect.macsteve.lan
       http:
         paths:

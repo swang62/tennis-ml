@@ -18,7 +18,9 @@ limit_conn_zone $binary_remote_addr zone=op_conn:10m;
 gzip on;
 gzip_comp_level 5;
 gzip_min_length 1024;
-gzip_types text/plain text/css application/json application/javascript application/xml image/svg+xml;
+# Vary advertises the encoding so proxies/CDNs cache gzip and identity separately.
+gzip_vary on;
+gzip_types text/plain text/css application/json application/javascript text/javascript application/xml image/svg+xml;
 
 server {
     listen 80;

@@ -46,18 +46,17 @@ dbt/             — silver→gold SQL models + tests (bronze is the PostgreSQL 
 
 **NN is served via ONNX Runtime, not torch.** The deploy flow exports the pinned `nn_best` PyTorch model to a single-file ONNX at deploy time and packages that into the Bento image. torch is not a serving dependency. The GBDT path may pick XGBoost or LightGBM at Optuna time — the serving image pins both so whichever wins loads cleanly.
 
-**Ingress is single-entrypoint only.** Host access to cluster services goes through `*.macsteve.lan` only. Caddy routes `*.macsteve.lan` to the k3d load balancer on `localhost:8080`, so do not add host port-forwards or ad hoc tunnels. The local Caddy TLS cert is self-signed. All services work over `https://*.macsteve.lan` — MLflow/Prefect clients when told to skip TLS verification (`MLFLOW_TRACKING_INSECURE_TLS=true`, `PREFECT_API_TLS_INSECURE_SKIP_VERIFY=True`). Inside the cluster, services still use Kubernetes DNS names (`mlflow`, `prefect-server`, etc.). BentoML serving is host-local via Docker Compose at `http://127.0.0.1:3000` — it is not a cluster service.
+**Ingress is single-entrypoint only.** Host access to cluster services goes through `*.macsteve.lan` only. Caddy routes `*.macsteve.lan` to the k3d load balancer on `localhost:8080`, so do not add host port-forwards or ad hoc tunnels. The local Caddy TLS cert is self-signed. All services work over `https://*.macsteve.lan` — Prefect clients when told to skip TLS verification (`PREFECT_API_TLS_INSECURE_SKIP_VERIFY=True`). Inside the cluster, services still use Kubernetes DNS names (`prefect-server`, etc.). MLflow is DagsHub-hosted. BentoML serving is host-local via Docker Compose at `http://127.0.0.1:3000` — it is not a cluster service.
 
 **Canonical service DNS names.** The `*.macsteve.lan` hostnames (recorded in `infra/manifests/default/ingress.yaml`) map to cluster services:
 
 | Hostname                    | Service                    | Port |
 | --------------------------- | -------------------------- | ---- |
-| `mlflow.macsteve.lan`       | `mlflow`                   | 5000 |
 | `prefect.macsteve.lan`      | `prefect-server`           | 4200 |
 
 DNS/TLS for `*.macsteve.lan` itself is served by the host
 
-**MLflow is the registry of record.** Training runs against the local store or k8s service. Deploy resolves `@champion` (and the exact base pins tagged on it) from whatever `MLFLOW_TRACKING_URI` points at.
+**MLflow is the registry of record, hosted on DagsHub.** Training logs runs and models to the DagsHub MLflow backend, and deploy resolves `@champion` (and the exact base pins tagged on it) from whatever `MLFLOW_TRACKING_URI` points at.
 
 **Ranking identity map** — `data/ranking_player_map.csv` is the authoritative reviewed mapping from ranking-source player id (`ranking_player_id`, the id in `data/raw/rankings/atp_rankings_*.csv`) to the canonical player id (`player_id`, the ATP_Database id space used by matches and profiles); `ranking_name` is an audit/review field only, never a production match key. Ingestion validates the map (structure, duplicate source ids, conflicting targets, unknown canonical ids) before any write and rejects it otherwise; unmapped top-200 rows are skipped and reported with source id, name, and count, never silently name-matched. `ranking_name_candidates()` in `src/db/ingest.py` is a deterministic normalized-name review aid for maintainers extending the map.
 

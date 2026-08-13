@@ -7,7 +7,7 @@ Production-grade MLOps pipeline for tennis match prediction. Prefect, PostgreSQL
 | Layer               | Tool                                      |
 | ------------------- | ----------------------------------------- |
 | Orchestration       | Prefect (retries, ETL triggers)           |
-| Experiment tracking | MLflow (model registry, trial comparison) |
+| Experiment tracking | MLflow on DagsHub (model registry, trial comparison) |
 | Model serving       | BentoML                                   |
 | Data warehouse      | PostgreSQL                                |
 | Development         | Jupyter + Papermill                       |
@@ -30,7 +30,7 @@ web/             — React + TanStack dashboard (Vite, local dev, HMR)
 ## Quick Start
 
 ```bash
-# 1. Full local dev setup (deps + k3d cluster for Prefect/MLflow + PostgreSQL init)
+# 1. Full local dev setup (deps + k3d cluster for Prefect + PostgreSQL init)
 just setup
 
 # 2. Seed the deterministic minimal match set into PostgreSQL bronze

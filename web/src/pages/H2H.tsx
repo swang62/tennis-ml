@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import ReactECharts from "echarts-for-react";
+import ReactECharts from "../lib/echarts";
 import type { EChartsOption } from "echarts";
-import * as echarts from "echarts";
+import { format } from "echarts/core";
 import {
   getHeadToHead,
   getPlayerProfile,
@@ -618,7 +618,7 @@ export default function H2H() {
                       show: true,
                       trigger: "item",
                       formatter: (params: any) =>
-                        `<span style="color:${params.color};font-weight:700">${echarts.format.encodeHTML(params.name)}</span>`,
+                        `<span style="color:${params.color};font-weight:700">${format.encodeHTML(params.name)}</span>`,
                       renderMode: "html",
                       backgroundColor: "transparent",
                       borderWidth: 0,
