@@ -12,16 +12,19 @@ from typing import Any, LiteralString, cast
 import pandas as pd
 import requests
 
-from src.constants import BRONZE_PROFILES_TABLE, ENRICH_WORKERS, ROOT
+from src.constants import (
+    BRONZE_PROFILES_TABLE,
+    BRONZE_TABLE,
+    ENRICH_WORKERS,
+    GOLD_TABLE,
+    RANKINGS_TABLE,
+    ROOT,
+)
 from src.countries import UNK, valid_ioc
 from src.db.client import get_conn, to_dataframe
 from src.features.columns import BRONZE_COLUMNS
 from src.features.validate import run_ingestion_checks
 from src.utils import load_env
-
-BRONZE_TABLE = "bronze.match_events"
-GOLD_TABLE = "gold.match_features"
-
 
 # ATP data provides player identity; Wikipedia adds missing enrichment.
 ATP_DATABASE_CSV = ROOT / "data" / "ATP_player_database.csv"
@@ -745,7 +748,9 @@ def _name_matches_seed(name: str, player_ids: set[str], canonical: dict[str, str
 
 # ── Official Rankings Ingest ───────────────────────────────────
 
-BRONZE_RANKINGS_TABLE = "bronze.rankings"
+# Ingest-facing alias for the shared rankings table constant (kept for callers
+# that import this name; the value is single-sourced in src.constants).
+BRONZE_RANKINGS_TABLE = RANKINGS_TABLE
 RANKINGS_DIR = ROOT / "data" / "raw" / "rankings"
 ATP_PLAYERS_CSV = RANKINGS_DIR / "atp_players.csv"
 

@@ -10,11 +10,21 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from src.constants import (
+    AUX_TAG_PREFIX,
+    BASE_TAG_PREFIX,
     CHAMPION_ALIAS,
     DATA_PROCESSED,
     DEPLOY_ARTIFACTS,
+    FRAMEWORK_KEY,
     FROZEN_ARTIFACTS,
     IMAGE_NAME,
+    LINEAGE_AUX_KEYS,
+    LINEAGE_BASE_KEYS,
+    LINEAGE_MODEL_NAME_KEY,
+    LINEAGE_MODEL_URI_KEY,
+    LINEAGE_RUN_ID_KEY,
+    LINEAGE_SCALER_KEYS,
+    LINEAGE_VERSION_KEY,
     LOGS,
     PRODUCTION_MODEL,
     ROOT,
@@ -40,18 +50,10 @@ DOCKER_REPO = os.getenv("DOCKER_REPO", "swang62")
 # nn_best is exported to ONNX and included as an artifact, not a BentoModel.
 BASE_BENTO_NAMES = {"linear": "linear_best", "gbdt": "gbdt_best", "nn": "nn_best"}
 
-# Auxiliary-artifact tag names (champion lineage, `aux_<key>` prefix) baked into
-# the canonical manifest.
-_AUX_TAG_KEYS = (
-    "embeddings_uri",
-    "embeddings_hash",
-    "bio_feature_cols_uri",
-    "bio_feature_cols_hash",
-    "similarity_index_uri",
-    "similarity_index_hash",
-    "similarity_metadata_uri",
-    "similarity_metadata_hash",
-)
+# BentoML model-metadata keys; only deploy.py writes them, so they stay local
+# (the shared FRAMEWORK_KEY comes from src.constants for the serving manifest).
+MLFLOW_URI_META_KEY = "mlflow_uri"
+MLFLOW_VERSION_META_KEY = "mlflow_version"
 
 # Packaged artifacts; serving reads PostgreSQL live, never training data.
 # Everything serving reads from disk lives in the frozen DEPLOY_ARTIFACTS folder
@@ -129,10 +131,10 @@ def _lineage_pins(client: Any, production: Any) -> dict[str, dict[str, str]]:
     version = client.get_model_version(PRODUCTION_MODEL, production.version)
     tags = dict(version.tags)
     missing = [
-        f"base_{cls}_{key}"
+        f"{BASE_TAG_PREFIX}{cls}_{key}"
         for cls in BASE_BENTO_NAMES
-        for key in ("registered_model_name", "version", "run_id", "model_uri")
-        if f"base_{cls}_{key}" not in tags
+        for key in LINEAGE_BASE_KEYS
+        if f"{BASE_TAG_PREFIX}{cls}_{key}" not in tags
     ]
     if missing:
         raise RuntimeError(
@@ -141,25 +143,22 @@ def _lineage_pins(client: Any, production: Any) -> dict[str, dict[str, str]]:
         )
     pins: dict[str, dict[str, str]] = {
         "production": {
-            "registered_model_name": PRODUCTION_MODEL,
-            "version": str(production.version),
-            "run_id": production.run_id,
-            "model_uri": f"models:/{PRODUCTION_MODEL}/{production.version}",
+            LINEAGE_MODEL_NAME_KEY: PRODUCTION_MODEL,
+            LINEAGE_VERSION_KEY: str(production.version),
+            LINEAGE_RUN_ID_KEY: production.run_id,
+            LINEAGE_MODEL_URI_KEY: f"models:/{PRODUCTION_MODEL}/{production.version}",
         }
     }
     for cls in BASE_BENTO_NAMES:
-        pins[cls] = {
-            key: tags[f"base_{cls}_{key}"]
-            for key in ("registered_model_name", "version", "run_id", "model_uri")
-        }
-        for key in ("scaler_uri", "scaler_hash"):
-            tag_key = f"base_{cls}_{key}"
+        pins[cls] = {key: tags[f"{BASE_TAG_PREFIX}{cls}_{key}"] for key in LINEAGE_BASE_KEYS}
+        for key in LINEAGE_SCALER_KEYS:
+            tag_key = f"{BASE_TAG_PREFIX}{cls}_{key}"
             if tag_key in tags:
                 pins[cls][key] = tags[tag_key]
     # The GBDT framework picks the native serving adapter (bentoml.xgboost vs
     # bentoml.lightgbm); detect it once here so the manifest and the
     # materialization step both know it.
-    pins["gbdt"]["framework"] = _gbdt_framework(pins["gbdt"]["model_uri"])
+    pins["gbdt"][FRAMEWORK_KEY] = _gbdt_framework(pins["gbdt"][LINEAGE_MODEL_URI_KEY])
     return pins
 
 
@@ -178,14 +177,14 @@ def _write_model_info(
     tags = version.tags
     manifest = {
         "champion": {
-            "registered_model_name": PRODUCTION_MODEL,
-            "version": str(production.version),
-            "run_id": production.run_id,
-            "model_uri": f"models:/{PRODUCTION_MODEL}/{production.version}",
+            LINEAGE_MODEL_NAME_KEY: PRODUCTION_MODEL,
+            LINEAGE_VERSION_KEY: str(production.version),
+            LINEAGE_RUN_ID_KEY: production.run_id,
+            LINEAGE_MODEL_URI_KEY: f"models:/{PRODUCTION_MODEL}/{production.version}",
             "creation_timestamp_ms": int(version.creation_timestamp),
         },
         "bases": {cls: pins[cls] for cls in BASE_BENTO_NAMES},
-        "aux_artifacts": {key: tags[f"aux_{key}"] for key in _AUX_TAG_KEYS},
+        "aux_artifacts": {key: tags[f"{AUX_TAG_PREFIX}{key}"] for key in LINEAGE_AUX_KEYS},
         "build_input_fingerprint": fingerprint,
     }
     MODEL_INFO_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -292,28 +291,34 @@ def _materialize_native_model(
     import bentoml
     import mlflow
 
-    registered_name = pin["registered_model_name"]
-    version = str(pin["version"])
+    registered_name = pin[LINEAGE_MODEL_NAME_KEY]
+    version = str(pin[LINEAGE_VERSION_KEY])
     uri = f"models:/{registered_name}/{version}"
     try:
         stored = bentoml.models.get(registered_name)
     except Exception:
         stored = None
-    if stored is not None and stored.info.metadata.get("mlflow_version") == version:
+    if stored is not None and stored.info.metadata.get(MLFLOW_VERSION_META_KEY) == version:
         print(f"Reusing {stored.tag} — already materialized (MLflow v{version})")
         return stored, framework
 
     raw = mlflow.pyfunc.load_model(uri).get_raw_model()
     if registered_name == BASE_BENTO_NAMES["gbdt"]:
         framework = framework or _detect_gbdt_framework(raw)
-        metadata = {"mlflow_uri": uri, "mlflow_version": version, "framework": framework}
+        metadata = {
+            MLFLOW_URI_META_KEY: uri,
+            MLFLOW_VERSION_META_KEY: version,
+            FRAMEWORK_KEY: framework,
+        }
         save = bentoml.xgboost.save_model if framework == "xgboost" else bentoml.lightgbm.save_model
         return save(registered_name, raw, metadata=metadata), framework
     if not _is_sklearn_estimator(raw):
         raise RuntimeError(f"{registered_name} is not an sklearn estimator: {type(raw).__name__}")
     return (
         bentoml.sklearn.save_model(
-            registered_name, raw, metadata={"mlflow_uri": uri, "mlflow_version": version}
+            registered_name,
+            raw,
+            metadata={MLFLOW_URI_META_KEY: uri, MLFLOW_VERSION_META_KEY: version},
         ),
         None,
     )
@@ -323,18 +328,20 @@ def _mlflow_import_or_reuse(pin: dict[str, Any]) -> Any:
     """Import or reuse a pinned MLflow version by exact version, never alias."""
     import bentoml
 
-    registered_name = pin["registered_model_name"]
-    version = str(pin["version"])
+    registered_name = pin[LINEAGE_MODEL_NAME_KEY]
+    version = str(pin[LINEAGE_VERSION_KEY])
     uri = f"models:/{registered_name}/{version}"
     try:
         stored = bentoml.models.get(registered_name)
     except Exception:
         stored = None
-    if stored is not None and stored.info.metadata.get("mlflow_version") == version:
+    if stored is not None and stored.info.metadata.get(MLFLOW_VERSION_META_KEY) == version:
         print(f"Reusing {stored.tag} — already imported (MLflow v{version})")
         return stored
     stored = bentoml.mlflow.import_model(
-        registered_name, uri, metadata={"mlflow_uri": uri, "mlflow_version": version}
+        registered_name,
+        uri,
+        metadata={MLFLOW_URI_META_KEY: uri, MLFLOW_VERSION_META_KEY: version},
     )
     print(f"Imported {uri} -> {stored.tag}")
     return stored
@@ -347,7 +354,7 @@ def _import_or_reuse(pin: dict[str, Any], framework: str | None = None) -> Any:
     a BentoModel, so it still takes the MLflow import path that
     _materialize_nn_onnx relies on.
     """
-    if pin["registered_model_name"] == BASE_BENTO_NAMES["nn"]:
+    if pin[LINEAGE_MODEL_NAME_KEY] == BASE_BENTO_NAMES["nn"]:
         return _mlflow_import_or_reuse(pin)
     return _materialize_native_model(pin, framework)[0]
 
@@ -369,8 +376,8 @@ def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
     warnings.filterwarnings("ignore", category=FutureWarning, message=".*LeafSpec.*")
 
     print(
-        f"Materializing ONNX from models:/{nn_pin['registered_model_name']}/{nn_pin['version']} "
-        f"(v{nn_pin['version']})"
+        f"Materializing ONNX from models:/{nn_pin[LINEAGE_MODEL_NAME_KEY]}/"
+        f"{nn_pin[LINEAGE_VERSION_KEY]} (v{nn_pin[LINEAGE_VERSION_KEY]})"
     )
     stored = _import_or_reuse(nn_pin)
 
@@ -413,8 +420,8 @@ def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
 
 def _reuse_or_materialize_nn_onnx(state: dict[str, Any], nn_pin: dict[str, Any]) -> bool:
     """Reuse an ONNX export only when it came from the exact pinned NN model."""
-    if NN_ONNX_FILE.exists() and state.get("nn_onnx_model_uri") == nn_pin["model_uri"]:
-        print(f"Reusing ONNX for {nn_pin['model_uri']}")
+    if NN_ONNX_FILE.exists() and state.get("nn_onnx_model_uri") == nn_pin[LINEAGE_MODEL_URI_KEY]:
+        print(f"Reusing ONNX for {nn_pin[LINEAGE_MODEL_URI_KEY]}")
         return True
     _materialize_nn_onnx(nn_pin)
     return False
@@ -461,7 +468,7 @@ def _import_models(pins: dict[str, dict[str, Any]]) -> dict[str, str]:
     """
     tags: dict[str, str] = {}
     for key, pin in pins.items():
-        framework = pin.get("framework") if key == "gbdt" else None
+        framework = pin.get(FRAMEWORK_KEY) if key == "gbdt" else None
         tags[key] = str(_import_or_reuse(pin, framework).tag)
     return tags
 
@@ -572,7 +579,7 @@ def build_bento_image() -> tuple[str, int]:
             **state,
             "fingerprint": fingerprint,
             "tag": tag,
-            "nn_onnx_model_uri": pins["nn"]["model_uri"],
+            "nn_onnx_model_uri": pins["nn"][LINEAGE_MODEL_URI_KEY],
         }
     )
     print(f"Built {tag} from {pinned}")

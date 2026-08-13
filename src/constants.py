@@ -42,6 +42,8 @@ PROFILES_TABLE = "gold.player_profiles"
 # ---- Config parameters ----
 ENRICH_WORKERS = 4
 BATCH_MAX_SIZE_ROWS = 1000
+# Upper bound for a single bulk inference request (Nginx chunks below this).
+BULK_MAX_ROWS = 1000
 
 # --- Core directories / files ---
 NOTEBOOKS = ROOT / "notebooks"
@@ -65,6 +67,9 @@ CANDIDATE_MANIFEST = DATA_PROCESSED / "candidate_manifest.json"
 PRODUCTION_MODEL = "ensemble_lr_model"
 CHAMPION_ALIAS = "champion"
 
+# --- Prefect ---
+WORK_POOL_NAME = "tennis-pool"
+
 # --- Deployed production Bento endpoint ---
 PRODUCTION_BENTO_URL = os.getenv("PRODUCTION_BENTO_URL", "http://127.0.0.1:8187")
 MODEL_INFO_ROUTE = "/api/internal/model-info"
@@ -78,6 +83,33 @@ STACK_ORDER = ("linear", "gbdt", "nn")
 
 
 # --- Champion lineage tags (single source of truth for the tag schema) ---
+# Tag-key names and prefixes used by the flattened `base_*`/`aux_*` champion
+# lineage tags; shared by the tag builder here, promotion, and the deploy flow.
+LINEAGE_MODEL_NAME_KEY = "registered_model_name"
+LINEAGE_VERSION_KEY = "version"
+LINEAGE_RUN_ID_KEY = "run_id"
+LINEAGE_MODEL_URI_KEY = "model_uri"
+LINEAGE_BASE_KEYS = (
+    LINEAGE_MODEL_NAME_KEY,
+    LINEAGE_VERSION_KEY,
+    LINEAGE_RUN_ID_KEY,
+    LINEAGE_MODEL_URI_KEY,
+)
+LINEAGE_SCALER_KEYS = ("scaler_uri", "scaler_hash")
+LINEAGE_AUX_KEYS = (
+    "embeddings_uri",
+    "embeddings_hash",
+    "bio_feature_cols_uri",
+    "bio_feature_cols_hash",
+    "similarity_index_uri",
+    "similarity_index_hash",
+    "similarity_metadata_uri",
+    "similarity_metadata_hash",
+)
+BASE_TAG_PREFIX = "base_"
+AUX_TAG_PREFIX = "aux_"
+
+
 def build_lineage_tags(
     base_pins: dict[str, dict[str, str]], aux_pins: dict[str, str]
 ) -> dict[str, str]:
@@ -89,20 +121,17 @@ def build_lineage_tags(
     """
     tags: dict[str, str] = {}
     for name, pin in base_pins.items():
-        for key in ("registered_model_name", "version", "run_id", "model_uri"):
-            tags[f"base_{name}_{key}"] = str(pin[key])
-        for key in ("scaler_uri", "scaler_hash"):
+        for key in LINEAGE_BASE_KEYS:
+            tags[f"{BASE_TAG_PREFIX}{name}_{key}"] = str(pin[key])
+        for key in LINEAGE_SCALER_KEYS:
             if key in pin:
-                tags[f"base_{name}_{key}"] = str(pin[key])
-    for key in (
-        "embeddings_uri",
-        "embeddings_hash",
-        "bio_feature_cols_uri",
-        "bio_feature_cols_hash",
-        "similarity_index_uri",
-        "similarity_index_hash",
-        "similarity_metadata_uri",
-        "similarity_metadata_hash",
-    ):
-        tags[f"aux_{key}"] = str(aux_pins[key])
+                tags[f"{BASE_TAG_PREFIX}{name}_{key}"] = str(pin[key])
+    for key in LINEAGE_AUX_KEYS:
+        tags[f"{AUX_TAG_PREFIX}{key}"] = str(aux_pins[key])
     return tags
+
+
+# --- Serving model metadata / manifest keys ---
+# BentoML model-metadata key shared by the deploy flow (write) and the serving
+# manifest (read back as `bases.<name>.framework`).
+FRAMEWORK_KEY = "framework"

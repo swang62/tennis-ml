@@ -50,6 +50,7 @@ import pandas as pd
 from prefect import flow, task
 from prefect.deployments import run_deployment
 
+from src.constants import WORK_POOL_NAME
 from src.db.client import get_conn
 from src.db.ingest import (
     BRONZE_RANKINGS_TABLE,
@@ -78,13 +79,14 @@ RANKINGS_TABLE_TIMEOUT_MS = 30_000
 # than that is not going to resolve, and a genuine missing week has no rows to
 # render and is skipped immediately.
 CHALLENGE_RESOLVE_BUDGET_S = 30
+# Per-navigation page-load budget for the rankings URL (goto, not row render).
+PAGE_NAVIGATION_TIMEOUT_MS = 60_000
 
 SCRAPE_DEPLOYMENT_NAME = "scrape"
 SCRAPE_CRON = "0 6 * * 1"  # Monday 06:00 UTC
 # The ETL deployment that this flow triggers when a scrape actually stored rows.
 # run_deployment resolves it by "<flow-name>/<deployment-name>".
 ETL_DEPLOYMENT_REF = "etl-flow/etl"
-WORK_POOL_NAME = "tennis-pool"
 CLOAKBROWSER_PROFILE_DIR = (
     Path.home() / ".local" / "share" / "tennis-prefect-worker" / "cloakbrowser"
 )
@@ -327,7 +329,7 @@ def _fetch_week_html(page, url: str, week: date) -> str:
     final no-table page is a missing week.
     """
     _jitter()
-    page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+    page.goto(url, wait_until="domcontentloaded", timeout=PAGE_NAVIGATION_TIMEOUT_MS)
     _jitter()
     if not _week_in_filter(page, week):
         raise RankingsParseError(

@@ -29,6 +29,7 @@ from src.constants import (
     PROFILES_TABLE,
     SILVER_PLAYER_MATCHES,
     SILVER_ROLLING_FEATURES,
+    WORK_POOL_NAME,
 )
 from src.db.client import get_conn
 from src.db.conninfo import dbt_env
@@ -40,7 +41,6 @@ DBT_RUN_RESULTS = constants.ROOT / "dbt" / "target" / "run_results.json"
 ETL_DEPLOYMENT_NAME = "etl"
 # No cron: ETL is triggered by the scrape flow via run_deployment only when new
 # rows were stored, so an empty or Cloudflare-blocked scrape never runs it.
-WORK_POOL_NAME = "tennis-pool"
 
 
 def run_dbt_build(
@@ -91,11 +91,11 @@ def bronze_to_gold(full_refresh: bool = False) -> int:
     run_dbt_build(log_file=log_file, full_refresh=full_refresh)
     with get_conn().cursor() as cur:
         counts = {
-            "bronze.match_events": _table_count(cur, BRONZE_TABLE),
-            "silver.player_matches": _table_count(cur, SILVER_PLAYER_MATCHES),
-            "silver.rolling_features": _table_count(cur, SILVER_ROLLING_FEATURES),
-            "gold.match_features": _table_count(cur, GOLD_TABLE),
-            "gold.player_profiles": _table_count(cur, PROFILES_TABLE),
+            BRONZE_TABLE: _table_count(cur, BRONZE_TABLE),
+            SILVER_PLAYER_MATCHES: _table_count(cur, SILVER_PLAYER_MATCHES),
+            SILVER_ROLLING_FEATURES: _table_count(cur, SILVER_ROLLING_FEATURES),
+            GOLD_TABLE: _table_count(cur, GOLD_TABLE),
+            PROFILES_TABLE: _table_count(cur, PROFILES_TABLE),
         }
     for table, count in counts.items():
         print(f"{table}: {count} current rows")

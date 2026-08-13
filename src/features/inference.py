@@ -24,6 +24,7 @@ import pandas as pd
 
 from src.constants import (
     BRONZE_PROFILES_TABLE,
+    BULK_MAX_ROWS,
     SILVER_PLAYER_MATCHES,
     SILVER_ROLLING_FEATURES,
     TOUR_AVERAGES_TABLE,
@@ -38,8 +39,8 @@ VALID_SURFACES = {"clay", "grass", "hard", "carpet", "0"}
 VALID_TOURNAMENT_LEVELS = {0, 1, 2, 3, 4}
 VALID_ROUND_ENCODINGS = {0, 1, 2, 3, 4, 5, 6, 7}
 
-# Upper bound for a single bulk inference request (Nginx chunks below this).
-BULK_MAX_ROWS = 1000
+# Last N strictly-prior meetings used for the pair-level head-to-head features.
+H2H_PRIOR_MEETINGS = 5
 
 # String aliases mirror the dbt context codebook; unknown values map to 0.
 _TOURNAMENT_LEVELS = {
@@ -104,7 +105,7 @@ FROM (
     GROUP BY 1, 2, 3, 4
 )
 ORDER BY match_date DESC, match_id DESC
-LIMIT 5
+LIMIT {H2H_PRIOR_MEETINGS}
 """
 
 # Per-player static identity lookup (metadata lives in bronze; gold has
@@ -162,7 +163,7 @@ LEFT JOIN LATERAL (
       AND match_date < req.as_of_iso::date
     GROUP BY match_id
     ORDER BY max_date DESC, match_id DESC
-    LIMIT 5
+    LIMIT {H2H_PRIOR_MEETINGS}
 ) h ON true
 """
 

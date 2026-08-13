@@ -17,7 +17,14 @@ from typing import Any
 
 import pandas as pd
 
-from src.constants import BATCH_MAX_SIZE_ROWS, PRODUCTION_MODEL
+from src.constants import (
+    BATCH_MAX_SIZE_ROWS,
+    CHAMPION_ALIAS,
+    LINEAGE_MODEL_NAME_KEY,
+    LINEAGE_RUN_ID_KEY,
+    LINEAGE_VERSION_KEY,
+    PRODUCTION_MODEL,
+)
 
 # ── Frozen weighted metric/composite policy (unchanged by the incumbent path) ──
 METRIC_NAMES = [
@@ -140,9 +147,9 @@ def verify_production_identity(model_info: object, champion: Any) -> None:
         )
     champ = manifest["champion"]
     expected = {
-        "registered_model_name": PRODUCTION_MODEL,
-        "version": str(getattr(champion, "version", None)),
-        "run_id": getattr(champion, "run_id", None),
+        LINEAGE_MODEL_NAME_KEY: PRODUCTION_MODEL,
+        LINEAGE_VERSION_KEY: str(getattr(champion, "version", None)),
+        LINEAGE_RUN_ID_KEY: getattr(champion, "run_id", None),
     }
     for key, want in expected.items():
         got = champ.get(key)
@@ -232,6 +239,6 @@ def resolve_champion(client: Any) -> Any | None:
     incumbent path, and registration happens only after every gate passes.
     """
     try:
-        return client.get_model_version_by_alias(PRODUCTION_MODEL, "champion")
+        return client.get_model_version_by_alias(PRODUCTION_MODEL, CHAMPION_ALIAS)
     except Exception:
         return None

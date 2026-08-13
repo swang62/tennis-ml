@@ -46,5 +46,9 @@ def _register_deployments() -> None:
 
 
 _register_deployments()
-cmd = ["prefect", "worker", "start", "--pool", "tennis-pool"]
+# Imported after the PREFECT_API_URL check: src.constants loads .env with
+# override=True, which must not shadow the value read above.
+from src.constants import WORK_POOL_NAME  # noqa: E402
+
+cmd = ["prefect", "worker", "start", "--pool", WORK_POOL_NAME]
 raise SystemExit(subprocess.call(cmd))

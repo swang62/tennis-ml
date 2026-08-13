@@ -32,7 +32,9 @@ from starlette.routing import Route
 from src.constants import (
     BRONZE_PROFILES_TABLE,
     BRONZE_TABLE,
+    BULK_MAX_ROWS,
     DEPLOY_ARTIFACTS,
+    FRAMEWORK_KEY,
     PRODUCTION_MODEL,
     PROFILES_TABLE,
     RANKINGS_TABLE,
@@ -858,7 +860,7 @@ class TennisPredictor:
         manifest = json.loads(MODEL_INFO_FILE.read_text())
         # Fixed evidence stack order shared by training and serving.
         self._stack_order: list[str] = list(STACK_ORDER)
-        gbdt_framework = manifest["bases"]["gbdt"]["framework"]
+        gbdt_framework = manifest["bases"]["gbdt"][FRAMEWORK_KEY]
         # xgboost/lightgbm use OpenMP, which can deadlock inside BentoML's
         # forked worker processes. Force single-threaded during model load.
         _old_omp = os.environ.get("OMP_NUM_THREADS")
@@ -1091,8 +1093,8 @@ class TennisPredictor:
         """
         if not rows:
             raise InvalidArgument("rows must be a non-empty list")
-        if len(rows) > 1000:
-            raise InvalidArgument(f"max 1000 rows, got {len(rows)}")
+        if len(rows) > BULK_MAX_ROWS:
+            raise InvalidArgument(f"max {BULK_MAX_ROWS} rows, got {len(rows)}")
         try:
             return _records(self._predict_from_ids_bulk(rows))
         except Exception:

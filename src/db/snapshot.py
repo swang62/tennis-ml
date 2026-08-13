@@ -7,7 +7,7 @@ from pathlib import Path
 
 import duckdb
 
-from src.constants import DATA_PROCESSED, get_database_url
+from src.constants import DATA_PROCESSED, GOLD_TABLE, get_database_url
 from src.features.columns import FEATURE_COLS, SIMILARITY_COLS
 
 # Training's single, atomically replaced local input.
@@ -74,11 +74,11 @@ def validate_snapshot(path: Path) -> None:
             )
 
         columns = tuple(
-            col[0] for col in con.execute("SELECT * FROM gold.match_features LIMIT 0").description
+            col[0] for col in con.execute(f"SELECT * FROM {GOLD_TABLE} LIMIT 0").description
         )
         if columns != EXPECTED_FEATURE_ORDER:
             raise SnapshotError(
-                f"gold.match_features columns do not match META_COLS + FEATURE_COLS "
+                f"{GOLD_TABLE} columns do not match META_COLS + FEATURE_COLS "
                 f"({len(EXPECTED_FEATURE_ORDER)} columns); got {len(columns)}"
             )
 
@@ -107,43 +107,43 @@ def validate_snapshot(path: Path) -> None:
         # directional row. Every match must have exactly two rows (one per
         # player) with reciprocal opponent ids and complementary labels.
         bad_groups = con.execute(
-            "SELECT COUNT(*) FROM ("
-            " SELECT match_id FROM gold.match_features"
-            " GROUP BY match_id HAVING COUNT(*) != 2)"
+            f"SELECT COUNT(*) FROM ("
+            f" SELECT match_id FROM {GOLD_TABLE}"
+            f" GROUP BY match_id HAVING COUNT(*) != 2)"
         ).fetchone()
         assert bad_groups is not None
         if bad_groups[0]:
             raise SnapshotError(
-                f"gold.match_features has {bad_groups[0]} match_id groups with "
+                f"{GOLD_TABLE} has {bad_groups[0]} match_id groups with "
                 "!= 2 rows; expected exactly 2 directional rows per match_id"
             )
 
         dup_keys = con.execute(
-            "SELECT COUNT(*) FROM ("
-            " SELECT match_id, player_id FROM gold.match_features"
-            " GROUP BY match_id, player_id HAVING COUNT(*) > 1)"
+            f"SELECT COUNT(*) FROM ("
+            f" SELECT match_id, player_id FROM {GOLD_TABLE}"
+            f" GROUP BY match_id, player_id HAVING COUNT(*) > 1)"
         ).fetchone()
         assert dup_keys is not None
         if dup_keys[0]:
             raise SnapshotError(
-                f'gold.match_features has {dup_keys[0]} duplicate "(match_id, player_id)" rows'
+                f'{GOLD_TABLE} has {dup_keys[0]} duplicate "(match_id, player_id)" rows'
             )
 
         bad_pairs = con.execute(
-            "SELECT COUNT(*) FROM ("
-            " SELECT a.match_id FROM gold.match_features a"
-            " JOIN gold.match_features b"
-            "   ON a.match_id = b.match_id AND a.player_id < b.player_id"
-            " WHERE NOT ("
-            "   a.opponent_id = b.player_id"
-            "   AND b.opponent_id = a.player_id"
-            "   AND a.match_won IN (0, 1) AND b.match_won IN (0, 1)"
-            "   AND a.match_won <> b.match_won))"
+            f"SELECT COUNT(*) FROM ("
+            f" SELECT a.match_id FROM {GOLD_TABLE} a"
+            f" JOIN {GOLD_TABLE} b"
+            f"   ON a.match_id = b.match_id AND a.player_id < b.player_id"
+            f" WHERE NOT ("
+            f"   a.opponent_id = b.player_id"
+            f"   AND b.opponent_id = a.player_id"
+            f"   AND a.match_won IN (0, 1) AND b.match_won IN (0, 1)"
+            f"   AND a.match_won <> b.match_won))"
         ).fetchone()
         assert bad_pairs is not None
         if bad_pairs[0]:
             raise SnapshotError(
-                f"gold.match_features has {bad_pairs[0]} match_id groups whose two rows "
+                f"{GOLD_TABLE} has {bad_pairs[0]} match_id groups whose two rows "
                 "are not a valid reciprocal pair (mismatched opponent/player ids "
                 "or non-complementary labels)"
             )
@@ -154,13 +154,11 @@ def validate_snapshot(path: Path) -> None:
         col_checks = " OR ".join(
             f'"{c}" IS NULL OR isnan("{c}") OR isinf("{c}")' for c in FEATURE_COLS
         )
-        bad_row = con.execute(
-            f"SELECT COUNT(*) FROM gold.match_features WHERE {col_checks}"
-        ).fetchone()
+        bad_row = con.execute(f"SELECT COUNT(*) FROM {GOLD_TABLE} WHERE {col_checks}").fetchone()
         assert bad_row is not None
         if bad_row[0]:
             raise SnapshotError(
-                f"gold.match_features has {bad_row[0]} NULL or non-finite model feature cells"
+                f"{GOLD_TABLE} has {bad_row[0]} NULL or non-finite model feature cells"
             )
     finally:
         con.close()
