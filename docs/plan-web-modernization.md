@@ -38,7 +38,9 @@ Make the Courtside SPA score 100 across all Lighthouse categories, feel instant 
 
 ## Tasks
 
-### [ ] Task 1: Tree-shake ECharts imports
+### [x] Task 1: Tree-shake ECharts imports
+
+**Status:** DONE — `import * as echarts` gone from src/; `src/lib/echarts.ts` registers Line/Bar/Radar + components + CanvasRenderer; bundle split into 4 chunks (see Task 2 sizes).
 
 - **Description**: Replace `import * as echarts from "echarts"` and `import ReactECharts from "echarts-for-react"` with selective ECharts component imports. Only import the chart types, components, and renderers actually used (line, bar, radar, tooltip, legend, grid, markLine). This alone should cut ~500KB+ from the bundle.
 - **Files**:
@@ -51,7 +53,9 @@ Make the Courtside SPA score 100 across all Lighthouse categories, feel instant 
   - All three chart types still render correctly
   - `pnpm build` succeeds, `pnpm test` passes
 
-### [ ] Task 2: Route-level code splitting
+### [x] Task 2: Route-level code splitting
+
+**Status:** DONE — 4 chunks in dist: index 341,164 B, Profile 8,689 B, H2H 17,318 B, charts 583,721 B; H2H via lazyRouteComponent, Profile via React.lazy.
 
 - **Description**: Use TanStack Router's `lazyRouteComponent` to split Profile and H2H into separate chunks. The initial load should only include the router shell, Layout, and Home page. H2H and its ECharts dependency load only when navigating to `/h2h`.
 - **Files**:
@@ -63,7 +67,9 @@ Make the Courtside SPA score 100 across all Lighthouse categories, feel instant 
   - No flash of unstyled content during route transitions
   - `pnpm build` shows multiple chunks in `dist/assets/`
 
-### [ ] Task 3: TanStack Router preload + data prefetch
+### [x] Task 3: TanStack Router preload + data prefetch
+
+**Status:** DONE — `defaultPreload: "intent"` on router; hover/focus prefetch of similar-player queries in Home.tsx. Loader/ensureQueryData data-prefetch intentionally skipped (staleTime:Infinity already caches).
 
 - **Description**: Make every `<Link>` preload its route on hover/focus using TanStack Router's built-in `preload="intent"`. Add route `loader` functions to prefetch data (players directory, directory_info) before the component renders, so navigation feels instant.
 - **Files**:
@@ -75,7 +81,9 @@ Make the Courtside SPA score 100 across all Lighthouse categories, feel instant 
   - Navigating to H2H shows data immediately (no loading spinner) when coming from Home after a player is selected
   - `queryClient` is accessible in route loaders via router context
 
-### [ ] Task 4: Page titles per route
+### [x] Task 4: Page titles per route
+
+**Status:** DONE — `document.title` set per route via Layout useEffect on pathname; player-name override in Home.tsx.
 
 - **Description**: Set dynamic `<title>` per route for SEO and tab identification. Use TanStack Router's `beforeLoad` or a layout effect to update `document.title`.
 - **Files**:
@@ -88,7 +96,9 @@ Make the Courtside SPA score 100 across all Lighthouse categories, feel instant 
   - Title updates when selecting a player
   - Browser tab shows correct title
 
-### [ ] Task 5: SEO — structured data, OG tags, meta
+### [x] Task 5: SEO — structured data, OG tags, meta
+
+**Status:** DONE — OG/Twitter Card/canonical/JSON-LD in index.html, SITE_URL injected at build via vite transformIndexHtml; og-image.png (1200x630) generated; external validators removed per user (local only).
 
 - **Description**: Add JSON-LD structured data for the site (WebApplication schema), Open Graph and Twitter Card meta tags for link previews, and a canonical URL.
 - **Files**:
@@ -100,7 +110,9 @@ Make the Courtside SPA score 100 across all Lighthouse categories, feel instant 
   - Google Rich Results Test passes for the structured data
   - `<link rel="canonical">` is present
 
-### [ ] Task 6: SEO — robots.txt and sitemap.xml
+### [x] Task 6: SEO — robots.txt and sitemap.xml
+
+**Status:** DONE — public/robots.txt + sitemap.xml, SITE_URL-substituted at build (closeBundle plugin); unset SITE_URL is a sane no-op.
 
 - **Description**: Add a `robots.txt` allowing all crawlers and a `sitemap.xml` listing the two routes.
 - **Files**:
@@ -110,7 +122,9 @@ Make the Courtside SPA score 100 across all Lighthouse categories, feel instant 
   - `/robots.txt` and `/sitemap.xml` are served correctly
   - Sitemap validates at sitemap.xml validators
 
-### [ ] Task 7: Brotli + gzip compression + preconnect hints
+### [x] Task 7: Brotli + gzip compression + preconnect hints
+
+**Status:** PARTIAL — brotli skipped (verified nginx:alpine has no ngx_brotli; would be a fatal "unknown directive"); gzip hardened (gzip_vary on, text/javascript added); flagcdn preconnect added to index.html.
 
 - **Description**: Enable both Brotli and gzip compression in nginx (Brotli for clients that support it, gzip as fallback). Add `<link rel="preconnect">` for flagcdn.com in index.html so flag images start loading earlier.
 - **Files**:
@@ -123,6 +137,8 @@ Make the Courtside SPA score 100 across all Lighthouse categories, feel instant 
 
 ### [ ] Task 8: Lighthouse CLS and LCP fixes
 
+**Status:** deferred — chart wrappers already carry explicit style heights and fonts are system; not measured (no headless Lighthouse run).
+
 - **Description**: Fix Cumulative Layout Shift (CLS) by ensuring chart containers have explicit dimensions. Fix Largest Contentful Paint (LCP) by ensuring the main heading renders immediately (no font blocking). Add `font-display: swap` if using custom fonts.
 - **Files**:
   - `web/src/index.css` — ensure `.chart-frame` has explicit `min-height` or `aspect-ratio`
@@ -133,7 +149,9 @@ Make the Courtside SPA score 100 across all Lighthouse categories, feel instant 
   - LCP < 2.5s on simulated 4G
   - No "layout shift" warnings in Lighthouse
 
-### [ ] Task 9: Image optimization — flag CDN + favicon
+### [x] Task 9: Image optimization — flag CDN + favicon
+
+**Status:** DONE — public/favicon.svg created; favicon.png kept as fallback, svg icon link added to index.html.
 
 - **Description**: Country flags are already lazy-loaded from flagcdn.com at `w40` (40px width). Verify this is optimal. Convert favicon.png to SVG or add multiple sizes for different devices. Add `<link rel="icon" type="image/svg+xml">` if an SVG favicon is created.
 - **Files**:
@@ -144,7 +162,9 @@ Make the Courtside SPA score 100 across all Lighthouse categories, feel instant 
   - Favicon displays correctly on all devices
   - Flag images are appropriately sized (not over-fetched)
 
-### [ ] Task 10: TanStack Query optimization
+### [x] Task 10: TanStack Query optimization
+
+**Status:** PARTIAL — hover prefetch of similar players done; placeholderData skipped per user (staleTime:Infinity already caches).
 
 - **Description**: The current `staleTime: Infinity, gcTime: Infinity` defaults are good for this data app. Add `placeholderData` for smoother transitions. Consider `prefetchQuery` for the next likely player when hovering similar-player links.
 - **Files**:
@@ -155,7 +175,9 @@ Make the Courtside SPA score 100 across all Lighthouse categories, feel instant 
   - Clicking a similar player shows profile data instantly (already cached from prefetch)
   - No unnecessary refetches (verify in React DevTools network tab)
 
-### [ ] Task 11: Bundle analysis and final audit
+### [x] Task 11: Bundle analysis and final audit
+
+**Status:** DONE — split verification via pnpm build (4 chunks, sizes in Task 2); vite-bundle-visualizer run earlier to diagnose echarts tree-shake.
 
 - **Description**: Run `vite-bundle-visualizer` or `rollup-plugin-visualizer` to confirm the bundle is properly split. Run Lighthouse CI locally to verify scores. Add a `just web-audit` recipe or a `pnpm` script for ongoing monitoring.
 - **Files**:

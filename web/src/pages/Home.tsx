@@ -1,5 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type SyntheticEvent,
+} from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import MiniSearch from "minisearch";
 import {
@@ -11,8 +19,12 @@ import {
   type Player,
 } from "../api";
 import { ErrorBox, Kicker, Loading, PlayerPicker } from "../components";
+import { homeRoute } from "../router";
 import { useTheme } from "../theme";
-import ProfileContent from "./Profile";
+
+// Profile (and its ECharts dependency) loads on demand once a player is
+// selected, keeping the index chunk free of chart code.
+const ProfileContent = lazy(() => import("./Profile"));
 
 const PLAYERS_INDEX_KEY = "tm-player-index-v2";
 
@@ -88,7 +100,10 @@ function useMiniSearch() {
 
 export default function Home() {
   const { theme } = useTheme();
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const navigate = homeRoute.useNavigate();
+  const { player: searchPlayer } = homeRoute.useSearch();
+  const selectedId = searchPlayer ?? null;
   const { search, ready, loading } = useMiniSearch();
 
   const profileQ = useQuery({
@@ -133,12 +148,73 @@ export default function Home() {
   const selectedPlayer =
     players.find((p) => p.player_id === selectedId) ?? null;
 
+  // Route head sets the static "Players — Courtside"; once a player is picked
+  // the selected name takes over (directory name backs the profile while it
+  // loads). Reverts on deselect.
+  const selectedName =
+    profileQ.data?.display_name ?? selectedPlayer?.display_name ?? null;
+  useEffect(() => {
+    document.title = selectedName
+      ? `${selectedName} — Courtside`
+      : "Players — Courtside";
+  }, [selectedName]);
+
+  // Mirror Home's profile/rank/match/similar queries so hovering or focusing
+  // a similar-player link makes the next selection render instantly.
+  const prefetchPlayer = useCallback(
+    (playerId: string) => {
+      void queryClient.prefetchQuery({
+        queryKey: ["profile", playerId],
+        queryFn: () => getPlayerProfile(playerId),
+      });
+      void queryClient.prefetchQuery({
+        queryKey: ["rank_history", playerId],
+        queryFn: () => getRankHistory(playerId),
+      });
+      void queryClient.prefetchQuery({
+        queryKey: ["match_history", playerId, 20],
+        queryFn: () => getMatchHistory(playerId, 20),
+      });
+      void queryClient.prefetchQuery({
+        queryKey: ["similar_players", playerId],
+        queryFn: () => getSimilarPlayers(playerId, 3),
+      });
+    },
+    [queryClient],
+  );
+
+  // Similar-player links render inside Profile; delegate from the container
+  // and resolve the id via the already-loaded similar_players response.
+  const handleSimilarPrefetch = useCallback(
+    (e: SyntheticEvent) => {
+      const btn = (e.target as HTMLElement).closest(".similar-link");
+      if (!(btn instanceof HTMLElement)) return;
+      const name = btn.textContent?.trim();
+      if (!name) return;
+      const sp = similarQ.data?.similar_players.find(
+        (p) => p.display_name === name,
+      );
+      if (sp) prefetchPlayer(sp.player_id);
+    },
+    [similarQ.data, prefetchPlayer],
+  );
+
   const handleSelectPlayer = (playerId: string | null) => {
     if (!document.startViewTransition) {
-      setSelectedId(playerId);
+      navigate({
+        to: "/",
+        search: { player: playerId ?? undefined },
+        replace: true,
+      });
       return;
     }
-    document.startViewTransition(() => setSelectedId(playerId));
+    document.startViewTransition(() =>
+      navigate({
+        to: "/",
+        search: { player: playerId ?? undefined },
+        replace: true,
+      }),
+    );
   };
 
   return (
@@ -197,6 +273,8 @@ export default function Home() {
           id="profile-anchor"
           className="mt-8"
           style={{ viewTransitionName: "profile-content" }}
+          onMouseOver={handleSimilarPrefetch}
+          onFocus={handleSimilarPrefetch}
         >
           {profileQ.isLoading && <Loading label="Loading profile" />}
           {profileQ.isError && (
@@ -207,17 +285,19 @@ export default function Home() {
             />
           )}
           {profileQ.data && (
-            <ProfileContent
-              profile={profileQ.data}
-              directoryRank={selectedPlayer?.current_rank ?? null}
-              rankHistory={rankQ.data}
-              rankLoading={rankQ.isLoading}
-              matchHistory={matchesQ.data}
-              matchesLoading={matchesQ.isLoading}
-              similarQ={similarQ}
-              theme={theme}
-              onSelectSimilar={handleSelectPlayer}
-            />
+            <Suspense fallback={<Loading label="Loading profile" />}>
+              <ProfileContent
+                profile={profileQ.data}
+                directoryRank={selectedPlayer?.current_rank ?? null}
+                rankHistory={rankQ.data}
+                rankLoading={rankQ.isLoading}
+                matchHistory={matchesQ.data}
+                matchesLoading={matchesQ.isLoading}
+                similarQ={similarQ}
+                theme={theme}
+                onSelectSimilar={handleSelectPlayer}
+              />
+            </Suspense>
           )}
         </div>
       )}

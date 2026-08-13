@@ -147,6 +147,7 @@ export function PlayerPicker({
   exclude,
   searchFn,
   loading,
+  tone,
 }: {
   players: Player[]
   value: string | null
@@ -155,6 +156,9 @@ export function PlayerPicker({
   exclude?: string | null
   searchFn?: (query: string) => Player[]
   loading?: boolean
+  // Tints the trigger-row border (and focus outline) to the player color once
+  // a player is selected; unselected pickers keep the default clay hover.
+  tone?: "grass" | "clay"
 }) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -236,7 +240,11 @@ export function PlayerPicker({
   return (
     <div className="picker" ref={rootRef}>
       <span className="picker-label">{placeholder}</span>
-      <div className="picker-trigger-row" data-open={open || undefined}>
+      <div
+        className={`picker-trigger-row${selected ? " is-selected" : ""}`}
+        data-open={open || undefined}
+        data-tone={tone || undefined}
+      >
         <button
           ref={triggerRef}
           type="button"

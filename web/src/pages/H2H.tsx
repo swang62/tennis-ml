@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import ReactECharts from "../lib/echarts";
 import type { EChartsOption } from "echarts";
 import { format } from "echarts/core";
@@ -169,6 +170,9 @@ export default function H2H() {
 
   const t = chartTokens();
   const ax = axisOption(t);
+  // Winner takes the player color: grass if player A wins, clay otherwise.
+  const winnerIsA = pred ? pred.predicted_winner === playerA : false;
+  const winnerColor = winnerIsA ? t.grass : t.clay;
 
   const compOption: EChartsOption | null = pred
     ? {
@@ -249,9 +253,9 @@ export default function H2H() {
             markLine: {
               silent: true,
               symbol: "none",
-              lineStyle: { color: t.clay, type: "solid", width: 2 },
+              lineStyle: { color: winnerColor, type: "solid", width: 2 },
               label: {
-                color: t.clay,
+                color: winnerColor,
                 fontSize: 11,
                 formatter: `Ensemble`,
                 position: "end",
@@ -336,6 +340,7 @@ export default function H2H() {
             onChange={selectA}
             placeholder="Player A"
             exclude={playerB}
+            tone="grass"
           />
           <PlayerPicker
             players={players}
@@ -343,6 +348,7 @@ export default function H2H() {
             onChange={selectB}
             placeholder="Player B"
             exclude={playerA}
+            tone="clay"
           />
         </div>
       </section>
@@ -470,10 +476,15 @@ export default function H2H() {
             {pred && compOption && (
               <div className="pred-result" aria-live="polite">
                 <div className="pred-main">
-                  <span className="pred-winner">
+                  <span className="pred-winner" style={{ color: winnerColor }}>
                     {name(pred.predicted_winner)} wins
                   </span>
-                  <span className="pred-pct num">+{pct(2 * winnerP - 1)}</span>
+                  <span
+                    className="pred-pct num"
+                    style={{ color: winnerColor }}
+                  >
+                    +{pct(2 * winnerP - 1)}
+                  </span>
                   <span className="pred-caption num">
                     {pct(orientA)} : {pct(1 - orientA)}
                   </span>
@@ -535,21 +546,29 @@ export default function H2H() {
             <Card title="Matchup comparison">
               <div className="mirror">
                 <div className="mirror-head">
-                  <span className="mirror-name">
+                  <Link
+                    to="/"
+                    search={{ player: h2h.player1_id }}
+                    className="mirror-name mirror-link"
+                  >
                     <PlayerFlag
                       iso2={playerById.get(h2h.player1_id)?.iso2}
                       countryName={playerById.get(h2h.player1_id)?.country_name}
                     />
                     {p1}
-                  </span>
+                  </Link>
                   <span className="mirror-vs">vs</span>
-                  <span className="mirror-name">
+                  <Link
+                    to="/"
+                    search={{ player: h2h.player2_id }}
+                    className="mirror-name mirror-link"
+                  >
                     {p2}
                     <PlayerFlag
                       iso2={playerById.get(h2h.player2_id)?.iso2}
                       countryName={playerById.get(h2h.player2_id)?.country_name}
                     />
-                  </span>
+                  </Link>
                 </div>
                 {mirrorRows.map((row) => {
                   return (

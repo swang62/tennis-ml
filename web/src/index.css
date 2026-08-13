@@ -810,6 +810,24 @@ html.light {
     outline-offset: 2px;
   }
 
+  /* Selected pickers tint border + focus outline to the player tone; these
+     outrank the clay hover/open rules. Unselected rows keep default clay. */
+  .picker-trigger-row[data-tone="clay"].is-selected {
+    border-color: var(--clay);
+  }
+
+  .picker-trigger-row[data-tone="grass"].is-selected {
+    border-color: var(--grass);
+  }
+
+  .picker-trigger-row[data-tone="clay"].is-selected:focus-within {
+    outline-color: var(--clay);
+  }
+
+  .picker-trigger-row[data-tone="grass"].is-selected:focus-within {
+    outline-color: var(--grass);
+  }
+
   .picker-trigger {
     flex: 1;
     min-width: 0;
@@ -1657,7 +1675,8 @@ html.light {
   .pred-result {
     margin-top: 1.25rem;
     border-top: 1px solid var(--line);
-    padding-top: 1.25rem;
+    padding-top: 1.75rem;
+    padding-bottom: 1rem;
   }
 
   .pred-main {
@@ -1852,6 +1871,13 @@ html.light {
   .mirror-name:last-child .player-flag {
     margin-right: 0;
     margin-left: 0.4rem;
+  }
+
+  /* Profile links in the matchup header: inherit .mirror-name typography and
+     alignment, gain an underline + tone on hover. */
+  .mirror-link:hover {
+    color: var(--clay);
+    text-decoration: underline;
   }
 
   .mirror-vs {
