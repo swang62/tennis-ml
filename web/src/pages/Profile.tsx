@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import ReactECharts from "../lib/echarts";
 import type { EChartsOption } from "echarts";
 import type {
@@ -15,7 +16,7 @@ import {
   chartTokens,
   withAlpha,
 } from "../lib/charts";
-import { yearAxisDomain } from "../lib/rankHistoryAxis";
+import { careerBestRank, yearAxisDomain } from "../lib/rankHistoryAxis";
 import {
   ROUND_LABEL,
   TIER_LABEL,
@@ -31,6 +32,54 @@ const SURFACE_COLORS: Record<string, string> = {
   hard: "var(--ice)",
   carpet: "var(--text-dim)",
 };
+
+// Milliseconds in a year; the rank x-axis' minimum label interval, so the
+// time-axis ladder never drops below year granularity.
+const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
+
+// Same mobile breakpoint the app uses elsewhere (nav, H2H charts); the rank
+// chart drops its axis title on narrow screens so the plot keeps its width.
+function useIsNarrow(): boolean {
+  const mq = "(max-width: 720px)";
+  const [narrow, setNarrow] = useState(() => window.matchMedia(mq).matches);
+  useEffect(() => {
+    const media = window.matchMedia(mq);
+    const fn = (e: MediaQueryListEvent) => setNarrow(e.matches);
+    media.addEventListener("change", fn);
+    return () => media.removeEventListener("change", fn);
+  }, []);
+  return narrow;
+}
+
+// Small up/down marker next to the current rank: the current rank number
+// compared with the latest rank-history point one month back. A lower rank
+// number is an improvement (up), a higher number a decline (down). The
+// triangle and the place count both take the direction color. Rendered only
+// when movement exists (unchanged or missing data never reaches this
+// component).
+function RankMove({ move, count }: { move: "up" | "down"; count: number }) {
+  const label =
+    move === "up" ? `Rank improved by ${count}` : `Rank declined by ${count}`;
+  return (
+    <span
+      className={`rank-move ${move === "up" ? "is-up" : "is-down"}`}
+      role="img"
+      aria-label={label}
+      title={label}
+    >
+      <svg aria-hidden="true" width="9" height="9" viewBox="0 0 9 9">
+        {move === "up" ? (
+          <path d="M4.5 1 L8.5 8 H0.5 Z" fill="currentColor" />
+        ) : (
+          <path d="M4.5 8 L8.5 1 H0.5 Z" fill="currentColor" />
+        )}
+      </svg>
+      <span className="rank-move-count num" aria-hidden="true">
+        {count}
+      </span>
+    </span>
+  );
+}
 
 function Metric({
   label,
@@ -109,18 +158,7 @@ export default function ProfileContent({
 }) {
   const t = chartTokens();
   const ax = axisOption(t);
-
-  const trend = profile.rank_points_trend;
-  let trendBadge = null;
-  if (trend && trend.delta !== 0) {
-    const improved = trend.delta > 0;
-    trendBadge = (
-      <span className={`badge ${improved ? "badge-grass" : "badge-clay"}`}>
-        {improved ? "▲" : "▼"} {improved ? "+" : ""}
-        {trend.delta} pts
-      </span>
-    );
-  }
+  const narrow = useIsNarrow();
 
   const handednessLabel =
     profile.handedness === "R"
@@ -140,13 +178,41 @@ export default function ProfileContent({
   const rankPoints = (rankHistory?.rank_history ?? []).filter(
     (p) => p.rank != null,
   );
-  // Deterministic calendar-year axis: one Jan-1 tick per year lying within
-  // the data domain (which starts at the earliest rank date, no padding),
-  // pinned via customValues instead of echarts' width-dependent tick heuristics.
+  // Year-start tick values pin the dotted grid lines (shown at every year
+  // start on every width); labeled years are ECharts' own width-based choice.
   const rankAxis = yearAxisDomain(rankPoints.map((p) => p.rank_date));
+  const careerBest = careerBestRank(rankPoints);
   // Final label is the profile's official rank; the directory rank only backs
   // it while the profile query is loading.
   const currentRank = profile.rank.current_rank ?? directoryRank ?? null;
+
+  // Month-over-month rank movement: the current official rank compared with
+  // the latest rank-history point at or before one month before today. A
+  // lower rank number is an improvement (up arrow), a higher one a decline
+  // (down arrow); unchanged, missing, or out-of-range values render nothing.
+  // rank_points_trend is intentionally not used — it is the earliest-to-latest
+  // career spread, not a one-month window.
+  const today = new Date();
+  const cutoffMs = Date.UTC(
+    today.getFullYear(),
+    today.getMonth() - 1,
+    today.getDate(),
+  );
+  let monthAgoMs = -Infinity;
+  let monthAgoRank: number | null = null;
+  for (const p of rankPoints) {
+    const ms = Date.parse(p.rank_date);
+    if (!Number.isFinite(ms) || ms > cutoffMs || ms <= monthAgoMs) continue;
+    monthAgoMs = ms;
+    monthAgoRank = p.rank;
+  }
+  const rankMove: { move: "up" | "down"; count: number } | null =
+    currentRank == null || monthAgoRank == null || monthAgoRank === currentRank
+      ? null
+      : {
+          move: monthAgoRank > currentRank ? "up" : "down",
+          count: Math.abs(monthAgoRank - currentRank),
+        };
 
   const bioFacts = (
     <dl className="bio-grid">
@@ -198,26 +264,26 @@ export default function ProfileContent({
   );
 
   const tourneyTable = (
-    <Card title="Recent tournaments">
+    <Card title="Recent matches">
       {matchesLoading ? (
-        <Loading label="Loading tournaments" />
+        <Loading label="Loading matches" />
       ) : sortedMatches.length === 0 ? (
-        <Empty message="No tournament history" />
+        <Empty message="No match history" />
       ) : (
         <div
           className="tourney-table-wrap"
           role="region"
           tabIndex={0}
-          aria-label={`Recent tournaments for ${profile.display_name}`}
+          aria-label={`Recent matches for ${profile.display_name}`}
         >
           <table className="tourney-table">
             <colgroup>
-              <col style={{ width: "12%" }} />
+              <col style={{ width: "10%" }} />
               <col style={{ width: "15%" }} />
-              <col style={{ width: "8%" }} />
+              <col style={{ width: "6%" }} />
               <col style={{ width: "15%" }} />
-              <col style={{ width: "20%" }} />
-              <col style={{ width: "18%" }} />
+              <col style={{ width: "25%" }} />
+              <col style={{ width: "15%" }} />
               <col />
             </colgroup>
             <thead>
@@ -237,13 +303,15 @@ export default function ProfileContent({
                   ROUND_LABEL[m.round as keyof typeof ROUND_LABEL] ?? m.round;
                 return (
                   <tr key={m.match_id}>
-                    <td className="num">{m.match_date}</td>
-                    <td className="tourney-name">
+                    <td className="num" data-label="Date">
+                      {m.match_date}
+                    </td>
+                    <td className="tourney-name" data-label="Tournament">
                       {m.tournament_name ||
                         (TIER_LABEL[m.tournament as keyof typeof TIER_LABEL] ??
                           m.tournament)}
                     </td>
-                    <td className="tourney-td-c">
+                    <td className="tourney-td-c" data-label="Surface">
                       <span
                         className="surface-pill"
                         style={{
@@ -255,8 +323,10 @@ export default function ProfileContent({
                         {m.surface}
                       </span>
                     </td>
-                    <td className="tourney-td-c">{roundLabel}</td>
-                    <td className="tourney-name">
+                    <td className="tourney-td-c" data-label="Round">
+                      {roundLabel}
+                    </td>
+                    <td className="tourney-name" data-label="Opponent">
                       <span className="opponent-vs">VS</span>{" "}
                       {m.opponent_name ?? m.opponent_id}{" "}
                       <span className="opponent-rank pl-1 num">
@@ -265,7 +335,7 @@ export default function ProfileContent({
                           : "N/A"}
                       </span>
                     </td>
-                    <td className="tourney-td-c num">
+                    <td className="tourney-td-c num" data-label="Score">
                       {scoreSegments(
                         m.score,
                         m.result === "won" ? "winner" : "loser",
@@ -277,7 +347,7 @@ export default function ProfileContent({
                         ),
                       ) ?? "—"}
                     </td>
-                    <td className="tourney-td-c">
+                    <td className="tourney-td-c" data-label="Result">
                       <span
                         className={`result-text ${
                           m.result === "won" ? "is-win" : "is-loss"
@@ -307,21 +377,31 @@ export default function ProfileContent({
         return `${date}<br/>Rank #${params[0].value[1]}`;
       },
     },
-    grid: { left: 50, right: 24, top: 16, bottom: 28, containLabel: false },
+    // Desktop leaves room for the vertical "Rank" axis name; mobile hides the
+    // name, so side margins shrink to just the y-axis value labels.
+    grid: {
+      left: narrow ? 36 : 50,
+      right: narrow ? 8 : 24,
+      top: 16,
+      bottom: 28,
+      containLabel: false,
+    },
     xAxis: {
       type: "time",
       min: rankAxis?.min,
       max: rankAxis?.max,
+      // Minimum granularity stays at one year so the time-axis ladder never
+      // drops to sub-year labels; ECharts picks the tick count itself from
+      // the chart width, guided by splitNumber.
+      minInterval: ONE_YEAR_MS,
+      splitNumber: narrow ? 5 : 8,
       axisLine: ax.axisLine,
       axisTick: { show: false, customValues: rankAxis?.ticks },
       axisLabel: {
         ...ax.axisLabel,
         margin: 8,
-        customValues: rankAxis?.ticks,
-        formatter: (value: number) => {
-          const d = new Date(value);
-          return String(d.getFullYear());
-        },
+        // Year-only labels via the time-axis string template.
+        formatter: "{yyyy}",
       },
       splitLine: { ...ax.splitLine, show: true },
     },
@@ -331,7 +411,7 @@ export default function ProfileContent({
       min: 1,
       max: 200,
       minInterval: 50,
-      name: "Rank",
+      name: narrow ? "" : "Rank",
       nameLocation: "middle",
       nameGap: 36,
       nameTextStyle: { color: t.dim, fontSize: 11 },
@@ -367,6 +447,36 @@ export default function ProfileContent({
             ],
           },
         },
+        ...(careerBest
+          ? {
+              markPoint: {
+                symbol: "circle",
+                symbolSize: 8,
+                itemStyle: {
+                  color: t.ice,
+                  borderColor: t.raised,
+                  borderWidth: 2,
+                },
+                label: {
+                  show: true,
+                  position: "bottom",
+                  distance: 8,
+                  formatter: `Career High · #${careerBest.rank}`,
+                  color: t.ice,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  textBorderColor: t.raised,
+                  textBorderWidth: 3,
+                },
+                data: [
+                  {
+                    name: "Career best",
+                    coord: [careerBest.rank_date, careerBest.rank],
+                  },
+                ],
+              },
+            }
+          : {}),
       },
     ],
   };
@@ -383,7 +493,6 @@ export default function ProfileContent({
             />
             {profile.display_name}
           </h1>
-          {trendBadge}
           <div className="profile-head-stats">
             <div className="stat">
               <span className="stat-label">Matches</span>
@@ -394,7 +503,12 @@ export default function ProfileContent({
             {currentRank != null && (
               <div className="stat">
                 <span className="stat-label">Current rank</span>
-                <span className="stat-num is-ice num">#{currentRank}</span>
+                <span className="stat-num is-ice num">
+                  #{currentRank}
+                  {rankMove && (
+                    <RankMove move={rankMove.move} count={rankMove.count} />
+                  )}
+                </span>
               </div>
             )}
           </div>

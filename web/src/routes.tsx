@@ -7,7 +7,7 @@ import {
   Outlet,
   useLocation,
 } from "@tanstack/react-router";
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import Home from "./pages/Home";
 import { getDirectoryInfo } from "./api";
@@ -112,6 +112,8 @@ function ThemeToggle({
 
 function Layout() {
   const { theme, toggle } = useTheme();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const headerRef = useRef<HTMLElement>(null);
   const directoryInfoQ = useQuery({
     queryKey: ["directory_info"],
     queryFn: getDirectoryInfo,
@@ -123,32 +125,82 @@ function Layout() {
     document.title =
       pathname === "/h2h" ? "Matchups — Courtside" : "Players — Courtside";
   }, [pathname]);
+  // Close the mobile dropdown when the user taps/click outside the header or
+  // presses Escape. A document-level listener is used instead of a viewport
+  // scrim because the header's backdrop-filter creates a containing block for
+  // fixed-position descendants, which trapped the old scrim inside the header.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!headerRef.current?.contains(event.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [menuOpen]);
   const profilesActive = pathname === "/";
   const h2hActive = pathname === "/h2h";
 
   return (
     <div className="app">
       <HeadContent />
-      <header className="topnav">
+      <header className="topnav" ref={headerRef}>
         <div className="container nav-inner">
           <Link
             to="/"
             search={{ player: undefined }}
             className="brand"
             aria-label="Courtside home"
+            aria-expanded={menuOpen}
+            aria-controls="nav-menu"
+            onClick={(e) => {
+              if (window.matchMedia("(max-width: 720px)").matches) {
+                e.preventDefault();
+                setMenuOpen((open) => !open);
+              }
+            }}
           >
             <CourtMark />
             <span className="brand-text">
               Courtside
               <span className="brand-kicker">Tennis Intelligence</span>
             </span>
+            <svg
+              className="brand-chevron"
+              width="14"
+              height="14"
+              viewBox="0 0 16 16"
+              fill="none"
+              aria-hidden="true"
+            >
+              <path
+                d="m3.5 6 4.5 4.5L12.5 6"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
           </Link>
-          <nav className="nav-links" aria-label="Primary">
+          <nav
+            className={`nav-links${menuOpen ? " open" : ""}`}
+            id="nav-menu"
+            aria-label="Primary"
+          >
             <Link
               to="/"
               search={{ player: undefined }}
               className={`navlink${profilesActive ? " active" : ""}`}
               aria-current={profilesActive ? "page" : undefined}
+              onClick={() => setMenuOpen(false)}
             >
               Players
             </Link>
@@ -157,6 +209,7 @@ function Layout() {
               search={{ playerA: undefined }}
               className={`navlink${h2hActive ? " active" : ""}`}
               aria-current={h2hActive ? "page" : undefined}
+              onClick={() => setMenuOpen(false)}
             >
               H2H Matchups
             </Link>

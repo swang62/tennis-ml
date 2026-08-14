@@ -127,13 +127,13 @@ def test_champion_cutoff_falls_back_to_creation():
     assert drift._champion_cutoff_date(client) == expected  # type: ignore[arg-type]
 
 
-def test_production_identity_mismatch_fails(monkeypatch):
+def test_development_bento_is_valid_for_drift(monkeypatch):
     _setup_model_info_stub(monkeypatch, mode="development", version="2", run_id="other-run")
 
     client = _FakeMlflowClient(champion=_FakeModelVersion(version="3", run_id="champ-run-id"))
 
-    with pytest.raises(RuntimeError, match="production Bento is not in production mode"):
-        drift._validate_production(client)  # type: ignore[arg-type]
+    champion = drift._validate_production(client)  # type: ignore[arg-type]
+    assert champion.version == "3"
 
 
 def test_empty_population_insufficient_data(monkeypatch, tmp_path):

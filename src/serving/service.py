@@ -24,7 +24,7 @@ import pandas as pd
 import psycopg.errors as _pg_errors
 from bentoml.exceptions import InvalidArgument
 from bentoml.images import Image
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
@@ -257,12 +257,10 @@ class PredictFromIdsRow(BaseModel):
     player_id: str
     opponent_id: str
     surface: Surface
-    tournament_level: int = 0
-    round_encoded: int = 0
     tournament: TournamentLevel | None = None
     round: Round | None = None
-    as_of_date: date | None = None
-    is_indoor: int | None = None
+    as_of_date: date = Field(default_factory=date.today)
+    is_indoor: int = 0
 
 
 def _predict_from_ids_bulk_impl(
@@ -890,19 +888,22 @@ class _LGBMProbaAdapter:
 SERVICE_DESCRIPTION = """\
 # Tennis Match Prediction API
 
-Symmetric service: `p_win(player_id, opponent_id) = 1 - p_win(opponent_id, player_id)`; \
-the first-supplied id is the player side and `p_win` is always P(first-supplied id wins).
+Symmetric player-vs-player predictions with feature snapshot construction.
+Prediction context accepts optional tournament and round enums; encoded fields
+are derived internally by the service. `is_indoor` defaults to 0 and `as_of_date` defaults
+to today. The first-supplied player_id is the canonical player side and used for p_win.
 
 ## POST /predict_from_ids
 Scalar ids-based prediction.
 - `player_id`, `opponent_id` — required `str`
 - `surface` — required `str` (`clay` / `grass` / `hard` / `carpet`)
-- `tournament_level` — optional `int`, default 0 (`grand_slam` / `masters` / `atp_500` / `atp_250`)
-- `round_encoded` — optional `int`, default 0 (`r128` / `r64` / `r32` / `r16` / `qf` / `sf` / `f`)
-- `tournament` — optional `str`
-- `round` — optional `str`
-- `as_of_date` — optional `date`
-- `is_indoor` — optional `int`
+- `tournament` — optional enum (`grand_slam` / `masters` / `atp_500` / `atp_250` / `davis_cup` / `atp_finals` / `olympics` / `professional`)
+- `round` — optional enum (`r128` / `r64` / `r32` / `r16` / `qf` / `sf` / `f`)
+- `as_of_date` — optional `date`, default today
+- `is_indoor` — optional `int` (`0` / `1`), default 0
+
+The service derives `tournament_level` and `round_encoded` from the enum values;
+those numeric fields are not accepted request inputs.
 
 ## POST /predict_from_ids_bulk
 Bulk ids-based prediction (API-key gated). Body envelope `{"rows": [ { ... } ]}` with the \
@@ -921,8 +922,6 @@ handlers that the OpenAPI generator does not introspect, so they are documented 
 @bentoml.service(
     image=SERVING_IMAGE,
     description=SERVICE_DESCRIPTION,
-    # Aligned with Nginx's 120s operational batch window so a large
-    # (<=1,000 row) batch is not killed by the serving layer first.
     traffic={"timeout": 120},
     resources={"cpu": "500m"},
 )
@@ -1091,8 +1090,6 @@ class TennisPredictor:
                 row.player_id,
                 row.opponent_id,
                 row.surface,
-                tournament_level=row.tournament_level,
-                round_encoded=row.round_encoded,
                 tournament=row.tournament,
                 round=row.round,
                 as_of_date=row.as_of_date,
@@ -1102,8 +1099,6 @@ class TennisPredictor:
                 row.opponent_id,
                 row.player_id,
                 row.surface,
-                tournament_level=row.tournament_level,
-                round_encoded=row.round_encoded,
                 tournament=row.tournament,
                 round=row.round,
                 as_of_date=row.as_of_date,

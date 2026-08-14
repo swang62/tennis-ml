@@ -12,7 +12,14 @@ from starlette.testclient import TestClient
 
 from src.constants import STACK_ORDER
 from src.features.columns import FEATURE_COLS, TOUR_AVERAGES_FALLBACK_COLS
-from src.serving.service import DATA_APP, PredictFromIdsRow, Surface, TennisPredictor
+from src.serving.service import (
+    DATA_APP,
+    PredictFromIdsRow,
+    Round,
+    Surface,
+    TennisPredictor,
+    TournamentLevel,
+)
 
 client = TestClient(DATA_APP)
 
@@ -688,3 +695,42 @@ def test_predict_from_ids_preserves_caller_order():
     assert ba["player_id"] == "Z355"
     assert ba["opponent_id"] == "S0AG"
     assert ba["predicted_winner"] == "Z355"
+
+
+def test_predict_from_ids_schema_derives_context_and_defaults():
+    row = PredictFromIdsRow(
+        player_id="S0AG",
+        opponent_id="Z355",
+        surface=Surface.HARD,
+        tournament=TournamentLevel.GRAND_SLAM,
+        round=Round.F,
+    )
+
+    assert row.tournament == TournamentLevel.GRAND_SLAM
+    assert row.round == Round.F
+    assert row.is_indoor == 0
+    assert row.as_of_date == date.today()
+
+
+def test_predict_from_ids_schema_rejects_numeric_context_fields():
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        PredictFromIdsRow.model_validate(
+            {
+                "player_id": "S0AG",
+                "opponent_id": "Z355",
+                "surface": Surface.HARD,
+                "tournament_level": 0,
+            }
+        )
+    with pytest.raises(ValidationError):
+        PredictFromIdsRow.model_validate(
+            {
+                "player_id": "S0AG",
+                "opponent_id": "Z355",
+                "surface": Surface.HARD,
+                "round_encoded": 0,
+            }
+        )

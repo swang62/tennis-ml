@@ -223,8 +223,8 @@ export default function Home() {
         <Kicker>Player directory</Kicker>
         <h1 className="page-title">Players</h1>
         <p className="page-sub">
-          Search for an ATP player to view career stats, surface splits, rank
-          history and recent matches.
+          Search for an ATP player to view career stats, surface splits, and
+          match history.
         </p>
         {players.length > 0 && (
           <div className="mt-5 flex flex-wrap gap-x-10 gap-y-4">

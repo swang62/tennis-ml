@@ -62,7 +62,6 @@ from src.evaluate.promotion import (
     compute_metrics,
     ordered_incumbent_contexts,
     resolve_champion,
-    verify_production_identity,
 )
 from src.features.columns import FEATURE_COLS
 from src.flows.etl import run_dbt_build
@@ -189,6 +188,12 @@ def _score_batches(contexts: list[dict[str, object]]) -> list[float]:
 
 
 def _validate_production(client: MlflowClient) -> Any:
+    """Resolve the champion and ensure the configured Bento frontend responds.
+
+    Drift measures whatever frontend is configured, including development
+    Bentos. Production identity validation belongs to promotion/evaluation,
+    not monitoring.
+    """
     champion = resolve_champion(client)
     if champion is None:
         raise RuntimeError(
@@ -200,8 +205,6 @@ def _validate_production(client: MlflowClient) -> Any:
         headers[BENTO_API_KEY_HEADER] = BENTO_API_KEY
     resp = requests.get(model_info_url, headers=headers, timeout=30)
     resp.raise_for_status()
-    model_info: object = resp.json()
-    verify_production_identity(model_info, champion)
     return champion
 
 

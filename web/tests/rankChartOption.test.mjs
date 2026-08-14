@@ -17,9 +17,11 @@ import { LineChart } from 'echarts/charts'
 import { GridComponent, LegendComponent, TooltipComponent, AriaComponent } from 'echarts/components'
 import { SVGRenderer } from 'echarts/renderers'
 import { axisOption, baseChartOption } from '../src/lib/charts.ts'
-import { yearAxisDomain } from '../src/lib/rankHistoryAxis.ts'
+import { careerBestRank, yearAxisDomain } from '../src/lib/rankHistoryAxis.ts'
 
 echarts.use([LineChart, GridComponent, LegendComponent, TooltipComponent, AriaComponent, SVGRenderer])
+
+const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000
 
 const tokens = {
   theme: 'dark',
@@ -50,13 +52,14 @@ function rankOption() {
       type: 'time',
       min: rankAxis?.min,
       max: rankAxis?.max,
+      minInterval: ONE_YEAR_MS,
+      splitNumber: 8,
       axisLine: ax.axisLine,
       axisTick: { show: false, customValues: rankAxis?.ticks },
       axisLabel: {
         ...ax.axisLabel,
         margin: 8,
-        customValues: rankAxis?.ticks,
-        formatter: (value) => String(new Date(value).getFullYear()),
+        formatter: '{yyyy}',
       },
       splitLine: { ...ax.splitLine, show: true },
     },
@@ -112,6 +115,17 @@ test('baseChartOption enables the aria decal that paints the hatch', () => {
   const base = baseChartOption(tokens)
   assert.equal(base.aria?.enabled, true)
   assert.equal(base.aria?.decal?.show, true)
+})
+
+test('careerBestRank keeps the first date for the best lifetime rank', () => {
+  assert.deepEqual(
+    careerBestRank([
+      { rank_date: '2020-03-01', rank: 90 },
+      { rank_date: '2021-04-15', rank: 12 },
+      { rank_date: '2022-09-01', rank: 12 },
+    ]),
+    { rank_date: '2021-04-15', rank: 12 },
+  )
 })
 
 test('SSR: default decal renders a diagonal hatch pattern over the area', () => {

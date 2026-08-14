@@ -1,15 +1,16 @@
-// Deterministic calendar-year axis for the rank-history chart.
+// Deterministic year-start tick marks for the rank-history chart's dotted
+// grid lines, independent of ECharts' width-based label thinning.
 //
-// ECharts' time axis ignores `interval` and picks ticks from a fixed
-// d3-style interval ladder (half-year, year, ...) based on the chart width
-// and span. A 3-5 year span gets half-year ticks, which collapse to
-// duplicate year labels; wider/narrower layouts skip years. We compute the
-// yearly ticks ourselves and pin them onto the axis with `customValues`,
-// which echarts renders exactly (see axisTickLabelBuilder.createAxisLabels /
-// createAxisTicks).
+// ECharts' time axis ignores `interval` and picks tick positions from a
+// fixed d3-style interval ladder (half-year, year, ...) based on the chart
+// width and span, so the year-start grid lines would drift off calendar-year
+// boundaries. We compute the year-start ticks ourselves and pin them onto
+// the axis with `axisTick.customValues`, which echarts renders exactly (see
+// axisTickLabelBuilder.createAxisTicks). Labels are left to ECharts: the
+// axis clamps its minimum label interval to one year and ECharts thins the
+// year labels by available width.
 //
-// All timestamps are local midnights (built from date parts), matching how
-// the axis label formatter reads `new Date(value).getFullYear()`.
+// All timestamps are local midnights (built from date parts).
 
 const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})/;
 
@@ -28,6 +29,24 @@ export interface YearAxisDomain {
   max: number;
   /** Jan 1 of each year spanned by the data that lies within [min, max] (local midnight). */
   ticks: number[];
+}
+
+export interface CareerBestRank {
+  rank: number;
+  rank_date: string;
+}
+
+/** Lowest (best) rank, keeping the first date it was achieved. */
+export function careerBestRank(
+  points: Array<{ rank_date: string; rank: number }>,
+): CareerBestRank | null {
+  if (points.length === 0) return null;
+  return points.reduce((best, point) =>
+    point.rank < best.rank ||
+    (point.rank === best.rank && point.rank_date < best.rank_date)
+      ? point
+      : best,
+  );
 }
 
 /** Yearly tick values + domain for YYYY-MM-DD rank dates; null when unusable. */

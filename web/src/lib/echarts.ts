@@ -1,11 +1,12 @@
 import { createElement } from 'react'
 import { use, init, dispose, getInstanceByDom } from 'echarts/core'
-import { BarChart, LineChart, RadarChart } from 'echarts/charts'
+import { BarChart, LineChart, RadarChart, ScatterChart } from 'echarts/charts'
 import {
   AriaComponent,
   GridComponent,
   LegendComponent,
   MarkLineComponent,
+  MarkPointComponent,
   RadarComponent,
   TooltipComponent,
 } from 'echarts/components'
@@ -14,15 +15,18 @@ import ReactEChartsCore from 'echarts-for-react/esm/core'
 import type { EChartsReactProps } from 'echarts-for-react/esm/types'
 
 // Tree-shaken ECharts: register only the charts, components, and renderer the
-// app actually uses (Profile rank line, H2H bar/radar/cumulative-wins line).
+// app actually uses (Profile rank line, H2H bar/radar/cumulative-wins scatter
+// + trend line).
 use([
   LineChart,
   BarChart,
   RadarChart,
+  ScatterChart,
   GridComponent,
   TooltipComponent,
   LegendComponent,
   MarkLineComponent,
+  MarkPointComponent,
   AriaComponent,
   RadarComponent,
   CanvasRenderer,

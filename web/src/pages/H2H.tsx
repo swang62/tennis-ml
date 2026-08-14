@@ -63,15 +63,14 @@ const today = () => new Date().toLocaleDateString("en-CA");
 // Chart side margins are fixed in px for desktop player-name labels; on
 // narrow screens the plot area shrinks to almost nothing. Track the breakpoint
 // so grid margins and axis labels can compact.
-function useIsNarrow(): boolean {
-  const mq = "(max-width: 720px)";
+function useIsNarrow(mq = "(max-width: 720px)"): boolean {
   const [narrow, setNarrow] = useState(() => window.matchMedia(mq).matches);
   useEffect(() => {
     const media = window.matchMedia(mq);
     const fn = (e: MediaQueryListEvent) => setNarrow(e.matches);
     media.addEventListener("change", fn);
     return () => media.removeEventListener("change", fn);
-  }, []);
+  }, [mq]);
   return narrow;
 }
 
@@ -104,6 +103,9 @@ const SURFACE_COLORS: Record<string, string> = {
 export default function H2H() {
   const { theme } = useTheme();
   const narrow = useIsNarrow();
+  // Player names in the ensemble axis labels overlap through phone landscape
+  // and tablet widths, so compact them at a wider breakpoint than the layout.
+  const compactLabels = useIsNarrow("(max-width: 1024px)");
   const { playerA: searchPlayerA } = h2hRoute.useSearch();
   const [playerA, setPlayerA] = useState<string | null>(searchPlayerA ?? null);
   const [playerB, setPlayerB] = useState<string | null>(null);
@@ -213,7 +215,7 @@ export default function H2H() {
               const edge = v as number;
               const sign = Math.round(Math.abs(edge) * 100);
               if (edge === 0) return "Even";
-              if (narrow) return `+${sign}`;
+              if (compactLabels) return `+${sign}`;
               return edge < 0
                 ? `${name(playerA!)} +${sign}`
                 : `${name(playerB!)} +${sign}`;
@@ -329,7 +331,7 @@ export default function H2H() {
         <h1 className="page-title">Matchup Predictions</h1>
         <p className="page-sub">
           Pick two players for a model prediction and implied odds, then compare
-          direct head-to-head statistics.
+          head-to-head statistics.
         </p>
       </section>
 
@@ -398,7 +400,7 @@ export default function H2H() {
                 </select>
               </label>
               <label className="field">
-                <span className="field-label">Tournament tier</span>
+                <span className="field-label">Tournament</span>
                 <select
                   value={tournament}
                   onChange={(e) =>
@@ -430,7 +432,7 @@ export default function H2H() {
                 </select>
               </label>
               <label className="field">
-                <span className="field-label">As of date</span>
+                <span className="field-label">Match date</span>
                 <input
                   type="date"
                   value={asOfDate}
@@ -538,7 +540,7 @@ export default function H2H() {
                   />
                 </div>
                 <p className="mt-2 text-center text-[0.65rem] text-(--text-faint)">
-                  Preference from 50%: left favors {name(playerA!)}, right
+                  Relative preference: left favors {name(playerA!)}, right
                   favors {name(playerB!)}
                 </p>
               </div>
@@ -560,7 +562,7 @@ export default function H2H() {
         <>
           {/* Matchup comparison */}
           <div className="grid gap-5 lg:grid-cols-2">
-            <Card title="Matchup comparison">
+            <Card title="Match comparison">
               <div className="mirror">
                 <div className="mirror-head">
                   <Link
@@ -589,7 +591,14 @@ export default function H2H() {
                 </div>
                 {mirrorRows.map((row) => {
                   return (
-                    <div className="mirror-row" key={row.label}>
+                    <div
+                      className={
+                        row.label === "All-time Wins"
+                          ? "mirror-row is-summary"
+                          : "mirror-row"
+                      }
+                      key={row.label}
+                    >
                       <div className="mirror-half is-left">
                         <span className="mirror-value num">{row.aText}</span>
                       </div>
@@ -666,7 +675,7 @@ export default function H2H() {
                     },
                     radar: {
                       center: ["50%", "55%"],
-                      radius: "62%",
+                      radius: narrow ? "53%" : "62%",
                       indicator: radarMetrics.map(([metric, a, b]) => ({
                         name: `{metric|${metric}}\n{grass|${Math.round((a ?? 0) * 100)}%} {clay|${Math.round((b ?? 0) * 100)}%}`,
                         max: 1,
@@ -770,8 +779,8 @@ export default function H2H() {
                       },
                     },
                     grid: {
-                      left: narrow ? 40 : 56,
-                      right: narrow ? 40 : 56,
+                      left: narrow ? 20 : 56,
+                      right: narrow ? 20 : 56,
                       top: 38,
                       bottom: 28,
                       containLabel: false,
@@ -794,7 +803,7 @@ export default function H2H() {
                       type: "value",
                       minInterval: 1,
                       max: Math.max(p1Cum, p2Cum, 1),
-                      name: "Cumulative Wins",
+                      name: narrow ? "" : "Cumulative Wins",
                       nameLocation: "middle",
                       nameGap: 36,
                       nameTextStyle: { color: t.dim, fontSize: 11 },
@@ -882,7 +891,7 @@ export default function H2H() {
                         <span className="meeting-round-note">
                           {roundLabel ? (
                             <>
-                              WON in{" "}
+                              Won in{" "}
                               <span className="meeting-round-strong">
                                 {roundLabel}
                               </span>
@@ -890,9 +899,11 @@ export default function H2H() {
                           ) : (
                             "WON"
                           )}
+                          <span className="meeting-sep" aria-hidden="true">
+                            ·
+                          </span>
                           {m.score ? (
                             <span className="meeting-score">
-                              {" "}
                               {scoreSegments(m.score, "winner")?.map((s, i) =>
                                 s.bold ? (
                                   <strong key={i}>{s.text}</strong>
