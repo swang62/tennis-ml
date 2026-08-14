@@ -13,7 +13,7 @@ services:
       bento:
         condition: service_healthy
     ports:
-      - "127.0.0.1:8187:80"
+      - "8187:80"
     environment:
       BENTO_API_URL: ${BENTO_API_URL:-http://bento:3000}
       BENTO_API_KEY: ${BENTO_API_KEY:?BENTO_API_KEY is required}
