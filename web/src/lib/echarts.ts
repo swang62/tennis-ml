@@ -11,7 +11,7 @@ import {
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import ReactEChartsCore from 'echarts-for-react/esm/core'
-import type { EChartsReactProps } from 'echarts-for-react/lib/types'
+import type { EChartsReactProps } from 'echarts-for-react/esm/types'
 
 // Tree-shaken ECharts: register only the charts, components, and renderer the
 // app actually uses (Profile rank line, H2H bar/radar/cumulative-wins line).
