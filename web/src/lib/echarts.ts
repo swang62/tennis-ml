@@ -10,7 +10,7 @@ import {
   TooltipComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import ReactEChartsCore from 'echarts-for-react/lib/core'
+import ReactEChartsCore from 'echarts-for-react/esm/core'
 import type { EChartsReactProps } from 'echarts-for-react/lib/types'
 
 // Tree-shaken ECharts: register only the charts, components, and renderer the
@@ -29,7 +29,9 @@ use([
 ])
 
 // echarts-for-react's core only calls init/dispose/getInstanceByDom on the
-// injected instance; pass the tree-shaken core's functions.
+// injected instance; pass the tree-shaken core's functions. Import from the
+// ESM build (esm/core) — the CJS lib/core double-wraps its default export, so
+// a default import resolves to a namespace object, not the component.
 const echarts = { init, dispose, getInstanceByDom }
 
 // Ready-to-use chart component with the tree-shaken instance injected; pages

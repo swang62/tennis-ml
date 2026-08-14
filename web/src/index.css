@@ -336,20 +336,13 @@ html.light {
     width: 2.75rem;
     height: 2.75rem;
     border-radius: var(--radius-sm);
-    border: 1px solid var(--line-strong);
-    background: var(--bg-raised);
     color: var(--text-dim);
     cursor: pointer;
-    transition:
-      color 0.15s var(--ease),
-      border-color 0.15s var(--ease),
-      background-color 0.15s var(--ease);
+    transition: color 0.15s var(--ease);
   }
 
   .theme-btn:hover {
     color: var(--clay);
-    border-color: var(--clay);
-    background: var(--clay-soft);
   }
 
   /* mobile: brand + theme on row 1, the two tabs centered on row 2 */
