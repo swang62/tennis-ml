@@ -1,6 +1,6 @@
 # Required env vars:
 #   POSTGRES_PASSWORD  (also used by bento's DATABASE_URL)
-#   BENTO_API_KEY      (authenticates the /api/internal/* nginx routes)
+#   BENTO_API_KEY      (authenticates the /api/model_info and /api/predict_from_ids_bulk nginx routes)
 
 services:
   web:

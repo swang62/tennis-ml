@@ -54,6 +54,12 @@ function seoFilesPlugin(siteUrl: string): Plugin {
         '    <changefreq>weekly</changefreq>',
         '    <priority>0.8</priority>',
         '  </url>',
+        '  <url>',
+        `    <loc>${base}api/</loc>`,
+        `    <lastmod>${SITEMAP_LASTMOD}</lastmod>`,
+        '    <changefreq>weekly</changefreq>',
+        '    <priority>0.5</priority>',
+        '  </url>',
         '</urlset>',
         '',
       ].join('\n')

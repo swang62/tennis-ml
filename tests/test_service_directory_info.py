@@ -8,11 +8,13 @@ from src.serving import service
 NGINX_TEMPLATE = Path(__file__).resolve().parents[1] / "web" / "nginx.conf.template"
 
 
-def test_nginx_allowlists_directory_info():
-    """GET /api/directory_info must be proxied, not caught by the /api/ 404."""
+def test_nginx_directory_info_flows_through_transparent_proxy():
+    """GET /api/directory_info flows through the transparent /api/ proxy; no
+    bespoke location remains."""
     conf = NGINX_TEMPLATE.read_text()
-    assert "location /api/directory_info {" in conf
-    assert "proxy_pass ${BENTO_API_URL}/directory_info;" in conf
+    assert "location /api/ {" in conf
+    assert "proxy_pass ${BENTO_API_URL}/;" in conf
+    assert "location /api/directory_info" not in conf
 
 
 def test_directory_info_returns_latest_bronze_match_date(monkeypatch):

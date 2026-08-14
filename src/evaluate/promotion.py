@@ -223,8 +223,16 @@ def decide_promotion(
     prod_metrics: dict[str, float] | None,
     champion_run_id: object,
     candidate_run_id: object,
+    force: bool = False,
 ) -> int:
-    """1 promote / 0 skip; metric-only, idempotent, first-promotion aware."""
+    """1 promote / 0 skip; metric-only, idempotent, first-promotion aware.
+
+    ``force`` overrides every gate — composite score, idempotency, and
+    first-promotion checks all yield 1 — so a manual ``--force-promote`` always
+    registers a fresh version (refreshing lineage tags).
+    """
+    if force:
+        return 1
     if champion_run_id is not None and str(champion_run_id) == str(candidate_run_id):
         return 0  # already promoted
     if prod_metrics is None:

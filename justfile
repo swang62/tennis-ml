@@ -71,5 +71,5 @@ test:
     pnpm --dir web test
 
 # Run the notebook training pipeline.
-train:
-    uv run python src/flows/pipeline.py
+train *args:
+    uv run python src/flows/pipeline.py {{ args }}

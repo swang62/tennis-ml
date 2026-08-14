@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """
 Standalone pipeline runner — runs all Papermill notebooks in sequence.
+
+``--force-promote`` passes ``force_promote=True`` into 04_evaluate so it always
+promotes the candidate (bypassing the metric gate), useful to refresh lineage
+tags without re-beating production.
 """
 
+import argparse
 import sys
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
@@ -32,7 +37,7 @@ load_env()
 suppress_insecure_tls_warning()
 
 
-def run_notebook(name: str) -> None:
+def run_notebook(name: str, parameters: dict | None = None) -> None:
     src = PARAMS / name
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     dst = OUTPUTS / f"{timestamp}_{name}"
@@ -48,6 +53,7 @@ def run_notebook(name: str) -> None:
         input_path=str(src),
         output_path=str(dst),
         kernel_name=ensure_kernel(),
+        parameters=parameters,
     )
     print(f"  Done: {name}")
 
@@ -109,6 +115,14 @@ class _Tee:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--force-promote",
+        action="store_true",
+        help="always promote the candidate, bypassing the metric gate",
+    )
+    args = parser.parse_args()
+
     LOGS.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = LOGS / f"pipeline_{timestamp}.log"
@@ -131,8 +145,11 @@ if __name__ == "__main__":
 
         print(f"Pipeline starting — {len(NB_ORDER)} notebooks")
         for name in NB_ORDER:
+            parameters = (
+                {"force_promote": args.force_promote} if name == "04_evaluate.ipynb" else None
+            )
             # Tagged parameter cells own notebook defaults.
-            run_notebook(name)
+            run_notebook(name, parameters=parameters)
 
         print(f"\n{'=' * 60}")
         print(" Pipeline complete.")

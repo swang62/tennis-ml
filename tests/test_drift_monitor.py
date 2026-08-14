@@ -88,7 +88,7 @@ def _stub_batch_response(ctxs, base_prob=0.65):
 def _setup_model_info_stub(monkeypatch, mode="production", version="3", run_id="champ-run-id"):
     monkeypatch.setattr(drift, "BENTO_API_KEY", "")
     monkeypatch.setattr(drift, "PRODUCTION_BENTO_URL", "http://127.0.0.1:8187")
-    monkeypatch.setattr(drift, "MODEL_INFO_ROUTE", "/api/internal/model-info")
+    monkeypatch.setattr(drift, "MODEL_INFO_ROUTE", "/api/model_info")
     fake_model_info = {
         "ok": True,
         "data": {
@@ -214,7 +214,9 @@ def test_normal_flow_creates_baseline_and_check(monkeypatch, tmp_path):
         batch_calls.append(json)
         fake_resp = MagicMock()
         fake_resp.raise_for_status = lambda: None
-        fake_resp.json.return_value = _stub_batch_response(json or [], base_prob=0.65)
+        fake_resp.json.return_value = _stub_batch_response(
+            (json or {}).get("rows", []), base_prob=0.65
+        )
         return fake_resp
 
     monkeypatch.setattr(drift.requests, "post", fake_post_batch)
@@ -239,7 +241,8 @@ def test_normal_flow_creates_baseline_and_check(monkeypatch, tmp_path):
     assert "drift_check" in run_names
 
     assert len(batch_calls) == 1
-    assert len(batch_calls[0]) == 5
+    assert "rows" in batch_calls[0]
+    assert len(batch_calls[0]["rows"]) == 5
 
 
 def test_repeat_check_reuses_existing_runs(monkeypatch, tmp_path):
@@ -285,7 +288,9 @@ def test_repeat_check_reuses_existing_runs(monkeypatch, tmp_path):
         del url, headers, timeout
         fake_resp = MagicMock()
         fake_resp.raise_for_status = lambda: None
-        fake_resp.json.return_value = _stub_batch_response(json or [], base_prob=0.68)
+        fake_resp.json.return_value = _stub_batch_response(
+            (json or {}).get("rows", []), base_prob=0.68
+        )
         return fake_resp
 
     monkeypatch.setattr(drift.requests, "post", fake_post_batch)

@@ -1,4 +1,4 @@
-"""Hermetic contract tests for GET /health and its nginx allowlist entry."""
+"""Hermetic contract tests for GET /health and the nginx transparent /api proxy."""
 
 from pathlib import Path
 from unittest.mock import patch
@@ -34,14 +34,28 @@ def test_health_503_when_database_unreachable():
     assert "boom" not in resp.text
 
 
-def test_nginx_allowlists_health_and_nothing_else():
-    """GET /api/health is the only public health route: no readyz, no bare
-    model_info, no internal prediction paths on the public allowlist."""
+def test_nginx_transparent_proxy_and_gated_routes():
+    """Public /api/ is a transparent proxy to Bento; model_info and bulk stay
+    API-key-gated; model-only /predict is explicitly blocked."""
     conf = NGINX_TEMPLATE.read_text()
-    assert "location /api/health {" in conf
-    assert "proxy_pass ${BENTO_API_URL}/health;" in conf
-    assert "${BENTO_API_URL}/readyz" not in conf
-    assert "location /api/model_info" not in conf
-    assert "location /api/predict_from_ids_bulk" not in conf
-    # Model-only /predict stays explicitly blocked.
-    assert "location /api/predict {" in conf
+    # Transparent proxy present.
+    assert "location /api/ {" in conf
+    assert "proxy_pass ${BENTO_API_URL}/;" in conf
+    # Auth-gated model_info.
+    assert "location /api/model_info {" in conf
+    assert "proxy_pass ${BENTO_API_URL}/model_info;" in conf
+    # Auth-gated bulk.
+    assert "location /api/predict_from_ids_bulk {" in conf
+    assert "proxy_pass ${BENTO_API_URL}/predict_from_ids_bulk;" in conf
+    # API-key guard present (used by both gated routes).
+    assert conf.count('$http_x_api_key != "${BENTO_API_KEY}"') == 2
+    # Model-only /predict blocked by an exact match.
+    assert "location = /api/predict {" in conf
+    # No legacy /api/internal route names.
+    assert "/api/internal" not in conf
+    # No bespoke public mappings survive.
+    assert "proxy_pass ${BENTO_API_URL}/health;" not in conf
+    assert "proxy_pass ${BENTO_API_URL}/players;" not in conf
+    assert "proxy_pass ${BENTO_API_URL}/directory_info;" not in conf
+    # No bespoke OpenAPI location (the transparent proxy exposes /api/docs.json).
+    assert "location = /api/openapi.json" not in conf

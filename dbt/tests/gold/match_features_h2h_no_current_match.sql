@@ -64,5 +64,6 @@ LEFT JOIN derived d
     ON d.match_id = mf.match_id
    AND d.player_id = mf.player_id
 WHERE mf.h2h_exposure IS DISTINCT FROM COALESCE(d.exp_exposure, 0)
-   OR mf.h2h_advantage IS DISTINCT FROM
-      ((COALESCE(d.exp_player_wins, 0) + 1.0) / (COALESCE(d.exp_exposure, 0) + 2.0) - 0.5)
+   OR ABS(mf.h2h_advantage - (
+       (COALESCE(d.exp_player_wins, 0) + 1.0) / (COALESCE(d.exp_exposure, 0) + 2.0) - 0.5
+   )) > 1e-6

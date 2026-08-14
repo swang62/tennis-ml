@@ -117,13 +117,13 @@ def _post_batch(contexts: list[dict[str, object]]) -> list[dict[str, object]]:
     headers = {"Content-Type": "application/json"}
     if BENTO_API_KEY:
         headers[BENTO_API_KEY_HEADER] = BENTO_API_KEY
-    resp = requests.post(url, json=contexts, headers=headers, timeout=120)  # type: ignore[arg-type]
+    # The bulk endpoint's Pydantic schema wraps the list under `rows`; a bare
+    # array is rejected with a 400 "Input should be an object".
+    resp = requests.post(url, json={"rows": contexts}, headers=headers, timeout=120)  # type: ignore[arg-type]
     resp.raise_for_status()
     body: object = resp.json()
     if not isinstance(body, list):
-        raise TypeError(
-            f"/api/internal/predict-batch returned {type(body).__name__}, expected list"
-        )
+        raise TypeError(f"{PREDICT_BATCH_ROUTE} returned {type(body).__name__}, expected list")
     return body  # type: ignore[return-value]
 
 

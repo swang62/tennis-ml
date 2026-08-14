@@ -1,4 +1,6 @@
-# Production SPA config; Bento is reachable only through allowlisted /api routes.
+# Production SPA config; Bento is reachable through a transparent /api proxy
+# (mirrors the local Vite proxy: the /api prefix is stripped) plus two
+# API-key-gated operational routes.
 # Rendered at container start by the official nginx image's envsubst template
 # mechanism (/etc/nginx/templates/*.template). Substitution is allowlisted to
 # BENTO_API_KEY and BENTO_API_URL via NGINX_ENVSUBST_FILTER in the Dockerfile,
@@ -48,90 +50,12 @@ server {
         return 502 '{"ok":false,"error":"upstream unavailable"}';
     }
 
-    # --- Allowlisted SPA data routes (GET) ---
-
-    location /api/directory_info {
-        limit_req zone=api_req burst=10 nodelay;
-        limit_conn api_conn 10;
-        proxy_pass ${BENTO_API_URL}/directory_info;
-        proxy_http_version 1.1;
-    }
-
-    location /api/players {
-        limit_req zone=api_req burst=10 nodelay;
-        limit_conn api_conn 10;
-        proxy_pass ${BENTO_API_URL}/players;
-        proxy_http_version 1.1;
-    }
-
-    location /api/player_profile {
-        limit_req zone=api_req burst=10 nodelay;
-        limit_conn api_conn 10;
-        proxy_pass ${BENTO_API_URL}/player_profile;
-        proxy_http_version 1.1;
-    }
-
-    location /api/rank_history {
-        limit_req zone=api_req burst=10 nodelay;
-        limit_conn api_conn 10;
-        proxy_pass ${BENTO_API_URL}/rank_history;
-        proxy_http_version 1.1;
-    }
-
-    location /api/match_history {
-        limit_req zone=api_req burst=10 nodelay;
-        limit_conn api_conn 10;
-        proxy_pass ${BENTO_API_URL}/match_history;
-        proxy_http_version 1.1;
-    }
-
-    location /api/head_to_head {
-        limit_req zone=api_req burst=10 nodelay;
-        limit_conn api_conn 10;
-        proxy_pass ${BENTO_API_URL}/head_to_head;
-        proxy_http_version 1.1;
-    }
-
-    location /api/similar_players {
-        limit_req zone=api_req burst=10 nodelay;
-        limit_conn api_conn 10;
-        proxy_pass ${BENTO_API_URL}/similar_players;
-        proxy_http_version 1.1;
-    }
-
-    # --- Public health check (GET) ---
-
-    location /api/health {
-        limit_req zone=api_req burst=10 nodelay;
-        limit_conn api_conn 10;
-        proxy_pass ${BENTO_API_URL}/health;
-        proxy_http_version 1.1;
-    }
-
-    # --- Allowlisted prediction route (POST only) ---
-
-    location /api/predict_from_ids {
-        # Stricter prediction rate limit.
-        limit_req zone=api_req burst=5 nodelay;
-        limit_conn api_conn 5;
-
-        # Only POST allowed.
-        limit_except POST {
-            deny all;
-        }
-
-        # The body must be JSON.
-        if ($content_type !~ ^application/json) {
-            return 415 '{"ok":false,"error":"content-type must be application/json"}';
-        }
-
-        proxy_pass ${BENTO_API_URL}/predict_from_ids;
-        proxy_http_version 1.1;
-    }
-
     # --- Authenticated operational routes (header X-API-Key) ---
+    # Longer prefixes than the public /api/ proxy below, so nginx routes these
+    # first. Paths are the direct Bento route names with only the /api prefix
+    # stripped (no internal route renames).
 
-    location /api/internal/model-info {
+    location /api/model_info {
         limit_req zone=api_req burst=5 nodelay;
         limit_conn api_conn 5;
 
@@ -148,7 +72,7 @@ server {
         proxy_http_version 1.1;
     }
 
-    location /api/internal/predict-batch {
+    location /api/predict_from_ids_bulk {
         limit_req zone=api_req burst=1 nodelay;
         # One active batch per client.
         limit_conn op_conn 1;
@@ -177,13 +101,24 @@ server {
     }
 
     # --- Explicitly reject the model-only /predict endpoint ---
-    location /api/predict {
+    # Exact match only, so /api/predict_from_ids* still fall through to the
+    # public /api/ proxy below instead of being shadowed by a prefix match.
+    location = /api/predict {
         return 403 '{"ok":false,"error":"model-only /predict is not exposed; use /api/predict_from_ids"}';
     }
 
-    # --- Catch-all for unknown API paths ---
+    # --- Public transparent Bento API proxy (mirrors the Vite proxy) ---
+    # Strips the /api/ prefix exactly as Vite does:
+    #   /api/              -> Bento /                       (Swagger UI)
+    #   /api/docs.json     -> Bento /docs.json              (OpenAPI schema)
+    #   /api/static_content/* -> Bento /static_content/*    (Swagger assets)
+    #   /api/players, /api/health, /api/predict_from_ids, ... -> root Bento routes
     location /api/ {
-        return 404 '{"ok":false,"error":"unknown api endpoint"}';
+        limit_req zone=api_req burst=10 nodelay;
+        limit_conn api_conn 10;
+
+        proxy_pass ${BENTO_API_URL}/;
+        proxy_http_version 1.1;
     }
 
     # --- Asset caching ---

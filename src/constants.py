@@ -72,8 +72,8 @@ WORK_POOL_NAME = "tennis-pool"
 
 # --- Deployed production Bento endpoint ---
 PRODUCTION_BENTO_URL = os.getenv("PRODUCTION_BENTO_URL", "http://127.0.0.1:8187")
-MODEL_INFO_ROUTE = "/api/internal/model-info"
-PREDICT_BATCH_ROUTE = "/api/internal/predict-batch"
+MODEL_INFO_ROUTE = "/api/model_info"
+PREDICT_BATCH_ROUTE = "/api/predict_from_ids_bulk"
 BENTO_API_KEY_HEADER = "X-API-Key"
 BENTO_API_KEY = os.getenv("BENTO_API_KEY", "")
 

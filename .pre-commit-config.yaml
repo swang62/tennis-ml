@@ -5,16 +5,11 @@ repos:
       - id: ruff-check
         types_or: [python, jupyter]
 
-  - repo: local
-    hooks:
-      - id: format-py
-        name: ruff format
-        description: Silently format Python files and re-stage them
-        language: system
-        entry: scripts/format_py.sh
-        pass_filenames: true
+      - id: ruff-format
         types_or: [python, jupyter]
 
+  - repo: local
+    hooks:
       - id: kubeconform
         name: kubeconform
         description: Validate Kubernetes YAML manifests

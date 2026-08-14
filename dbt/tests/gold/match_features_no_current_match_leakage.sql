@@ -323,5 +323,10 @@ SELECT
 FROM comparisons c
 JOIN prior_snapshot ps USING (match_id)
 WHERE c.guard
-  AND c.mf_val IS DISTINCT FROM c.prior_val
+  -- Real leakage shifts a feature by an O(0.01) amount; tolerate float
+  -- round-off so recomputation noise never flags a false positive.
+  AND (
+    (c.mf_val IS NULL) <> (c.prior_val IS NULL)
+    OR ABS(c.mf_val - c.prior_val) > 1e-6
+  )
 ORDER BY c.match_id, c.feature

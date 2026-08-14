@@ -116,7 +116,7 @@ Required env vars (compose reads them from `.env` or the shell):
 | Var                 | Used by         | Purpose                                                      |
 | ------------------- | --------------- | ------------------------------------------------------------ |
 | `POSTGRES_PASSWORD` | postgres, bento | PostgreSQL password; bento's `DATABASE_URL` derives from it  |
-| `BENTO_API_KEY`     | web             | Authenticates the `/api/internal/*` nginx operational routes |
+| `BENTO_API_KEY`     | web             | Authenticates the `/api/model_info` and `/api/predict_from_ids_bulk` nginx routes |
 
 ### Inference schema
 
