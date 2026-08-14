@@ -6,14 +6,26 @@ metadata:
 servers: 1
 agents: 0
 
-network: tennis-ml-net
+volumes:
+  - volume: prefect-data:/var/lib/rancher/k3s/storage
+    nodeFilters:
+      - server:0
 
 ports:
-  - port: 8080:80
+  - port: 4200:30420
     nodeFilters:
-      - loadbalancer
+      - server:0:direct
 
 options:
   k3d:
     wait: true
     timeout: "120s"
+    disableLoadbalancer: true
+  k3s:
+    extraArgs:
+      - arg: --disable=traefik
+        nodeFilters:
+          - server:*
+      - arg: --disable=servicelb
+        nodeFilters:
+          - server:*

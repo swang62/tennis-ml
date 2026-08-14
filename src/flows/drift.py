@@ -1,9 +1,11 @@
 """Production drift monitor against the deployed champion Bento.
 
-Runs dbt build to refresh gold data, resolves the MLflow champion, scores all
-new untrained matches through the production Bento, and logs drift metrics to MLflow.
-
-Exit 0 on success (including insufficient_data), 1 on failure.
+Scheduled 30 minutes after the weekly scrape (Monday 06:30 UTC, right after the
+06:00 scrape). Runs dbt build to refresh gold data, resolves the MLflow
+champion, and — after a smoke test that skips outright when there are no new
+matches since the champion's creation date — scores the new untrained matches
+through the production Bento and logs drift metrics to MLflow. The full drift
+summary is printed to stdout so it appears in both Prefect logs and the CLI.
 """
 
 from __future__ import annotations
@@ -14,12 +16,13 @@ import os
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import mlflow
 import pandas as pd
 import requests
 from mlflow.tracking import MlflowClient
+from prefect import flow
 from scipy import stats
 from sklearn.metrics import (
     accuracy_score,
@@ -44,14 +47,20 @@ from src.constants import (
     PREDICT_BATCH_ROUTE,
     PRODUCTION_BENTO_URL,
     PRODUCTION_MODEL,
+    TRAIN_DATA_MAX_DATE_KEY,
+    WORK_POOL_NAME,
 )
-from src.db.client import to_dataframe
+from src.db.client import execute_df
 from src.evaluate.promotion import resolve_champion, verify_production_identity
 from src.flows.etl import run_dbt_build
 from src.utils import load_env, suppress_insecure_tls_warning
 
 LOCK_FILE = ARTIFACTS / ".check_drift.lock"
 EXPERIMENT_NAME = "drift_monitoring"
+
+DRIFT_DEPLOYMENT_NAME = "drift"
+# 30 minutes after the scrape cron (Monday 06:00 UTC), so ETL has finished.
+DRIFT_CRON = "30 6 * * 1"
 
 
 @contextmanager
@@ -112,9 +121,18 @@ def _verify_db_identity(db_meta: dict[str, Any]) -> None:
 
 
 def _champion_cutoff_date(client: MlflowClient) -> date | None:
+    """Latest training-data match date pinned on the champion, from MLflow.
+
+    Falls back to the model-registration timestamp for champions promoted
+    before the training-data watermark tag existed.
+    """
     champion = resolve_champion(client)
     if champion is None:
         return None
+    version = client.get_model_version(PRODUCTION_MODEL, champion.version)
+    raw = version.tags.get(TRAIN_DATA_MAX_DATE_KEY)
+    if raw:
+        return date.fromisoformat(raw)
     return datetime.fromtimestamp(champion.creation_timestamp / 1000, tz=UTC).date()
 
 
@@ -253,7 +271,13 @@ def _drift_summary(
     return result
 
 
-def check_drift() -> int:
+@flow(log_prints=True, retries=2)
+def drift_flow() -> int:
+    """Drift monitor: dbt build, champion smoke test, score new matches, log.
+
+    The smoke test counts gold matches newer than the champion's creation date;
+    when there are none the drift check is skipped entirely (insufficient_data).
+    """
     load_env()
     suppress_insecure_tls_warning()
     client = MlflowClient()
@@ -271,12 +295,13 @@ def check_drift() -> int:
         cutoff_date = _champion_cutoff_date(client)
         print(f"Cutoff date (champion creation): {cutoff_date}")
 
-        df = to_dataframe(
+        df = execute_df(
             f"SELECT match_id, match_date, player_id, opponent_id, surface, "
             f"is_indoor, tournament_level, round_encoded, match_won "
             f"FROM {GOLD_TABLE} "
             f"WHERE match_date > %s "
             f"ORDER BY match_date, match_id",
+            [cutoff_date],
         )
         if df is None or df.empty:
             print("insufficient_data: no matches found after champion cutoff")
@@ -391,5 +416,30 @@ def check_drift() -> int:
         return 0
 
 
+def register_deployment() -> None:
+    """Create/update the Monday drift deployment (idempotent by name).
+
+    Scheduled 30 minutes after the scrape cron (Monday 06:30 UTC), on the host
+    ``tennis-pool`` work pool alongside scrape and ETL.
+    """
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    deployment = cast(
+        Any,
+        drift_flow.from_source(
+            source=str(repo_root),
+            entrypoint="src/flows/drift.py:drift_flow",
+        ),
+    )
+    deployment.deploy(
+        name=DRIFT_DEPLOYMENT_NAME,
+        work_pool_name=WORK_POOL_NAME,
+        cron=DRIFT_CRON,
+        build=False,
+        ignore_warnings=True,
+        print_next_steps=False,
+    )
+    print(f"Registered deployment {DRIFT_DEPLOYMENT_NAME!r} (cron {DRIFT_CRON})")
+
+
 if __name__ == "__main__":
-    raise SystemExit(check_drift())
+    drift_flow()

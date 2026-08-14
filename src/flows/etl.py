@@ -136,7 +136,7 @@ def _dbt_model_rows() -> dict[str, int]:
     }
 
 
-@flow(log_prints=True)
+@flow(log_prints=True, retries=2)
 def etl_flow(full_refresh: bool = False):
     """Bronze → gold ETL: dbt build only. Enrichment is a seed-time step —
     run `just db-seed --enrich`, then re-run `just db-etl`.

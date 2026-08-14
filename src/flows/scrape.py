@@ -393,7 +393,7 @@ def fetch_and_upsert_week(page, week: date, rank_map: dict[str, str]) -> int:
     return len(frame)
 
 
-@flow(log_prints=True)
+@flow(log_prints=True, retries=2)
 def scrape_flow(start_date: date | None = None, end_date: date | None = None):
     """Scrape missing ranking weeks: watermark-to-today (no params) or a date range.
 

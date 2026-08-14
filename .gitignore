@@ -27,7 +27,8 @@ tests/___db/
 !web/.env.example
 
 # TLS keys and certs (generate per deployment)
-infra/postgres/tls/
+infra/postgres/tls/server.crt
+infra/postgres/tls/server.key
 
 # Models (serialized)
 *.pkl

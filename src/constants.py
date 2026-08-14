@@ -109,6 +109,11 @@ LINEAGE_AUX_KEYS = (
 BASE_TAG_PREFIX = "base_"
 AUX_TAG_PREFIX = "aux_"
 
+# Training-data watermark pinned on the champion model version: the latest
+# match date present in the training splits at promotion time. Drift checks use
+# it as the cutoff for "new" matches instead of the model-registration time.
+TRAIN_DATA_MAX_DATE_KEY = "train_data_max_match_date"
+
 
 def build_lineage_tags(
     base_pins: dict[str, dict[str, str]], aux_pins: dict[str, str]

@@ -31,10 +31,11 @@ class _FakeExperiment:
 
 
 class _FakeMlflowClient:
-    def __init__(self, champion=None, runs=None, download_dir="/fake/artifact/dir"):
+    def __init__(self, champion=None, runs=None, download_dir="/fake/artifact/dir", tags=None):
         self._champion = champion
         self._runs = runs or []
         self._download_dir = download_dir
+        self._tags = tags or {}
         self.logged_params: dict[str, dict[str, object]] = {}
         self.logged_metrics: dict[str, dict[str, float]] = {}
         self.logged_texts: list[tuple[str, str, str]] = []
@@ -47,6 +48,10 @@ class _FakeMlflowClient:
 
             raise MlflowException("Alias 'champion' not found")
         return self._champion
+
+    def get_model_version(self, name, version):
+        del name, version
+        return SimpleNamespace(tags=self._tags)
 
     def get_experiment_by_name(self, _name):
         return _FakeExperiment()
@@ -114,6 +119,29 @@ def test_no_champion_fails():
         drift._validate_production(client)  # type: ignore[arg-type]
 
 
+def test_champion_cutoff_prefers_training_data_tag():
+    from datetime import date
+
+    champion = _FakeModelVersion(
+        version="3", run_id="champ-run-id", creation_timestamp=1700000000000
+    )
+    client = _FakeMlflowClient(
+        champion=champion, tags={drift.TRAIN_DATA_MAX_DATE_KEY: "2025-01-10"}
+    )
+    assert drift._champion_cutoff_date(client) == date(2025, 1, 10)  # type: ignore[arg-type]
+
+
+def test_champion_cutoff_falls_back_to_creation():
+    from datetime import UTC, datetime
+
+    champion = _FakeModelVersion(
+        version="3", run_id="champ-run-id", creation_timestamp=1700000000000
+    )
+    client = _FakeMlflowClient(champion=champion, tags={})
+    expected = datetime.fromtimestamp(1700000000000 / 1000, tz=UTC).date()
+    assert drift._champion_cutoff_date(client) == expected  # type: ignore[arg-type]
+
+
 def test_production_identity_mismatch_fails(monkeypatch):
     _setup_model_info_stub(monkeypatch, mode="development", version="2", run_id="other-run")
 
@@ -135,7 +163,7 @@ def test_empty_population_insufficient_data(monkeypatch, tmp_path):
     client = _FakeMlflowClient(champion=champion)
     monkeypatch.setattr(drift, "MlflowClient", lambda: client)
 
-    monkeypatch.setattr(drift, "to_dataframe", lambda _sql: pd.DataFrame())
+    monkeypatch.setattr(drift, "execute_df", lambda _sql, _params=None: pd.DataFrame())
 
     mlflow_runs = []
 
@@ -149,7 +177,7 @@ def test_empty_population_insufficient_data(monkeypatch, tmp_path):
 
     monkeypatch.setattr(drift.mlflow, "start_run", fake_start_run)
 
-    result = drift.check_drift()
+    result = drift.drift_flow.fn()
     assert result == 0
     assert any(
         r.get("tags") and r["tags"].get("status") == "insufficient_data" for r in mlflow_runs
@@ -182,7 +210,7 @@ def test_normal_flow_creates_baseline_and_check(monkeypatch, tmp_path):
             "match_won": y_true,
         }
     )
-    monkeypatch.setattr(drift, "to_dataframe", lambda _sql: fake_df)
+    monkeypatch.setattr(drift, "execute_df", lambda _sql, _params=None: fake_df)
 
     batch_calls = []
 
@@ -208,7 +236,7 @@ def test_normal_flow_creates_baseline_and_check(monkeypatch, tmp_path):
 
     monkeypatch.setattr(drift.mlflow, "start_run", fake_start_run)
 
-    result = drift.check_drift()
+    result = drift.drift_flow.fn()
     assert result == 0
 
     run_names = [r["name"] for r in mlflow_runs]
@@ -256,7 +284,7 @@ def test_repeat_check_reuses_existing_runs(monkeypatch, tmp_path):
             "match_won": y_true,
         }
     )
-    monkeypatch.setattr(drift, "to_dataframe", lambda _sql: fake_df)
+    monkeypatch.setattr(drift, "execute_df", lambda _sql, _params=None: fake_df)
 
     def fake_post_batch(url, json=None, headers=None, timeout=None):
         del url, headers, timeout
@@ -279,7 +307,7 @@ def test_repeat_check_reuses_existing_runs(monkeypatch, tmp_path):
 
     monkeypatch.setattr(drift.mlflow, "start_run", fake_start_run)
 
-    result = drift.check_drift()
+    result = drift.drift_flow.fn()
     assert result == 0
 
     run_names = [r["name"] for r in mlflow_runs]

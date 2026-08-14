@@ -7,7 +7,7 @@ Production-grade MLOps pipeline for tennis match prediction. Prefect, PostgreSQL
 | Layer               | Tool                                      |
 | ------------------- | ----------------------------------------- |
 | Orchestration       | Prefect (retries, ETL triggers)           |
-| Experiment tracking | MLflow on DagsHub (model registry, trial comparison) |
+| Experiment tracking | MLflow (model registry, trial comparison) |
 | Model serving       | BentoML                                   |
 | Data warehouse      | PostgreSQL                                |
 | Development         | Jupyter + Papermill                       |

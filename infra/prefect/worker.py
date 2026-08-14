@@ -3,8 +3,8 @@
 
 The Prefect server runs in the cluster; the worker runs on the host so it can
 access local resources (PostgreSQL, trained models). It loads the repo's .env
-(which defines PREFECT_API_URL pointing at the ingress) and starts a worker
-attached to the process-based `tennis-pool`.
+(which defines PREFECT_API_URL pointing at the k3d node port) and starts a
+worker attached to the process-based `tennis-pool`.
 
 Run from the repo root:
     uv run python infra/prefect/worker.py
@@ -38,11 +38,13 @@ def _register_deployments() -> None:
     are created/updated whenever this worker starts and stay manually
     triggerable from the Prefect UI or `prefect deployment run`.
     """
+    from src.flows.drift import register_deployment as register_drift
     from src.flows.etl import register_deployment as register_etl
     from src.flows.scrape import register_deployment as register_scrape
 
     register_scrape()
     register_etl()
+    register_drift()
 
 
 _register_deployments()

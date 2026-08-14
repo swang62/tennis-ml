@@ -1,13 +1,45 @@
 apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: prefect-server-data
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  hostPath:
+    path: /var/lib/rancher/k3s/storage/prefect-server
+    type: DirectoryOrCreate
+---
+apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: prefect-server-data
 spec:
+  storageClassName: ""
+  volumeName: prefect-server-data
   accessModes:
     - ReadWriteOnce
   resources:
     requests:
       storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prefect-server
+  labels:
+    app: prefect-server
+spec:
+  type: NodePort
+  ports:
+    - name: http
+      port: 4200
+      targetPort: http
+      nodePort: 30420
+  selector:
+    app: prefect-server
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -27,7 +59,8 @@ spec:
     spec:
       containers:
         - name: prefect-server
-          image: prefecthq/prefect:3.7.3-python3.11
+          image: prefecthq/prefect:3-python3.11
+          imagePullPolicy: Always
           command:
             - /bin/bash
             - -c
@@ -75,17 +108,3 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: prefect-server-data
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: prefect-server
-  labels:
-    app: prefect-server
-spec:
-  ports:
-    - name: http
-      port: 4200
-      targetPort: http
-  selector:
-    app: prefect-server

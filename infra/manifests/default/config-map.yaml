@@ -5,11 +5,12 @@ metadata:
   labels:
     app: tennis-ml
 data:
+  PREFECT_API_ENABLE_METRICS: "false"
+  PREFECT_API_TLS_INSECURE_SKIP_VERIFY: "true"
   PREFECT_API_URL: "http://prefect-server:4200/api"
+  PREFECT_LOGGING_SERVER_LEVEL: "INFO"
   PREFECT_SERVER_API_HOST: "0.0.0.0"
   PREFECT_SERVER_API_PORT: "4200"
-  PREFECT_API_TLS_INSECURE_SKIP_VERIFY: "true"
-  PREFECT_UI_API_URL: "https://prefect.macsteve.lan/api"
   PREFECT_SERVER_DATABASE_CONNECTION_URL: "sqlite+aiosqlite:////data/prefect.db"
-  PREFECT_API_ENABLE_METRICS: "true"
-  PREFECT_LOGGING_SERVER_LEVEL: "INFO"
+  PREFECT_UI_API_URL: "http://localhost:4200/api"
+  PREFECT_WORKER_QUERY_SECONDS: "60"
