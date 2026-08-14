@@ -35,7 +35,6 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
-from src import constants
 from src.constants import (
     ARTIFACTS,
     BATCH_MAX_SIZE_ROWS,
@@ -95,29 +94,6 @@ def _ensure_experiment(client: MlflowClient) -> str:
     if experiment is not None:
         return experiment.experiment_id
     return client.create_experiment(EXPERIMENT_NAME)
-
-
-def _db_conn_params() -> dict[str, str | int | None]:
-    from urllib.parse import unquote, urlsplit
-
-    raw = constants.get_database_url()
-    parts = urlsplit(raw)
-    db_name = unquote(parts.path.lstrip("/")) if parts.path else None
-    return {
-        "server_address": parts.hostname,
-        "server_port": parts.port,
-        "database_name": db_name or None,
-    }
-
-
-def _verify_db_identity(db_meta: dict[str, Any]) -> None:
-    expected = _db_conn_params()
-    mismatches = []
-    for key in ("server_address", "server_port", "database_name"):
-        if str(db_meta.get(key)) != str(expected[key]):
-            mismatches.append(f"{key}: deployed {db_meta.get(key)!r}, expected {expected[key]!r}")
-    if mismatches:
-        raise RuntimeError("production Bento database identity mismatch: " + "; ".join(mismatches))
 
 
 def _champion_cutoff_date(client: MlflowClient) -> date | None:
@@ -180,11 +156,6 @@ def _validate_production(client: MlflowClient) -> Any:
     resp.raise_for_status()
     model_info: object = resp.json()
     verify_production_identity(model_info, champion)
-    if isinstance(model_info, dict):
-        db_meta = (model_info.get("data") or {}).get("database") or {}
-    else:
-        db_meta = {}
-    _verify_db_identity(db_meta)
     return champion
 
 

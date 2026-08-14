@@ -89,11 +89,6 @@ def _setup_model_info_stub(monkeypatch, mode="production", version="3", run_id="
     monkeypatch.setattr(drift, "BENTO_API_KEY", "")
     monkeypatch.setattr(drift, "PRODUCTION_BENTO_URL", "http://127.0.0.1:8187")
     monkeypatch.setattr(drift, "MODEL_INFO_ROUTE", "/api/internal/model-info")
-    monkeypatch.setattr(
-        drift,
-        "_db_conn_params",
-        lambda: {"server_address": None, "server_port": None, "database_name": None},
-    )
     fake_model_info = {
         "ok": True,
         "data": {

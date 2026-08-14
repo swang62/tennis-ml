@@ -71,8 +71,8 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react(), tailwindcss(), seoPlugin(env.SITE_URL || ''), seoFilesPlugin(env.SITE_URL || '')],
     server: {
-      // Fail on an occupied IPv4 loopback port, matching Bento's bind host.
-      host: '127.0.0.1',
+      // Bind all interfaces so HMR is reachable from other devices on the LAN.
+      host: '0.0.0.0',
       port: 5173,
       strictPort: true,
       proxy: {
