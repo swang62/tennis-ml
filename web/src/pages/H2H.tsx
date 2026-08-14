@@ -201,7 +201,9 @@ export default function H2H() {
           axisTick: {
             show: true,
             length: 4,
-            customValues: [1, 0.8, 0.6, 0.4, 0.2, 0, -0.2, -0.4, -0.6, -0.8, -1],
+            customValues: [
+              1, 0.8, 0.6, 0.4, 0.2, 0, -0.2, -0.4, -0.6, -0.8, -1,
+            ],
             lineStyle: { color: t.line },
           },
           axisLabel: {
@@ -479,10 +481,7 @@ export default function H2H() {
                   <span className="pred-winner" style={{ color: winnerColor }}>
                     {name(pred.predicted_winner)} wins
                   </span>
-                  <span
-                    className="pred-pct num"
-                    style={{ color: winnerColor }}
-                  >
+                  <span className="pred-pct num" style={{ color: winnerColor }}>
                     +{pct(2 * winnerP - 1)}
                   </span>
                   <span className="pred-caption num">
@@ -578,9 +577,7 @@ export default function H2H() {
                       </div>
                       <span
                         className="mirror-label"
-                        style={
-                          row.color ? { color: row.color } : undefined
-                        }
+                        style={row.color ? { color: row.color } : undefined}
                       >
                         {row.label}
                       </span>
@@ -821,9 +818,7 @@ export default function H2H() {
                 })()}
                 <div className="h2h-meetings-wrap">
                   {sortedMeetings.map((m) => {
-                    // player1_won is canonical lower-id, not picker order.
-                    const aWon =
-                      m.player1_won === (playerA === h2h.player1_id);
+                    const aWon = m.player1_won === (playerA === h2h.player1_id);
                     const winnerName = aWon ? p1 : p2;
                     const tourney =
                       m.tournament_name ??
@@ -847,11 +842,9 @@ export default function H2H() {
                             className="surface-pill"
                             style={{
                               color:
-                                SURFACE_COLORS[m.surface] ??
-                                "var(--text-dim)",
+                                SURFACE_COLORS[m.surface] ?? "var(--text-dim)",
                               borderColor:
-                                SURFACE_COLORS[m.surface] ??
-                                "var(--text-dim)",
+                                SURFACE_COLORS[m.surface] ?? "var(--text-dim)",
                             }}
                           >
                             {m.surface}

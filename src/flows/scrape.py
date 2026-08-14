@@ -26,10 +26,13 @@ and humanized navigation inserts random jitter so page moves are not detected
 as a bot.
 
 A week whose page fails to load or carries no parseable rankings table is
-logged and skipped, never treated as a failure — a Cloudflare challenge, a
-missing rankings page for that week, or a markup change all move on to the next
-week instead of aborting the backfill. Each successful week commits
-independently.
+logged and skipped so the backfill continues past it — a Cloudflare challenge,
+a missing rankings page for that week, or a markup change all move on to the
+next week instead of aborting the backfill. But rankings are posted every
+week, so a backfill that could not access or parse the site for any of its
+weeks is a failure: the run is marked failed (and retried) rather than silently
+succeeding on no data. Finding a parseable page is success even when its rows
+are already stored. Each successful week commits independently.
 
 Run once (manual/local):  ``just scrape``
 Backfill to a date:       ``just scrape --param end_date=YYYY-MM-DD``
@@ -48,7 +51,6 @@ from typing import Any, cast
 
 import pandas as pd
 from prefect import flow, task
-from prefect.deployments import run_deployment
 
 from src.constants import WORK_POOL_NAME
 from src.db.client import get_conn
@@ -84,9 +86,6 @@ PAGE_NAVIGATION_TIMEOUT_MS = 60_000
 
 SCRAPE_DEPLOYMENT_NAME = "scrape"
 SCRAPE_CRON = "0 6 * * 1"  # Monday 06:00 UTC
-# The ETL deployment that this flow triggers when a scrape actually stored rows.
-# run_deployment resolves it by "<flow-name>/<deployment-name>".
-ETL_DEPLOYMENT_REF = "etl-flow/etl"
 CLOAKBROWSER_PROFILE_DIR = (
     Path.home() / ".local" / "share" / "tennis-prefect-worker" / "cloakbrowser"
 )
@@ -351,15 +350,16 @@ def _fetch_week_html(page, url: str, week: date) -> str:
     return html
 
 
-def fetch_and_upsert_week(page, week: date, rank_map: dict[str, str]) -> int:
-    """Fetch one weekly ranking page and upsert its mapped rows; returns count.
+def fetch_and_upsert_week(page, week: date, rank_map: dict[str, str]) -> int | None:
+    """Fetch one weekly ranking page and upsert its mapped rows.
 
     Uses the run's shared browser page (never launches its own — the flow owns
     the page and closes it in finally). Commits independently
-    (``_copy_df_into`` runs in one transaction). A page that cannot be loaded or
-    parsed (Cloudflare challenge, missing rankings week, markup change) is
-    logged and skipped, returning 0 — never a failure, so a full backfill moves
-    past blocked weeks.
+    (``_copy_df_into`` runs in one transaction). Returns the number of rows
+    written, or ``None`` when the page could not be accessed or parsed
+    (Cloudflare challenge, missing rankings week, markup change) — a signal the
+    caller reads to distinguish "found no data" (a failure) from "found data but
+    nothing new to write" (``0``).
     """
     url = RANKINGS_URL.format(date=week.isoformat())
     print(f"Week {week.isoformat()}: fetching {url}")
@@ -368,7 +368,7 @@ def fetch_and_upsert_week(page, week: date, rank_map: dict[str, str]) -> int:
         rows = extract_rankings_from_html(html)
     except Exception as exc:
         print(f"Week {week.isoformat()}: skipped (could not load or parse): {exc}")
-        return 0
+        return None
 
     frame, skipped = translate_rank_rows(rows, rank_map)
     frame = (
@@ -408,6 +408,10 @@ def scrape_flow(start_date: date | None = None, end_date: date | None = None):
     nothing. Launches exactly one CloakBrowser session, processes every missing
     week inside a try block, and closes the browser in finally — even when a
     week fails, the session is always released before the flow returns/raises.
+    A run that had weeks to fetch but could not access or parse the rankings
+    site for any of them (Cloudflare blocked every page, or the markup changed)
+    is marked failed and retried; finding data that is already stored is a
+    success, not a failure.
     """
     load_env()
     watermark, weeks = missing_ranking_mondays(start_date, end_date)
@@ -429,11 +433,15 @@ def scrape_flow(start_date: date | None = None, end_date: date | None = None):
     browser = _launch_browser()
     page = None
     stored = 0
+    found_data = False
     try:
         page = browser.new_page()
         print("Browser session open: navigating one page across all weeks")
         for week in weeks:
-            stored += fetch_and_upsert_week(page, week, rank_map)
+            rows = fetch_and_upsert_week(page, week, rank_map)
+            if rows is not None:
+                found_data = True
+                stored += rows
     finally:
         # CloakBrowser tracks sessions server-side; an exit without a clean
         # close permanently wedges the session id, so the browser (and any page
@@ -443,20 +451,28 @@ def scrape_flow(start_date: date | None = None, end_date: date | None = None):
         if page is not None:
             page.close()
         browser.close()
+    _fail_if_no_data_found(found_data, weeks)
     print(f"Scrape complete: {stored} rows stored")
-    _trigger_etl_if_needed(stored)
 
 
-def _trigger_etl_if_needed(stored: int) -> None:
-    """Trigger the ETL deployment only when the scrape stored new rows."""
-    if stored == 0:
-        print("No new rows stored — skipping ETL trigger.")
-        return
-    print(f"New data stored ({stored} rows); triggering {ETL_DEPLOYMENT_REF}...")
-    # Native in-flow trigger: submits a flow run for the ETL deployment on the
-    # same Prefect server (no webhook/API-key plumbing needed). timeout=0 is
-    # fire-and-forget — the scrape run finishes without waiting on the ETL.
-    run_deployment(ETL_DEPLOYMENT_REF, timeout=0)
+def _fail_if_no_data_found(found_data: bool, weeks: list[date]) -> None:
+    """Fail the run when the scrape could not access or parse the site at all.
+
+    Rankings post weekly, so if every week we tried failed to fetch or parse
+    (Cloudflare block, missing page, or markup change) the site is effectively
+    unreachable — a real failure worth surfacing, not a "nothing new" result.
+    That legitimate case (an empty ``weeks`` because everything is current)
+    returns before any browser work. Finding a parseable page counts as success
+    even when it wrote no new rows (already-present data), so re-scraping stored
+    weeks is never a failure. Raising marks the flow run failed and lets its
+    ``retries=2`` re-run.
+    """
+    if not found_data:
+        raise RuntimeError(
+            f"Scrape could not access or parse the rankings site for any of "
+            f"{len(weeks)} expected week(s) "
+            f"({weeks[0].isoformat()}..{weeks[-1].isoformat()})."
+        )
 
 
 def register_deployment() -> None:

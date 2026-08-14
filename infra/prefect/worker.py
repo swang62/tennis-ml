@@ -47,7 +47,19 @@ def _register_deployments() -> None:
     register_drift()
 
 
+def _register_automations() -> None:
+    """Register event-driven automations (idempotent upserts by name).
+
+    The scrape -> ETL trigger is a visible Prefect automation, not an in-flow
+    command, so it lives here alongside the deployments it wires together.
+    """
+    from src.flows.etl import register_automation
+
+    register_automation()
+
+
 _register_deployments()
+_register_automations()
 # Imported after the PREFECT_API_URL check: src.constants loads .env with
 # override=True, which must not shadow the value read above.
 from src.constants import WORK_POOL_NAME  # noqa: E402

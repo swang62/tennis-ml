@@ -15,11 +15,17 @@ import os
 import re
 import subprocess
 import sys
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
-from typing import TextIO
+from typing import TextIO, cast
+from uuid import UUID
 
 from prefect import flow, task
+from prefect.automations import Automation
+from prefect.client.orchestration import get_client
+from prefect.events.actions import RunDeployment
+from prefect.events.schemas.automations import EventTrigger
 
 from src import constants
 from src.constants import (
@@ -39,8 +45,12 @@ DBT_BUILD_CMD = ["uv", "run", "dbt", "build", "--project-dir", "dbt", "--profile
 DBT_RUN_RESULTS = constants.ROOT / "dbt" / "target" / "run_results.json"
 
 ETL_DEPLOYMENT_NAME = "etl"
-# No cron: ETL is triggered by the scrape flow via run_deployment only when new
-# rows were stored, so an empty or Cloudflare-blocked scrape never runs it.
+# No cron: ETL is triggered by the "scrape-triggers-etl" automation (see
+# register_automation) whenever a scrape flow run completes successfully. The
+# trigger is a visible Prefect automation, not an in-flow command.
+
+SCRAPE_FLOW_NAME = "scrape-flow"  # Prefect flow name of src/flows/scrape.py:scrape_flow
+SCRAPE_ETL_AUTOMATION_NAME = "scrape-triggers-etl"
 
 
 def run_dbt_build(
@@ -149,9 +159,9 @@ def etl_flow(full_refresh: bool = False):
 def register_deployment() -> None:
     """Create/update the ETL deployment (idempotent by name).
 
-    Registered on the host ``tennis-pool`` work pool so the scrape flow's
-    ``run_deployment("etl-flow/etl")`` trigger resolves to it. No cron — ETL
-    runs only when new data was actually scraped.
+    Registered on the host ``tennis-pool`` work pool so the automation's
+    ``RunDeployment`` action can resolve it by ``etl-flow/etl``. No cron — ETL
+    runs only when the scrape flow completes successfully.
     """
     repo_root = Path(__file__).resolve().parent.parent.parent
     from typing import Any, cast
@@ -170,7 +180,48 @@ def register_deployment() -> None:
         ignore_warnings=True,
         print_next_steps=False,
     )
-    print(f"Registered deployment {ETL_DEPLOYMENT_NAME!r} (no cron — scrape-triggered)")
+    print(f"Registered deployment {ETL_DEPLOYMENT_NAME!r} (no cron — automation-triggered)")
+
+
+def build_scrape_etl_automation(etl_deployment_id: UUID) -> Automation:
+    """Automation spec: run ETL when the scrape flow completes successfully.
+
+    Pure builder (no API calls) so the trigger/action wiring is unit-testable
+    without a Prefect server. The trigger matches ``prefect.flow-run.Completed``
+    events whose related ``flow`` resource is the scrape flow, so a scrape run
+    that fails (or any other flow completing) never fires ETL.
+    """
+    return Automation(
+        name=SCRAPE_ETL_AUTOMATION_NAME,
+        description="Run ETL after a successful scrape flow run.",
+        trigger=EventTrigger(
+            expect={"prefect.flow-run.Completed"},
+            match_related={
+                "prefect.resource.role": "flow",
+                "prefect.resource.name": SCRAPE_FLOW_NAME,
+            },
+        ),
+        actions=[RunDeployment.model_validate({"deployment_id": etl_deployment_id})],
+    )
+
+
+def register_automation() -> None:
+    """Idempotent upsert of the scrape -> ETL automation (by name).
+
+    Replaces any existing automation with the same name, so worker restarts
+    converge on the current spec. Runs on the host worker (alongside the
+    deployments) so the trigger is a first-class, visible Prefect automation.
+    """
+    with get_client(sync_client=True) as client:
+        deployment = client.read_deployment_by_name(f"{etl_flow.name}/{ETL_DEPLOYMENT_NAME}")
+    automation = build_scrape_etl_automation(deployment.id)
+    with suppress(ValueError):
+        cast(Automation, Automation.read(name=SCRAPE_ETL_AUTOMATION_NAME)).delete()
+    automation.create()
+    print(
+        f"Registered automation {SCRAPE_ETL_AUTOMATION_NAME!r}: "
+        f"{SCRAPE_FLOW_NAME} success -> {etl_flow.name}/{ETL_DEPLOYMENT_NAME}"
+    )
 
 
 if __name__ == "__main__":

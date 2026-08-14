@@ -109,7 +109,7 @@ def test_fetch_week_skips_on_failure(monkeypatch, capsys):
 
     monkeypatch.setattr(scrape, "_fetch_week_html", fail_fetch)
 
-    assert scrape.fetch_and_upsert_week(None, date(2026, 1, 5), {}) == 0
+    assert scrape.fetch_and_upsert_week(None, date(2026, 1, 5), {}) is None
     assert "Week 2026-01-05: skipped (could not load or parse)" in capsys.readouterr().out
 
 
@@ -261,3 +261,24 @@ def test_translate_keeps_mapped_drops_unmapped():
     frame, skipped = scrape.translate_rank_rows(rows, rank_map)
     assert frame["player_id"].tolist() == ["S0AG", "A0E2"]
     assert len(skipped) == 2
+
+
+# ── Backfill failure guard ───────────────────────────────────────
+
+
+def test_backfill_that_cannot_access_the_site_fails():
+    """A backfill that could not access/parse the site for any week fails.
+
+    Rankings post weekly, so finding no parseable page for every expected week
+    means the site was blocked or the markup changed — not a legitimate
+    "nothing new" result (that path returns before the guard via the
+    empty-``weeks`` early return).
+    """
+    weeks = [date(2026, 1, 12), date(2026, 1, 19)]
+    with pytest.raises(RuntimeError, match="could not access or parse"):
+        scrape._fail_if_no_data_found(False, weeks)
+
+
+def test_backfill_that_found_data_does_not_fail():
+    # Even a week that parsed but wrote 0 rows (already present) found data.
+    scrape._fail_if_no_data_found(True, [date(2026, 1, 12)])

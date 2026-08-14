@@ -630,7 +630,6 @@ def _head_to_head(request: Request) -> JSONResponse:
             "missing required query parameters: "
             "pass player1_id+player2_id (or player_id+opponent_id)",
         )
-    # Canonical pair: lower id is the player_* side (matches model convention).
     lower, higher = sorted([p1, p2])
     raw_limit = request.query_params.get("limit", "100")
     try:

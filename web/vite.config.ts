@@ -38,7 +38,7 @@ function seoFilesPlugin(siteUrl: string): Plugin {
     async closeBundle() {
       if (!siteUrl || !outDir) return
       const base = `${siteUrl.replace(/\/+$/, '')}/`
-      const robots = `User-agent: *\nAllow: /\n\nSitemap: ${base}sitemap.xml\n`
+      const robots = `User-agent: *\nAllow: /\nDisallow: /api/\n\nSitemap: ${base}sitemap.xml\n`
       const sitemap = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
@@ -53,12 +53,6 @@ function seoFilesPlugin(siteUrl: string): Plugin {
         `    <lastmod>${SITEMAP_LASTMOD}</lastmod>`,
         '    <changefreq>weekly</changefreq>',
         '    <priority>0.8</priority>',
-        '  </url>',
-        '  <url>',
-        `    <loc>${base}api/</loc>`,
-        `    <lastmod>${SITEMAP_LASTMOD}</lastmod>`,
-        '    <changefreq>weekly</changefreq>',
-        '    <priority>0.5</priority>',
         '  </url>',
         '</urlset>',
         '',

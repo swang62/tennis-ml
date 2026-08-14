@@ -1,6 +1,11 @@
 import subprocess
+from typing import cast
+from uuid import uuid4
 
 import pytest
+from prefect.events.actions import RunDeployment
+from prefect.events.schemas.automations import EventTrigger
+from prefect.events.schemas.events import ResourceSpecification
 
 import src.flows.etl as etl
 from src.constants import ROOT
@@ -94,3 +99,25 @@ def test_enrich_missing_is_callable():
     from src.db.ingest import enrich_missing
 
     assert callable(enrich_missing)
+
+
+def test_scrape_etl_automation_triggers_etl_on_scrape_completion():
+    """The scrape -> ETL trigger is a visible Prefect automation (not an in-flow
+    command): it fires on the scrape flow's Completed event and runs the ETL
+    deployment. Pure builder, so no Prefect server or database is touched.
+    """
+    deployment_id = uuid4()
+    automation = etl.build_scrape_etl_automation(deployment_id)
+
+    assert automation.name == etl.SCRAPE_ETL_AUTOMATION_NAME
+    trigger = cast(EventTrigger, automation.trigger)
+    assert trigger.expect == {"prefect.flow-run.Completed"}
+    match_related = cast(ResourceSpecification, trigger.match_related)
+    assert match_related.root == {
+        "prefect.resource.role": "flow",
+        "prefect.resource.name": etl.SCRAPE_FLOW_NAME,
+    }
+    assert len(automation.actions) == 1
+    action = cast(RunDeployment, automation.actions[0])
+    assert action.deployment_id == deployment_id
+    assert action.source == "selected"
