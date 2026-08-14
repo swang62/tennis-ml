@@ -51,3 +51,10 @@ dbt/             — silver→gold SQL models + tests (bronze is the PostgreSQL 
 **Tests are self-contained — no live data, ever.** Tests must never read or use `DATABASE_URL`, open database clients/connections (`get_conn`, `psycopg.connect`, `refresh_snapshot` against a real source), call `init_db`/`seed`/dbt against a DB, or include the deleted live-db fixture names (`postgres_ready`, `gold_ready`, `seeded_test_db`, `_postgres_reachable`). The suite must pass with `DATABASE_URL` unset or blocked, with no PostgreSQL server, gold tables, or any pre-built external state. External database behavior is asserted hermetically at the boundary: mock `execute_df` where the code under test imports it (string-patched module attributes), or run the same SQL against an in-memory DuckDB fixture (see `test_inference_features.py`). A test that depends on a live database is a contract violation — convert it to a boundary mock, never skip it. `tests/test_no_live_db.py` is a static guard that fails CI if these patterns are reintroduced.
 
 **Official rankings** — ingested ranks are strictly official ATP top-200 values per week; downstream rank/current-rank values are actual official ranks only, never estimated or interpolated.
+
+## Extra Notes
+
+- **Symmetric, order-preserving** — the ensemble satisfies `p_win(player, opponent) = 1 - p_win(opponent, player)`; the first-supplied id is the player side, so `p_win` always means "first-supplied id wins". H2H and all endpoints report ids in the order supplied — no sorting or canonicalization.
+- **Rolling form lookup** — live inference reads each player's newest snapshot strictly before `as_of_date`
+- **Cold-start imputation** — missing players use the materialized `gold.tour_averages` singleton (pre-computed full-pool defaults + weighted tour benchmarks), never on-demand aggregates.
+- **Bento image data sources** — Bento loads native sklearn/XGBoost/LightGBM models materialized at deploy time from the champion's exact lineage tags; no MLflow at serving time. NN is ONNX Runtime. Bio embeddings are compressed NumPy `.npz`, not Parquet. Production serving reads PostgreSQL live through sidecar.

@@ -32,7 +32,7 @@ import {
   sanitizeErrorMessage,
   scoreSegments,
 } from "../lib/format";
-import { h2hRoute } from "../router";
+import { h2hRoute } from "../routes";
 import { useTheme } from "../theme";
 
 const SURFACES: Surface[] = ["clay", "grass", "hard", "carpet"];
@@ -111,7 +111,7 @@ export default function H2H() {
   const [tournament, setTournament] = useState<TournamentTier | "">("");
   const [round, setRound] = useState<MatchRound | "">("");
   const [asOfDate, setAsOfDate] = useState(today);
-  const [indoor, setIndoor] = useState<"" | 0 | 1>("");
+  const [isIndoor, setIsIndoor] = useState<"" | 0 | 1>("");
 
   const playersQ = useQuery({ queryKey: ["players"], queryFn: getPlayers });
 
@@ -382,9 +382,9 @@ export default function H2H() {
               <label className="field">
                 <span className="field-label">Venue</span>
                 <select
-                  value={indoor}
+                  value={isIndoor}
                   onChange={(e) =>
-                    setIndoor(
+                    setIsIndoor(
                       e.target.value === ""
                         ? ""
                         : (Number(e.target.value) as 0 | 1),
@@ -451,7 +451,7 @@ export default function H2H() {
                     ...(tournament ? { tournament } : {}),
                     ...(round ? { round } : {}),
                     ...(asOfDate ? { as_of_date: asOfDate } : {}),
-                    ...(indoor !== "" ? { indoor } : {}),
+                    ...(isIndoor !== "" ? { is_indoor: isIndoor } : {}),
                   })
                 }
                 disabled={predict.isPending}
@@ -478,7 +478,7 @@ export default function H2H() {
             {pred && compOption && (
               <div className="pred-result" aria-live="polite">
                 <div className="pred-main">
-                  <span className="pred-winner" style={{ color: winnerColor }}>
+                  <span className="pred-winner">
                     {name(pred.predicted_winner)} wins
                   </span>
                   <span className="pred-pct num" style={{ color: winnerColor }}>
@@ -489,7 +489,16 @@ export default function H2H() {
                   </span>
                 </div>
                 <div className="odds-row">
-                  <div className="odds">
+                  <div
+                    className="odds"
+                    style={
+                      pred.predicted_winner === playerA
+                        ? {
+                            borderColor: winnerColor,
+                          }
+                        : undefined
+                    }
+                  >
                     <span className="odds-label">{name(playerA!)}</span>
                     <span
                       className={`odds-num num ${orientA >= 0.5 ? "is-fav" : ""}`}
@@ -497,7 +506,16 @@ export default function H2H() {
                       {fairOdds(orientA)}
                     </span>
                   </div>
-                  <div className="odds">
+                  <div
+                    className="odds"
+                    style={
+                      pred.predicted_winner === playerB
+                        ? {
+                            borderColor: winnerColor,
+                          }
+                        : undefined
+                    }
+                  >
                     <span className="odds-label">{name(playerB!)}</span>
                     <span
                       className={`odds-num num ${orientA < 0.5 ? "is-fav" : ""}`}

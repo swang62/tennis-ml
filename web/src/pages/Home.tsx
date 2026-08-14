@@ -19,7 +19,7 @@ import {
   type Player,
 } from "../api";
 import { ErrorBox, Kicker, Loading, PlayerPicker } from "../components";
-import { homeRoute } from "../router";
+import { homeRoute } from "../routes";
 import { useTheme } from "../theme";
 
 // Profile (and its ECharts dependency) loads on demand once a player is

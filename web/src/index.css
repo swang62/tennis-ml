@@ -1620,10 +1620,6 @@ html.light {
 
   /* prediction panel — the clay betting signal */
 
-  .pred-card {
-    border-color: color-mix(in srgb, var(--clay) 38%, var(--line));
-  }
-
   .pred-head {
     display: flex;
     align-items: center;

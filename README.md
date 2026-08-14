@@ -142,10 +142,3 @@ uv sync
 # Inference-only — the exact packages in the production Bento image
 uv sync --group inference
 ```
-
-## Extra Notes
-
-- **Symmetric, order-preserving** — the ensemble satisfies `p_win(player, opponent) = 1 - p_win(opponent, player)`; the first-supplied id is the player side, so `p_win` always means "first-supplied id wins". H2H and all endpoints report ids in the order supplied — no sorting or canonicalization.
-- **Rolling form lookup** — live inference reads each player's newest snapshot strictly before `as_of_date`
-- **Cold-start imputation** — missing players use the materialized `gold.tour_averages` singleton (pre-computed full-pool defaults + weighted tour benchmarks), never on-demand aggregates.
-- **Bento image data sources** — Bento loads native sklearn/XGBoost/LightGBM models materialized at deploy time from the champion's exact lineage tags; no MLflow at serving time. NN is ONNX Runtime. Bio embeddings are compressed NumPy `.npz`, not Parquet. Production serving reads PostgreSQL live through sidecar.
