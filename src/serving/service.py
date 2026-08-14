@@ -13,6 +13,7 @@ import pickle
 from collections.abc import Callable
 from datetime import date, datetime
 from decimal import Decimal
+from enum import Enum, StrEnum
 from time import perf_counter
 from typing import Any, cast
 
@@ -23,6 +24,7 @@ import pandas as pd
 import psycopg.errors as _pg_errors
 from bentoml.exceptions import InvalidArgument
 from bentoml.images import Image
+from pydantic import BaseModel, ConfigDict
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
@@ -218,25 +220,70 @@ def _stack_evidence(
     return probs
 
 
+class TournamentLevel(StrEnum):
+    GRAND_SLAM = "grand_slam"
+    MASTERS = "masters"
+    ATP_500 = "atp_500"
+    ATP_250 = "atp_250"
+    DAVIS_CUP = "davis_cup"
+    ATP_FINALS = "atp_finals"
+    OLYMPICS = "olympics"
+    PROFESSIONAL = "professional"
+
+
+class Round(StrEnum):
+    R128 = "r128"
+    R64 = "r64"
+    R32 = "r32"
+    R16 = "r16"
+    QF = "qf"
+    SF = "sf"
+    F = "f"
+
+
+class Surface(StrEnum):
+    CLAY = "clay"
+    GRASS = "grass"
+    HARD = "hard"
+    CARPET = "carpet"
+    UNKNOWN = "0"
+
+
+class PredictFromIdsRow(BaseModel):
+    """One row of the bulk prediction envelope; mirrors `predict_from_ids` fields."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    player_id: str
+    opponent_id: str
+    surface: Surface
+    tournament_level: int = 0
+    round_encoded: int = 0
+    tournament: TournamentLevel | None = None
+    round: Round | None = None
+    as_of_date: date | None = None
+    is_indoor: int | None = None
+
+
 def _predict_from_ids_bulk_impl(
-    rows: list[dict[str, object]], predict_proba: object
+    rows: list[PredictFromIdsRow], predict_proba: object
 ) -> pd.DataFrame:
     """Build + predict a batch; `predict_proba` is the service's shared ensemble.
 
     Each row accepts the same fields as `predict_from_ids` (including its own
-    historical `as_of_date`); the endpoint's `indoor` field maps to the
-    builder's `is_indoor`. Both orientation rows are built per context (forward
-    and reversed), paired, and stacked through the shared ensemble. Returns a
+    historical `as_of_date`). Both orientation rows are built per context
+    (forward and reversed), paired, and stacked through the shared ensemble.
+    Returns a
     DataFrame with the finalized FEATURE_COLS plus ids and the four probability
     columns, in input order with the REQUESTED ids.
     """
     started_at = perf_counter()
     normalized: list[dict[str, object]] = []
     for row in rows:
+        # BentoML passes validated PredictFromIdsRow instances; accept dicts too.
+        d = row if isinstance(row, dict) else row.model_dump()
         # Strip BentoML auto-generated Pydantic extras before normalize.
-        r = {k: v for k, v in row.items() if k in _NORMALIZE_KEYS}
-        if "indoor" in r:  # scalar endpoint field -> builder field
-            r["is_indoor"] = r.pop("indoor")
+        r = {k: v for k, v in d.items() if k in _NORMALIZE_KEYS}
         if r.get("as_of_date") is not None:
             r["as_of_date"] = _to_date(r["as_of_date"])
         normalized.append(r)
@@ -630,7 +677,6 @@ def _head_to_head(request: Request) -> JSONResponse:
             "missing required query parameters: "
             "pass player1_id+player2_id (or player_id+opponent_id)",
         )
-    lower, higher = sorted([p1, p2])
     raw_limit = request.query_params.get("limit", "100")
     try:
         limit = int(raw_limit)
@@ -638,14 +684,14 @@ def _head_to_head(request: Request) -> JSONResponse:
         return _err(400, "limit must be an integer")
     limit = max(1, min(limit, 100))  # clamp: a pair never meets more than this
     try:
-        df = execute_df(_H2H_MEETINGS_SQL, [lower, higher, higher, lower, limit])
+        df = execute_df(_H2H_MEETINGS_SQL, [p1, p2, p2, p1, limit])
     except Exception as exc:
         return _err(500, f"head-to-head query failed: {exc}")
 
     meetings = []
     for r in _records(df):
         winner_id = r["winner_id"]
-        player1_won = winner_id == lower
+        player1_won = winner_id == p1
         meetings.append(
             {
                 "match_id": r["match_id"],
@@ -656,7 +702,7 @@ def _head_to_head(request: Request) -> JSONResponse:
                 "round": r["round"],
                 "score": r["score"],
                 "winner_id": winner_id,
-                "loser_id": higher if player1_won else lower,
+                "loser_id": p2 if player1_won else p1,
                 "player1_won": bool(player1_won),
             }
         )
@@ -675,8 +721,8 @@ def _head_to_head(request: Request) -> JSONResponse:
     }
     return _ok(
         {
-            "player1_id": lower,
-            "player2_id": higher,
+            "player1_id": p1,
+            "player2_id": p2,
             "meetings": meetings,
             "summary": summary,
         }
@@ -836,8 +882,45 @@ class _LGBMProbaAdapter:
         return np.column_stack([1.0 - p, p])
 
 
+# BentoML uses the build context's README as the bento doc (OpenAPI
+# info.description) unless the service sets its own. The repo README is not an
+# API reference, so every /api/ endpoint is documented here manually: the
+# Starlette GET routes are mounted handlers the OpenAPI generator does not
+# introspect, so they exist in this description only.
+SERVICE_DESCRIPTION = """\
+# Tennis Match Prediction API
+
+Symmetric service: `p_win(player_id, opponent_id) = 1 - p_win(opponent_id, player_id)`; \
+the first-supplied id is the player side and `p_win` is always P(first-supplied id wins).
+
+## POST /predict_from_ids
+Scalar ids-based prediction.
+- `player_id`, `opponent_id` — required `str`
+- `surface` — required `str` (`clay` / `grass` / `hard` / `carpet`)
+- `tournament_level` — optional `int`, default 0 (`grand_slam` / `masters` / `atp_500` / `atp_250`)
+- `round_encoded` — optional `int`, default 0 (`r128` / `r64` / `r32` / `r16` / `qf` / `sf` / `f`)
+- `tournament` — optional `str`
+- `round` — optional `str`
+- `as_of_date` — optional `date`
+- `is_indoor` — optional `int`
+
+## POST /predict_from_ids_bulk
+Bulk ids-based prediction (API-key gated). Body envelope `{"rows": [ { ... } ]}` with the \
+same per-row fields as `POST /predict_from_ids`; max 1000 rows; unknown fields are rejected.
+
+## GET endpoints
+Read-only dashboard data: `GET /players`, `GET /directory_info`, `GET /player_profile`, \
+`GET /rank_history`, `GET /match_history`, `GET /head_to_head`, `GET /similar_players`.
+`GET /model_info` — API-key gated model metadata. `GET /health` — liveness.
+
+Only the POST routes appear as OpenAPI paths; the GET routes are mounted Starlette
+handlers that the OpenAPI generator does not introspect, so they are documented here only.
+"""
+
+
 @bentoml.service(
     image=SERVING_IMAGE,
+    description=SERVICE_DESCRIPTION,
     # Aligned with Nginx's 120s operational batch window so a large
     # (<=1,000 row) batch is not killed by the serving layer first.
     traffic={"timeout": 120},
@@ -999,43 +1082,38 @@ class TennisPredictor:
     @bentoml.api
     def predict_from_ids(
         self,
-        player_id: str,
-        opponent_id: str,
-        surface: str,
-        *,
-        tournament_level: int = 0,
-        round_encoded: int = 0,
-        tournament: str | None = None,
-        round: str | None = None,
-        as_of_date: date | None = None,
-        indoor: int | None = None,
+        row: PredictFromIdsRow,
     ) -> dict[str, object]:
         """Build an as-of-dated feature row from player ids, then predict."""
         started_at = perf_counter()
-        row_ab, meta = _build_inference_features_with_meta(
-            player_id,
-            opponent_id,
-            surface,
-            tournament_level=tournament_level,
-            round_encoded=round_encoded,
-            tournament=tournament,
-            round=round,
-            as_of_date=as_of_date,
-            is_indoor=indoor,
-        )
-        row_ba, _meta_ba = _build_inference_features_with_meta(
-            opponent_id,
-            player_id,
-            surface,
-            tournament_level=tournament_level,
-            round_encoded=round_encoded,
-            tournament=tournament,
-            round=round,
-            as_of_date=as_of_date,
-            is_indoor=indoor,
-        )
-        # Reuse the shared prediction path (no nested HTTP — see _predict_proba).
-        out_df = self._predict_proba(row_ab, row_ba)
+        try:
+            row_ab, meta = _build_inference_features_with_meta(
+                row.player_id,
+                row.opponent_id,
+                row.surface,
+                tournament_level=row.tournament_level,
+                round_encoded=row.round_encoded,
+                tournament=row.tournament,
+                round=row.round,
+                as_of_date=row.as_of_date,
+                is_indoor=row.is_indoor,
+            )
+            row_ba, _meta_ba = _build_inference_features_with_meta(
+                row.opponent_id,
+                row.player_id,
+                row.surface,
+                tournament_level=row.tournament_level,
+                round_encoded=row.round_encoded,
+                tournament=row.tournament,
+                round=row.round,
+                as_of_date=row.as_of_date,
+                is_indoor=row.is_indoor,
+            )
+            # Reuse the shared prediction path (no nested HTTP - see _predict_proba).
+            out_df = self._predict_proba(row_ab, row_ba)
+        except Exception:
+            _log.exception("predict_from_ids failed")
+            raise InvalidArgument("prediction failed - check input parameters") from None
         # One row in, one row out — return the first record as a flat dict for
         # ergonomic JSON over HTTP. ids come from row_ab (requested order).
         rec = first_row_dict(out_df)
@@ -1077,12 +1155,12 @@ class TennisPredictor:
         )
         return rec
 
-    def _predict_from_ids_bulk(self, rows: list[dict[str, object]]) -> pd.DataFrame:
+    def _predict_from_ids_bulk(self, rows: list[PredictFromIdsRow]) -> pd.DataFrame:
         """Shared bulk path: normalize JSON rows, build features, predict once."""
         return _predict_from_ids_bulk_impl(rows, self._predict_proba)
 
     @bentoml.api
-    def predict_from_ids_bulk(self, rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    def predict_from_ids_bulk(self, rows: list[PredictFromIdsRow]) -> list[dict[str, object]]:
         """Bulk predictions from minimal per-row contexts (internal endpoint).
 
         Each row accepts the same fields/defaults as `predict_from_ids`,

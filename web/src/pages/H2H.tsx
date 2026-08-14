@@ -23,7 +23,7 @@ import {
   PlayerPicker,
 } from "../components";
 import { axisOption, baseChartOption, chartTokens } from "../lib/charts";
-import { orientH2H, preferenceEdge } from "../lib/h2hOrientation";
+import { preferenceEdge } from "../lib/h2hOrientation";
 import {
   ROUND_LABEL,
   TIER_LABEL,
@@ -154,7 +154,7 @@ export default function H2H() {
       <ErrorBox error={playersQ.error} onRetry={() => playersQ.refetch()} />
     );
 
-  const h2h = h2hQ.data && playerA ? orientH2H(h2hQ.data, playerA) : undefined;
+  const h2h = h2hQ.data;
   const meetings = h2h?.meetings ?? [];
   const summary = h2h?.summary;
   const sortedMeetings = [...meetings].sort((a, b) =>
@@ -506,7 +506,7 @@ export default function H2H() {
                     </span>
                   </div>
                 </div>
-                <p className="mt-2 text-center text-[0.65rem] text-[var(--text-faint)]">
+                <p className="mt-2 text-center text-[0.65rem] text-(--text-faint)">
                   Decimal odds show total return per 1 unit staked. A price of{" "}
                   {fairOdds(orientA)} returns {fairOdds(orientA)} units,
                   including the stake, if {name(playerA!)} wins.
@@ -519,7 +519,7 @@ export default function H2H() {
                     className="chart-frame"
                   />
                 </div>
-                <p className="mt-2 text-center text-[0.65rem] text-[var(--text-faint)]">
+                <p className="mt-2 text-center text-[0.65rem] text-(--text-faint)">
                   Preference from 50%: left favors {name(playerA!)}, right
                   favors {name(playerB!)}
                 </p>
@@ -818,7 +818,7 @@ export default function H2H() {
                 })()}
                 <div className="h2h-meetings-wrap">
                   {sortedMeetings.map((m) => {
-                    const aWon = m.player1_won === (playerA === h2h.player1_id);
+                    const aWon = m.player1_won;
                     const winnerName = aWon ? p1 : p2;
                     const tourney =
                       m.tournament_name ??

@@ -21,9 +21,10 @@
 -- a feature.
 --
 -- H2H uses the five most recent distinct, strictly-prior unordered-pair
--- meetings (LEAST/GREATEST canonicalization for lookup only). h2h_exposure is
--- the shared meeting count (identical for both mirrors); h2h_advantage is the
--- Beta(1,1)-smoothed directional advantage and negates across mirrors.
+-- meetings, read directly from bronze.match_events via winner_id (no id
+-- canonicalization). h2h_exposure is the shared meeting count (identical for
+-- both mirrors); h2h_advantage is the Beta(1,1)-smoothed directional advantage
+-- and negates across mirrors.
 --
 -- Player snapshot state stays strictly prior (no current-match leakage);
 -- fallback values are intentionally global: the same full-pool singleton is
@@ -167,37 +168,26 @@ player_match_enriched AS (
     LEFT JOIN {{ source('bronze', 'player_profiles') }} prof
         ON prof.player_id = pm.player_id
 ),
--- Dedupe player perspectives to canonical unordered meetings for H2H lookup.
--- LEAST/GREATEST canonicalize the pair for lookup only; orientation to each
--- directional row's player happens in prior_h2h.
+-- Strictly-prior unordered-pair meetings per directional row, read directly
+-- from bronze.match_events (one row per physical match, so no dedup; winner_id
+-- orients each meeting to the row's player without any id canonicalization).
+-- Limited to the five most recent meetings per row, keyed on (match_id, player_id).
 pair_meetings AS (
-    SELECT
-        LEAST(player_id, opponent_id) AS a,
-        GREATEST(player_id, opponent_id) AS b,
-        match_id,
-        match_date,
-        MAX(CASE WHEN player_id < opponent_id THEN match_won
-                 ELSE 1 - match_won END) AS a_won
-    FROM {{ ref('player_matches') }}
-    GROUP BY 1, 2, 3, 4
-),
--- Strictly-prior H2H rows for each directional row, limited to the five most
--- recent unordered-pair meetings per row (keyed on (match_id, player_id)).
-prior_meeting_rows AS (
     SELECT
         current_match.match_id,
         current_match.player_id,
-        current_match.opponent_id,
-        meeting.a_won,
+        (meeting.winner_id = current_match.player_id) AS winner_is_current_player,
         ROW_NUMBER() OVER (
             PARTITION BY current_match.match_id, current_match.player_id
             ORDER BY meeting.match_date DESC, meeting.match_id DESC
         ) AS rn
     FROM player_match_enriched current_match
-    JOIN pair_meetings meeting
-        ON meeting.a = LEAST(current_match.player_id, current_match.opponent_id)
-       AND meeting.b = GREATEST(current_match.player_id, current_match.opponent_id)
-       AND meeting.match_date < current_match.match_date
+    JOIN {{ source('bronze', 'match_events') }} meeting
+        ON (meeting.player1_id = current_match.player_id
+            AND meeting.player2_id = current_match.opponent_id)
+        OR (meeting.player1_id = current_match.opponent_id
+            AND meeting.player2_id = current_match.player_id)
+    WHERE meeting.match_date < current_match.match_date
 ),
 -- Directional H2H per row: shared exposure, wins oriented to the row player.
 prior_h2h AS (
@@ -205,9 +195,8 @@ prior_h2h AS (
         match_id,
         player_id,
         COUNT(*) AS h2h_exposure,
-        SUM(CASE WHEN player_id < opponent_id THEN a_won
-                 ELSE 1 - a_won END) AS wins_for_player
-    FROM prior_meeting_rows
+        SUM(CASE WHEN winner_is_current_player THEN 1 ELSE 0 END) AS wins_for_player
+    FROM pair_meetings
     WHERE rn <= 5
     GROUP BY match_id, player_id
 )

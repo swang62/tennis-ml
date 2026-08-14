@@ -114,6 +114,33 @@ AUX_TAG_PREFIX = "aux_"
 # it as the cutoff for "new" matches instead of the model-registration time.
 TRAIN_DATA_MAX_DATE_KEY = "train_data_max_match_date"
 
+# Performance metrics pinned on the champion model version at promotion time.
+# Metric tag keys are METRIC_PREFIX + metric name (the 8 in METRIC_NAMES);
+# drift reads them with this uniform prefix.
+METRIC_PREFIX = "metric_"
+METRIC_COMPOSITE_KEY = "metric_promotion_composite"
+EVAL_SPLIT_SIZE_KEY = "metric_eval_split_size"
+EVAL_MAX_DATE_KEY = "metric_eval_max_date"
+
+# --- Drift monitoring thresholds (single source of truth for the verdict) ---
+# Per-feature PSI bands: < DRIFT_PSI_MODERATE = no drift, moderate band between,
+# >= DRIFT_PSI_SIGNIFICANT = significant. Drift share is the fraction of
+# features with PSI >= DRIFT_PSI_SIGNIFICANT. Prediction PSI and calibration /
+# AUC degradation are retrain triggers; the AUC trigger only applies once the
+# current window is large enough to mean anything.
+DRIFT_PSI_MODERATE = 0.1
+DRIFT_PSI_SIGNIFICANT = 0.2
+DRIFT_SHARE_THRESHOLD = 0.5
+DRIFT_PRED_PSI_THRESHOLD = 0.2
+DRIFT_CALIBRATION_DELTA = 0.05
+DRIFT_AUC_DROP = 0.05
+DRIFT_MIN_N_FOR_AUC = 30
+
+# On-demand reference window bounds: size-matched to the current window,
+# floored at DRIFT_REF_MIN and capped at DRIFT_REF_MAX matches.
+DRIFT_REF_MIN = 50
+DRIFT_REF_MAX = 2000
+
 
 def build_lineage_tags(
     base_pins: dict[str, dict[str, str]], aux_pins: dict[str, str]

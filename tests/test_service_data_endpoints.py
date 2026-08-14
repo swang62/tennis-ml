@@ -1,12 +1,18 @@
 """Contract tests for /players, /rank_history, /match_history, and /head_to_head."""
 
+from datetime import date
+from typing import Any, cast
 from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
 from psycopg.errors import UndefinedColumn, UndefinedTable
+from sklearn.preprocessing import StandardScaler
 from starlette.testclient import TestClient
 
-from src.serving.service import DATA_APP
+from src.constants import STACK_ORDER
+from src.features.columns import FEATURE_COLS, TOUR_AVERAGES_FALLBACK_COLS
+from src.serving.service import DATA_APP, PredictFromIdsRow, Surface, TennisPredictor
 
 client = TestClient(DATA_APP)
 
@@ -485,11 +491,11 @@ def _h2h_df() -> pd.DataFrame:
 
 
 def test_head_to_head_canonical_orientation_both_param_conventions():
-    """Response uses the lower id on the player1 side regardless of request order."""
+    """Response echoes the supplied order: the first-supplied id is the
+    player1 side — for both parameter conventions, in either request order."""
     for params in (
-        {"player1_id": "b", "player2_id": "a"},
-        {"player_id": "b", "opponent_id": "a"},
         {"player1_id": "a", "player2_id": "b"},
+        {"player_id": "a", "opponent_id": "b"},
     ):
         with patch("src.serving.service.execute_df", return_value=_h2h_df()) as exec:
             resp = client.get("/head_to_head", params=params)
@@ -497,8 +503,28 @@ def test_head_to_head_canonical_orientation_both_param_conventions():
         data = resp.json()["data"]
         assert data["player1_id"] == "a"
         assert data["player2_id"] == "b"
+        # Newest meeting m6 was won by "a" = the first-supplied id.
+        assert data["meetings"][0]["player1_won"] is True
         sql, bound = exec.call_args_list[0].args
         assert bound[:4] == ["a", "b", "b", "a"]
+        assert bound[4] == 100  # default limit
+        assert "ORDER BY match_date DESC, match_id DESC" in sql
+        assert "LIMIT %s" in sql
+    for params in (
+        {"player1_id": "b", "player2_id": "a"},
+        {"player_id": "b", "opponent_id": "a"},
+    ):
+        with patch("src.serving.service.execute_df", return_value=_h2h_df()) as exec:
+            resp = client.get("/head_to_head", params=params)
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["player1_id"] == "b"
+        assert data["player2_id"] == "a"
+        # Same meeting m6 (winner "a"): the first-supplied id "b" lost it.
+        assert data["meetings"][0]["player1_won"] is False
+        assert data["meetings"][0]["loser_id"] == "b"
+        sql, bound = exec.call_args_list[0].args
+        assert bound[:4] == ["b", "a", "a", "b"]
         assert bound[4] == 100  # default limit
         assert "ORDER BY match_date DESC, match_id DESC" in sql
         assert "LIMIT %s" in sql
@@ -582,3 +608,83 @@ def test_head_to_head_database_error_returns_500():
         resp = client.get("/head_to_head?player1_id=a&player2_id=b")
     assert resp.status_code == 500
     assert "head-to-head query failed" in resp.json()["error"]
+
+
+# ── predict_from_ids order preservation ──────────────────────────────────────
+
+
+class _ProbaModel:
+    """Constant-probability sklearn-style classifier (class 1 = positive)."""
+
+    def __init__(self, p: float) -> None:
+        self.classes_ = np.array([0, 1])
+        self._p = p
+
+    def predict_proba(self, features) -> np.ndarray:
+        return np.array([[1 - self._p, self._p]] * len(features))
+
+
+class _ONNXSession:
+    """Tiny ONNX-session stand-in returning a positive logit."""
+
+    def run(self, _output_names: object, _inputs: object) -> list[np.ndarray]:
+        return [np.array([[2.0]])]  # sigmoid(2) ~ 0.88
+
+
+def _fake_execute_df(sql: str, _params: list | None = None) -> pd.DataFrame:
+    """Hermetic execute_df stand-in: cold-start DB state keyed on the SQL text."""
+    if "tour_averages" in sql:
+        row: dict[str, object] = dict.fromkeys(TOUR_AVERAGES_FALLBACK_COLS, 1.0)
+        row.update(
+            singleton_id=1,
+            pool_as_of_date=date.today(),
+            snapshot_pool_rows=0,
+            snapshot_pool_players=0,
+            profile_rows=0,
+            player_match_rows=0,
+        )
+        return pd.DataFrame([row])
+    if "player_matches" in sql:
+        return pd.DataFrame([{"n": 0}])
+    if "match_events" in sql:
+        return pd.DataFrame(columns=["winner_id"])
+    return pd.DataFrame()  # rolling_features / player_profiles: cold start
+
+
+def test_predict_from_ids_preserves_caller_order():
+    """predict_from_ids echoes the requested ids: the first-supplied id is the
+    player side (p_win > 0.5 -> predicted_winner = first id), and swapping the
+    ids swaps the response sides. No lower-id canonicalization at the endpoint."""
+    # Bypass __init__ (no DB/bootstrap): the @bentoml.service decorator turns
+    # the module-level name into a Service wrapper, so reach the original class
+    # via `.inner` and construct an instance without running __init__.
+    pred = cast(Any, object.__new__(TennisPredictor.inner))  # type: ignore[attr-defined,arg-type]
+    pred._stack_order = list(STACK_ORDER)
+    pred.scaler = StandardScaler().fit(
+        pd.DataFrame(np.zeros((1, len(FEATURE_COLS))), columns=FEATURE_COLS)
+    )
+    pred.linear = _ProbaModel(0.8)
+    pred.gbdt = _ProbaModel(0.8)
+    pred.production = _ProbaModel(0.9)
+    pred.nn_session = _ONNXSession()
+    pred.bio_feature_cols = ["bio_0"]
+    pred.bio_by_player = {}
+    pred.bio_array = np.zeros((0, 1), dtype=np.float32)
+
+    with (
+        patch("src.features.inference.execute_df", side_effect=_fake_execute_df),
+        patch("src.features.tour_averages.execute_df", side_effect=_fake_execute_df),
+    ):
+        ab = pred.predict_from_ids(
+            PredictFromIdsRow(player_id="S0AG", opponent_id="Z355", surface=Surface.HARD)
+        )
+        ba = pred.predict_from_ids(
+            PredictFromIdsRow(player_id="Z355", opponent_id="S0AG", surface=Surface.HARD)
+        )
+
+    assert ab["player_id"] == "S0AG"
+    assert ab["opponent_id"] == "Z355"
+    assert ab["predicted_winner"] == "S0AG"  # first-supplied id is the player side
+    assert ba["player_id"] == "Z355"
+    assert ba["opponent_id"] == "S0AG"
+    assert ba["predicted_winner"] == "Z355"

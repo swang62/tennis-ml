@@ -2,16 +2,19 @@
 
 Scheduled 30 minutes after the weekly scrape (Monday 06:30 UTC, right after the
 06:00 scrape). Runs dbt build to refresh gold data, resolves the MLflow
-champion, and — after a smoke test that skips outright when there are no new
-matches since the champion's creation date — scores the new untrained matches
-through the production Bento and logs drift metrics to MLflow. The full drift
-summary is printed to stdout so it appears in both Prefect logs and the CLI.
+champion, and compares two size-matched windows from gold.match_features —
+the post-cutoff current window and the most recent pre-cutoff reference
+window, both scored through the production Bento — using Evidently's
+DataDriftPreset (per-feature PSI, prediction PSI, drift share). Current-window
+performance is compared against the champion's promotion-pinned metric tags,
+and the combined signals map to a healthy / investigate / retrain verdict that
+is printed and logged to MLflow. The full drift summary is printed to stdout
+so it appears in both Prefect logs and the CLI.
 """
 
 from __future__ import annotations
 
 import json
-import math
 import os
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
@@ -21,19 +24,10 @@ from typing import Any, cast
 import mlflow
 import pandas as pd
 import requests
+from evidently import Report
+from evidently.presets.drift import DataDriftPreset
 from mlflow.tracking import MlflowClient
 from prefect import flow
-from scipy import stats
-from sklearn.metrics import (
-    accuracy_score,
-    average_precision_score,
-    brier_score_loss,
-    f1_score,
-    matthews_corrcoef,
-    precision_score,
-    recall_score,
-    roc_auc_score,
-)
 
 from src.constants import (
     ARTIFACTS,
@@ -41,7 +35,20 @@ from src.constants import (
     BENTO_API_KEY,
     BENTO_API_KEY_HEADER,
     CHAMPION_ALIAS,
+    DRIFT_AUC_DROP,
+    DRIFT_CALIBRATION_DELTA,
+    DRIFT_MIN_N_FOR_AUC,
+    DRIFT_PRED_PSI_THRESHOLD,
+    DRIFT_PSI_MODERATE,
+    DRIFT_PSI_SIGNIFICANT,
+    DRIFT_REF_MAX,
+    DRIFT_REF_MIN,
+    DRIFT_SHARE_THRESHOLD,
+    EVAL_MAX_DATE_KEY,
+    EVAL_SPLIT_SIZE_KEY,
     GOLD_TABLE,
+    METRIC_COMPOSITE_KEY,
+    METRIC_PREFIX,
     MODEL_INFO_ROUTE,
     PREDICT_BATCH_ROUTE,
     PRODUCTION_BENTO_URL,
@@ -50,7 +57,14 @@ from src.constants import (
     WORK_POOL_NAME,
 )
 from src.db.client import execute_df
-from src.evaluate.promotion import resolve_champion, verify_production_identity
+from src.evaluate.promotion import (
+    METRIC_NAMES,
+    compute_metrics,
+    ordered_incumbent_contexts,
+    resolve_champion,
+    verify_production_identity,
+)
+from src.features.columns import FEATURE_COLS
 from src.flows.etl import run_dbt_build
 from src.utils import load_env, suppress_insecure_tls_warning
 
@@ -60,6 +74,13 @@ EXPERIMENT_NAME = "drift_monitoring"
 DRIFT_DEPLOYMENT_NAME = "drift"
 # 30 minutes after the scrape cron (Monday 06:00 UTC), so ETL has finished.
 DRIFT_CRON = "30 6 * * 1"
+
+# Both drift windows are pulled from gold with the same column set: identity
+# and context (for scoring through the Bento), the label, and every FEATURE_COL.
+_DRIFT_WINDOW_COLUMNS = (
+    "match_id, match_date, player_id, opponent_id, surface, is_indoor, "
+    "tournament_level, round_encoded, match_won, " + ", ".join(FEATURE_COLS)
+)
 
 
 @contextmanager
@@ -112,6 +133,31 @@ def _champion_cutoff_date(client: MlflowClient) -> date | None:
     return datetime.fromtimestamp(champion.creation_timestamp / 1000, tz=UTC).date()
 
 
+def _pinned_metrics(client: MlflowClient, champion: Any) -> dict[str, Any]:
+    """Champion metric tags pinned at promotion: the 8 gate metrics + eval notes.
+
+    Returns only the tags that exist; the 8 metrics are floats, eval_max_date is
+    kept as its stored string.
+    """
+    tags = client.get_model_version(PRODUCTION_MODEL, champion.version).tags or {}
+    pinned: dict[str, Any] = {}
+    for name in METRIC_NAMES:
+        raw = tags.get(f"{METRIC_PREFIX}{name}")
+        if raw is not None:
+            pinned[name] = float(raw)
+    for key, label in (
+        (METRIC_COMPOSITE_KEY, "promotion_composite"),
+        (EVAL_SPLIT_SIZE_KEY, "eval_split_size"),
+    ):
+        raw = tags.get(key)
+        if raw is not None:
+            pinned[label] = float(raw)
+    raw_max_date = tags.get(EVAL_MAX_DATE_KEY)
+    if raw_max_date is not None:
+        pinned["eval_max_date"] = raw_max_date
+    return pinned
+
+
 def _post_batch(contexts: list[dict[str, object]]) -> list[dict[str, object]]:
     url = f"{PRODUCTION_BENTO_URL}{PREDICT_BATCH_ROUTE}"
     headers = {"Content-Type": "application/json"}
@@ -159,95 +205,134 @@ def _validate_production(client: MlflowClient) -> Any:
     return champion
 
 
-def _compute_metrics(y_true: list[int], probas: list[float]) -> dict[str, float]:
-    pred_list = [1 if p >= 0.5 else 0 for p in probas]
-    return {
-        "roc_auc": float(roc_auc_score(y_true, probas)) if len(set(y_true)) > 1 else 0.5,
-        "pr_auc": float(average_precision_score(y_true, probas)),
-        "accuracy": float(accuracy_score(y_true, pred_list)),
-        "precision": float(precision_score(y_true, pred_list, zero_division=0.0)),  # type: ignore[arg-type]
-        "recall": float(recall_score(y_true, pred_list, zero_division=0.0)),  # type: ignore[arg-type]
-        "f1": float(f1_score(y_true, pred_list, zero_division=0.0)),  # type: ignore[arg-type]
-        "mcc": float(matthews_corrcoef(y_true, pred_list)),
-        "brier": float(brier_score_loss(y_true, probas)),
-    }
+def _pull_windows(cutoff_date: date) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Current post-cutoff window + size-matched pre-cutoff reference window.
 
-
-def _baseline_run_id(client: MlflowClient, experiment_id: str) -> str | None:
-    runs = client.search_runs(
-        experiment_ids=[experiment_id],
-        filter_string="tags.stage = 'baseline'",
-        order_by=["start_time DESC"],
-        max_results=1,
+    `reference` is the most recent `n_reference` matches strictly before the
+    cutoff, where `n_reference` is the current-window size clamped to the
+    DRIFT_REF_MIN/DRIFT_REF_MAX bounds. It is fetched newest-first then reversed
+    back into chronological order so both windows share the same row order.
+    """
+    current = execute_df(
+        f"SELECT {_DRIFT_WINDOW_COLUMNS} FROM {GOLD_TABLE} "
+        "WHERE match_date > %s ORDER BY match_date, match_id",
+        [cutoff_date],
     )
-    return runs[0].info.run_id if runs else None
+    n_reference = max(DRIFT_REF_MIN, min(len(current), DRIFT_REF_MAX))
+    reference = execute_df(
+        f"SELECT {_DRIFT_WINDOW_COLUMNS} FROM {GOLD_TABLE} "
+        "WHERE match_date < %s ORDER BY match_date DESC, match_id DESC LIMIT %s",
+        [cutoff_date, n_reference],
+    )
+    if reference is not None and not reference.empty:
+        reference = reference.iloc[::-1].reset_index(drop=True)
+    return current, reference
 
 
-def _baseline_artifacts(client: MlflowClient, run_id: str) -> dict[str, Any]:
-    artifacts_dir = client.download_artifacts(run_id, "")
-    baseline_path = Path(artifacts_dir) / "baseline.json"
-    if baseline_path.exists():
-        return json.loads(baseline_path.read_text())
-    return {}
+def _score_window(window: pd.DataFrame) -> pd.DataFrame:
+    """Append `p_win` (champion Bento) to a window of FEATURE_COLS + match_won."""
+    contexts = ordered_incumbent_contexts(window)
+    probas = _score_batches(contexts)
+    frame = window[[*FEATURE_COLS, "match_won"]].copy()
+    frame["p_win"] = probas
+    return frame
 
 
-def _psi(expected: list[float], observed: list[float], bins: int = 10) -> float:
-    if not expected or not observed:
-        return 0.0
-    combined = pd.Series(list(expected) + list(observed))
-    if combined.nunique() <= 1:
-        return 0.0
+def _window_metrics(current_df: pd.DataFrame) -> dict[str, float]:
+    """The 8 gate metrics for the current window via the shared promotion helper."""
+    probas = current_df["p_win"].tolist()
+    return compute_metrics(
+        y_true=current_df["match_won"].tolist(),
+        proba=probas,
+        pred=[1 if p >= 0.5 else 0 for p in probas],
+    )
+
+
+def _as_float(value: object) -> float:
     try:
-        edges = pd.qcut(combined, min(bins, combined.nunique()), duplicates="drop", retbins=True)[1]  # type: ignore[arg-type]
-    except ValueError:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
         return 0.0
-    e_series = pd.Series(expected)
-    o_series = pd.Series(observed)
-    e_bins = pd.cut(e_series, bins=edges, include_lowest=True)  # type: ignore[call-overload]
-    o_bins = pd.cut(o_series, bins=edges, include_lowest=True)  # type: ignore[call-overload]
-    e_dist = e_series.groupby(e_bins, observed=False).size() / len(expected)
-    o_dist = o_series.groupby(o_bins, observed=False).size() / len(observed)
-    aligned = pd.DataFrame({"e": e_dist, "o": o_dist}).fillna(0.0)
-    aligned["e"] = aligned["e"].replace(0.0, 1e-9)
-    aligned["o"] = aligned["o"].replace(0.0, 1e-9)
-    return float(sum(aligned["o"] * (aligned["o"] / aligned["e"]).apply(math.log)))
 
 
-def _drift_summary(
-    y_true: list[int], probas: list[float], baseline: dict[str, Any]
-) -> dict[str, Any]:
-    metrics = _compute_metrics(y_true, probas)
-    mean_prob = float(pd.Series(probas).mean())
-    std_prob = float(pd.Series(probas).std())
-    cal_mean = float(pd.Series(y_true).mean())
-    result: dict[str, Any] = {
-        "n_matches": len(y_true),
-        "metrics": metrics,
-        "mean_prediction": mean_prob,
-        "std_prediction": std_prob,
-        "calibration_rate": cal_mean,
-    }
-    baseline_metrics: dict[str, float] | None = baseline.get("metrics")
-    baseline_probas: list[float] | None = baseline.get("probas")
-    if baseline_metrics:
-        deltas = {
-            f"{k}_delta": metrics[k] - baseline_metrics[k] for k in metrics if k in baseline_metrics
-        }
-        result["metric_deltas"] = deltas
-    if baseline_probas:
-        ks_result = stats.ks_2samp(probas, baseline_probas)
-        result["ks_test_stat"] = float(ks_result.statistic)  # type: ignore[attr-defined]
-        result["ks_test_pval"] = float(ks_result.pvalue)  # type: ignore[attr-defined]
-        result["psi"] = _psi(baseline_probas, probas)
-    return result
+def _evidently_drift(
+    current_df: pd.DataFrame,
+    reference_df: pd.DataFrame,
+    json_path: Path,
+    html_path: Path,
+) -> tuple[dict[str, float], float, float]:
+    """Run Evidently DataDriftPreset over the two windows; save JSON + HTML.
+
+    All numeric columns are compared with PSI (categorical included), so every
+    per-feature score is directly comparable against the PSI threshold table.
+    Returns (per-FEATURE_COL PSI, drift share, prediction p_win PSI); drift
+    share and prediction PSI come straight from the report payload.
+    """
+    report = Report(
+        metrics=[
+            DataDriftPreset(
+                drift_share=DRIFT_SHARE_THRESHOLD,
+                num_method="psi",
+                num_threshold=DRIFT_PSI_SIGNIFICANT,
+                cat_method="psi",
+                cat_threshold=DRIFT_PSI_SIGNIFICANT,
+            )
+        ],
+        include_tests=True,
+    )
+    snapshot = report.run(current_data=current_df, reference_data=reference_df)
+    payload = json.loads(snapshot.json())
+    json_path.write_text(json.dumps(payload, indent=2, default=str))
+    snapshot.save_html(str(html_path))
+
+    drift_share = 0.0
+    per_column: dict[str, float] = {}
+    for metric in payload["metrics"]:
+        name = metric["metric_name"]
+        if name.startswith("DriftedColumnsCount"):
+            drift_share = _as_float(metric["value"]["share"])  # type: ignore[index]
+        elif name.startswith("ValueDrift(column="):
+            column = name[len("ValueDrift(column=") :].split(",", 1)[0]
+            per_column[column] = _as_float(metric["value"])
+    per_feature = {column: score for column, score in per_column.items() if column in FEATURE_COLS}
+    return per_feature, drift_share, per_column.get("p_win", 0.0)
+
+
+def _recommendation(
+    *,
+    drift_share: float,
+    prediction_psi: float,
+    calibration_delta: float,
+    n_current: int,
+    auc_drop: float | None,
+    per_feature_drift: dict[str, float],
+) -> str:
+    """Map drift signals to healthy / investigate / retrain (plan thresholds).
+
+    retrain: drift share >= 0.5, prediction PSI >= 0.2, |Δcalibration_rate|
+    > 0.05, or (n >= 30 and roc_auc drop > 0.05). investigate: any feature PSI
+    in the moderate band. healthy: otherwise.
+    """
+    if (
+        drift_share >= DRIFT_SHARE_THRESHOLD
+        or prediction_psi >= DRIFT_PRED_PSI_THRESHOLD
+        or calibration_delta > DRIFT_CALIBRATION_DELTA
+        or (n_current >= DRIFT_MIN_N_FOR_AUC and auc_drop is not None and auc_drop > DRIFT_AUC_DROP)
+    ):
+        return "retrain"
+    if any(
+        DRIFT_PSI_MODERATE <= psi <= DRIFT_PSI_SIGNIFICANT for psi in per_feature_drift.values()
+    ):
+        return "investigate"
+    return "healthy"
 
 
 @flow(log_prints=True, retries=2)
 def drift_flow() -> int:
-    """Drift monitor: dbt build, champion smoke test, score new matches, log.
+    """Drift monitor: dbt build, champion validation, score windows, verdict.
 
-    The smoke test counts gold matches newer than the champion's creation date;
-    when there are none the drift check is skipped entirely (insufficient_data).
+    The smoke test counts gold matches newer than the champion's cutoff; when
+    there are none the drift check is skipped entirely (insufficient_data).
     """
     load_env()
     suppress_insecure_tls_warning()
@@ -264,17 +349,12 @@ def drift_flow() -> int:
         print(f"Champion: {PRODUCTION_MODEL} v{champion.version} (run {champion.run_id})")
 
         cutoff_date = _champion_cutoff_date(client)
-        print(f"Cutoff date (champion creation): {cutoff_date}")
+        if cutoff_date is None:
+            raise RuntimeError("could not resolve champion cutoff date")
+        print(f"Cutoff date (champion training-data watermark): {cutoff_date}")
 
-        df = execute_df(
-            f"SELECT match_id, match_date, player_id, opponent_id, surface, "
-            f"is_indoor, tournament_level, round_encoded, match_won "
-            f"FROM {GOLD_TABLE} "
-            f"WHERE match_date > %s "
-            f"ORDER BY match_date, match_id",
-            [cutoff_date],
-        )
-        if df is None or df.empty:
+        current, reference = _pull_windows(cutoff_date)
+        if current is None or current.empty:
             print("insufficient_data: no matches found after champion cutoff")
             with mlflow.start_run(
                 experiment_id=experiment_id,
@@ -289,68 +369,70 @@ def drift_flow() -> int:
                 client.log_param(rid, "n_matches", 0)
             return 0
 
-        print(f"Found {len(df)} drift matches since cutoff")
-
-        contexts: list[dict[str, object]] = []
-        y_true: list[int] = []
-        for _idx, row in df.iterrows():
-            match_date_val: Any = row["match_date"]
-            if isinstance(match_date_val, pd.Timestamp):
-                match_date_val = match_date_val.date()
-            contexts.append(
-                {
-                    "player_id": str(row["player_id"]),
-                    "opponent_id": str(row["opponent_id"]),
-                    "surface": str(row["surface"]),
-                    "as_of_date": match_date_val.isoformat(),
-                    "tournament_level": int(row["tournament_level"]),
-                    "round_encoded": int(row["round_encoded"]),
-                    "is_indoor": int(row["is_indoor"]),
-                }
+        if reference is None or reference.empty:
+            raise RuntimeError(
+                f"no reference matches before cutoff {cutoff_date} — cannot compare drift"
             )
-            y_true.append(int(row["match_won"]))
 
-        print(f"Scoring {len(contexts)} contexts through production Bento...")
-        probas = _score_batches(contexts)
+        pinned_metrics = _pinned_metrics(client, champion)
+        print(f"Pinned champion metrics: {pinned_metrics!r}")
+
+        print(
+            f"Scoring {len(current)} current + {len(reference)} reference "
+            "matches through production Bento..."
+        )
+        current_df = _score_window(current)
+        reference_df = _score_window(reference)
         print("Scoring complete.")
 
-        baseline_run_id = _baseline_run_id(client, experiment_id)
-        baseline: dict[str, Any] = {}
-        if baseline_run_id is not None:
-            baseline = _baseline_artifacts(client, baseline_run_id)
+        report_json = ARTIFACTS / f"drift_report_{cutoff_date.isoformat()}_v{champion.version}.json"
+        per_feature_drift, drift_share, prediction_psi = _evidently_drift(
+            current_df, reference_df, report_json, report_json.with_suffix(".html")
+        )
+        print(f"Evidently report saved: {report_json}")
 
-        summary = _drift_summary(y_true, probas, baseline)
+        current_metrics = _window_metrics(current_df)
+        calibration_rate_current = float(current_df["match_won"].mean())
+        calibration_rate_reference = float(reference_df["match_won"].mean())
+        calibration_delta = abs(calibration_rate_current - calibration_rate_reference)
+        metric_deltas = {
+            name: current_metrics[name] - pinned_metrics[name]
+            for name in METRIC_NAMES
+            if name in pinned_metrics
+        }
+        pinned_roc_auc = pinned_metrics.get("roc_auc")
+        auc_drop = (
+            pinned_roc_auc - current_metrics["roc_auc"] if pinned_roc_auc is not None else None
+        )
+        recommendation = _recommendation(
+            drift_share=drift_share,
+            prediction_psi=prediction_psi,
+            calibration_delta=calibration_delta,
+            n_current=len(current_df),
+            auc_drop=auc_drop,
+            per_feature_drift=per_feature_drift,
+        )
+        retrain_required = recommendation == "retrain"
+
+        summary: dict[str, Any] = {
+            "n_current": len(current_df),
+            "n_reference": len(reference_df),
+            "cutoff_date": cutoff_date.isoformat(),
+            "champion_version": str(champion.version),
+            "pinned_metrics": pinned_metrics,
+            "current_metrics": current_metrics,
+            "metric_deltas": metric_deltas,
+            "drift_share": drift_share,
+            "prediction_psi": prediction_psi,
+            "calibration_rate_current": calibration_rate_current,
+            "calibration_rate_reference": calibration_rate_reference,
+            "calibration_delta": calibration_delta,
+            "recommendation": recommendation,
+            "retrain_required": retrain_required,
+            "per_feature_drift": per_feature_drift,
+        }
         print(json.dumps(summary, indent=2, default=str))
-
-        if baseline_run_id is None:
-            with mlflow.start_run(
-                experiment_id=experiment_id,
-                run_name="drift_baseline",
-                tags={"stage": "baseline", "timestamp": start_ts},
-                log_system_metrics=False,
-            ) as base_run:
-                rid = base_run.info.run_id
-                client.log_param(rid, "champion_version", str(champion.version))
-                client.log_param(rid, "champion_run_id", champion.run_id)
-                client.log_param(rid, "n_matches", len(y_true))
-                for key, val in summary["metrics"].items():
-                    client.log_metric(rid, key, val)
-                client.log_metric(rid, "mean_prediction", summary["mean_prediction"])
-                client.log_metric(rid, "std_prediction", summary["std_prediction"])
-                client.log_metric(rid, "calibration_rate", summary["calibration_rate"])
-                baseline_artifact = {
-                    "metrics": summary["metrics"],
-                    "probas": probas,
-                    "y_true": y_true,
-                    "cutoff_date": str(cutoff_date),
-                    "champion_version": str(champion.version),
-                    "champion_run_id": champion.run_id,
-                }
-                client.log_text(
-                    rid,
-                    json.dumps(baseline_artifact, default=str),
-                    "baseline.json",
-                )
+        print(f"VERDICT: {recommendation} (retrain_required={retrain_required})")
 
         with mlflow.start_run(
             experiment_id=experiment_id,
@@ -358,7 +440,8 @@ def drift_flow() -> int:
             tags={
                 "stage": "check",
                 "timestamp": start_ts,
-                "baseline_run_id": baseline_run_id or "",
+                "recommendation": recommendation,
+                "retrain_required": str(retrain_required),
             },
             log_system_metrics=False,
         ) as check_run:
@@ -366,22 +449,24 @@ def drift_flow() -> int:
             client.log_param(rid, "champion_version", str(champion.version))
             client.log_param(rid, "champion_run_id", champion.run_id)
             client.log_param(rid, "cutoff_date", str(cutoff_date))
-            client.log_param(rid, "n_matches", len(y_true))
-            for key, val in summary["metrics"].items():
-                client.log_metric(rid, key, val)
-            client.log_metric(rid, "mean_prediction", summary["mean_prediction"])
-            client.log_metric(rid, "std_prediction", summary["std_prediction"])
-            client.log_metric(rid, "calibration_rate", summary["calibration_rate"])
-            for key, val in summary.get("metric_deltas", {}).items():
-                client.log_metric(rid, key, val)
-            for key in ("ks_test_stat", "ks_test_pval", "psi"):
-                if key in summary:
-                    client.log_metric(rid, key, summary[key])
+            client.log_param(rid, "n_current", len(current_df))
+            client.log_param(rid, "n_reference", len(reference_df))
+            for name, value in current_metrics.items():
+                client.log_metric(rid, name, value)
+            for name, value in metric_deltas.items():
+                client.log_metric(rid, f"{name}_delta", value)
+            client.log_metric(rid, "drift_share", drift_share)
+            client.log_metric(rid, "prediction_psi", prediction_psi)
+            client.log_metric(rid, "calibration_rate_current", calibration_rate_current)
+            client.log_metric(rid, "calibration_rate_reference", calibration_rate_reference)
+            client.log_metric(rid, "calibration_delta", calibration_delta)
             client.log_text(
                 rid,
                 json.dumps(summary, indent=2, default=str),
                 "drift_summary.json",
             )
+            client.log_artifact(rid, str(report_json))
+            client.log_artifact(rid, str(report_json.with_suffix(".html")))
 
         print(f"Drift check complete. Run: {check_run.info.run_id}")
         return 0

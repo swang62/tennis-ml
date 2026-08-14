@@ -338,6 +338,16 @@ def _seed(con: duckdb.DuckDBPyConnection) -> None:
         )
         """
     )
+    # Bronze holds one row per physical match; the H2H queries select on
+    # match_id/winner_id and filter on player1_id/player2_id/match_date.
+    con.execute(
+        """
+        CREATE TABLE bronze.match_events (
+            match_id VARCHAR, match_date DATE,
+            player1_id VARCHAR, player2_id VARCHAR, winner_id VARCHAR
+        )
+        """
+    )
     fallback_ddl = ", ".join(f'"{c}" DOUBLE' for c in TOUR_AVERAGES_FALLBACK_COLS)
     con.execute(
         f"""
@@ -365,6 +375,13 @@ def _seed(con: duckdb.DuckDBPyConnection) -> None:
     con.executemany(
         f"INSERT INTO silver.player_matches VALUES ({', '.join(['?'] * 11)})",
         _match_rows(),
+    )
+    # The only seeded pair meeting is pm-s6 (S0AG beat Z355 on 2026-07-12),
+    # stored bronze-style: winner on player1_id (constraint winner_id =
+    # player1_id). Other seeded matches are never requested as H2H pairs.
+    con.executemany(
+        "INSERT INTO bronze.match_events VALUES (?, ?, ?, ?, ?)",
+        [("pm-s6", date(2026, 7, 12), "S0AG", "Z355", "S0AG")],
     )
     con.executemany(
         "INSERT INTO bronze.player_profiles VALUES (?, ?, ?, ?)",
@@ -435,15 +452,15 @@ def _duck_db_backed(monkeypatch):
 
 
 def _insert_prior_meetings(pair_a: str, pair_b: str, meetings: list[tuple[str, str, int]]) -> None:
-    """Insert canonical prior meetings as two complementary player perspectives."""
+    """Insert prior meetings as single bronze rows, winner on player1_id."""
     rows = []
     for match_id, date_iso, a_won in meetings:
-        rows.append((match_id, date.fromisoformat(date_iso), pair_a, pair_b, a_won))
-        rows.append((match_id, date.fromisoformat(date_iso), pair_b, pair_a, 1 - a_won))
+        winner, loser = (pair_a, pair_b) if a_won else (pair_b, pair_a)
+        rows.append((match_id, date.fromisoformat(date_iso), winner, loser, winner))
     assert _DB is not None
     _DB.executemany(
-        "INSERT INTO silver.player_matches "
-        "(match_id, match_date, player_id, opponent_id, match_won) "
+        "INSERT INTO bronze.match_events "
+        "(match_id, match_date, player1_id, player2_id, winner_id) "
         "VALUES (?, ?, ?, ?, ?)",
         rows,
     )

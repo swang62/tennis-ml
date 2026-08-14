@@ -37,7 +37,6 @@ exclude = [
   "data",
   "dbt",
   "infra",
-  "mlruns",
   ".git",
   "**/.ipynb_checkpoints/**",
 ]
@@ -115,6 +114,7 @@ training = [
   "requests>=2.34",
   "ipywidgets>=8.1.8",
   "jupyter>=1.1.1",
+  "evidently>=0.7.21",
 ]
 
 # Local ETL/ops: Prefect orchestration, dbt, DuckDB snapshot, rankings catch-up.

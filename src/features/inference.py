@@ -6,9 +6,10 @@ Rolling values use snapshots strictly before the requested date. Missing values
 use the materialized gold.tour_averages singleton (never on-demand
 AVG/PERCENTILE); SQL values are always passed as parameters.
 
-H2H SQL canonicalizes the pair to an unordered (a, b) lookup only (a_won is the
-lower-id side's outcome); the shared meeting list is then oriented to the
-requested player for wins/h2h_advantage.
+H2H features read bronze.match_events directly (one row per physical match):
+the pair branches match either storage orientation of the two players,
+winner_id is the explicit winner, and wins are counted by comparing winner_id
+to the caller-supplied id (requested order preserved).
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ import pandas as pd
 
 from src.constants import (
     BRONZE_PROFILES_TABLE,
+    BRONZE_TABLE,
     BULK_MAX_ROWS,
     SILVER_PLAYER_MATCHES,
     SILVER_ROLLING_FEATURES,
@@ -87,23 +89,15 @@ WHERE player_id = %s
   AND match_date < %s::date
 """
 
-# Last five distinct, strictly-prior meetings for the unordered pair lookup.
+# Last five distinct, strictly-prior meetings for the requested pair. Bronze
+# stores one row per physical match; winner_id is the explicit winner, so the
+# caller counts wins by comparing winner_id to the requested player id.
 _H2H_PRIOR_SQL = f"""
-SELECT match_id, a_won
-FROM (
-    SELECT
-        CASE WHEN player_id < opponent_id THEN player_id ELSE opponent_id END AS a,
-        CASE WHEN player_id < opponent_id THEN opponent_id ELSE player_id END AS b,
-        match_id,
-        match_date,
-        MAX(CASE WHEN player_id < opponent_id THEN match_won
-                 ELSE 1 - match_won END) AS a_won
-    FROM {SILVER_PLAYER_MATCHES}
-    WHERE ((%s = player_id AND %s = opponent_id)
-        OR (%s = opponent_id AND %s = player_id))
-      AND match_date < %s::date
-    GROUP BY 1, 2, 3, 4
-)
+SELECT match_id, winner_id
+FROM {BRONZE_TABLE}
+WHERE ((player1_id = %s AND player2_id = %s)
+    OR (player1_id = %s AND player2_id = %s))
+  AND match_date < %s::date
 ORDER BY match_date DESC, match_id DESC
 LIMIT {H2H_PRIOR_MEETINGS}
 """
@@ -150,19 +144,16 @@ WHERE player_id = ANY(%s::text[])
 """
 
 _H2H_PRIOR_BULK_SQL = f"""
-SELECT req.a, req.b, req.as_of_iso, h.match_id, h.a_won
-FROM unnest(%s::text[], %s::text[], %s::date[]) AS req(a, b, as_of_iso)
+SELECT req.player_id AS req_player_id, req.opponent_id AS req_opponent_id,
+       req.as_of_iso, h.match_id, h.winner_id
+FROM unnest(%s::text[], %s::text[], %s::date[]) AS req(player_id, opponent_id, as_of_iso)
 LEFT JOIN LATERAL (
-    SELECT match_id,
-        MAX(CASE WHEN player_id < opponent_id THEN match_won
-                 ELSE 1 - match_won END) AS a_won,
-        MAX(match_date) AS max_date
-    FROM {SILVER_PLAYER_MATCHES}
-    WHERE ((req.a = player_id AND req.b = opponent_id)
-        OR (req.b = player_id AND req.a = opponent_id))
+    SELECT match_id, winner_id
+    FROM {BRONZE_TABLE}
+    WHERE ((req.player_id = player1_id AND req.opponent_id = player2_id)
+        OR (req.opponent_id = player1_id AND req.player_id = player2_id))
       AND match_date < req.as_of_iso::date
-    GROUP BY match_id
-    ORDER BY max_date DESC, match_id DESC
+    ORDER BY match_date DESC, match_id DESC
     LIMIT {H2H_PRIOR_MEETINGS}
 ) h ON true
 """
@@ -391,20 +382,6 @@ def _normalize_inputs(
     )
 
 
-def _h2h_wins_for_requested(player_id: str, opponent_id: str, a_won_values: list[int]) -> int:
-    """Orient the unordered-pair H2H lookup to the requested player.
-
-    The H2H SQL returns ``a_won`` — the outcome of the lexicographically LOWER
-    id (internal canonicalization for the shared pair lookup only). The lower
-    side uses a_won as-is; the higher side uses its complement.
-    """
-    if not a_won_values:
-        return 0
-    if player_id < opponent_id:
-        return sum(a_won_values)
-    return sum(1 - v for v in a_won_values)
-
-
 def _assemble_row(
     ctx: _RowContext,
     player_side: dict[str, int | float],
@@ -541,16 +518,17 @@ def _build_inference_features_with_meta(
     player_side.update(_profile_values(ctx.player_id, ctx.as_of_date, defaults))
     opponent_side.update(_profile_values(ctx.opponent_id, ctx.as_of_date, defaults))
 
-    # ── Head-to-head: last five strictly-prior meetings for the unordered pair.
-    #    The SQL canonicalizes the pair internally (a_won = lower-id outcome) for
-    #    the shared lookup only; orientation happens in _h2h_wins_for_requested.
+    # ── Head-to-head: last five strictly-prior meetings for the requested pair.
+    #    bronze.match_events stores one row per physical match and winner_id
+    #    marks the explicit winner, so wins for the requested side are counted
+    #    directly by comparing winner_id to the requested player id.
     h2h_df = execute_df(
         _H2H_PRIOR_SQL,
-        [ctx.player_id, ctx.opponent_id, ctx.player_id, ctx.opponent_id, ctx.as_of_iso],
+        [ctx.player_id, ctx.opponent_id, ctx.opponent_id, ctx.player_id, ctx.as_of_iso],
     )
-    a_won_values = [int(v) for v in h2h_df["a_won"].tolist()] if not h2h_df.empty else []
-    h2h_exposure = len(a_won_values)
-    h2h_wins = _h2h_wins_for_requested(ctx.player_id, ctx.opponent_id, a_won_values)
+    winner_id_values = h2h_df["winner_id"].tolist() if not h2h_df.empty else []
+    h2h_exposure = len(winner_id_values)
+    h2h_wins = sum(1 for w in winner_id_values if str(w) == ctx.player_id)
 
     # ── Assemble the directional row in FEATURE_COLS order ──
     row = _assemble_row(ctx, player_side, opponent_side, h2h_exposure, h2h_wins)
@@ -672,15 +650,11 @@ def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame
     for rec in execute_df(_PROFILES_BULK_SQL, [players]).to_dict("records"):
         profiles[str(rec["player_id"])] = cast(dict[str, object], rec)
 
-    # H2H lookup is keyed on the unordered pair (LEAST/GREATEST) for the shared
-    # prior-meeting store; orientation to each requested player happens below.
-    h2h: dict[tuple[str, str, str], list[tuple[str, int]]] = {}
-    h2h_triples = list(
-        {
-            (min(c.player_id, c.opponent_id), max(c.player_id, c.opponent_id), c.as_of_iso)
-            for c in ctxs
-        }
-    )
+    # H2H lookup is keyed on the requested (player, opponent) pair; the
+    # lateral query matches either storage orientation and winner_id marks the
+    # explicit winner, so wins for each requested side are counted directly.
+    h2h: dict[tuple[str, str, str], list[tuple[str, str]]] = {}
+    h2h_triples = list({(c.player_id, c.opponent_id, c.as_of_iso) for c in ctxs})
     h2h_rows = execute_df(
         _H2H_PRIOR_BULK_SQL,
         [
@@ -692,8 +666,8 @@ def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame
     for rec in h2h_rows.to_dict("records"):
         if rec["match_id"] is None:  # pair with no prior meetings
             continue
-        key = (rec["a"], rec["b"], _to_date(rec["as_of_iso"]).isoformat())
-        h2h.setdefault(key, []).append((str(rec["match_id"]), int(rec["a_won"])))
+        key = (rec["req_player_id"], rec["req_opponent_id"], _to_date(rec["as_of_iso"]).isoformat())
+        h2h.setdefault(key, []).append((str(rec["match_id"]), str(rec["winner_id"])))
 
     out_rows: list[dict[str, int | float | str]] = []
     for ctx in ctxs:
@@ -719,22 +693,15 @@ def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame
         opponent_side.update(
             _profile_values_from_row(profiles.get(ctx.opponent_id), ctx.as_of_date, defaults)
         )
-        meetings = h2h.get(
-            (
-                min(ctx.player_id, ctx.opponent_id),
-                max(ctx.player_id, ctx.opponent_id),
-                ctx.as_of_iso,
-            ),
-            [],
-        )
-        a_won_values = [w for _, w in meetings]
+        meetings = h2h.get((ctx.player_id, ctx.opponent_id, ctx.as_of_iso), [])
+        winner_id_values = [w for _, w in meetings]
         out_rows.append(
             _assemble_row(
                 ctx,
                 player_side,
                 opponent_side,
-                len(a_won_values),
-                _h2h_wins_for_requested(ctx.player_id, ctx.opponent_id, a_won_values),
+                len(winner_id_values),
+                sum(1 for w in winner_id_values if w == ctx.player_id),
             )
         )
 
