@@ -19,7 +19,7 @@
   /* text */
   --text: #e8edf7;
   --text-dim: #9aa6c0;
-  --text-faint: #616e8c;
+  --text-faint: #7f8ba5;
 
   /* lines */
   --line: #222a3c;
@@ -62,7 +62,7 @@ html.light {
 
   --text: #252b3a;
   --text-dim: #5b6578;
-  --text-faint: #8b93a5;
+  --text-faint: #5b6578;
 
   --line: #ddd4c2;
   --line-strong: #c3b79e;

@@ -136,6 +136,19 @@ def test_development_bento_is_valid_for_drift(monkeypatch):
     assert champion.version == "3"
 
 
+def test_vite_url_is_rejected_before_http_request(monkeypatch):
+    monkeypatch.setattr(drift, "PRODUCTION_BENTO_URL", "http://localhost:5173")
+    monkeypatch.setattr(
+        drift.requests,
+        "get",
+        lambda *_args, **_kwargs: pytest.fail("HTTP call"),
+    )
+
+    client = _FakeMlflowClient(champion=_FakeModelVersion())
+    with pytest.raises(RuntimeError, match="points to Vite"):
+        drift._validate_production(client)  # type: ignore[arg-type]
+
+
 def test_empty_population_insufficient_data(monkeypatch, tmp_path):
     monkeypatch.setattr(drift, "ARTIFACTS", tmp_path)
     monkeypatch.setattr(drift, "run_dbt_build", lambda **__kwargs: None)
