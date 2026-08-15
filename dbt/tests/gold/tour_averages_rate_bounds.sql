@@ -103,3 +103,8 @@ SELECT singleton_id, 'tour_break_point_opportunities_per_return_game',
 FROM {{ ref('tour_averages') }}
 WHERE tour_break_point_opportunities_per_return_game IS NOT NULL
   AND tour_break_point_opportunities_per_return_game < 0
+UNION ALL
+SELECT singleton_id, 'tour_return_games_won_pct', tour_return_games_won_pct
+FROM {{ ref('tour_averages') }}
+WHERE tour_return_games_won_pct IS NOT NULL
+  AND (tour_return_games_won_pct < 0 OR tour_return_games_won_pct > 1)

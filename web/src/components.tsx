@@ -146,8 +146,10 @@ export function PlayerPicker({
   placeholder,
   exclude,
   searchFn,
+  searchLoader,
   loading,
   tone,
+  centered,
 }: {
   players: Player[]
   value: string | null
@@ -155,14 +157,18 @@ export function PlayerPicker({
   placeholder: string
   exclude?: string | null
   searchFn?: (query: string) => Player[]
+  searchLoader?: () => Promise<(query: string) => Player[]>
   loading?: boolean
   // Tints the trigger-row border (and focus outline) to the player color once
   // a player is selected; unselected pickers keep the default clay hover.
   tone?: "grass" | "clay"
+  centered?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [activeIndex, setActiveIndex] = useState(0)
+  const [loadedSearchFn, setLoadedSearchFn] = useState<typeof searchFn>()
+  const [searchLoading, setSearchLoading] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -178,13 +184,22 @@ export function PlayerPicker({
   const options =
     q.length === 0
       ? rankedDefaults
-      : searchFn
-        ? searchFn(q)
+      : (loadedSearchFn ?? searchFn)
+        ? (loadedSearchFn ?? searchFn)!(q)
         : players.filter(
             (p) => p.player_id !== exclude && p.display_name.toLowerCase().includes(q),
           )
   const active = Math.min(activeIndex, Math.max(options.length - 1, 0))
-  const showLoading = loading && (q.length > 0 || options.length === 0)
+  const showLoading = (loading || searchLoading) && (q.length > 0 || options.length === 0)
+
+  useEffect(() => {
+    if (!q || loadedSearchFn || searchFn || !searchLoader) return
+    setSearchLoading(true)
+    void searchLoader()
+      .then((search) => setLoadedSearchFn(() => search))
+      .catch(() => {})
+      .finally(() => setSearchLoading(false))
+  }, [q, loadedSearchFn, searchFn, searchLoader])
 
   const close = (refocus: boolean) => {
     setOpen(false)
@@ -238,7 +253,7 @@ export function PlayerPicker({
   const optionId = (i: number) => `${uid}-option-${i}`
 
   return (
-    <div className="picker" ref={rootRef}>
+    <div className={`picker${centered ? " is-centered" : ""}`} ref={rootRef}>
       <span className="picker-label">{placeholder}</span>
       <div
         className={`picker-trigger-row${selected ? " is-selected" : ""}`}
@@ -313,7 +328,17 @@ export function PlayerPicker({
                   onClick={() => select(p.player_id)}
                   className={`picker-option${i === active ? ' is-active' : ''}${p.player_id === value ? ' is-selected' : ''}`}
                 >
-                  <span className="picker-option-name">{p.display_name}</span>
+                  <span className="picker-option-player">
+                    <span className="picker-option-name">{p.display_name}</span>
+                    {p.ioc && (
+                      <span
+                        className="picker-option-country"
+                        aria-label={`Country: ${p.ioc}`}
+                      >
+                        {p.ioc}
+                      </span>
+                    )}
+                  </span>
                   {p.current_rank != null && (
                     <span className="picker-option-rank num">#{p.current_rank}</span>
                   )}

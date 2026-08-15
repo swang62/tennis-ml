@@ -7,10 +7,11 @@ import {
   Outlet,
   useLocation,
 } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import Home from "./pages/Home";
+import { getDirectoryInfo } from "./api";
 import { formatLongDate } from "./lib/format";
-import { usePlayerDirectory } from "./lib/playerIndex";
 import { useTheme, type ThemeName } from "./theme";
 
 function CourtMark() {
@@ -113,7 +114,12 @@ function Layout() {
   const { theme, toggle } = useTheme();
   const [menuOpen, setMenuOpen] = useState(false);
   const headerRef = useRef<HTMLElement>(null);
-  const directoryQ = usePlayerDirectory();
+  const directoryInfoQ = useQuery({
+    queryKey: ["directory_info"],
+    queryFn: getDirectoryInfo,
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
   const { pathname } = useLocation();
   useEffect(() => {
     document.title =
@@ -200,7 +206,7 @@ function Layout() {
             </Link>
             <Link
               to="/h2h"
-              search={{ playerA: undefined }}
+              search={{ playerA: undefined, playerB: undefined }}
               className={`navlink${h2hActive ? " active" : ""}`}
               aria-current={h2hActive ? "page" : undefined}
               onClick={() => setMenuOpen(false)}
@@ -236,9 +242,9 @@ function Layout() {
       </main>
       <footer className="footer container">
         <span>Courtside — model-driven tennis intelligence.</span>
-        {directoryQ.data?.latest_match_date && (
+        {directoryInfoQ.data?.latest_match_date && (
           <span>
-            Last updated {formatLongDate(directoryQ.data.latest_match_date)}
+            Last updated {formatLongDate(directoryInfoQ.data.latest_match_date)}
           </span>
         )}
       </footer>
@@ -266,9 +272,9 @@ export const h2hRoute = createRoute({
   component: lazyRouteComponent(() => import("./pages/H2H")),
   validateSearch: (search: Record<string, unknown>) => ({
     playerA:
-      typeof search.playerA === "string"
-        ? search.playerA
-        : (undefined as string | undefined),
+      typeof search.playerA === "string" ? search.playerA : undefined,
+    playerB:
+      typeof search.playerB === "string" ? search.playerB : undefined,
   }),
 });
 

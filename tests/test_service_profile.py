@@ -57,6 +57,7 @@ def _profile_row(**overrides) -> pd.DataFrame:
         "return_points_won_pct": 0.42,
         "first_serve_return_points_won_pct": 0.30,
         "second_serve_return_points_won_pct": 0.52,
+        "return_games_won_pct": 0.43,
         "break_point_conversion_pct": 0.40,
         "break_point_opportunities_per_return_game": 0.55,
         # surface
@@ -80,6 +81,7 @@ def _profile_row(**overrides) -> pd.DataFrame:
         "tour_df_rate": 0.04,
         "tour_aces_per_svc_game": 0.40,
         "tour_break_point_opportunities_per_return_game": 0.50,
+        "tour_return_games_won_pct": 0.38,
     }
     row.update(overrides)
     return pd.DataFrame([row])
@@ -120,11 +122,12 @@ def test_profile_single_query_returns_full_contract():
         "break_points_saved_pct": 0.60,
     }
 
-    # return: all five materialized metrics
+    # return: all six materialized metrics
     assert data["return"] == {
         "return_points_won_pct": 0.42,
         "first_serve_return_points_won_pct": 0.30,
         "second_serve_return_points_won_pct": 0.52,
+        "return_games_won_pct": 0.43,
         "break_point_conversion_pct": 0.40,
         "break_point_opportunities_per_return_game": 0.55,
     }
@@ -173,6 +176,7 @@ def test_profile_tour_comparisons_are_player_minus_tour_deltas():
     # return-side benchmarks are 1 - the serve benchmark
     assert tc["first_serve_return_points_won_pct"] == pytest.approx(0.30 - (1 - 0.72))
     assert tc["second_serve_return_points_won_pct"] == pytest.approx(0.52 - (1 - 0.52))
+    assert tc["return_games_won_pct"] == pytest.approx(0.43 - 0.38)
     assert tc["break_point_conversion_pct"] == pytest.approx(0.40 - (1 - 0.58))
     assert tc["break_point_opportunities_per_return_game"] == pytest.approx(0.55 - 0.50)
 
@@ -213,6 +217,7 @@ def test_profile_zero_match_player():
         "return_points_won_pct": None,
         "first_serve_return_points_won_pct": None,
         "second_serve_return_points_won_pct": None,
+        "return_games_won_pct": None,
         "break_point_conversion_pct": None,
         "break_point_opportunities_per_return_game": None,
         "hard_matches": 0,
@@ -314,6 +319,7 @@ def test_profile_zero_denominators_null_not_false_zero():
                 aces_per_service_game=None,  # no service_games
                 break_points_saved_pct=None,  # no break_points_faced
                 break_point_conversion_pct=None,  # no opp break_points_faced
+                return_games_won_pct=None,  # no opp service_games
                 break_point_opportunities_per_return_game=None,  # no opp service_games
             )
         ],
@@ -325,6 +331,7 @@ def test_profile_zero_denominators_null_not_false_zero():
     assert data["serve"]["aces_per_service_game"] is None
     assert data["serve"]["break_points_saved_pct"] is None
     assert data["return"]["break_point_conversion_pct"] is None
+    assert data["return"]["return_games_won_pct"] is None
     assert data["return"]["break_point_opportunities_per_return_game"] is None
     # ...while the remaining metrics keep their values
     assert data["serve"]["first_serve_in_pct"] == 0.62

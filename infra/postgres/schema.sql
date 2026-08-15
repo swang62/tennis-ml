@@ -164,6 +164,17 @@ CREATE INDEX IF NOT EXISTS idx_match_events_p1_date
 CREATE INDEX IF NOT EXISTS idx_match_events_p2_date
     ON bronze.match_events (player2_id, match_date);
 
+-- Ordered direct-meeting reads used by /head_to_head. `match_id` completes
+-- the endpoint's deterministic ORDER BY after same-day matches.
+CREATE INDEX IF NOT EXISTS idx_match_events_p1_date_match
+    ON bronze.match_events (player1_id, match_date DESC, match_id DESC);
+CREATE INDEX IF NOT EXISTS idx_match_events_p2_date_match
+    ON bronze.match_events (player2_id, match_date DESC, match_id DESC);
+
+-- Global latest-match lookup for the dynamic directory footer.
+CREATE INDEX IF NOT EXISTS idx_match_events_date
+    ON bronze.match_events (match_date);
+
 -- Identity backbone for players, sourced from the ATP player database
 -- (data/ATP_player_database.csv, canonical ATP id/name + base metadata).
 -- Enrichment columns at the bottom are left empty by the ATP load and filled

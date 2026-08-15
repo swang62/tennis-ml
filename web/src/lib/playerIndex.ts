@@ -1,63 +1,40 @@
-// Shared static player-directory source for Home, H2H, and the layout footer.
+// Shared static player-directory source for Home and H2H.
 // The browser fetches only the deploy-built manifest, then its content-hashed
 // payload, and deserializes the MiniSearch index with loadJSON — the index is
 // never constructed in the browser. HTTP caching of the immutable hashed asset
 // is the only client cache (no localStorage, no polling, no API fallback).
 
 import { useQuery } from "@tanstack/react-query";
-import MiniSearch from "minisearch";
 import type { Player } from "../api";
 
 export const PLAYER_INDEX_MANIFEST = "/player-index.manifest.json";
 
-// Must match MINISEARCH_OPTS in web/scripts/build-player-index.mjs: a
-// serialized index only deserializes with the exact options it was built with.
+// Must match MINISEARCH_OPTS in web/scripts/build-player-index.mjs.
 export const MINISEARCH_OPTS = Object.freeze({
   fields: ["display_name"],
   idField: "player_id",
-  storeFields: [
-    "display_name",
-    "matches_played",
-    "latest_rank_points",
-    "current_rank",
-    "ioc",
-    "iso2",
-    "country_name",
-  ],
   searchOptions: { fuzzy: 0.2, prefix: true, boost: { display_name: 2 } },
 });
 
 export interface PlayerIndexData {
   players: Player[];
-  latest_match_date: string | null;
-  search: (query: string) => Player[];
+  loadSearch: () => Promise<PlayerSearch>;
 }
 
-// Deserialize the deploy-built payload. The index string is the documented
-// MiniSearch.loadJSON input; search is bound to the deserialized instance.
-export function deserializePlayerIndex(payload: {
-  latest_match_date: string | null;
-  players: Player[];
-  index: string;
-}): PlayerIndexData {
-  const index = MiniSearch.loadJSON(payload.index, MINISEARCH_OPTS);
-  return {
-    players: payload.players,
-    latest_match_date: payload.latest_match_date,
-    search: (query: string): Player[] => {
-      const q = query.trim();
-      if (!q) return [];
-      return index.search(q, { fuzzy: 0.2, prefix: true }).map((r) => ({
-        player_id: r.id,
-        display_name: r.display_name as string,
-        matches_played: r.matches_played as number,
-        latest_rank_points: r.latest_rank_points as number | undefined,
-        current_rank: r.current_rank as number | null | undefined,
-        ioc: r.ioc as string,
-        iso2: r.iso2 as string,
-        country_name: r.country_name as string,
-      }));
-    },
+export type PlayerSearch = (query: string) => Player[];
+
+// The MiniSearch module and serialized index are loaded only after the user
+// types a query; initial picker defaults use the directory payload alone.
+export async function deserializePlayerSearch(indexPayload: string, players: Player[]): Promise<PlayerSearch> {
+  const { default: MiniSearch } = await import("minisearch");
+  const index = MiniSearch.loadJSON(indexPayload, MINISEARCH_OPTS);
+  const playersById = new Map(players.map((player) => [player.player_id, player]));
+  return (query: string): Player[] => {
+    const q = query.trim();
+    if (!q) return [];
+    return index
+      .search(q, { fuzzy: 0.2, prefix: true })
+      .flatMap((result) => playersById.get(String(result.id)) ?? []);
   };
 }
 
@@ -66,12 +43,36 @@ export async function fetchPlayerIndex(): Promise<PlayerIndexData> {
   if (!manifestRes.ok) {
     throw new Error(`player index manifest: HTTP ${manifestRes.status}`);
   }
-  const manifest = (await manifestRes.json()) as { path: string };
-  const payloadRes = await fetch(manifest.path);
+  const manifest = (await manifestRes.json()) as {
+    directoryPath?: string;
+    searchPath?: string;
+    path?: string;
+  };
+  const payloadRes = await fetch(manifest.directoryPath ?? manifest.path!);
   if (!payloadRes.ok) {
     throw new Error(`player index payload: HTTP ${payloadRes.status}`);
   }
-  return deserializePlayerIndex(await payloadRes.json());
+  const payload = (await payloadRes.json()) as {
+    players: Player[];
+    index?: string;
+  };
+  let searchPromise: Promise<PlayerSearch> | undefined;
+  return {
+    ...payload,
+    loadSearch: () => {
+      searchPromise ??= manifest.searchPath
+        ? fetch(manifest.searchPath)
+            .then((res) => {
+              if (!res.ok) throw new Error(`player search index: HTTP ${res.status}`);
+              return res.json() as Promise<{ index: string }>;
+            })
+            .then(({ index }) => deserializePlayerSearch(index, payload.players))
+        : payload.index
+          ? deserializePlayerSearch(payload.index, payload.players)
+          : Promise.reject(new Error("player search index missing from manifest"));
+      return searchPromise;
+    },
+  };
 }
 
 export const playerIndexQueryKey = ["player-index"] as const;
