@@ -13,7 +13,7 @@ End-to-end MLOps pipeline for tennis match prediction. Data flows CSV → Postgr
 - **ETL** is a Prefect flow that runs `dbt build` (one command, dependency-ordered). All promoted models are registered in MLFlow.
 - **Deploy** is a separate Prefect flow gated on the latest promoted model — it only redeploys when the `@champion` alias or serving artifacts actually changed (or when run with `--force`).
 
-**Just recipes invoke project `.py` files directly.** Recipes run the exact file via `uv run python path/to/file.py` (e.g. `just db-migrate` → `uv run python src/db/migrate_db.py migrate`); `*args` recipes pass CLI args through unchanged. Do not add console scripts or generic CLI wrappers just to serve the justfile.
+**Just recipes invoke project `.py` files directly.** Recipes run the exact file via `uv run python path/to/file.py` (e.g. `just migrate` → `uv run python src/db/migrate_db.py migrate`); `*args` recipes pass CLI args through unchanged. Do not add console scripts or generic CLI wrappers just to serve the justfile.
 
 **The host Prefect worker is a serviceman user agent.** Its name is `tennis-prefect-worker`; it runs `uv run python infra/prefect/worker.py` from the repository root. That entrypoint loads the root `.env` before registering the rankings deployment and starting `tennis-pool`. Do not add a `just worker` recipe.
 

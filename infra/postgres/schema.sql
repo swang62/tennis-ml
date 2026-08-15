@@ -13,7 +13,7 @@
 -- (bronze.match_events and bronze.player_profiles). No data is loaded here —
 -- dbt owns silver.player_matches / silver.rolling_features /
 -- gold.match_features / gold.tour_averages / gold.player_profiles, and data
--- is written later by just db-seed / db-etl. Nothing is baked into an image;
+-- is written later by just seed / etl. Nothing is baked into an image;
 -- the Compose named volume persists everything.
 
 -- Bento workers can start concurrently; serialize this idempotent migration.

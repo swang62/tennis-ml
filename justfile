@@ -13,14 +13,14 @@ cluster-restart:
     kubectl rollout restart statefulset
 
 # Create the cluster, manifests, and database.
-cluster-setup: deps cluster-create db-migrate
+cluster-setup: deps cluster-create migrate
 
 # Run bronze-to-gold ETL; pass --full-refresh to rebuild silver/gold from bronze.
-db-etl *args:
+etl *args:
     uv run python src/flows/etl.py {{ args }}
 
 # Apply idempotent PostgreSQL schema migrations without dropping data.
-db-migrate:
+migrate:
     uv run python src/db/migrate_db.py migrate
 
 # Drop and recreate PostgreSQL schemas.
@@ -28,11 +28,11 @@ db-reset:
     uv run python src/db/migrate_db.py reset
 
 # Seed deterministic raw matches. --all (every CSV) --enrich (Wikipedia bios) --force (overwrite).
-db-seed *args:
+seed *args:
     uv run python src/db/seed.py {{ args }}
 
 # Export an atomic PostgreSQL training snapshot, optional as the training pipeline always snapshots first.
-db-snapshot:
+snapshot:
     uv run python src/db/snapshot.py
 
 # Build and push all production docker images.
@@ -57,7 +57,7 @@ lint:
     uv run pre-commit run --all-files
 
 # Delete every registered model and non-default experiment from MLflow.
-mlflow-clean:
+mlflow-reset:
     uv run python scripts/reset_mlflow.py
 
 # Trigger the Prefect scrape deployment; pass Prefect CLI args through unchanged (see scrape_flow docstring).

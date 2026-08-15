@@ -260,7 +260,7 @@ def test_training_reads_snapshot_not_postgres(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(training, "SNAPSHOT_PATH", tmp_path / "missing.duckdb")
     training.close()
-    with pytest.raises(FileNotFoundError, match="db-snapshot"):
+    with pytest.raises(FileNotFoundError, match="snapshot"):
         training.connect()
 
 

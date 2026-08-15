@@ -1,7 +1,7 @@
 -- Incremental ETL demo fixture: ONE new bronze match.
 --
 -- Apply this INSERT (e.g. `psql "$DATABASE_URL" -f tests/fixtures/incremental_demo.sql`)
--- and re-run `just db-etl`. Expected deltas on the next dbt build:
+-- and re-run `just etl`. Expected deltas on the next dbt build:
 --
 --   bronze.match_events      +1  (this row)
 --   silver.player_matches    +2  (one perspective per player)

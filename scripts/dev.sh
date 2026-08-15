@@ -114,7 +114,7 @@ FROM (VALUES ('bronze.match_events'), ('silver.player_matches'),
 WHERE to_regclass(t.t) IS NULL") || exit 1
 if [ -n "$missing" ]; then
     echo "[db] error: required table(s) missing in '$DB_NAME': $missing" >&2
-    echo "[db] run 'just db-migrate' then 'just db-seed' and 'just db-etl' to build them" >&2
+    echo "[db] run 'just migrate' then 'just seed' and 'just etl' to build them" >&2
     exit 1
 fi
 
@@ -222,6 +222,7 @@ else:
     exit 1
 }
 
+uv run python src/db/migrate_db.py migrate
 log bento "starting Bento on http://127.0.0.1:3000 and Vite on http://127.0.0.1:5173; Ctrl-C stops both"
 # --reload restarts only for files matched by bentofile.yaml include and
 # .bentoignore (src/**, infra/postgres/schema.sql, data/processed/*); web/,

@@ -5,8 +5,8 @@ silver.player_matches (player-perspective rows) -> silver.rolling_features
 (post-match snapshots) -> gold.match_features (canonical one-row-per-match
 training table) -> gold.player_profiles (derived player-grain aggregates).
 
-Wikipedia bio enrichment happens at seed time via `just db-seed --enrich`
-(never after ETL); re-run `just db-etl` to pick up new summaries.
+Wikipedia bio enrichment happens at seed time via `just seed --enrich`
+(never after ETL); re-run `just etl` to pick up new summaries.
 """
 
 import argparse
@@ -149,7 +149,7 @@ def _dbt_model_rows() -> dict[str, int]:
 @flow(log_prints=True, retries=2)
 def etl_flow(full_refresh: bool = False):
     """Bronze → gold ETL: dbt build only. Enrichment is a seed-time step —
-    run `just db-seed --enrich`, then re-run `just db-etl`.
+    run `just seed --enrich`, then re-run `just etl`.
     """
     load_env()
     rows = bronze_to_gold(full_refresh=full_refresh)
