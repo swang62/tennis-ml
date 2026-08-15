@@ -24,67 +24,33 @@ from src.constants import (
     LINEAGE_RUN_ID_KEY,
     LINEAGE_VERSION_KEY,
     PRODUCTION_MODEL,
+    PROMOTION_AUC_TOLERANCE,
 )
 
-# ── Frozen weighted metric/composite policy (unchanged by the incumbent path) ──
+# ── Frozen promotion-metric policy (unchanged by the incumbent path) ──
 METRIC_NAMES = [
+    "log_loss",
     "roc_auc",
-    "pr_auc",
     "accuracy",
-    "precision",
-    "recall",
-    "f1",
-    "mcc",
     "brier",
 ]
-METRIC_WEIGHTS = {
-    "roc_auc": 0.30,
-    "f1": 0.20,
-    "accuracy": 0.15,
-    "pr_auc": 0.10,
-    "precision": 0.10,
-    "recall": 0.10,
-    "mcc": 0.05,
-    "brier": 0.00,
-}
-EPS = 1e-9
 
 
 def compute_metrics(y_true: object, proba: object, pred: object) -> dict[str, float]:
-    """The 8 gate metrics for one stack on one (y, proba, pred) triple."""
+    """The 4 gate metrics for one stack on one (y, proba, pred) triple."""
     from sklearn.metrics import (
         accuracy_score,
-        average_precision_score,
         brier_score_loss,
-        f1_score,
-        matthews_corrcoef,
-        precision_score,
-        recall_score,
+        log_loss,
         roc_auc_score,
     )
 
     return {
+        "log_loss": float(log_loss(y_true, proba)),
         "roc_auc": float(roc_auc_score(y_true, proba)),
-        "pr_auc": float(average_precision_score(y_true, proba)),
         "accuracy": float(accuracy_score(y_true, pred)),
-        "precision": float(precision_score(y_true, pred)),
-        "recall": float(recall_score(y_true, pred)),
-        "f1": float(f1_score(y_true, pred)),
-        "mcc": float(matthews_corrcoef(y_true, pred)),
         "brier": float(brier_score_loss(y_true, proba)),
     }
-
-
-def promotion_composite(cand_metrics: dict[str, float], prod_metrics: dict[str, float]) -> float:
-    """Weighted relative-delta composite used by the promotion gate.
-
-    `composite = sum(w_i * (cand_i - prod_i) / max(abs(prod_i), EPS))`.
-    Positive means the candidate beats the incumbent on the same test matrix.
-    """
-    return sum(
-        w * (cand_metrics[m] - prod_metrics[m]) / max(abs(prod_metrics[m]), EPS)
-        for m, w in METRIC_WEIGHTS.items()
-    )
 
 
 def ordered_incumbent_contexts(info: pd.DataFrame) -> list[dict[str, object]]:
@@ -108,8 +74,23 @@ def ordered_incumbent_contexts(info: pd.DataFrame) -> list[dict[str, object]]:
                 "opponent_id": str(rec["opponent_id"]),
                 "surface": str(rec["surface"]),
                 "as_of_date": match_date.isoformat(),
-                "tournament_level": int(rec["tournament_level"]),
-                "round_encoded": int(rec["round_encoded"]),
+                "tournament": {
+                    0: None,
+                    1: "atp_250",
+                    2: "atp_500",
+                    3: "masters",
+                    4: "grand_slam",
+                }[int(rec["tournament_level"])],
+                "round": {
+                    0: None,
+                    1: "r128",
+                    2: "r64",
+                    3: "r32",
+                    4: "r16",
+                    5: "qf",
+                    6: "sf",
+                    7: "f",
+                }[int(rec["round_encoded"])],
                 "is_indoor": int(rec["is_indoor"]),
             }
         )
@@ -225,11 +206,14 @@ def decide_promotion(
     candidate_run_id: object,
     force: bool = False,
 ) -> int:
-    """1 promote / 0 skip; metric-only, idempotent, first-promotion aware.
+    """1 promote / 0 skip; probability-first, idempotent, first-promotion aware.
 
-    ``force`` overrides every gate — composite score, idempotency, and
-    first-promotion checks all yield 1 — so a manual ``--force-promote`` always
-    registers a fresh version (refreshing lineage tags).
+    With an incumbent, promotion requires the candidate's test log loss to be
+    strictly lower than the incumbent's AND its ROC-AUC to trail by no more
+    than ``PROMOTION_AUC_TOLERANCE``. ``force`` overrides every gate —
+    idempotency and first-promotion checks both yield 1 — so a manual
+    ``--force-promote`` always registers a fresh version (refreshing lineage
+    tags).
     """
     if force:
         return 1
@@ -237,7 +221,12 @@ def decide_promotion(
         return 0  # already promoted
     if prod_metrics is None:
         return 1  # first promotion: no incumbent to beat
-    return 1 if promotion_composite(cand_metrics, prod_metrics) > 0 else 0
+    return (
+        1
+        if cand_metrics["log_loss"] < prod_metrics["log_loss"]
+        and cand_metrics["roc_auc"] >= prod_metrics["roc_auc"] - PROMOTION_AUC_TOLERANCE
+        else 0
+    )
 
 
 def resolve_champion(client: Any) -> Any | None:

@@ -2,4 +2,6 @@ node_modules
 dist
 .git
 *.md
-.env.example
+.env
+.env.*
+!.env.example

@@ -1,11 +1,15 @@
-"""Grouped cross-validation helpers shared by the 02 tuning notebooks.
+"""Grouped cross-validation helpers shared by the split and 02 tuning notebooks.
 
 Gold holds two directional rows per physical match, keyed by
 (match_id, player_id). Splitting must never separate a match's two
-orientations, so every fold holds out whole matches and all 02 notebooks
-derive their fold assignment from this module. GroupKFold is deterministic
-for a fixed group order, so the persisted fold_assignment.parquet is
-identical across the linear, GBDT, and NN runs.
+orientations, so every fold holds out whole matches. GroupKFold is
+deterministic for a fixed group order, so the fold_assignment.parquet
+persisted by the 01 split notebook is identical across the linear, GBDT,
+and NN runs.
+
+Lifecycle: 01 creates/replaces fold_assignment.parquet exactly once per
+training run, right after writing the new split artifacts; each 02 tuner
+loads and validates that current-run assignment and never writes it.
 """
 
 from __future__ import annotations
@@ -79,22 +83,81 @@ def load_fold_assignment(path: str | Path) -> pd.DataFrame:
     return pd.read_parquet(Path(path))
 
 
-def persist_fold_assignment(
+def create_fold_assignment(
     match_ids: ArrayInput,
     player_ids: ArrayInput,
     n_splits: int,
     random_state: int,
     path: str | Path,
 ) -> pd.DataFrame:
-    """Compute the fold frame, assert it matches any existing file, then save.
+    """Compute the current split's fold frame and persist it, replacing any
+    prior run's assignment.
 
-    Every 02 notebook calls this with the same inputs, so the persisted
-    fold_assignment.parquet is identical across runs and a stale file cannot
-    silently disagree with a fresh computation.
+    Called exactly once per training run by the 01 split notebook after it
+    writes the new split artifacts; the 02 tuners only load what this wrote.
     """
     frame = fold_assignment_frame(match_ids, player_ids, n_splits, random_state)
-    path = Path(path)
-    if path.exists():
-        pd.testing.assert_frame_equal(load_fold_assignment(path), frame)
     save_fold_assignment(frame, path)
     return frame
+
+
+def load_validated_fold_assignment(
+    match_ids: ArrayInput,
+    player_ids: ArrayInput,
+    n_splits: int,
+    random_state: int,
+    path: str | Path,
+) -> pd.DataFrame:
+    """Load the current run's fold assignment and validate it against the
+    split this notebook is consuming, before any tuning starts.
+
+    The persisted frame must be exactly what GroupKFold computes for the
+    current split: the same match IDs, fold count, canonical ordering (one
+    row per match, sorted by match_id), and fold values. Anything else — a
+    stale file from a previous snapshot, a different split, a different fold
+    count, or a corrupted file — raises with a clear message instead of
+    silently diverging.
+    """
+    path = Path(path)
+    frame = load_fold_assignment(path)
+    expected = fold_assignment_frame(match_ids, player_ids, n_splits, random_state)
+    _validate_fold_assignment(frame, expected, path)
+    return frame
+
+
+def _validate_fold_assignment(frame: pd.DataFrame, expected: pd.DataFrame, path: Path) -> None:
+    """Raise ValueError with a clear message on any stale/corrupt mismatch."""
+    if list(frame.columns) != ["match_id", "fold"]:
+        raise ValueError(
+            f"fold assignment {path} has columns {list(frame.columns)}; "
+            'expected ["match_id", "fold"]'
+        )
+    if frame["match_id"].duplicated().any():
+        raise ValueError(f"fold assignment {path} contains duplicate match_ids")
+    frame_ids = set(frame["match_id"])
+    current_ids = set(expected["match_id"])
+    if frame_ids != current_ids:
+        missing = sorted(current_ids - frame_ids)[:5]
+        extra = sorted(frame_ids - current_ids)[:5]
+        raise ValueError(
+            f"fold assignment {path} is stale or mismatched for the current split: "
+            f"{len(current_ids - frame_ids)} current match_id(s) missing (e.g. {missing}) "
+            f"and {len(frame_ids - current_ids)} unknown match_id(s) present (e.g. {extra})"
+        )
+    expected_folds = set(expected["fold"])
+    if set(frame["fold"]) != expected_folds:
+        raise ValueError(
+            f"fold assignment {path} has folds {sorted(set(frame['fold']))}; "
+            f"expected {sorted(expected_folds)} for the current split"
+        )
+    if list(frame["match_id"]) != list(expected["match_id"]):
+        raise ValueError(
+            f"fold assignment {path} is not in the canonical ordering of the current "
+            "split (one row per match, sorted by match_id)"
+        )
+    try:
+        pd.testing.assert_frame_equal(frame, expected, check_dtype=False)
+    except AssertionError as exc:
+        raise ValueError(
+            f"fold assignment {path} does not match the current split's computed folds"
+        ) from exc

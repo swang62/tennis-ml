@@ -33,7 +33,7 @@ def test_recommendation_healthy_when_no_triggers():
 
 
 def test_recommendation_investigate_on_moderate_feature_psi():
-    assert _recommend(per_feature_drift={"rank_diff": 0.15}) == "investigate"
+    assert _recommend(per_feature_drift={"player1_first_serve_pct": 0.15}) == "investigate"
 
 
 def test_recommendation_retrain_on_drift_share():
@@ -45,11 +45,14 @@ def test_recommendation_retrain_on_prediction_psi():
 
 
 def test_recommendation_retrain_on_calibration_delta():
-    assert _recommend(calibration_delta=0.06) == "retrain"
+    assert _recommend(calibration_delta=drift.DRIFT_CALIBRATION_DELTA + 0.01) == "retrain"
 
 
 def test_recommendation_retrain_on_auc_drop_with_enough_matches():
-    assert _recommend(n_current=drift.DRIFT_MIN_N_FOR_AUC, auc_drop=0.1) == "retrain"
+    assert (
+        _recommend(n_current=drift.DRIFT_MIN_N_FOR_AUC, auc_drop=drift.DRIFT_AUC_DROP + 0.01)
+        == "retrain"
+    )
 
 
 def test_recommendation_ignores_auc_drop_when_sample_too_small():
@@ -60,7 +63,7 @@ def test_recommendation_retrain_takes_precedence_over_investigate():
     assert (
         _recommend(
             drift_share=drift.DRIFT_SHARE_THRESHOLD,
-            per_feature_drift={"rank_diff": 0.15},
+            per_feature_drift={"player1_serve_win_pct": 0.15},
         )
         == "retrain"
     )
@@ -95,19 +98,16 @@ def test_pinned_metrics_parses_champion_tags():
     tags: dict[str, str] = {}
     for name in METRIC_NAMES:
         tags[f"{drift.METRIC_PREFIX}{name}"] = "0.61"
-    tags[drift.METRIC_COMPOSITE_KEY] = "0.12"
     tags[drift.EVAL_SPLIT_SIZE_KEY] = "125"
     tags[drift.EVAL_MAX_DATE_KEY] = "2025-01-10"
 
     pinned = drift._pinned_metrics(_FakeClient(tags), _champion())  # type: ignore[arg-type]
 
     assert set(pinned) == set(METRIC_NAMES) | {
-        "promotion_composite",
         "eval_split_size",
         "eval_max_date",
     }
     assert pinned["roc_auc"] == 0.61
-    assert pinned["promotion_composite"] == 0.12
     assert pinned["eval_split_size"] == 125
     assert pinned["eval_max_date"] == "2025-01-10"
 

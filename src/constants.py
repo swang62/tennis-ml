@@ -28,21 +28,20 @@ def get_database_url() -> str:
 
 
 # --- Table names ---
-BRONZE_TABLE = "bronze.match_events"
+BRONZE_MATCHES_TABLE = "bronze.match_events"
 BRONZE_PROFILES_TABLE = "bronze.player_profiles"
-RANKINGS_TABLE = "bronze.rankings"
+BRONZE_RANKINGS_TABLE = "bronze.rankings"
 
 SILVER_PLAYER_MATCHES = "silver.player_matches"
 SILVER_ROLLING_FEATURES = "silver.rolling_features"
 
-GOLD_TABLE = "gold.match_features"
+GOLD_MATCHES_TABLE = "gold.match_features"
+GOLD_PROFILES_TABLE = "gold.player_profiles"
 TOUR_AVERAGES_TABLE = "gold.tour_averages"
-PROFILES_TABLE = "gold.player_profiles"
 
 # ---- Config parameters ----
 ENRICH_WORKERS = 4
 BATCH_MAX_SIZE_ROWS = 1000
-# Upper bound for a single bulk inference request (Nginx chunks below this).
 BULK_MAX_ROWS = 1000
 
 # --- Core directories / files ---
@@ -115,26 +114,30 @@ AUX_TAG_PREFIX = "aux_"
 TRAIN_DATA_MAX_DATE_KEY = "train_data_max_match_date"
 
 # Performance metrics pinned on the champion model version at promotion time.
-# Metric tag keys are METRIC_PREFIX + metric name (the 8 in METRIC_NAMES);
+# Metric tag keys are METRIC_PREFIX + metric name (the 4 in METRIC_NAMES);
 # drift reads them with this uniform prefix.
 METRIC_PREFIX = "metric_"
-METRIC_COMPOSITE_KEY = "metric_promotion_composite"
 EVAL_SPLIT_SIZE_KEY = "metric_eval_split_size"
 EVAL_MAX_DATE_KEY = "metric_eval_max_date"
+
+# --- Promotion gate ---
+# The candidate's ROC-AUC may trail the incumbent's by up to this amount (a
+# strictly lower test log loss is still required) and still be promoted.
+PROMOTION_AUC_TOLERANCE = 0.01
 
 # --- Drift monitoring thresholds (single source of truth for the verdict) ---
 # Per-feature PSI bands: < DRIFT_PSI_MODERATE = no drift, moderate band between,
 # >= DRIFT_PSI_SIGNIFICANT = significant. Drift share is the fraction of
-# features with PSI >= DRIFT_PSI_SIGNIFICANT. Prediction PSI and calibration /
-# AUC degradation are retrain triggers; the AUC trigger only applies once the
-# current window is large enough to mean anything.
+# features with PSI >= DRIFT_PSI_SIGNIFICANT. Retrain gates are intentionally
+# loose; moderate changes recommend investigation instead.
 DRIFT_PSI_MODERATE = 0.1
-DRIFT_PSI_SIGNIFICANT = 0.2
-DRIFT_SHARE_THRESHOLD = 0.5
-DRIFT_PRED_PSI_THRESHOLD = 0.2
-DRIFT_CALIBRATION_DELTA = 0.05
-DRIFT_AUC_DROP = 0.05
+DRIFT_PSI_SIGNIFICANT = 0.3
+DRIFT_SHARE_THRESHOLD = 0.75
+DRIFT_PRED_PSI_THRESHOLD = 0.3
+DRIFT_CALIBRATION_DELTA = 0.1
+DRIFT_AUC_DROP = 0.1
 DRIFT_MIN_N_FOR_AUC = 30
+DRIFT_MIN_N_FOR_CHECK = 10
 
 # On-demand reference window bounds: size-matched to the current window,
 # floored at DRIFT_REF_MIN and capped at DRIFT_REF_MAX matches.

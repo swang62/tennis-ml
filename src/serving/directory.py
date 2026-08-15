@@ -15,7 +15,7 @@ from decimal import Decimal
 import numpy as np
 import pandas as pd
 
-from src.constants import BRONZE_PROFILES_TABLE, PROFILES_TABLE
+from src.constants import BRONZE_PROFILES_TABLE, GOLD_PROFILES_TABLE
 from src.countries import resolve_ioc, valid_ioc
 
 # Directory read: bronze metadata (name/IOC) joined to the dbt-derived gold
@@ -27,7 +27,7 @@ SELECT bp.player_id, bp.display_name, bp.ioc,
        gp.match_count AS matches_played,
        gp.current_rank
 FROM {BRONZE_PROFILES_TABLE} bp
-LEFT JOIN {PROFILES_TABLE} gp ON gp.player_id = bp.player_id
+LEFT JOIN {GOLD_PROFILES_TABLE} gp ON gp.player_id = bp.player_id
 ORDER BY gp.current_rank NULLS LAST, bp.display_name, bp.player_id
 """
 

@@ -14,7 +14,7 @@ from src.constants import (
     BRONZE_PROFILES_TABLE,
     DATA_PROCESSED,
     DEPLOY_ARTIFACTS,
-    PROFILES_TABLE,
+    GOLD_PROFILES_TABLE,
 )
 from src.db.client import to_dataframe
 
@@ -70,7 +70,7 @@ LIFETIME_PLAYSTYLE_COLS: list[str] = [
 
 _PLAYER_LIFETIME_SQL = f"""
 SELECT player_id, {", ".join(LIFETIME_PLAYSTYLE_COLS)}
-FROM {PROFILES_TABLE}
+FROM {GOLD_PROFILES_TABLE}
 """
 
 # Fixed one-hot categories keep the vector layout stable across builds even
