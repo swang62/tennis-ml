@@ -3,22 +3,18 @@ import {
   Suspense,
   useCallback,
   useEffect,
-  useRef,
-  useState,
   type SyntheticEvent,
 } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import MiniSearch from "minisearch";
 import {
   getMatchHistory,
   getPlayerProfile,
-  getPlayers,
   getRankHistory,
   getSimilarPlayers,
-  type Player,
 } from "../api";
 import { ErrorBox, Kicker, Loading, PlayerPicker } from "../components";
+import { usePlayerDirectory } from "../lib/playerIndex";
 import { homeRoute } from "../routes";
 import { useTheme } from "../theme";
 
@@ -26,85 +22,19 @@ import { useTheme } from "../theme";
 // selected, keeping the index chunk free of chart code.
 const ProfileContent = lazy(() => import("./Profile"));
 
-const PLAYERS_INDEX_KEY = "tm-player-index-v2";
-
-const MINISEARCH_OPTS = {
-  fields: ["display_name"],
-  idField: "player_id",
-  storeFields: [
-    "display_name",
-    "matches_played",
-    "latest_rank_points",
-    "current_rank",
-    "ioc",
-    "iso2",
-    "country_name",
-  ],
-  searchOptions: { fuzzy: 0.2, prefix: true, boost: { display_name: 2 } },
-};
-
-function useMiniSearch() {
-  const indexRef = useRef<MiniSearch | null>(null);
-  const [ready, setReady] = useState(false);
-
-  const playersQ = useQuery({
-    queryKey: ["players"],
-    queryFn: getPlayers,
-    staleTime: Infinity,
-    gcTime: Infinity,
-  });
-
-  useEffect(() => {
-    try {
-      const cached = localStorage.getItem(PLAYERS_INDEX_KEY);
-      if (cached) {
-        indexRef.current = MiniSearch.loadJSON(cached, MINISEARCH_OPTS);
-        setReady(true);
-      }
-    } catch {
-      localStorage.removeItem(PLAYERS_INDEX_KEY);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!playersQ.data || indexRef.current) return;
-    const ms = new MiniSearch(MINISEARCH_OPTS);
-    ms.addAll(playersQ.data.players as any);
-    indexRef.current = ms;
-    setReady(true);
-    try {
-      localStorage.setItem(PLAYERS_INDEX_KEY, JSON.stringify(ms));
-    } catch {
-      // localStorage full, non-critical
-    }
-  }, [playersQ.data]);
-
-  const search = useCallback((query: string): Player[] => {
-    if (!indexRef.current || !query.trim()) return [];
-    return indexRef.current
-      .search(query.trim(), { fuzzy: 0.2, prefix: true })
-      .map((r) => ({
-        player_id: r.id,
-        display_name: r.display_name as string,
-        matches_played: r.matches_played as number,
-        latest_rank_points: r.latest_rank_points as number | undefined,
-        current_rank: r.current_rank as number | null | undefined,
-        ioc: r.ioc as string,
-        iso2: r.iso2 as string,
-        country_name: r.country_name as string,
-      }));
-  }, []);
-
-  return { search, ready, loading: playersQ.isLoading && !ready };
-}
-
 export default function Home() {
   const { theme } = useTheme();
   const queryClient = useQueryClient();
   const navigate = homeRoute.useNavigate();
   const { player: searchPlayer } = homeRoute.useSearch();
   const selectedId = searchPlayer ?? null;
-  const { search, ready, loading } = useMiniSearch();
+  const directoryQ = usePlayerDirectory();
+  const players = directoryQ.data?.players ?? [];
+  const totalMatches = players.reduce((n, p) => n + p.matches_played, 0);
+  // Directory rank backs the profile's current-rank label while the profile
+  // query loads; the profile response is authoritative once it lands.
+  const selectedPlayer =
+    players.find((p) => p.player_id === selectedId) ?? null;
 
   const profileQ = useQuery({
     queryKey: ["profile", selectedId],
@@ -134,19 +64,6 @@ export default function Home() {
     staleTime: Infinity,
     gcTime: Infinity,
   });
-
-  const playersQ = useQuery({
-    queryKey: ["players"],
-    queryFn: getPlayers,
-    staleTime: Infinity,
-    gcTime: Infinity,
-  });
-  const players = playersQ.data?.players ?? [];
-  const totalMatches = players.reduce((n, p) => n + p.matches_played, 0);
-  // Directory rank backs the profile's current-rank label while the profile
-  // query loads; the profile response is authoritative once it lands.
-  const selectedPlayer =
-    players.find((p) => p.player_id === selectedId) ?? null;
 
   // Route head sets the static "Players — Courtside"; once a player is picked
   // the selected name takes over (directory name backs the profile while it
@@ -247,8 +164,8 @@ export default function Home() {
             value={selectedId}
             onChange={handleSelectPlayer}
             placeholder="Player"
-            searchFn={ready ? search : undefined}
-            loading={loading}
+            searchFn={directoryQ.data?.search}
+            loading={directoryQ.isLoading}
           />
         </div>
         <Link

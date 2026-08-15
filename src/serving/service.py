@@ -55,6 +55,7 @@ from src.features.inference import (
     build_inference_features_bulk,
 )
 from src.models.similarity import PlayerSimilarity
+from src.serving.directory import PLAYERS_SQL, directory_players
 from src.utils import load_env
 
 AUX_DIR = DEPLOY_ARTIFACTS
@@ -309,20 +310,8 @@ def _predict_from_ids_bulk_impl(
 
 # ── SQL (table names interpolated from constants; values always via `%s`) ──
 
-# Directory read: bronze metadata (name/IOC) joined to the dbt-derived gold
-# aggregates. current_rank is the player's latest official weekly rank
-# (bronze.rankings), falling back to match-time rank from the most recent
-# match when no ranking row exists — both materialized by dbt in gold.
-_PLAYERS_SQL = f"""
-SELECT bp.player_id, bp.display_name, bp.ioc,
-       gp.match_count AS matches_played,
-       gp.latest_rank_points,
-       gp.current_rank
-FROM {BRONZE_PROFILES_TABLE} bp
-LEFT JOIN {PROFILES_TABLE} gp ON gp.player_id = bp.player_id
-ORDER BY gp.current_rank NULLS LAST, bp.display_name, bp.player_id
-"""
-
+# The player-directory read lives in src.serving.directory (shared with the
+# deploy-time static web artifact), so /players and web/public never drift.
 _DIRECTORY_INFO_SQL = f"""
 SELECT MAX(match_date) AS latest_match_date
 FROM {BRONZE_TABLE}
@@ -424,13 +413,8 @@ LIMIT %s
 
 def _players(_request: Request) -> JSONResponse:
     try:
-        df = _safe_query(_PLAYERS_SQL)
-        players = []
-        for r in _records(df):
-            ioc = valid_ioc(r.get("ioc"))
-            iso2, country_name = resolve_ioc(ioc)
-            players.append({**r, "ioc": ioc, "iso2": iso2, "country_name": country_name})
-        return _ok({"players": players})
+        df = _safe_query(PLAYERS_SQL)
+        return _ok({"players": directory_players(df)})
     except Exception as exc:  # DB errors -> 500 with message
         return _err(500, f"players query failed: {exc}")
 
@@ -924,6 +908,7 @@ handlers that the OpenAPI generator does not introspect, so they are documented 
     description=SERVICE_DESCRIPTION,
     traffic={"timeout": 120},
     resources={"cpu": "500m"},
+    workers=4,
 )
 @bentoml.asgi_app(DATA_APP, path="/")
 class TennisPredictor:

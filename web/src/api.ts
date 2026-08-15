@@ -227,14 +227,6 @@ async function get<T>(path: string): Promise<T> {
   return envelope.data as T
 }
 
-export function getPlayers(): Promise<{ players: Player[] }> {
-  return get('/players')
-}
-
-export function getDirectoryInfo(): Promise<{ latest_match_date: string | null }> {
-  return get('/directory_info')
-}
-
 export function getPlayerProfile(playerId: string): Promise<PlayerProfile> {
   return get(`/player_profile?player_id=${encodeURIComponent(playerId)}`)
 }

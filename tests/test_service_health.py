@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pandas as pd
 from starlette.testclient import TestClient
 
-from src.serving.service import DATA_APP
+from src.serving.service import DATA_APP, TennisPredictor
 
 client = TestClient(DATA_APP)
 
@@ -59,3 +59,8 @@ def test_nginx_transparent_proxy_and_gated_routes():
     assert "proxy_pass ${BENTO_API_URL}/directory_info;" not in conf
     # No bespoke OpenAPI location (the transparent proxy exposes /api/docs.json).
     assert "location = /api/openapi.json" not in conf
+
+
+def test_service_declares_four_workers():
+    """Bento runs four worker processes; each holds model state and one lazy DB connection."""
+    assert TennisPredictor.config.get("workers") == 4

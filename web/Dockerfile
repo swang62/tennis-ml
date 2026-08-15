@@ -10,14 +10,19 @@ RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store/v3,sha
     pnpm install --frozen-lockfile
 # Copy the source, then build the dashboard.
 COPY . .
+# Serialize the deploy-time player directory (public/player-directory.json,
+# written by deploy.py) into a content-hashed MiniSearch payload + discovery
+# manifest under public/, which Vite then copies into dist/. Fails the build
+# when the artifact is missing and consumes the raw input so it never ships.
+RUN node scripts/build-player-index.mjs
 RUN --mount=type=cache,id=pnpm-vite,target=/app/node_modules/.vite,sharing=locked \
     pnpm build
 
 # Serve the SPA and proxy only allowlisted Bento routes.
 FROM nginx:alpine
 # worker_processes is main-context; patch and verify the distro config.
-RUN sed -i 's/^worker_processes.*/worker_processes  1;/' /etc/nginx/nginx.conf \
-    && grep -q '^worker_processes  1;' /etc/nginx/nginx.conf
+RUN sed -i 's/^worker_processes.*/worker_processes  4;/' /etc/nginx/nginx.conf \
+    && grep -q '^worker_processes  4;' /etc/nginx/nginx.conf
 COPY --from=build /app/dist /usr/share/nginx/html
 # Official-image startup template: the entrypoint renders /etc/nginx/templates
 # via envsubst at container start. Substitution is allowlisted to

@@ -42,9 +42,13 @@ def _connect() -> psycopg.Connection[Any]:
 
 
 def get_conn() -> psycopg.Connection[Any]:
-    """Return the process-wide lazy PostgreSQL connection (autocommit)."""
+    """Return the process-wide lazy PostgreSQL connection (autocommit).
+
+    Reconnects when the cached connection was closed underneath us (idle
+    timeout, server restart) so a stale handle can never poison a request.
+    """
     global _conn
-    if _conn is None:
+    if _conn is None or _conn.closed:
         _conn = _connect()
     return _conn
 
@@ -79,10 +83,18 @@ def execute_df(sql: str, params: list[object] | tuple[object, ...] | None = None
 
     Positional `%s` placeholders in `sql` are bound to `params` by psycopg, so
     bound values containing quotes or other SQL metacharacters stay safe.
+
+    A connection-level failure closes and resets the shared connection before
+    re-raising, so the next request reconnects. The statement is never replayed
+    automatically here — callers may be writing.
     """
-    with get_conn().cursor() as cur:
-        cur.execute(cast(LiteralString, sql), params)
-        return _cursor_to_df(cur)
+    try:
+        with get_conn().cursor() as cur:
+            cur.execute(cast(LiteralString, sql), params)
+            return _cursor_to_df(cur)
+    except (psycopg.OperationalError, psycopg.InterfaceError):
+        close()
+        raise
 
 
 def to_dataframe(sql: str) -> pd.DataFrame:

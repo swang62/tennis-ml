@@ -130,6 +130,25 @@ server {
         try_files $uri =404;
     }
 
+    # The generated MiniSearch payload is content-hashed
+    # (player-index.<sha256>.json), so it gets the same immutable year-long
+    # cache as the Vite bundles and is safe for Cloudflare to hold. The
+    # manifest name is deliberately not a hex hash, so this regex never
+    # matches it with a stale forever cache. Quoted: an unquoted {64}
+    # quantifier would be parsed as a config block.
+    location ~ "^/player-index\.[0-9a-f]{64}\.json$" {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+    }
+
+    # Tiny mutable pointer to the current hashed payload: the browser
+    # revalidates it on every load, so a new deploy is discovered as soon as
+    # its index.html is.
+    location = /player-index.manifest.json {
+        add_header Cache-Control "no-cache";
+    }
+
     location = /index.html {
         add_header Cache-Control "no-store";
     }

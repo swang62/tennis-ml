@@ -38,6 +38,9 @@ infra/postgres/tls/server.key
 # Package manifests (repository-owned; not hidden by *.json above)
 !/web/package.json
 
+# Deploy-generated web directory artifact (written by src/flows/deploy.py)
+web/public/player-directory.json
+
 # Node
 node_modules/
 

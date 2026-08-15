@@ -33,6 +33,13 @@ from src.constants import (
     ROOT,
     load_env,
 )
+from src.db.client import execute_df
+from src.serving.directory import (
+    LATEST_MATCH_DATE_SQL,
+    PLAYERS_SQL,
+    directory_players,
+    latest_match_date,
+)
 from src.utils import suppress_insecure_tls_warning
 
 # --- Deploy-only paths and names ---
@@ -41,6 +48,11 @@ SERVICE_FILE = ROOT / "src" / "serving" / "service.py"
 PINNED_BENTOFILE = DATA_PROCESSED / "bentofile.pinned.yaml"
 BENTO_TAG_FILE = DATA_PROCESSED / "bento_tag.txt"
 STATE_FILE = DATA_PROCESSED / "bento_build_state.json"
+
+# Raw player directory baked into the web image: written from the canonical
+# src.serving.directory query before any image is published, consumed by the
+# web build (`just deploy` builds web/ after deploy.py). Git-ignored.
+WEB_DIRECTORY_ARTIFACT = ROOT / "web" / "public" / "player-directory.json"
 
 # .env is loaded by src.constants before the inline settings are read.
 load_env()
@@ -703,13 +715,39 @@ def build_bento_image() -> tuple[str, int]:
     return image, int(production.version)
 
 
+def generate_directory_artifact() -> Path:
+    """Query the player directory once and write the deterministic raw JSON
+    artifact under web/public/ for the web image build.
+
+    The artifact carries the directory player data plus the database's actual
+    latest match date (``MAX(match_date)`` from bronze), never the deployment
+    time. Runs before any image is published: a query or write failure raises
+    and aborts the deploy, so the web image can never bake a missing or stale
+    directory. Deterministic for a given database state (same rows, same
+    ordering, same bytes).
+    """
+    players = directory_players(execute_df(PLAYERS_SQL))
+    artifact = {
+        "latest_match_date": latest_match_date(execute_df(LATEST_MATCH_DATE_SQL)),
+        "players": players,
+    }
+    WEB_DIRECTORY_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
+    WEB_DIRECTORY_ARTIFACT.write_text(json.dumps(artifact, indent=2) + "\n")
+    print(
+        f"Wrote web directory artifact: {WEB_DIRECTORY_ARTIFACT}"
+        f" ({len(players)} players, latest match date {artifact['latest_match_date']})"
+    )
+    return WEB_DIRECTORY_ARTIFACT
+
+
 def deploy_bento() -> None:
     """Authenticate, then build and publish the multi-arch image with Buildx.
 
-    Build output streams to the console and to a single deploy_<timestamp>.log
-    opened before the build, so a failed build still leaves a log of the
-    attempt. Docker login runs before the build because Buildx's `--push` is
-    part of the build command.
+    The player-directory artifact is generated first — a failure there aborts
+    before any image is published. Build output streams to the console and to
+    a single deploy_<timestamp>.log opened before the build, so a failed build
+    still leaves a log of the attempt. Docker login runs before the build
+    because Buildx's `--push` is part of the build command.
     """
     LOGS.mkdir(parents=True, exist_ok=True)
     deploy_log = LOGS / f"deploy_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
@@ -719,6 +757,7 @@ def deploy_bento() -> None:
             redirect_stdout(_Tee(sys.stdout, log)),
             redirect_stderr(_Tee(sys.stderr, log)),
         ):
+            generate_directory_artifact()
             _docker_login()
             _image, production_version = build_bento_image()
     except subprocess.CalledProcessError as exc:
