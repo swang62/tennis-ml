@@ -585,6 +585,10 @@ class _Tee:
         self.console.flush()
         self.log.flush()
 
+    def isatty(self) -> bool:
+        """Preserve terminal detection while stdout/stderr are redirected."""
+        return self.console.isatty()
+
 
 def _run_teed(
     cmd: list[str], log: TextIO | None = None, env: dict[str, str] | None = None
