@@ -5,9 +5,10 @@ Pure numpy/sklearn — no Bento, database, or MLflow. Verifies that the pure
 when the paired orientation is reversed.
 """
 
+import warnings
+
 import numpy as np
 import pandas as pd
-import warnings
 from sklearn.linear_model import LogisticRegression
 
 from src.serving.service import _stack_evidence

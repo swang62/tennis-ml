@@ -158,7 +158,7 @@ function Layout() {
             to="/"
             search={{ player: undefined }}
             className="brand"
-            aria-label="Courtside home"
+            aria-label="Courtside Tennis Intelligence"
             aria-expanded={menuOpen}
             aria-controls="nav-menu"
             onClick={(e) => {

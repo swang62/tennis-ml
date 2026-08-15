@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import urlparse
 
 import mlflow
 import pandas as pd
@@ -86,21 +87,21 @@ _DRIFT_WINDOW_COLUMNS = (
 def _file_lock() -> Any:
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
     try:
-        import portalocker  # type: ignore[import-untyped]
+        import fcntl
 
-        with portalocker.Lock(str(LOCK_FILE), timeout=300) as fh:
-            yield fh
+        fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_RDWR)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield None
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
     except ImportError:
         try:
-            import fcntl
+            import portalocker  # type: ignore[import-untyped]
 
-            fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_RDWR)
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            try:
-                yield None
-            finally:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-                os.close(fd)
+            with portalocker.Lock(str(LOCK_FILE), timeout=300) as fh:
+                yield fh
         except ImportError:
             fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_RDWR)
             try:
@@ -198,6 +199,11 @@ def _validate_production(client: MlflowClient) -> Any:
     if champion is None:
         raise RuntimeError(
             f"no champion found ({PRODUCTION_MODEL}@{CHAMPION_ALIAS}) — deploy a model first"
+        )
+    if urlparse(PRODUCTION_BENTO_URL).port == 5173:
+        raise RuntimeError(
+            "PRODUCTION_BENTO_URL points to Vite (port 5173); set it to the Bento "
+            "server, normally http://127.0.0.1:8187"
         )
     model_info_url = f"{PRODUCTION_BENTO_URL}{MODEL_INFO_ROUTE}"
     headers = {}
