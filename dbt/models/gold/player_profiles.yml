@@ -58,6 +58,12 @@ models:
         description: Career first serve return points won (from opponent perspective).
       - name: second_serve_return_points_won_pct
         description: Career second serve return points won (from opponent perspective).
+      - name: return_games_won_pct
+        description: >
+          Career return games won percentage (from opponent perspective):
+          weighted SUM(opp break points faced - opp break points saved) /
+          SUM(opp service games), since every converted break point ends that
+          service game.
       - name: break_point_conversion_pct
         description: Career break point conversion percentage (from opponent perspective).
       - name: break_point_opportunities_per_return_game

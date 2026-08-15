@@ -151,7 +151,7 @@ export default function Home() {
             </div>
             <div className="stat">
               <span className="stat-label">Matches</span>
-              <span className="stat-num num">{totalMatches}</span>
+              <span className="stat-num num">{totalMatches.toLocaleString("en-US")}</span>
             </div>
           </div>
         )}
@@ -164,13 +164,16 @@ export default function Home() {
             value={selectedId}
             onChange={handleSelectPlayer}
             placeholder="Player"
-            searchFn={directoryQ.data?.search}
+            searchLoader={directoryQ.data?.loadSearch}
             loading={directoryQ.isLoading}
           />
         </div>
         <Link
           to="/h2h"
-          search={{ playerA: selectedId ?? undefined } as any}
+          search={{
+            playerA: selectedId ?? undefined,
+            playerB: undefined,
+          }}
           className={`toolbar-compare${selectedId ? "" : " disabled"}`}
           aria-disabled={!selectedId}
           tabIndex={selectedId ? 0 : -1}

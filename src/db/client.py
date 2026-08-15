@@ -5,7 +5,7 @@ psycopg's `%s` placeholders — request data is never concatenated into SQL —
 and results come back as pandas DataFrames.
 
 Each process shares a lazily-created `psycopg_pool.ConnectionPool`
-(min_size=1, max_size=2, autocommit, health-checked at every checkout)
+(min_size=1, max_size=2, autocommit)
 instead of one global connection, so concurrent Bento worker requests each
 run on their own connection. `execute_df()` checks out one connection per
 call; multi-step writes run inside an explicit `transaction()` context
@@ -43,10 +43,10 @@ _pool_lock = threading.Lock()
 def get_pool() -> ConnectionPool:
     """Return the process-local connection pool, creating it on first use.
 
-    The pool is bounded (min_size=1, max_size=2), autocommit, and
-    health-checked: every checkout verifies the connection with a trivial
-    query before handing it out. `wait()` surfaces an unreachable
-    DATABASE_URL at first use instead of failing on the first query.
+    The pool is bounded (min_size=1, max_size=2) and autocommit. `wait()`
+    surfaces an unreachable DATABASE_URL at first use instead of failing on
+    the first query. Broken connections are discarded after their failed use
+    and replenished by psycopg_pool's background workers.
     """
     global _pool
     pool = _pool
@@ -63,7 +63,6 @@ def get_pool() -> ConnectionPool:
                     min_size=MIN_POOL_SIZE,
                     max_size=MAX_POOL_SIZE,
                     kwargs={"autocommit": True},
-                    check=ConnectionPool.check_connection,
                     name="tennis-pool",
                 )
                 _pool.wait()
@@ -119,8 +118,8 @@ def execute_df(sql: str, params: list[object] | tuple[object, ...] | None = None
 
     Each call checks out one pooled connection and returns it on exit. A
     connection-level failure (OperationalError/InterfaceError) is discarded by
-    the pool — the next checkout health-checks the replacement — and the
-    statement is never replayed automatically here: callers may be writing.
+    the pool and replaced asynchronously. Statements are never replayed
+    automatically here: callers may be writing.
     """
     with connection() as conn, conn.cursor() as cur:
         cur.execute(cast(LiteralString, sql), params)

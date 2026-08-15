@@ -82,6 +82,37 @@ def test_init_sql_rankings_history_and_latest_rank_index():
     ), "per-player (player_id, ranking_date) index missing"
 
 
+def test_init_sql_latest_match_date_index():
+    """A standalone date index supports the global MAX(match_date) footer query."""
+    ddl = _schema_ddl()
+    assert re.search(
+        r"CREATE INDEX IF NOT EXISTS idx_match_events_date\s+"
+        r"ON bronze\.match_events \(match_date\)",
+        ddl,
+    ), "standalone match_date index missing"
+
+
+def test_init_sql_head_to_head_indexes_match_endpoint_ordering():
+    """Both sides of the /head_to_head OR predicate have deterministic
+    date/match-id ordered indexes, avoiding a full history sort."""
+    ddl = _schema_ddl()
+    for player_column in ("player1_id", "player2_id"):
+        assert re.search(
+            rf"CREATE INDEX IF NOT EXISTS idx_match_events_p[12]_date_match\s+"
+            rf"ON bronze\.match_events \({player_column}, match_date DESC, match_id DESC\)",
+            ddl,
+        ), f"/head_to_head index missing for {player_column}"
+
+
+def test_dbt_player_matches_index_serves_match_history_ordering():
+    """/match_history filters by player then returns the newest match ids."""
+    config = (migrate_db.ROOT / "dbt" / "dbt_project.yml").read_text()
+    assert (
+        "{{ ensure_index_sql(this, 'idx_player_matches_pid_date_match', "
+        "'player_id, match_date DESC, match_id DESC') }}"
+    ) in config
+
+
 def test_init_sql_profile_ownership_join_key_is_primary_key():
     """bronze.player_profiles.player_id is the PK: every ownership join/read
     (serving bp.player_id join, inference WHERE player_id, enrichment UPDATE)

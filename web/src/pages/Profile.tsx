@@ -112,9 +112,14 @@ function Metric({
   );
 }
 
+function oneMinus(value: number | null): number | null {
+  return value == null ? null : 1 - value;
+}
+
 const serveMetrics: { label: string; key: keyof ServeMetrics }[] = [
   { label: "1st serve points won", key: "first_serve_points_won_pct" },
   { label: "2nd serve points won", key: "second_serve_points_won_pct" },
+  { label: "Serve rate", key: "double_faults_per_serve_point" },
   { label: "Break points saved", key: "break_points_saved_pct" },
   { label: "Aces per game", key: "aces_per_service_game" },
 ];
@@ -123,6 +128,7 @@ const serveRates = new Set(["aces_per_service_game"]);
 const returnMetrics: { label: string; key: keyof ReturnMetrics }[] = [
   { label: "1st serve returns won", key: "first_serve_return_points_won_pct" },
   { label: "2nd serve returns won", key: "second_serve_return_points_won_pct" },
+  { label: "Break rate", key: "return_games_won_pct" },
   { label: "Break points converted", key: "break_point_conversion_pct" },
   {
     label: "Break point chances per game",
@@ -278,7 +284,7 @@ export default function ProfileContent({
         >
           <table className="tourney-table">
             <colgroup>
-              <col style={{ width: "10%" }} />
+              <col style={{ width: "12%" }} />
               <col style={{ width: "15%" }} />
               <col style={{ width: "6%" }} />
               <col style={{ width: "15%" }} />
@@ -495,7 +501,7 @@ export default function ProfileContent({
           </h1>
           <div className="profile-head-stats">
             <div className="stat">
-              <span className="stat-label">Matches</span>
+              <span className="stat-label">Career Matches</span>
               <span className="stat-num num">
                 {profile.career.matches_played}
               </span>
@@ -532,15 +538,28 @@ export default function ProfileContent({
       <div className="stats-row">
         <Card title="On service">
           <div className="sr-list">
-            {serveMetrics.map((m) => (
-              <Metric
-                key={m.key}
-                label={m.label}
-                value={profile.serve[m.key]}
-                delta={profile.tour_comparisons[m.key]}
-                rate={serveRates.has(m.key)}
-              />
-            ))}
+            {serveMetrics.map((m) => {
+              const tourComparison = profile.tour_comparisons[m.key];
+              return (
+                <Metric
+                  key={m.key}
+                  label={m.label}
+                  value={
+                    m.key === "double_faults_per_serve_point"
+                      ? oneMinus(profile.serve[m.key])
+                      : profile.serve[m.key]
+                  }
+                  delta={
+                    m.key === "double_faults_per_serve_point"
+                      ? tourComparison == null
+                        ? null
+                        : -tourComparison
+                      : tourComparison
+                  }
+                  rate={serveRates.has(m.key)}
+                />
+              );
+            })}
           </div>
         </Card>
         <Card title="On return">

@@ -862,6 +862,10 @@ html.light {
     color: var(--text-faint);
   }
 
+  .picker.is-centered .picker-label {
+    text-align: center;
+  }
+
   .picker-trigger-row {
     display: flex;
     align-items: center;
@@ -928,6 +932,20 @@ html.light {
     font-weight: 500;
   }
 
+  .picker.is-centered .picker-trigger {
+    padding-inline: 2rem;
+    text-align: center;
+  }
+
+  .picker.is-centered .picker-trigger-row.is-selected {
+    position: relative;
+  }
+
+  .picker.is-centered .picker-clear {
+    position: absolute;
+    right: 0;
+  }
+
   .picker-clear {
     flex: none;
     border: 0;
@@ -989,6 +1007,21 @@ html.light {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .picker-option-player {
+    display: flex;
+    align-items: baseline;
+    min-width: 0;
+    gap: 0.4rem;
+  }
+
+  .picker-option-country {
+    flex: none;
+    color: var(--text-faint);
+    font-family: var(--font-data);
+    font-size: 0.625rem;
+    letter-spacing: 0.08em;
   }
 
   .picker-option-rank {
@@ -1284,6 +1317,18 @@ html.light {
   .profile-head-stats .stat {
     align-items: center;
     text-align: center;
+  }
+
+  .profile-head-stats .stat-num {
+    display: inline-block;
+    position: relative;
+  }
+
+  .profile-head-stats .rank-move {
+    position: absolute;
+    top: 50%;
+    left: 100%;
+    transform: translateY(-50%);
   }
 
   @media (min-width: 640px) {
@@ -1762,16 +1807,11 @@ html.light {
 
   /* prediction panel — the clay betting signal */
 
-  .pred-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.75rem;
-    margin-bottom: 1rem;
-  }
-
   .pred-controls {
     display: grid;
+    width: min(100%, 60rem);
+    margin-inline: auto;
+    padding-block: 0.5rem;
     grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
     gap: 0.75rem;
     align-items: end;

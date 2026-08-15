@@ -7,11 +7,9 @@ export interface Player {
   player_id: string
   display_name: string
   matches_played: number
-  latest_rank_points?: number
   current_rank?: number | null
   ioc: string
   iso2: string
-  country_name: string
 }
 
 export interface CareerStats {
@@ -34,6 +32,7 @@ export interface ReturnMetrics {
   return_points_won_pct: number | null
   first_serve_return_points_won_pct: number | null
   second_serve_return_points_won_pct: number | null
+  return_games_won_pct: number | null
   break_point_conversion_pct: number | null
   break_point_opportunities_per_return_game: number | null
 }
@@ -59,6 +58,7 @@ export interface TourComparisons {
   return_points_won_pct: number | null
   first_serve_return_points_won_pct: number | null
   second_serve_return_points_won_pct: number | null
+  return_games_won_pct: number | null
   break_point_conversion_pct: number | null
   break_point_opportunities_per_return_game: number | null
 }
@@ -225,6 +225,10 @@ async function get<T>(path: string): Promise<T> {
     throw new ApiError(res.status, envelope.error ?? `HTTP ${res.status}`)
   }
   return envelope.data as T
+}
+
+export function getDirectoryInfo(): Promise<{ latest_match_date: string | null }> {
+  return get('/directory_info')
 }
 
 export function getPlayerProfile(playerId: string): Promise<PlayerProfile> {

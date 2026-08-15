@@ -23,11 +23,21 @@ from src.serving.service import (
 client = TestClient(DATA_APP)
 
 
-def test_obsolete_directory_routes_are_not_mounted():
-    """The deleted /players and /directory_info endpoints are not mounted:
-    the directory is a deploy-time static asset, never a serving route."""
+def test_directory_info_returns_latest_match_date():
+    with patch(
+        "src.serving.service.execute_df",
+        return_value=pd.DataFrame({"latest_match_date": [date(2026, 8, 10)]}),
+    ) as exec:
+        response = client.get("/directory_info")
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "data": {"latest_match_date": "2026-08-10"}}
+    assert "MAX(match_date)" in exec.call_args.args[0]
+    assert "FROM bronze.match_events" in exec.call_args.args[0]
+
+
+def test_only_players_route_remains_unmounted():
     assert client.get("/players").status_code == 404
-    assert client.get("/directory_info").status_code == 404
 
 
 # ── /rank_history ───────────────────────────────────────────────────────────

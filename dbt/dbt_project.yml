@@ -22,8 +22,9 @@ models:
       # CTAS tables need post-hooks; macros replace stale objects after dbt swaps.
       player_matches:
         +post-hook:
-          - "{{ ensure_primary_key_sql(this, 'pk_player_matches', 'player_id, match_id') }}"
-          - "{{ ensure_index_sql(this, 'idx_player_matches_pid_date', 'player_id, match_date') }}"
+           - "{{ ensure_primary_key_sql(this, 'pk_player_matches', 'player_id, match_id') }}"
+           - "{{ ensure_index_sql(this, 'idx_player_matches_pid_date', 'player_id, match_date') }}"
+           - "{{ ensure_index_sql(this, 'idx_player_matches_pid_date_match', 'player_id, match_date DESC, match_id DESC') }}"
 
       rolling_features:
         +post-hook:

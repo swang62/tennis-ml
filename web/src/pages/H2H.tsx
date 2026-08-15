@@ -16,7 +16,6 @@ import {
   Card,
   Empty,
   ErrorBox,
-  Kicker,
   Loading,
   PlayerFlag,
   PlayerPicker,
@@ -106,9 +105,15 @@ export default function H2H() {
   // Player names in the ensemble axis labels overlap through phone landscape
   // and tablet widths, so compact them at a wider breakpoint than the layout.
   const compactLabels = useIsNarrow("(max-width: 1024px)");
-  const { playerA: searchPlayerA } = h2hRoute.useSearch();
-  const [playerA, setPlayerA] = useState<string | null>(searchPlayerA ?? null);
-  const [playerB, setPlayerB] = useState<string | null>(null);
+  const { playerA: searchPlayerA, playerB: searchPlayerB } =
+    h2hRoute.useSearch();
+  const navigate = h2hRoute.useNavigate();
+  const [playerA, setPlayerA] = useState<string | null>(
+    searchPlayerA ?? null,
+  );
+  const [playerB, setPlayerB] = useState<string | null>(
+    searchPlayerB ?? null,
+  );
   const [surface, setSurface] = useState<Surface>("hard");
   const [tournament, setTournament] = useState<TournamentTier | "">("");
   const [round, setRound] = useState<MatchRound | "">("");
@@ -124,31 +129,53 @@ export default function H2H() {
     enabled: ready,
   });
   const profileAQ = useQuery({
-    queryKey: ["player-profile", playerA],
+    // Home's profile key so both pages share the cache; profile data is
+    // immutable history, so match Home's Infinity staleness to avoid
+    // refetching a cached profile on page switch.
+    queryKey: ["profile", playerA],
     queryFn: () => getPlayerProfile(playerA!),
     enabled: ready,
+    staleTime: Infinity,
+    gcTime: Infinity,
   });
   const profileBQ = useQuery({
-    queryKey: ["player-profile", playerB],
+    queryKey: ["profile", playerB],
     queryFn: () => getPlayerProfile(playerB!),
     enabled: ready,
+    staleTime: Infinity,
+    gcTime: Infinity,
   });
 
   const predict = useMutation({ mutationFn: predictFromIds });
   const selectA = (id: string | null) => {
     setPlayerA(id);
+    navigate({
+      search: { playerA: id ?? undefined, playerB: playerB ?? undefined },
+      replace: true,
+    });
     predict.reset();
   };
   const selectB = (id: string | null) => {
     setPlayerB(id);
+    navigate({
+      search: { playerA: playerA ?? undefined, playerB: id ?? undefined },
+      replace: true,
+    });
     predict.reset();
   };
-
   const players = directoryQ.data?.players ?? [];
   const playerById = new Map(players.map((p) => [p.player_id, p]));
   // Display names only; an unknown player gets a neutral label, never the raw id.
   const name = (id: string) =>
     playerById.get(id)?.display_name ?? "Unknown player";
+
+  useEffect(() => {
+    if (!ready) return;
+    for (const playerId of [playerA, playerB]) {
+      const iso2 = playerById.get(playerId)?.iso2?.trim().toLowerCase();
+      if (iso2?.length === 2) new Image().src = `https://flagcdn.com/w40/${iso2}.png`;
+    }
+  }, [playerA, playerB, players, ready]);
 
   if (directoryQ.isLoading) return <Loading label="Loading players" />;
   if (directoryQ.isError)
@@ -344,7 +371,9 @@ export default function H2H() {
             onChange={selectA}
             placeholder="Player A"
             exclude={playerB}
+            searchLoader={directoryQ.data?.loadSearch}
             tone="grass"
+            centered
           />
           <PlayerPicker
             players={players}
@@ -352,16 +381,15 @@ export default function H2H() {
             onChange={selectB}
             placeholder="Player B"
             exclude={playerA}
+            searchLoader={directoryQ.data?.loadSearch}
             tone="clay"
+            centered
           />
         </div>
       </section>
 
       {/* Match predictor */}
       <section className="card pred-card">
-        <div className="pred-head">
-          <Kicker>Match predictor</Kicker>
-        </div>
         {!ready ? (
           <Empty message="Select two different players to predict" />
         ) : (
@@ -572,7 +600,7 @@ export default function H2H() {
                   >
                     <PlayerFlag
                       iso2={playerById.get(h2h.player1_id)?.iso2}
-                      countryName={playerById.get(h2h.player1_id)?.country_name}
+                      countryName={profileAQ.data?.country_name}
                     />
                     {p1}
                   </Link>
@@ -585,7 +613,7 @@ export default function H2H() {
                     {p2}
                     <PlayerFlag
                       iso2={playerById.get(h2h.player2_id)?.iso2}
-                      countryName={playerById.get(h2h.player2_id)?.country_name}
+                      countryName={profileBQ.data?.country_name}
                     />
                   </Link>
                 </div>

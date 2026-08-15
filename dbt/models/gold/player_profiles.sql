@@ -98,6 +98,11 @@ return_agg AS (
             AS DOUBLE PRECISION)
             / NULLIF(SUM(opp.total_serve_points - opp.first_serves_made), 0)
             AS second_serve_return_points_won_pct,
+        -- return games won: every converted break point ends that service
+        -- game, so (opp BP faced - opp BP saved) / opp service games
+        CAST(SUM(opp.break_points_faced - opp.break_points_saved) AS DOUBLE PRECISION)
+            / NULLIF(SUM(opp.service_games), 0)
+            AS return_games_won_pct,
         -- break point conversion: (opp BP faced - opp BP saved) / opp BP faced
         CAST(SUM(opp.break_points_faced - opp.break_points_saved) AS DOUBLE PRECISION)
             / NULLIF(SUM(opp.break_points_faced), 0)
@@ -168,6 +173,7 @@ SELECT
     pa.return_points_won_pct,
     ra.first_serve_return_points_won_pct,
     ra.second_serve_return_points_won_pct,
+    ra.return_games_won_pct,
     ra.break_point_conversion_pct,
     ra.break_point_opportunities_per_return_game,
 

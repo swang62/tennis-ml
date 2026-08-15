@@ -53,6 +53,14 @@ WITH violations AS (
       AND (tour_break_point_opportunities_per_return_game = 'NaN'::DOUBLE PRECISION
            OR tour_break_point_opportunities_per_return_game = 'Infinity'::DOUBLE PRECISION
            OR tour_break_point_opportunities_per_return_game = '-Infinity'::DOUBLE PRECISION)
+    UNION ALL
+    SELECT 'tour_return_games_won_pct' AS column_name,
+           tour_return_games_won_pct AS value
+    FROM {{ ref('tour_averages') }}
+    WHERE tour_return_games_won_pct IS NOT NULL
+      AND (tour_return_games_won_pct = 'NaN'::DOUBLE PRECISION
+           OR tour_return_games_won_pct = 'Infinity'::DOUBLE PRECISION
+           OR tour_return_games_won_pct = '-Infinity'::DOUBLE PRECISION)
 )
 SELECT column_name, value FROM violations
 UNION ALL

@@ -134,3 +134,10 @@ models:
           break points faced per service game played. May be NULL only when
           the denominator is zero; bounded to [0, 1] by
           tour_averages_rate_bounds when present.
+      - name: tour_return_games_won_pct
+        description: >
+          Tour-wide return games won percentage
+          (SUM(break_points_faced - break_points_saved) / SUM(service_games)):
+          every converted break point ends that service game. May be NULL only
+          when the denominator is zero; bounded to [0, 1] by
+          tour_averages_rate_bounds when present.

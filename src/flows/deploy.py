@@ -35,10 +35,8 @@ from src.constants import (
 )
 from src.db.client import execute_df
 from src.serving.directory import (
-    LATEST_MATCH_DATE_SQL,
     PLAYERS_SQL,
     directory_players,
-    latest_match_date,
 )
 from src.utils import suppress_insecure_tls_warning
 
@@ -719,24 +717,16 @@ def generate_directory_artifact() -> Path:
     """Query the player directory once and write the deterministic raw JSON
     artifact under web/public/ for the web image build.
 
-    The artifact carries the directory player data plus the database's actual
-    latest match date (``MAX(match_date)`` from bronze), never the deployment
-    time. Runs before any image is published: a query or write failure raises
-    and aborts the deploy, so the web image can never bake a missing or stale
-    directory. Deterministic for a given database state (same rows, same
-    ordering, same bytes).
+    Runs before any image is published: a query or write failure raises and
+    aborts the deploy, so the web image can never bake a missing directory.
+    Deterministic for a given database state (same rows, same ordering, same
+    bytes).
     """
     players = directory_players(execute_df(PLAYERS_SQL))
-    artifact = {
-        "latest_match_date": latest_match_date(execute_df(LATEST_MATCH_DATE_SQL)),
-        "players": players,
-    }
+    artifact = {"players": players}
     WEB_DIRECTORY_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
     WEB_DIRECTORY_ARTIFACT.write_text(json.dumps(artifact, indent=2) + "\n")
-    print(
-        f"Wrote web directory artifact: {WEB_DIRECTORY_ARTIFACT}"
-        f" ({len(players)} players, latest match date {artifact['latest_match_date']})"
-    )
+    print(f"Wrote web directory artifact: {WEB_DIRECTORY_ARTIFACT} ({len(players)} players)")
     return WEB_DIRECTORY_ARTIFACT
 
 

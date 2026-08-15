@@ -135,7 +135,12 @@ tour_rates AS (
             / NULLIF(SUM(service_games), 0) AS tour_aces_per_svc_game,
         CAST(SUM(break_points_faced) AS DOUBLE PRECISION)
             / NULLIF(SUM(service_games), 0)
-            AS tour_break_point_opportunities_per_return_game
+            AS tour_break_point_opportunities_per_return_game,
+        -- return games won tour-wide: every converted break point ends that
+        -- service game, so (BP faced - BP saved) / service games
+        CAST(SUM(break_points_faced - break_points_saved) AS DOUBLE PRECISION)
+            / NULLIF(SUM(service_games), 0)
+            AS tour_return_games_won_pct
     FROM {{ ref('player_matches') }}
 )
 SELECT
@@ -190,7 +195,8 @@ SELECT
     tr.tour_return_points_won_pct,
     tr.tour_df_rate,
     tr.tour_aces_per_svc_game,
-    tr.tour_break_point_opportunities_per_return_game
+    tr.tour_break_point_opportunities_per_return_game,
+    tr.tour_return_games_won_pct
 FROM pool_meta p
 CROSS JOIN snapshot_aggregates s
 CROSS JOIN activity a

@@ -265,7 +265,7 @@ def test_get_pool_uses_passwordless_local_database_url(monkeypatch):
     assert pool.min_size == 1
     assert pool.max_size == 2
     assert pool.kwargs == {"autocommit": True}
-    assert pool.check is FakePool.check_connection  # health check configured
+    assert pool.check is None  # avoid a round trip on every checkout
     assert pool.waited  # wait() called: first use surfaces an unreachable DB
 
 

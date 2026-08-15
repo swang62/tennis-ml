@@ -326,7 +326,8 @@ SELECT
     gp.overall_serve_points_won_pct, gp.double_faults_per_serve_point,
     gp.aces_per_service_game, gp.break_points_saved_pct,
     gp.return_points_won_pct, gp.first_serve_return_points_won_pct,
-    gp.second_serve_return_points_won_pct, gp.break_point_conversion_pct,
+    gp.second_serve_return_points_won_pct, gp.return_games_won_pct,
+    gp.break_point_conversion_pct,
     gp.break_point_opportunities_per_return_game,
     gp.hard_matches, gp.clay_matches, gp.grass_matches,
     gp.hard_win_rate, gp.clay_win_rate, gp.grass_win_rate,
@@ -340,7 +341,8 @@ SELECT
     ta.tour_return_points_won_pct,
     ta.tour_df_rate,
     ta.tour_aces_per_svc_game,
-    ta.tour_break_point_opportunities_per_return_game
+    ta.tour_break_point_opportunities_per_return_game,
+    ta.tour_return_games_won_pct
 FROM {BRONZE_PROFILES_TABLE} bp
 LEFT JOIN {PROFILES_TABLE} gp ON gp.player_id = bp.player_id
 CROSS JOIN {TOUR_AVERAGES_TABLE} ta
@@ -399,8 +401,22 @@ ORDER BY match_date DESC, match_id DESC
 LIMIT %s
 """
 
+_DIRECTORY_INFO_SQL = f"""
+SELECT MAX(match_date) AS latest_match_date
+FROM {BRONZE_TABLE}
+"""
+
 
 # ── Route handlers ─────────────────────────────────────────────────────────
+
+
+def _directory_info(_request: Request) -> JSONResponse:
+    try:
+        df = execute_df(_DIRECTORY_INFO_SQL)
+        latest_match_date = None if df.empty else _iso(first_row_dict(df)["latest_match_date"])
+        return _ok({"latest_match_date": latest_match_date})
+    except Exception as exc:
+        return _err(500, f"directory info query failed: {exc}")
 
 
 def _player_profile(request: Request) -> JSONResponse:
@@ -434,6 +450,7 @@ def _player_profile(request: Request) -> JSONResponse:
         "return_points_won_pct": _iso(row["return_points_won_pct"]),
         "first_serve_return_points_won_pct": _iso(row["first_serve_return_points_won_pct"]),
         "second_serve_return_points_won_pct": _iso(row["second_serve_return_points_won_pct"]),
+        "return_games_won_pct": _iso(row["return_games_won_pct"]),
         "break_point_conversion_pct": _iso(row["break_point_conversion_pct"]),
         "break_point_opportunities_per_return_game": _iso(
             row["break_point_opportunities_per_return_game"]
@@ -471,6 +488,7 @@ def _player_profile(request: Request) -> JSONResponse:
             "second_serve_return_points_won_pct",
             _complement(row["tour_second_serve_win_pct"]),
         ),
+        "return_games_won_pct": delta("return_games_won_pct", row["tour_return_games_won_pct"]),
         "break_point_conversion_pct": delta(
             "break_point_conversion_pct", _complement(row["tour_break_points_saved_pct"])
         ),
@@ -810,6 +828,7 @@ DATA_APP = Starlette(
         Exception: _catch_all_error,
     },
     routes=[
+        Route("/directory_info", _directory_info, methods=["GET"]),
         Route("/player_profile", _player_profile, methods=["GET"]),
         Route("/rank_history", _rank_history, methods=["GET"]),
         Route("/match_history", _match_history, methods=["GET"]),
@@ -868,7 +887,7 @@ Bulk ids-based prediction (API-key gated). Body envelope `{"rows": [ { ... } ]}`
 same per-row fields as `POST /predict_from_ids`; max 1000 rows; unknown fields are rejected.
 
 ## GET endpoints
-Read-only dashboard data: `GET /player_profile`, `GET /rank_history`, `GET /match_history`, \
+Read-only dashboard data: `GET /directory_info`, `GET /player_profile`, `GET /rank_history`, `GET /match_history`, \
 `GET /head_to_head`, `GET /similar_players`.
 `GET /model_info` — API-key gated model metadata. `GET /health` — liveness.
 
