@@ -55,7 +55,6 @@ from src.features.inference import (
     build_inference_features_bulk,
 )
 from src.models.similarity import PlayerSimilarity
-from src.serving.directory import PLAYERS_SQL, directory_players
 from src.utils import load_env
 
 AUX_DIR = DEPLOY_ARTIFACTS
@@ -310,13 +309,6 @@ def _predict_from_ids_bulk_impl(
 
 # ── SQL (table names interpolated from constants; values always via `%s`) ──
 
-# The player-directory read lives in src.serving.directory (shared with the
-# deploy-time static web artifact), so /players and web/public never drift.
-_DIRECTORY_INFO_SQL = f"""
-SELECT MAX(match_date) AS latest_match_date
-FROM {BRONZE_TABLE}
-"""
-
 # One point query: bronze metadata (bp.*) joined to the dbt-materialized gold
 # aggregates (gp.*) and the one-row tour singleton (cross join). current_rank
 # is already materialized in gold.player_profiles via dbt (official ranking
@@ -409,22 +401,6 @@ LIMIT %s
 
 
 # ── Route handlers ─────────────────────────────────────────────────────────
-
-
-def _players(_request: Request) -> JSONResponse:
-    try:
-        df = _safe_query(PLAYERS_SQL)
-        return _ok({"players": directory_players(df)})
-    except Exception as exc:  # DB errors -> 500 with message
-        return _err(500, f"players query failed: {exc}")
-
-
-def _directory_info(_request: Request) -> JSONResponse:
-    try:
-        df = execute_df(_DIRECTORY_INFO_SQL)
-        return _ok({"latest_match_date": _iso(first_row_dict(df).get("latest_match_date"))})
-    except Exception as exc:
-        return _err(500, f"directory info query failed: {exc}")
 
 
 def _player_profile(request: Request) -> JSONResponse:
@@ -834,8 +810,6 @@ DATA_APP = Starlette(
         Exception: _catch_all_error,
     },
     routes=[
-        Route("/players", _players, methods=["GET"]),
-        Route("/directory_info", _directory_info, methods=["GET"]),
         Route("/player_profile", _player_profile, methods=["GET"]),
         Route("/rank_history", _rank_history, methods=["GET"]),
         Route("/match_history", _match_history, methods=["GET"]),
@@ -894,8 +868,8 @@ Bulk ids-based prediction (API-key gated). Body envelope `{"rows": [ { ... } ]}`
 same per-row fields as `POST /predict_from_ids`; max 1000 rows; unknown fields are rejected.
 
 ## GET endpoints
-Read-only dashboard data: `GET /players`, `GET /directory_info`, `GET /player_profile`, \
-`GET /rank_history`, `GET /match_history`, `GET /head_to_head`, `GET /similar_players`.
+Read-only dashboard data: `GET /player_profile`, `GET /rank_history`, `GET /match_history`, \
+`GET /head_to_head`, `GET /similar_players`.
 `GET /model_info` — API-key gated model metadata. `GET /health` — liveness.
 
 Only the POST routes appear as OpenAPI paths; the GET routes are mounted Starlette

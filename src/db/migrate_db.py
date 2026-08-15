@@ -13,7 +13,7 @@ from psycopg.errors import DuplicateDatabase
 
 from src import constants
 from src.constants import ROOT, SCHEMA_SQL, get_database_url
-from src.db.client import get_conn
+from src.db.client import connection
 
 
 def migrate() -> None:
@@ -36,15 +36,15 @@ def migrate() -> None:
         except DuplicateDatabase:
             pass
     schema_sql = SCHEMA_SQL.read_text()
-    conn = get_conn()
-    with conn.transaction(), conn.cursor() as cur:
+    with connection() as conn, conn.transaction(), conn.cursor() as cur:
         cur.execute(cast(LiteralString, schema_sql))
     print("PostgreSQL migration: done")
 
 
 def actual_target() -> tuple[str | None, int, str]:
     """Return the configured client-side connection endpoint."""
-    info = get_conn().info
+    with connection() as conn:
+        info = conn.info
     return info.host, int(info.port), info.dbname
 
 
@@ -52,8 +52,7 @@ def reset() -> None:
     """Drop and recreate schemas."""
     host, port, database = actual_target()
 
-    conn = get_conn()
-    with conn.transaction(), conn.cursor() as cur:
+    with connection() as conn, conn.transaction(), conn.cursor() as cur:
         for schema in ("bronze", "silver", "gold"):
             cur.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
     migrate()

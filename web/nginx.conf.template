@@ -112,7 +112,7 @@ server {
     #   /api/              -> Bento /                       (Swagger UI)
     #   /api/docs.json     -> Bento /docs.json              (OpenAPI schema)
     #   /api/static_content/* -> Bento /static_content/*    (Swagger assets)
-    #   /api/players, /api/health, /api/predict_from_ids, ... -> root Bento routes
+    #   /api/health, /api/predict_from_ids, ... -> root Bento routes
     location /api/ {
         limit_req zone=api_req burst=10 nodelay;
         limit_conn api_conn 10;

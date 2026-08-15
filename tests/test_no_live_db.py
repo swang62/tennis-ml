@@ -2,13 +2,14 @@
 
 Fails when a test module reintroduces the deleted live-db fixture names
 (postgres_ready / gold_ready / seeded_test_db) or opens a production database
-client connection (importing get_conn, calling it, or refreshing the training
-snapshot) without demonstrably mocking the connection boundary. The guard
-deliberately allows the legitimate boundary-mocked patterns:
+client connection (importing get_conn/get_pool/connection, calling them, or
+refreshing the training snapshot) without demonstrably mocking the connection
+boundary. The guard deliberately allows the legitimate boundary-mocked
+patterns:
 - module imports of src.db.client (test_db_client unit-tests the client with a
-  fake psycopg.connect and never opens a real connection);
-- qualified get_conn() calls inside a file that references psycopg (the mock
-  signal), as in the client's own unit tests;
+  fake pool and never opens a real connection);
+- qualified get_conn()/get_pool()/connection() calls inside a file that
+  references psycopg (the mock signal), as in the client's own unit tests;
 - snapshot.refresh_snapshot() inside a file that mocks _copy_tables.
 """
 
@@ -23,7 +24,7 @@ _FORBIDDEN_FIXTURE_NAMES = {
     "seeded_test_db",
     "_postgres_reachable",
 }
-_CONNECTION_FUNCS = {"get_conn"}
+_CONNECTION_FUNCS = {"get_conn", "get_pool", "connection"}
 
 
 def _identifiers(tree: ast.AST) -> set[str]:
@@ -85,12 +86,12 @@ def _failures(path: Path) -> list[str]:
                 record(node, f"unqualified {func.id}() call")
             elif isinstance(func, ast.Attribute):
                 if (
-                    func.attr == "get_conn"
+                    func.attr in _CONNECTION_FUNCS
                     and isinstance(func.value, ast.Name)
                     and func.value.id in client_aliases
                     and not mentions_psycopg
                 ):
-                    record(node, "client get_conn() call without a psycopg mock")
+                    record(node, f"client {func.attr}() call without a psycopg mock")
                 if func.attr == "refresh_snapshot" and not mocks_copy_tables:
                     record(node, "refresh_snapshot() call without a _copy_tables mock")
 

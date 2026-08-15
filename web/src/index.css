@@ -1734,6 +1734,11 @@ html.light {
       padding: 0.25rem 0;
     }
 
+    .tourney-table td[data-label="Score"],
+    .tourney-table td[data-label="Opponent"] {
+      gap: 0.25rem;
+    }
+
     /* A match is seven stacked cells, so row-level padding is the only
        vertical space between match blocks: it sits between the last cell and
        the row's border separator instead of inflating every cell. */
@@ -1882,7 +1887,7 @@ html.light {
   .h2h-meetings-wrap {
     margin-top: 1rem;
     padding: 0 56px;
-    max-height: 15rem;
+    max-height: 12rem;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
     scrollbar-width: thin;
@@ -1902,15 +1907,7 @@ html.light {
   @media (max-width: 720px) {
     .h2h-meetings-wrap {
       padding: 0 20px;
-    }
-
-    .meeting-meta,
-    .meeting-result {
-      flex-basis: 100%;
-    }
-
-    .meeting-tourney {
-      flex: 0 1 8rem;
+      max-height: 20rem;
     }
   }
 
@@ -1929,19 +1926,19 @@ html.light {
     border-bottom: 0;
   }
 
-  .meeting-meta,
-  .meeting-result {
-    display: flex;
+  .meeting-meta {
+    display: grid;
+    grid-template-columns: 5.1rem 4rem 8rem;
     align-items: center;
+    flex: 0 0 auto;
     min-width: 0;
   }
 
-  .meeting-meta {
-    flex: 0 1 auto;
-  }
-
   .meeting-result {
+    display: flex;
+    align-items: center;
     flex: 0 0 auto;
+    min-width: 0;
   }
 
   .meeting-date {
@@ -1952,7 +1949,6 @@ html.light {
   }
 
   .meeting-tourney {
-    flex: 0 0 8rem;
     min-width: 0;
     font-weight: 700;
     white-space: nowrap;
@@ -1993,6 +1989,21 @@ html.light {
     font-family: var(--font-data);
     font-weight: 400;
     color: var(--text);
+  }
+
+  @media (max-width: 720px) {
+    .meeting-meta,
+    .meeting-result {
+      flex-basis: 100%;
+    }
+
+    .meeting-meta {
+      display: flex;
+    }
+
+    .meeting-tourney {
+      flex: 0 0 auto;
+    }
   }
 
   .chart-frame {

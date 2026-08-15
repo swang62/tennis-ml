@@ -55,8 +55,6 @@ def test_nginx_transparent_proxy_and_gated_routes():
     assert "/api/internal" not in conf
     # No bespoke public mappings survive.
     assert "proxy_pass ${BENTO_API_URL}/health;" not in conf
-    assert "proxy_pass ${BENTO_API_URL}/players;" not in conf
-    assert "proxy_pass ${BENTO_API_URL}/directory_info;" not in conf
     # No bespoke OpenAPI location (the transparent proxy exposes /api/docs.json).
     assert "location = /api/openapi.json" not in conf
 

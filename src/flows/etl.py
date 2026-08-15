@@ -37,7 +37,7 @@ from src.constants import (
     SILVER_ROLLING_FEATURES,
     WORK_POOL_NAME,
 )
-from src.db.client import get_conn
+from src.db.client import connection
 from src.db.conninfo import dbt_env
 from src.utils import load_env
 
@@ -99,7 +99,7 @@ def bronze_to_gold(full_refresh: bool = False) -> int:
     mode = "full refresh" if full_refresh else "incremental"
     print(f"dbt mode: {mode}")
     run_dbt_build(log_file=log_file, full_refresh=full_refresh)
-    with get_conn().cursor() as cur:
+    with connection() as conn, conn.cursor() as cur:
         counts = {
             BRONZE_TABLE: _table_count(cur, BRONZE_TABLE),
             SILVER_PLAYER_MATCHES: _table_count(cur, SILVER_PLAYER_MATCHES),

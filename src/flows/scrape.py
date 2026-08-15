@@ -53,7 +53,7 @@ import pandas as pd
 from prefect import flow, task
 
 from src.constants import WORK_POOL_NAME
-from src.db.client import get_conn
+from src.db.client import connection
 from src.db.ingest import (
     BRONZE_RANKINGS_TABLE,
     RANKING_TARGET_COLUMNS,
@@ -135,7 +135,7 @@ def ranking_mondays_after(watermark: date, as_of: date) -> list[date]:
 
 def current_watermark() -> date | None:
     """Latest stored ranking date in bronze.rankings, or None when empty."""
-    with get_conn().cursor() as cur:
+    with connection() as conn, conn.cursor() as cur:
         cur.execute(f"SELECT MAX(ranking_date) FROM {BRONZE_RANKINGS_TABLE}")
         row = cur.fetchone()
     return row[0] if row is not None and row[0] is not None else None
@@ -143,7 +143,7 @@ def current_watermark() -> date | None:
 
 def stored_ranking_mondays() -> set[date]:
     """Every ranking Monday currently present in bronze.rankings."""
-    with get_conn().cursor() as cur:
+    with connection() as conn, conn.cursor() as cur:
         cur.execute(f"SELECT DISTINCT ranking_date FROM {BRONZE_RANKINGS_TABLE}")
         return {row[0] for row in cur.fetchall()}
 
