@@ -1,4 +1,5 @@
 import re
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import src.db.migrate_db as migrate_db
@@ -42,7 +43,7 @@ def test_migrate_bootstraps_configured_database_from_template1(monkeypatch, tmp_
     )
     monkeypatch.setattr(migrate_db, "SCHEMA_SQL", schema_sql)
     monkeypatch.setattr(migrate_db.psycopg, "connect", connect)
-    monkeypatch.setattr(migrate_db, "get_conn", lambda: target_connection)
+    monkeypatch.setattr(migrate_db, "connection", lambda: nullcontext(target_connection))
 
     migrate_db.migrate()
 

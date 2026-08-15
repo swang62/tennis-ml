@@ -1,11 +1,11 @@
 """Canonical player-directory query and normalization.
 
-Single source of truth for the directory data contract shared by the live
-`/players` endpoint and the deploy-time static directory artifact written
-under web/public/. The raw SQL and the IOC -> (iso2, country) mapping live
-here only, so the two consumers can never drift apart. The database's actual
-latest match date (``MAX(match_date)``) is part of the contract: the artifact
-carries it, never the deployment wall-clock time.
+Single source of truth for the directory data contract used by the deploy-time
+static directory artifact written under web/public/. The raw SQL and the IOC ->
+(iso2, country) mapping live here only, so the artifact can never drift from
+the source. The database's actual latest match date (``MAX(match_date)``) is
+part of the contract: the artifact carries it, never the deployment wall-clock
+time.
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ def _json_safe(value: object) -> object:
 
 
 def directory_players(df: pd.DataFrame) -> list[dict[str, object]]:
-    """Map raw directory rows to the /players response shape.
+    """Map raw directory rows to the deploy artifact's player shape.
 
     Each entry carries JSON-safe values plus the resolved iso2/country_name
     for the player's normalized IOC, preserving the SQL row order.

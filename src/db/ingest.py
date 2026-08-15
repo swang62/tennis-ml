@@ -21,7 +21,7 @@ from src.constants import (
     ROOT,
 )
 from src.countries import UNK, valid_ioc
-from src.db.client import get_conn, to_dataframe
+from src.db.client import connection, to_dataframe
 from src.features.columns import BRONZE_COLUMNS
 from src.features.validate import run_ingestion_checks
 from src.utils import load_env
@@ -306,8 +306,7 @@ def _copy_df_into(
     """
     columns = list(df.columns)
     columns_sql = ", ".join(columns)
-    conn = get_conn()
-    with conn.transaction(), conn.cursor() as cur:
+    with connection() as conn, conn.transaction(), conn.cursor() as cur:
         cur.execute(cast(LiteralString, f"CREATE TEMP TABLE stage (LIKE {table}) ON COMMIT DROP"))
         # NaN is pandas' NULL marker; COPY binary adapts Python None as SQL NULL.
         records = df.where(pd.notnull(df), None)
@@ -922,8 +921,7 @@ def backfill_profile_iocs(
             updates.append((ioc, canonical))
     if not updates:
         return
-    conn = get_conn()
-    with conn.transaction(), conn.cursor() as cur:
+    with connection() as conn, conn.transaction(), conn.cursor() as cur:
         cur.executemany(
             cast(
                 LiteralString,
@@ -1269,16 +1267,16 @@ def _fetch_wiki_bio(name: str, pid: str) -> tuple[str, str] | None:
 
 def _write_summary(pid: str, summary_text: str, title: str) -> None:
     """Write a fetched bio to bronze.player_profiles (main thread only)."""
-    conn = get_conn()
-    conn.execute(
-        cast(
-            LiteralString,
-            f"""UPDATE {BRONZE_PROFILES_TABLE}
-            SET summary = %s, enriched_at = CURRENT_TIMESTAMP
-            WHERE player_id = %s""",
-        ),
-        [summary_text, pid],
-    )
+    with connection() as conn:
+        conn.execute(
+            cast(
+                LiteralString,
+                f"""UPDATE {BRONZE_PROFILES_TABLE}
+                SET summary = %s, enriched_at = CURRENT_TIMESTAMP
+                WHERE player_id = %s""",
+            ),
+            [summary_text, pid],
+        )
     print(f"  OK {pid}: wrote {len(summary_text)}-char summary from {title}")
 
 
@@ -1302,8 +1300,7 @@ def enrich_players(player_ids: list[str], force: bool = False) -> int:
     name are counted as no-name skips and never attempted.
 
     The slow HTTP fetch + parse runs in a thread pool (ENRICH_WORKERS workers);
-    the DB write stays on the main thread because ``get_conn()`` is a
-    process-wide singleton connection that is not safe to share. Per-player
+    the DB write stays on the main thread on one pooled connection. Per-player
     lines print only for currently enriching (OK) and failed (SKIP/ERROR)
     players; pre-skip categories are summarized without per-player lines. The
     final batch summary distinguishes attempted, already enriched, no name,
@@ -1312,16 +1309,16 @@ def enrich_players(player_ids: list[str], force: bool = False) -> int:
     """
     if not player_ids:
         return 0
-    conn = get_conn()
-    rows = conn.execute(
-        cast(
-            LiteralString,
-            f"SELECT player_id, COALESCE(display_name, atp_name) AS name, summary "
-            f"FROM {BRONZE_PROFILES_TABLE} "
-            f"WHERE player_id IN ({', '.join(['%s'] * len(player_ids))})",
-        ),
-        player_ids,
-    ).fetchall()
+    with connection() as conn:
+        rows = conn.execute(
+            cast(
+                LiteralString,
+                f"SELECT player_id, COALESCE(display_name, atp_name) AS name, summary "
+                f"FROM {BRONZE_PROFILES_TABLE} "
+                f"WHERE player_id IN ({', '.join(['%s'] * len(player_ids))})",
+            ),
+            player_ids,
+        ).fetchall()
     enriched = failed = already_enriched = no_name = 0
     to_enrich: list[tuple[str, str]] = []
     for pid, name, summary in rows:

@@ -50,7 +50,7 @@ def _directory_df() -> pd.DataFrame:
     )
 
 
-# ── Shared directory contract (used by /players and the deploy artifact) ────
+# ── Shared directory contract (used by the deploy artifact) ─────────────────
 
 
 def test_directory_players_matches_players_contract():

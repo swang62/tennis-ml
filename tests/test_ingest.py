@@ -1,5 +1,6 @@
 """Hermetic ingest tests with fake network, database, and ATP CSV seams."""
 
+from contextlib import nullcontext
 from pathlib import Path
 
 import pandas as pd
@@ -95,7 +96,7 @@ class _FakeConn:
 @pytest.fixture
 def fake_ingest_conn(monkeypatch):
     conn = _FakeConn()
-    monkeypatch.setattr(ingest, "get_conn", lambda: conn)
+    monkeypatch.setattr(ingest, "connection", lambda: nullcontext(conn))
     return conn
 
 
@@ -1585,7 +1586,7 @@ def test_ingest_rankings_force_overwrites_existing_rows(fake_ingest_conn, tmp_pa
     assert "points = excluded.points" in insert_sql
 
 
-def test_ingest_rankings_reports_unmapped_rows(fake_ingest_conn, tmp_path, capsys):  # noqa: ARG001 — fixture patches ingest.get_conn
+def test_ingest_rankings_reports_unmapped_rows(fake_ingest_conn, tmp_path, capsys):  # noqa: ARG001 — fixture patches ingest.connection
     _write_ranking_csv(
         tmp_path,
         "atp_rankings_00s.csv",

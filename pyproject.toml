@@ -85,6 +85,7 @@ inference = [
   "xgboost>=3.2",
   "lightgbm>=4.6",
   "psycopg[binary]>=3.2",
+  "psycopg-pool>=3.2",
   "pandas>=2.3",
   "numpy>=2.4",
   "onnxruntime>=1.27.0",

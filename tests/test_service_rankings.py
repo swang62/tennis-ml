@@ -1,6 +1,6 @@
 """Focused contract tests for official ranking serving.
 
-/rank_history, /players, and /player_profile all read their rank values from
+/rank_history and /player_profile both read their rank values from
 bronze.rankings (weekly official ATP top-200 rows) — never from match rows.
 """
 
@@ -62,32 +62,6 @@ def test_rank_history_empty_for_player_without_official_rows():
     assert resp.json()["data"]["rank_history"] == []
 
 
-def test_players_current_rank_comes_from_bronze_rankings():
-    """The /players current_rank is the dbt-materialized gold column (official
-    ranking with match-time fallback), joined to bronze profile metadata."""
-    df = pd.DataFrame(
-        [
-            {
-                "player_id": "p1",
-                "display_name": "A",
-                "matches_played": 5,
-                "latest_rank_points": 1000.0,
-                "ioc": "ESP",
-                "current_rank": 12,
-            }
-        ]
-    )
-    with patch("src.serving.service.execute_df", return_value=df) as exec:
-        resp = client.get("/players")
-    assert resp.status_code == 200
-    players = resp.json()["data"]["players"]
-    assert players[0]["current_rank"] == 12
-    sql = exec.call_args_list[0].args[0]
-    assert "current_rank" in sql
-    assert "FROM bronze.player_profiles" in sql
-    assert "gold.player_profiles" in sql
-
-
 def test_rank_history_requires_player_id():
     resp = client.get("/rank_history")
     assert resp.status_code == 400
@@ -105,9 +79,9 @@ def test_rank_history_database_error_returns_500():
 
 
 def test_rankings_row_drives_api_rank_values():
-    """A bronze.rankings row is what /rank_history reports; /players and
-    /player_profile read current_rank from dbt-materialized gold.player_profiles.
-    The DB is mocked at the execute_df boundary, so no live database is used."""
+    """A bronze.rankings row is what /rank_history reports; /player_profile
+    reads current_rank from dbt-materialized gold.player_profiles. The DB is
+    mocked at the execute_df boundary, so no live database is used."""
     rows = pd.DataFrame(
         [
             {"ranking_date": "2026-07-27", "rank": 38, "points": 1480},
