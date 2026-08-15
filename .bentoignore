@@ -21,7 +21,7 @@ node_modules/
 # Tests
 tests/
 
-# Infrastructure (except init.sql)
+# Infrastructure (except schema.sql)
 infra/k3d/
 infra/manifests/
 infra/prefect/

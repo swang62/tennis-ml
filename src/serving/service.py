@@ -46,7 +46,7 @@ from src.constants import (
 )
 from src.countries import resolve_ioc, valid_ioc
 from src.db.client import execute_df, first_row_dict
-from src.db.init_db import init as init_db
+from src.db.migrate_db import migrate
 from src.evaluate.symmetry import antisymmetric_evidence, evidence_to_probability
 from src.features.columns import FEATURE_COLS
 from src.features.inference import (
@@ -934,9 +934,9 @@ class TennisPredictor:
     bento_production = bentoml.models.BentoModel(f"{PRODUCTION_MODEL}:latest")
 
     def __init__(self):
-        # Idempotent schema bootstrap (applies init.sql). Must run before
+        # Idempotent schema migration (applies schema.sql). Must run before
         # any read endpoint queries the tables it creates.
-        init_db()
+        migrate()
         self.linear: Any = bentoml.sklearn.load_model(self.bento_linear)
         manifest = json.loads(MODEL_INFO_FILE.read_text())
         # Fixed evidence stack order shared by training and serving.

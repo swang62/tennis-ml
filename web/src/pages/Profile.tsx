@@ -461,7 +461,7 @@ export default function ProfileContent({
                   show: true,
                   position: "bottom",
                   distance: 8,
-                  formatter: `Career High · #${careerBest.rank}`,
+                  formatter: `Career High #${careerBest.rank}`,
                   color: t.ice,
                   fontSize: 12,
                   fontWeight: 600,

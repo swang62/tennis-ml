@@ -86,7 +86,7 @@ FROM (VALUES ('bronze.match_events'), ('silver.player_matches'),
 WHERE to_regclass(t.t) IS NULL") || exit 1
 if [ -n "$missing" ]; then
     echo "error: required table(s) missing in database '$DB_NAME': $missing" >&2
-    echo "  run 'just db-init' then 'just db-seed' and 'just db-etl' to build them" >&2
+    echo "  run 'just db-migrate' then 'just db-seed' and 'just db-etl' to build them" >&2
     exit 1
 fi
 
@@ -177,7 +177,7 @@ print("dev import complete")
 
 echo "starting Bento on http://127.0.0.1:3000 and Vite on http://127.0.0.1:5173; Ctrl-C stops both"
 # --reload restarts only for files matched by bentofile.yaml include and
-# .bentoignore (src/**, infra/postgres/init.sql, data/processed/*); web/,
+# .bentoignore (src/**, infra/postgres/schema.sql, data/processed/*); web/,
 # notebooks/, tests/, and mlruns/ are ignored, so Vite HMR edits never restart
 # Bento. The reloader is a circus plugin thread inside this process, so the
 # process tree and cleanup are unchanged.

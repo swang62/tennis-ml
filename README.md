@@ -2,7 +2,7 @@
 
 Tennis match predictions end to end. I made this repo with the goal of learning modern MLOps, deploying a full stack pipeline with automated ingestion, training, evaluation, promotion, deployment, and a nice UI to boot. I love tennis, and so I built a simple and fun way to look up stats and match predictions, and avoiding the ATP website as much as possible (which is a true eyesore).
 
-Use this site to predict the next Wimbledon match betwen your two favorite players, and maybe gain an edge over your local bookkeeper while you're at it ;)
+Use this site to predict the next Wimbledon match betwen your two favorite players, and maybe gain an edge over your local bookie while you're at it ;)
 
 ## Features
 
@@ -55,7 +55,8 @@ Only requirement is a free account on [Dagshub](https://dagshub.com), [Docker](h
 # 1. Full local dev setup (deps + k3d cluster for Prefect + PostgreSQL init)
 just setup
 
-# 2. Seed the matches into PostgreSQL bronze
+# 2. Apply schema migrations, then seed the matches into PostgreSQL bronze
+just db-migrate
 just db-seed
 
 # 3. Generate silver/gold tables

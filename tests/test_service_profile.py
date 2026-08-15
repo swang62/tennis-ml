@@ -250,7 +250,7 @@ def test_profile_uses_parameterized_point_query():
     assert "FROM bronze.player_profiles" in sql
     assert "JOIN gold.player_profiles" in sql
     assert "gold.tour_averages" in sql
-    # Ownership join keys are player_id on both sides (bronze PK in init.sql;
+    # Ownership join keys are player_id on both sides (bronze PK in schema.sql;
     # gold PK re-applied by the dbt post-hook) — a direct equality probe.
     assert "LEFT JOIN gold.player_profiles gp ON gp.player_id = bp.player_id" in sql
 

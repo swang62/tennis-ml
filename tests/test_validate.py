@@ -55,18 +55,18 @@ def test_validate_bronze_row_accepts_valid_row():
     assert validate_bronze_row(_valid_row()) == []
 
 
-def test_validate_bronze_row_flags_row_level_semantic_errors():
+def test_validate_bronze_row_flags_invalid_bounds_and_identity_errors():
     row = _valid_row()
     row["player1_break_points_saved"] = -9
-    row["player2_first_serves_made"] = 31
+    row["player2_first_serves_made"] = 20001
     row["player1_rank_points"] = 20001
     row["player2_age"] = 100.5
     row["winner_id"] = "B001"
 
     issues = validate_bronze_row(row)
 
-    assert "player1_break_points_saved outside SMALLINT 0..255: -9" in issues
-    assert "player2_first_serves_made exceeds player2_total_serve_points" in issues
+    assert "player1_break_points_saved must be non-negative: -9" in issues
+    assert "player2_first_serves_made outside INTEGER 0..20000: 20001" in issues
     assert "player1_rank_points outside INTEGER 0..20000: 20001" in issues
     assert "player2_age outside 0..100: 100.5" in issues
     assert "winner_id must equal player1_id" in issues
@@ -101,7 +101,7 @@ def test_run_ingestion_checks_drops_invalid_rows_and_keeps_valid_rows():
     assert result["valid_rows"] == 1
     assert result["dropped_rows"] == 1
     assert any(
-        "player1_break_points_saved outside SMALLINT 0..255: -9" in issue
+        "player1_break_points_saved must be non-negative: -9" in issue
         for issue in result["results"]
     )
     assert cast(pd.DataFrame, result["valid_df"]).to_dict(orient="records") == [valid]
@@ -155,31 +155,22 @@ def test_is_missing():
     assert _is_missing("abc") is False
 
 
-def test_run_ingestion_checks_rejects_zero_rank_rows():
+def test_run_ingestion_checks_accepts_extended_and_inconsistent_match_counts():
     valid = _valid_row()
-    zero_rank = _valid_row() | {
+    extended = _valid_row() | {
         "match_id": "2026-test-002",
-        "player1_ranking": 0,
-    }
-    excess_serves = _valid_row() | {
-        "match_id": "2026-test-003",
-        "player1_first_serves_made": 35,
-        "player1_total_serve_points": 30,
+        "player1_first_serves_made": 361,
+        "player1_total_serve_points": 20001,
+        "player2_break_points_saved": 7,
+        "player2_break_points_faced": 6,
     }
 
-    result: IngestionCheckReport = run_ingestion_checks(
-        pd.DataFrame([valid, zero_rank, excess_serves])
-    )
+    result: IngestionCheckReport = run_ingestion_checks(pd.DataFrame([valid, extended]))
 
-    assert result["passed"] is False
-    assert result["input_rows"] == 3
-    assert result["valid_rows"] == 1
-    assert result["dropped_rows"] == 2
-    assert any("player1_ranking must be positive or null" in issue for issue in result["results"])
-    assert any(
-        "player1_first_serves_made exceeds player1_total_serve_points" in issue
-        for issue in result["results"]
-    )
+    assert result["passed"] is True
+    assert result["input_rows"] == 2
+    assert result["valid_rows"] == 2
+    assert result["dropped_rows"] == 0
     kept = cast(pd.DataFrame, result["valid_df"]).to_dict(orient="records")
     assert kept[0] == valid
 

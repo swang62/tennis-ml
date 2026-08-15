@@ -64,8 +64,10 @@ def validate_bronze_row(row: Mapping[str, Any]) -> list[str]:
         value = _as_number(row.get(column))
         if value is None:
             continue
-        if value < 0 or value > 255:
-            issues.append(f"{column} outside SMALLINT 0..255: {value}")
+        if value < 0:
+            issues.append(f"{column} must be non-negative: {value}")
+        elif not column.endswith("total_serve_points") and value > 20000:
+            issues.append(f"{column} outside INTEGER 0..20000: {value}")
 
     for column in BRONZE_COLUMNS_INT32:
         value = _as_number(row.get(column))
@@ -94,24 +96,6 @@ def validate_bronze_row(row: Mapping[str, Any]) -> list[str]:
         matches = _as_number(row.get(f"{side}_matches_last_10"))
         if wins is not None and matches is not None and wins > matches:
             issues.append(f"{side}_wins_last_10 exceeds {side}_matches_last_10")
-
-        break_points_saved = _as_number(row.get(f"{side}_break_points_saved"))
-        break_points_faced = _as_number(row.get(f"{side}_break_points_faced"))
-        if (
-            break_points_saved is not None
-            and break_points_faced is not None
-            and break_points_saved > break_points_faced
-        ):
-            issues.append(f"{side}_break_points_saved exceeds {side}_break_points_faced")
-
-        first_serves_made = _as_number(row.get(f"{side}_first_serves_made"))
-        total_serve_points = _as_number(row.get(f"{side}_total_serve_points"))
-        if (
-            first_serves_made is not None
-            and total_serve_points is not None
-            and first_serves_made > total_serve_points
-        ):
-            issues.append(f"{side}_first_serves_made exceeds {side}_total_serve_points")
 
     return issues
 

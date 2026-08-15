@@ -111,7 +111,7 @@ def test_docker_login_raises_on_failure(monkeypatch):
         d._docker_login()
 
 
-# --- Command construction (push latest only; no Compose, no web build) ---
+# --- Command construction (Buildx multi-arch push; no Compose, no web build) ---
 
 
 def _stub_subprocess(monkeypatch):
@@ -119,31 +119,38 @@ def _stub_subprocess(monkeypatch):
     monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
 
 
-def test_deploy_bento_pushes_only_latest_no_compose_no_web(monkeypatch, tmp_path):
+def test_deploy_bento_logs_in_before_build_then_writes_state(monkeypatch, tmp_path):
+    """Login happens before the build (whose Buildx `--push` is the push); deploy
+    itself runs no docker tag/push and only ever targets the Docker Hub latest image."""
     d = _deploy()
     monkeypatch.setattr(d, "DOCKER_REPO", "acme")
     monkeypatch.setattr(d, "IMAGE_NAME", "tennis-bento")
     monkeypatch.setattr(d, "LOGS", tmp_path)
-    monkeypatch.setattr(d, "build_bento_image", lambda **_kwargs: ("tennis-bento:latest", 5))
-    monkeypatch.setattr(d, "_docker_login", lambda: None)
     monkeypatch.setattr(d, "_read_state", lambda: {})
     written = {}
     monkeypatch.setattr(d, "_write_state", lambda s: written.update(s))
     monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
-    _stub_subprocess(monkeypatch)
+    order = []
+    docker_calls = []
 
-    calls = []
+    def fake_run(cmd, **_kwargs):
+        docker_calls.append(list(cmd))
+        return SimpleNamespace(returncode=0)
 
-    def fake_run_teed(cmd, _log):
-        calls.append(list(cmd))
-        return None
-
-    monkeypatch.setattr(d, "_run_teed", fake_run_teed)
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(d, "_docker_login", lambda: order.append("login"))
+    monkeypatch.setattr(
+        d,
+        "build_bento_image",
+        lambda: order.append("build") or ("acme/tennis-bento:latest", 5),
+    )
 
     d.deploy_bento()
 
-    # Push only the Docker Hub latest image.
-    assert calls == [["docker", "push", "acme/tennis-bento:latest"]]
+    # Login precedes the build because `--push` is part of the Buildx build.
+    assert order == ["login", "build"]
+    # Deploy itself performs no separate docker tag/push — Buildx pushed already.
+    assert docker_calls == []
     assert written["deployed_version"] == 5
     assert written["deployed_image"] == "acme/tennis-bento:latest"
 
@@ -154,31 +161,30 @@ def test_deploy_bento_does_not_require_postgres_password(monkeypatch, tmp_path):
     monkeypatch.setattr(d, "DOCKER_REPO", "acme")
     monkeypatch.setattr(d, "IMAGE_NAME", "tennis-bento")
     monkeypatch.setattr(d, "LOGS", tmp_path)
-    monkeypatch.setattr(d, "build_bento_image", lambda **_kwargs: ("tennis-bento:latest", 5))
+    monkeypatch.setattr(d, "build_bento_image", lambda **_kwargs: ("acme/tennis-bento:latest", 5))
     monkeypatch.setattr(d, "_docker_login", lambda: None)
     monkeypatch.setattr(d, "_read_state", lambda: {})
     monkeypatch.setattr(d, "_write_state", lambda _s: None)
     monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
-    pushed = []
-    monkeypatch.setattr(d, "_run_teed", lambda cmd, _log: pushed.append(list(cmd)))
+    teed = []
+    monkeypatch.setattr(d, "_run_teed", lambda cmd, _log=None: teed.append(list(cmd)))
     _stub_subprocess(monkeypatch)
 
     d.deploy_bento()  # must not raise
 
-    assert pushed == [["docker", "push", "acme/tennis-bento:latest"]]
+    # Nothing is pushed by deploy directly; Buildx pushed inside the build.
+    assert teed == []
 
 
-def test_deploy_bento_fails_when_push_fails(monkeypatch, tmp_path):
+def test_deploy_bento_fails_when_buildx_push_fails(monkeypatch, tmp_path):
     d = _deploy()
     monkeypatch.setattr(d, "LOGS", tmp_path)
-    monkeypatch.setattr(d, "build_bento_image", lambda **_kwargs: ("tennis-bento:latest", 5))
     monkeypatch.setattr(d, "_docker_login", lambda: None)
-    _stub_subprocess(monkeypatch)
 
-    def fail_push(_cmd, _log):
-        raise subprocess.CalledProcessError(1, ["docker", "push"])
+    def fail_build():
+        raise subprocess.CalledProcessError(1, ["docker", "buildx", "build"])
 
-    monkeypatch.setattr(d, "_run_teed", fail_push)
+    monkeypatch.setattr(d, "build_bento_image", fail_build)
 
     import pytest
 
@@ -186,11 +192,11 @@ def test_deploy_bento_fails_when_push_fails(monkeypatch, tmp_path):
         d.deploy_bento()
 
 
-# --- Whole deploy tees build + push into one deploy_<timestamp>.log ---
+# --- Whole deploy tees build + Buildx output into one deploy_<timestamp>.log ---
 
 
-def test_deploy_bento_logs_build_and_push_to_single_file(monkeypatch, tmp_path):
-    """Build prints and push output go into one deploy_*.log that exists
+def test_deploy_bento_logs_build_and_buildx_to_single_file(monkeypatch, tmp_path):
+    """Build prints and Buildx output go into one deploy_*.log that exists
     before the build starts, while the console still sees them."""
     d = _deploy()
     monkeypatch.setattr(d, "LOGS", tmp_path)
@@ -201,15 +207,24 @@ def test_deploy_bento_logs_build_and_push_to_single_file(monkeypatch, tmp_path):
     monkeypatch.setattr(d, "_write_state", lambda _s: None)
     _stub_subprocess(monkeypatch)
 
+    class _FakeProc:
+        stdout = iter([b"#90 exporting manifest list 0.3s\n"])
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr("subprocess.Popen", lambda *_a, **_k: _FakeProc())
+
     build_output = {}
 
     def fake_build():
         build_output["log_at_build_start"] = sorted(p.name for p in tmp_path.glob("deploy_*.log"))
         print("building bento image")
-        return "tennis-bento:latest", 5
+        # The Buildx build streams its output through _run_teed into the open log.
+        d._run_teed(["docker", "buildx", "build", "--push"])
+        return "acme/tennis-bento:latest", 5
 
     monkeypatch.setattr(d, "build_bento_image", fake_build)
-    monkeypatch.setattr(d, "_run_teed", lambda _cmd, log: (log.write("push output\n"), log.flush()))
 
     d.deploy_bento()
 
@@ -219,7 +234,7 @@ def test_deploy_bento_logs_build_and_push_to_single_file(monkeypatch, tmp_path):
     assert build_output["log_at_build_start"] == [logs[0].name]
     content = logs[0].read_text()
     assert "building bento image" in content
-    assert "push output" in content
+    assert "exporting manifest list" in content
 
 
 def test_deploy_bento_leaves_log_when_build_fails(monkeypatch, tmp_path):
@@ -261,15 +276,30 @@ def test_reuse_or_materialize_nn_onnx_uses_exact_model_uri(monkeypatch, tmp_path
     assert materialized == [pin]
 
 
+class _FakeContext:
+    """Context manager standing in for _buildx_context's temp directory."""
+
+    def __init__(self, path):
+        self.path = path
+
+    def __enter__(self):
+        return self.path
+
+    def __exit__(self, *_exc):
+        return False
+
+
 def _stub_bento_build(monkeypatch):
     """Patch the MLflow/BentoML/Docker machinery behind build_bento_image."""
     d = _deploy()
     from pathlib import Path as _Path
 
     monkeypatch.setattr(d, "IMAGE_NAME", "tennis-bento")
+    monkeypatch.setattr(d, "DOCKER_REPO", "acme")
     monkeypatch.setattr(d, "BENTO_TAG_FILE", _Path("/tmp/bento_tag.txt"))
     monkeypatch.setattr(d, "STATE_FILE", _Path("/tmp/state.json"))
     monkeypatch.setattr(d, "MODEL_INFO_FILE", _Path("/tmp/model_info.json"))
+    monkeypatch.setattr(d, "BENTO_CONTAINERFILE", _Path("/tmp/Containerfile.bento"))
     monkeypatch.setattr(
         d,
         "_latest_production_version",
@@ -291,6 +321,11 @@ def _stub_bento_build(monkeypatch):
     )
     monkeypatch.setattr(d, "_write_pinned_bentofile", lambda _tags: "pinned")
     monkeypatch.setattr(d, "_write_state", lambda _s: None)
+    monkeypatch.setattr(d, "_ensure_buildx_builder", lambda: "tennis-multiarch")
+    monkeypatch.setattr(
+        d, "_write_bento_containerfile", lambda _bento: _Path("/tmp/Containerfile.bento")
+    )
+    monkeypatch.setattr(d, "_buildx_context", lambda _bento: _FakeContext("/ctx"))
     docker_calls = []
     monkeypatch.setattr(
         "subprocess.run",
@@ -298,12 +333,13 @@ def _stub_bento_build(monkeypatch):
             (docker_calls.append(list(a[0])) if a else None) or SimpleNamespace(returncode=0)
         ),
     )
+    teed_calls = []
+    monkeypatch.setattr(d, "_run_teed", lambda cmd, _log=None: teed_calls.append(list(cmd)))
 
-    built = {"bento": 0, "container": 0, "image_tags": [], "docker_calls": docker_calls}
+    built = {"bento": 0, "teed_calls": teed_calls, "docker_calls": docker_calls}
     bentoml = {
         "bentoml": SimpleNamespace(
-            bentos=SimpleNamespace(get=lambda _tag: (_ for _ in ()).throw(Exception())),
-            container=SimpleNamespace(),
+            bentos=SimpleNamespace(get=lambda _tag: (_ for _ in ()).throw(Exception()))
         )
     }
     monkeypatch.setitem(sys.modules, "bentoml", bentoml["bentoml"])
@@ -326,35 +362,161 @@ def _stub_bento_build(monkeypatch):
         built["bento"] += 1
         return SimpleNamespace(tag="bento:abc")
 
-    def container_build(*_args, **_kwargs):
-        built["container"] += 1
-        built["image_tags"].append(_kwargs.get("image_tag"))
-
     bentoml["bentoml"].bentos.build_bentofile = build_bentofile
-    bentoml["bentoml"].container.build = container_build
     return d, built
 
 
-def test_build_force_rebuilds(monkeypatch):
+def test_build_bento_image_publishes_multiarch_via_buildx(monkeypatch):
+    """build_bento_image runs one `docker buildx build` that targets the remote
+    latest tag, both platforms, the generated Containerfile, and the Bento
+    build context — with `--push` as part of the build."""
     d, built = _stub_bento_build(monkeypatch)
 
     image, version = d.build_bento_image()
     assert built["bento"] == 1
-    assert built["container"] == 1
-    # Build only the moving local latest tag.
-    assert built["image_tags"] == [("tennis-bento:latest",)]
-    assert image == "tennis-bento:latest"
+    assert image == "acme/tennis-bento:latest"
     assert version == 7
+    (cmd,) = built["teed_calls"]
+    assert cmd[:3] == ["docker", "buildx", "build"]
+    assert cmd[cmd.index("--builder") + 1] == "tennis-multiarch"
+    assert cmd[cmd.index("--file") + 1] == "/tmp/Containerfile.bento"
+    assert cmd[cmd.index("--platform") + 1] == "linux/amd64,linux/arm64"
+    assert cmd[cmd.index("--tag") + 1] == "acme/tennis-bento:latest"
+    assert "--push" in cmd
+    # The build context that actually contains the Bento is the last argument.
+    assert cmd[-1] == "/ctx"
+    # No separate docker tag/push anywhere: the only docker subprocess is Buildx.
     assert built["docker_calls"] == []
 
 
-def test_build_without_force_rebuilds(monkeypatch):
+def test_build_bento_image_no_separate_docker_push(monkeypatch):
+    """Every deploy rebuilds the Bento and publishes it with the single Buildx
+    command — the old docker tag + docker push route is gone."""
     d, built = _stub_bento_build(monkeypatch)
 
     d.build_bento_image()
     assert built["bento"] == 1
-    assert built["container"] == 1
-    assert built["image_tags"] == [("tennis-bento:latest",)]
+    assert len(built["teed_calls"]) == 1
+    cmd = built["teed_calls"][0]
+    assert cmd[:3] == ["docker", "buildx", "build"]
+    assert "--push" in cmd
+
+
+# --- Buildx command and builder setup ---
+
+
+def test_buildx_build_cmd_exact():
+    """The generated command is exactly the Buildx multi-platform push."""
+    d = _deploy()
+    cmd = d._buildx_build_cmd(
+        builder="b1",
+        containerfile=Path("/cf"),
+        context=Path("/ctx"),
+        image="acme/tennis-bento:latest",
+    )
+    assert cmd == [
+        "docker",
+        "buildx",
+        "build",
+        "--builder",
+        "b1",
+        "--file",
+        "/cf",
+        "--platform",
+        "linux/amd64,linux/arm64",
+        "--tag",
+        "acme/tennis-bento:latest",
+        "--push",
+        "/ctx",
+    ]
+
+
+def test_ensure_buildx_builder_reuses_existing(monkeypatch):
+    d = _deploy()
+    calls = []
+
+    def fake_run(cmd, **_kwargs):
+        calls.append(list(cmd))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert d._ensure_buildx_builder() == "tennis-multiarch"
+    # Inspect only — the named builder already exists, so it is reused.
+    assert calls == [["docker", "buildx", "inspect", "tennis-multiarch"]]
+
+
+def test_ensure_buildx_builder_creates_docker_container_when_missing(monkeypatch):
+    d = _deploy()
+    calls = []
+
+    def fake_run(cmd, **_kwargs):
+        calls.append(list(cmd))
+        # First call (inspect) fails; the create that follows succeeds.
+        return SimpleNamespace(returncode=1 if len(calls) == 1 else 0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert d._ensure_buildx_builder() == "tennis-multiarch"
+    assert calls == [
+        ["docker", "buildx", "inspect", "tennis-multiarch"],
+        [
+            "docker",
+            "buildx",
+            "create",
+            "--name",
+            "tennis-multiarch",
+            "--driver",
+            "docker-container",
+        ],
+    ]
+
+
+def test_write_bento_containerfile_uses_bentoml_generator(monkeypatch, tmp_path):
+    """The Containerfile comes from BentoML's get_containerfile, written to the
+    deploy artifacts path for the current Bento tag."""
+    d = _deploy()
+    containerfile = tmp_path / "Containerfile.bento"
+    monkeypatch.setattr(d, "BENTO_CONTAINERFILE", containerfile)
+    calls = {}
+    fake_bentoml = SimpleNamespace(
+        container=SimpleNamespace(
+            get_containerfile=lambda tag, **kwargs: calls.update(tag=str(tag), **kwargs) or None
+        )
+    )
+    monkeypatch.setitem(sys.modules, "bentoml", fake_bentoml)
+
+    assert d._write_bento_containerfile(SimpleNamespace(tag="bento:abc")) == containerfile
+    assert calls["tag"] == "bento:abc"
+    assert calls["output_path"] == str(containerfile)
+
+
+def test_buildx_context_copies_bento_and_materializes_models(monkeypatch, tmp_path):
+    """The build context contains the whole Bento: its files plus the model
+    files resolved from the model store (bento.path has no models/ itself)."""
+    d = _deploy()
+    bento_root = tmp_path / "bento"
+    (bento_root / "env" / "python").mkdir(parents=True)
+    (bento_root / "env" / "python" / "requirements.txt").write_text("x")
+    store_root = tmp_path / "store"
+    model_root = store_root / "m1" / "v1"
+    model_root.mkdir(parents=True)
+    (model_root / "model.pkl").write_bytes(b"data")
+    stored = SimpleNamespace(tag=SimpleNamespace(name="m1", version="v1"), path=model_root)
+    bento = SimpleNamespace(
+        path=bento_root,
+        info=SimpleNamespace(all_models=[SimpleNamespace(tag="m1:v1")]),
+    )
+    fake_bentoml = SimpleNamespace(models=SimpleNamespace(get=lambda _tag: stored))
+    monkeypatch.setitem(sys.modules, "bentoml", fake_bentoml)
+
+    with d._buildx_context(bento) as context:
+        assert (context / "env" / "python" / "requirements.txt").read_text() == "x"
+        assert (context / "models" / "m1" / "v1" / "model.pkl").read_bytes() == b"data"
+        context_path = context
+
+    # The temporary context is cleaned up after the build.
+    assert not context_path.exists()
 
 
 # --- Every deploy packages the on-disk artifacts into the build context ---

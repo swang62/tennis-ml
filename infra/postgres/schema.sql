@@ -1,11 +1,11 @@
 -- PostgreSQL bootstrap: structure only.
 --
 -- Runs on any standard PostgreSQL 18 instance: the Compose `postgres:18.4`
--- service executes it from /docker-entrypoint-initdb.d/init.sql on a fresh
+-- service executes it from /docker-entrypoint-initdb.d/schema.sql on a fresh
 -- data volume (never on restart), and host operators may apply it manually to
 -- the configured local database, e.g.:
 --
---   psql -U <user> -d <db> -f infra/postgres/init.sql
+--   psql -U <user> -d <db> -f infra/postgres/schema.sql
 --
 -- It is idempotent (CREATE ... IF NOT EXISTS), so re-running it is safe.
 
@@ -16,6 +16,9 @@
 -- is written later by just db-seed / db-etl. Nothing is baked into an image;
 -- the Compose named volume persists everything.
 
+-- Bento workers can start concurrently; serialize this idempotent migration.
+SELECT pg_advisory_xact_lock(7910881);
+
 CREATE SCHEMA IF NOT EXISTS bronze;
 CREATE SCHEMA IF NOT EXISTS silver;
 CREATE SCHEMA IF NOT EXISTS gold;
@@ -23,9 +26,9 @@ CREATE SCHEMA IF NOT EXISTS gold;
 -- Raw match data: one row per match with both players' stats in the row.
 -- The gold layer expands each row into two player-perspective rows.
 --
--- The small-integer count columns hold counts in the 0..255 range the row
--- validator (src.features.validate) enforces; that range is re-asserted here
--- as a CHECK. Unknown match-time ranks are NULL; rank points may be 0.
+-- Match count columns use INTEGER: exceptional long matches exceed SMALLINT's
+-- former 0..255 validation ceiling. Unknown match-time ranks are NULL; rank
+-- points may be 0.
 CREATE TABLE IF NOT EXISTS bronze.match_events (
     match_id                   VARCHAR NOT NULL,
     match_date                 DATE    NOT NULL,
@@ -39,28 +42,28 @@ CREATE TABLE IF NOT EXISTS bronze.match_events (
     is_indoor                  SMALLINT,
     player1_ranking            INTEGER,
     player2_ranking            INTEGER,
-    player1_wins_last_10       SMALLINT,
-    player1_matches_last_10    SMALLINT,
-    player1_aces               SMALLINT NOT NULL,
-    player1_double_faults      SMALLINT NOT NULL,
-    player1_first_serves_made  SMALLINT NOT NULL,
-    player1_total_serve_points SMALLINT NOT NULL,
-    player1_first_serve_points_won   SMALLINT NOT NULL,
-    player1_second_serve_points_won  SMALLINT NOT NULL,
-    player1_service_games      SMALLINT NOT NULL,
-    player1_break_points_saved SMALLINT NOT NULL,
-    player1_break_points_faced SMALLINT NOT NULL,
-    player2_wins_last_10       SMALLINT,
-    player2_matches_last_10    SMALLINT,
-    player2_aces               SMALLINT NOT NULL,
-    player2_double_faults      SMALLINT NOT NULL,
-    player2_first_serves_made  SMALLINT NOT NULL,
-    player2_total_serve_points SMALLINT NOT NULL,
-    player2_first_serve_points_won   SMALLINT NOT NULL,
-    player2_second_serve_points_won  SMALLINT NOT NULL,
-    player2_service_games      SMALLINT NOT NULL,
-    player2_break_points_saved SMALLINT NOT NULL,
-    player2_break_points_faced SMALLINT NOT NULL,
+    player1_wins_last_10       INTEGER,
+    player1_matches_last_10    INTEGER,
+    player1_aces               INTEGER NOT NULL,
+    player1_double_faults      INTEGER NOT NULL,
+    player1_first_serves_made  INTEGER NOT NULL,
+    player1_total_serve_points INTEGER NOT NULL,
+    player1_first_serve_points_won   INTEGER NOT NULL,
+    player1_second_serve_points_won  INTEGER NOT NULL,
+    player1_service_games      INTEGER NOT NULL,
+    player1_break_points_saved INTEGER NOT NULL,
+    player1_break_points_faced INTEGER NOT NULL,
+    player2_wins_last_10       INTEGER,
+    player2_matches_last_10    INTEGER,
+    player2_aces               INTEGER NOT NULL,
+    player2_double_faults      INTEGER NOT NULL,
+    player2_first_serves_made  INTEGER NOT NULL,
+    player2_total_serve_points INTEGER NOT NULL,
+    player2_first_serve_points_won   INTEGER NOT NULL,
+    player2_second_serve_points_won  INTEGER NOT NULL,
+    player2_service_games      INTEGER NOT NULL,
+    player2_break_points_saved INTEGER NOT NULL,
+    player2_break_points_faced INTEGER NOT NULL,
     player1_rank_points        INTEGER NOT NULL,
     player2_rank_points        INTEGER NOT NULL,
     player1_age                DOUBLE PRECISION NOT NULL,
@@ -78,26 +81,69 @@ CREATE TABLE IF NOT EXISTS bronze.match_events (
         player1_age BETWEEN 0 AND 100 AND player2_age BETWEEN 0 AND 100
     ),
     CONSTRAINT match_events_check_integer_counts  CHECK (
-        player1_wins_last_10 BETWEEN 0 AND 255 AND player1_matches_last_10 BETWEEN 0 AND 255
-        AND player1_aces BETWEEN 0 AND 255 AND player1_double_faults BETWEEN 0 AND 255
-        AND player1_first_serves_made BETWEEN 0 AND 255 AND player1_total_serve_points BETWEEN 0 AND 255
-        AND player1_first_serve_points_won BETWEEN 0 AND 255
-        AND player1_second_serve_points_won BETWEEN 0 AND 255
-        AND player1_service_games BETWEEN 0 AND 255
-        AND player1_break_points_saved BETWEEN 0 AND 255 AND player1_break_points_faced BETWEEN 0 AND 255
-        AND player2_wins_last_10 BETWEEN 0 AND 255 AND player2_matches_last_10 BETWEEN 0 AND 255
-        AND player2_aces BETWEEN 0 AND 255 AND player2_double_faults BETWEEN 0 AND 255
-        AND player2_first_serves_made BETWEEN 0 AND 255 AND player2_total_serve_points BETWEEN 0 AND 255
-        AND player2_first_serve_points_won BETWEEN 0 AND 255
-        AND player2_second_serve_points_won BETWEEN 0 AND 255
-        AND player2_service_games BETWEEN 0 AND 255
-        AND player2_break_points_saved BETWEEN 0 AND 255 AND player2_break_points_faced BETWEEN 0 AND 255
+        player1_wins_last_10 BETWEEN 0 AND 20000 AND player1_matches_last_10 BETWEEN 0 AND 20000
+        AND player1_aces BETWEEN 0 AND 20000 AND player1_double_faults BETWEEN 0 AND 20000
+        AND player1_first_serves_made BETWEEN 0 AND 20000 AND player1_total_serve_points >= 0
+        AND player1_first_serve_points_won BETWEEN 0 AND 20000
+        AND player1_second_serve_points_won BETWEEN 0 AND 20000
+        AND player1_service_games BETWEEN 0 AND 20000
+        AND player1_break_points_saved BETWEEN 0 AND 20000 AND player1_break_points_faced BETWEEN 0 AND 20000
+        AND player2_wins_last_10 BETWEEN 0 AND 20000 AND player2_matches_last_10 BETWEEN 0 AND 20000
+        AND player2_aces BETWEEN 0 AND 20000 AND player2_double_faults BETWEEN 0 AND 20000
+        AND player2_first_serves_made BETWEEN 0 AND 20000 AND player2_total_serve_points >= 0
+        AND player2_first_serve_points_won BETWEEN 0 AND 20000
+        AND player2_second_serve_points_won BETWEEN 0 AND 20000
+        AND player2_service_games BETWEEN 0 AND 20000
+        AND player2_break_points_saved BETWEEN 0 AND 20000 AND player2_break_points_faced BETWEEN 0 AND 20000
     ),
     CONSTRAINT match_events_check_indoor CHECK (is_indoor IS NULL OR is_indoor IN (0, 1))
 );
 
 -- Upgrade existing local databases created before match score was ingested.
 ALTER TABLE bronze.match_events ADD COLUMN IF NOT EXISTS score VARCHAR;
+
+-- Non-destructive upgrade for databases created with SMALLINT match counts.
+-- ALTER TYPE widens the existing values in place; no rows or schemas are dropped.
+ALTER TABLE bronze.match_events
+    ALTER COLUMN player1_wins_last_10 TYPE INTEGER,
+    ALTER COLUMN player1_matches_last_10 TYPE INTEGER,
+    ALTER COLUMN player1_aces TYPE INTEGER,
+    ALTER COLUMN player1_double_faults TYPE INTEGER,
+    ALTER COLUMN player1_first_serves_made TYPE INTEGER,
+    ALTER COLUMN player1_total_serve_points TYPE INTEGER,
+    ALTER COLUMN player1_first_serve_points_won TYPE INTEGER,
+    ALTER COLUMN player1_second_serve_points_won TYPE INTEGER,
+    ALTER COLUMN player1_service_games TYPE INTEGER,
+    ALTER COLUMN player1_break_points_saved TYPE INTEGER,
+    ALTER COLUMN player1_break_points_faced TYPE INTEGER,
+    ALTER COLUMN player2_wins_last_10 TYPE INTEGER,
+    ALTER COLUMN player2_matches_last_10 TYPE INTEGER,
+    ALTER COLUMN player2_aces TYPE INTEGER,
+    ALTER COLUMN player2_double_faults TYPE INTEGER,
+    ALTER COLUMN player2_first_serves_made TYPE INTEGER,
+    ALTER COLUMN player2_total_serve_points TYPE INTEGER,
+    ALTER COLUMN player2_first_serve_points_won TYPE INTEGER,
+    ALTER COLUMN player2_second_serve_points_won TYPE INTEGER,
+    ALTER COLUMN player2_service_games TYPE INTEGER,
+    ALTER COLUMN player2_break_points_saved TYPE INTEGER,
+    ALTER COLUMN player2_break_points_faced TYPE INTEGER;
+ALTER TABLE bronze.match_events DROP CONSTRAINT IF EXISTS match_events_check_integer_counts;
+ALTER TABLE bronze.match_events ADD CONSTRAINT match_events_check_integer_counts CHECK (
+    player1_wins_last_10 BETWEEN 0 AND 20000 AND player1_matches_last_10 BETWEEN 0 AND 20000
+    AND player1_aces BETWEEN 0 AND 20000 AND player1_double_faults BETWEEN 0 AND 20000
+    AND player1_first_serves_made BETWEEN 0 AND 20000 AND player1_total_serve_points >= 0
+    AND player1_first_serve_points_won BETWEEN 0 AND 20000
+    AND player1_second_serve_points_won BETWEEN 0 AND 20000
+    AND player1_service_games BETWEEN 0 AND 20000
+    AND player1_break_points_saved BETWEEN 0 AND 20000 AND player1_break_points_faced BETWEEN 0 AND 20000
+    AND player2_wins_last_10 BETWEEN 0 AND 20000 AND player2_matches_last_10 BETWEEN 0 AND 20000
+    AND player2_aces BETWEEN 0 AND 20000 AND player2_double_faults BETWEEN 0 AND 20000
+    AND player2_first_serves_made BETWEEN 0 AND 20000 AND player2_total_serve_points >= 0
+    AND player2_first_serve_points_won BETWEEN 0 AND 20000
+    AND player2_second_serve_points_won BETWEEN 0 AND 20000
+    AND player2_service_games BETWEEN 0 AND 20000
+    AND player2_break_points_saved BETWEEN 0 AND 20000 AND player2_break_points_faced BETWEEN 0 AND 20000
+);
 
 -- Upgrade existing local databases created before unknown ranks became NULL.
 ALTER TABLE bronze.match_events ALTER COLUMN player1_ranking DROP NOT NULL;

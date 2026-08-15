@@ -13,19 +13,19 @@ cluster-restart:
     kubectl rollout restart statefulset
 
 # Create the cluster, manifests, and database.
-cluster-setup: deps cluster-create db-init
+cluster-setup: deps cluster-create db-migrate
 
 # Run bronze-to-gold ETL; pass --full-refresh to rebuild silver/gold from bronze.
 db-etl *args:
     uv run python src/flows/etl.py {{ args }}
 
-# Create PostgreSQL schemas and tables.
-db-init:
-    uv run python src/db/init_db.py init
+# Apply idempotent PostgreSQL schema migrations without dropping data.
+db-migrate:
+    uv run python src/db/migrate_db.py migrate
 
 # Drop and recreate PostgreSQL schemas.
 db-reset:
-    uv run python src/db/init_db.py reset
+    uv run python src/db/migrate_db.py reset
 
 # Seed deterministic raw matches. --all (every CSV) --enrich (Wikipedia bios) --force (overwrite).
 db-seed *args:
@@ -38,8 +38,7 @@ db-snapshot:
 # Build and push all production docker images.
 deploy *args:
     uv run python src/flows/deploy.py {{ args }}
-    docker build -t swang62/tennis-web:latest web/
-    docker push swang62/tennis-web:latest
+    docker buildx build --builder tennis-multiarch --platform linux/amd64,linux/arm64 --tag swang62/tennis-web:latest --push web/
 
 # Install Python dependencies.
 deps:

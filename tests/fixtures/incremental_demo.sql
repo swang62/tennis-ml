@@ -13,7 +13,7 @@
 -- Re-running dbt build with no further bronze changes is a no-op (idempotent).
 --
 -- Player1 is the winner by bronze convention (winner_id = player1_id, the
--- CHECK enforced in infra/postgres/init.sql). Values use existing pool players
+-- CHECK enforced in infra/postgres/schema.sql). Values use existing pool players
 -- (S0AG, A0E2) and satisfy every bronze CHECK constraint.
 
 INSERT INTO bronze.match_events (

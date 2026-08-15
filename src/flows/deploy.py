@@ -1,9 +1,12 @@
-"""Build the promoted Bento image locally and push it to Docker Hub."""
+"""Build the promoted Bento and publish it to Docker Hub for multiple platforms."""
 
+import contextlib
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
@@ -46,6 +49,13 @@ suppress_insecure_tls_warning()
 assert IMAGE_NAME is not None, "IMAGE_NAME not set in env; load_env() must be called first"
 # Docker Hub uses only `latest`; MLflow pins determine the packaged model versions.
 DOCKER_REPO = os.getenv("DOCKER_REPO", "swang62")
+
+# Multi-architecture publishing: one Docker Hub manifest list for both platforms.
+MULTIARCH_PLATFORMS = ("linux/amd64", "linux/arm64")
+# Named docker-container Buildx builder reused across deploys (keeps its cache).
+BUILDX_BUILDER = "tennis-multiarch"
+# Containerfile rendered from the current Bento, written fresh on every deploy.
+BENTO_CONTAINERFILE = DEPLOY_ARTIFACTS / "Containerfile.bento"
 
 # nn_best is exported to ONNX and included as an artifact, not a BentoModel.
 BASE_BENTO_NAMES = {"linear": "linear_best", "gbdt": "gbdt_best", "nn": "nn_best"}
@@ -92,7 +102,8 @@ SOURCE_FINGERPRINT_FILES = [
     # Rest of the runtime source closure shipped in the Bento image.
     ROOT / "src" / "countries.py",
     ROOT / "src" / "db" / "client.py",
-    ROOT / "src" / "db" / "init_db.py",
+    ROOT / "src" / "db" / "migrate_db.py",
+    ROOT / "infra" / "postgres" / "schema.sql",
     ROOT / "src" / "utils.py",
     ROOT / "src" / "models" / "similarity.py",
     ROOT / "src" / "models" / "nn.py",
@@ -528,31 +539,126 @@ class _Tee:
 
 
 def _run_teed(
-    cmd: list[str], log: TextIO, env: dict[str, str] | None = None
+    cmd: list[str], log: TextIO | None = None, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess:
-    """Run a deploy subprocess, streaming its output to the console AND a log file."""
+    """Run a deploy subprocess, streaming its output to the console AND a log file.
+
+    With `log` None the output still reaches the console — and, inside
+    deploy_bento's redirect, the deploy log — via sys.stdout.
+    """
     proc = subprocess.Popen(
         cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env
     )
     assert proc.stdout is not None
     for line in proc.stdout:
         text = line.decode(errors="replace")
-        # Docker push re-renders the full layer status table on every change,
-        # spamming `Waiting` for layers that are already cached; drop those.
+        # Docker push/buildx re-renders the full layer status table on every
+        # change, spamming `Waiting` for layers that are already cached; drop those.
         if text.strip().endswith(": Waiting"):
             continue
         sys.stdout.write(text)
         sys.stdout.flush()
-        log.write(text)
-        log.flush()
+        if log is not None:
+            log.write(text)
+            log.flush()
     returncode = proc.wait()
     if returncode != 0:
         raise subprocess.CalledProcessError(returncode, cmd)
     return subprocess.CompletedProcess(cmd, returncode)
 
 
+def _buildx_build_cmd(*, builder: str, containerfile: Path, context: Path, image: str) -> list[str]:
+    """The exact `docker buildx build` invocation publishing the image.
+
+    `--push` is part of the build: Buildx writes each per-platform image to
+    the builder's local cache and pushes one `latest` manifest list, so the
+    image is never separately tagged or pushed afterwards.
+    """
+    return [
+        "docker",
+        "buildx",
+        "build",
+        "--builder",
+        builder,
+        "--file",
+        str(containerfile),
+        "--platform",
+        ",".join(MULTIARCH_PLATFORMS),
+        "--tag",
+        image,
+        "--push",
+        str(context),
+    ]
+
+
+def _ensure_buildx_builder() -> str:
+    """Return the docker-container Buildx builder, creating it on first use.
+
+    Multi-platform builds require the docker-container driver; the default
+    docker driver cannot build or push multi-arch manifests. Reusing the
+    named builder keeps its layer cache across deploys.
+    """
+    if (
+        subprocess.run(
+            ["docker", "buildx", "inspect", BUILDX_BUILDER],
+            cwd=ROOT,
+            capture_output=True,
+        ).returncode
+        != 0
+    ):
+        print(f"Creating Buildx builder {BUILDX_BUILDER} (docker-container driver)...")
+        subprocess.run(
+            [
+                "docker",
+                "buildx",
+                "create",
+                "--name",
+                BUILDX_BUILDER,
+                "--driver",
+                "docker-container",
+            ],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+        )
+    return BUILDX_BUILDER
+
+
+def _write_bento_containerfile(bento: Any) -> Path:
+    """Render the Bento's Containerfile with BentoML's own generator."""
+    import bentoml
+
+    BENTO_CONTAINERFILE.parent.mkdir(parents=True, exist_ok=True)
+    bentoml.container.get_containerfile(str(bento.tag), output_path=str(BENTO_CONTAINERFILE))
+    print(f"Wrote Containerfile: {BENTO_CONTAINERFILE}")
+    return BENTO_CONTAINERFILE
+
+
+@contextlib.contextmanager
+def _buildx_context(bento: Any):
+    """Yield a portable build context: the Bento content plus its models.
+
+    A stored Bento keeps its models in the global model store, not under
+    bento.path/models, so the Containerfile's `COPY . ./` would miss them.
+    Mirror BentoML's construct_containerfile: copy the Bento and materialize
+    each model into the context so it really contains the whole Bento.
+    """
+    import bentoml
+
+    with tempfile.TemporaryDirectory(prefix="bento-buildx-") as tmp:
+        context = Path(tmp)
+        shutil.copytree(bento.path, context, dirs_exist_ok=True)
+        models_dir = context / "models"
+        models_dir.mkdir(parents=True, exist_ok=True)
+        for model in bento.info.all_models:
+            stored = bentoml.models.get(model.tag)
+            target = models_dir / str(stored.tag.name) / str(stored.tag.version)
+            shutil.copytree(stored.path, target, dirs_exist_ok=True)
+        yield context
+
+
 def build_bento_image() -> tuple[str, int]:
-    """Build the promoted Bento and `${IMAGE_NAME}:latest` image on every deploy."""
+    """Build the promoted Bento and publish the multi-arch Docker Hub image."""
     import bentoml
     from mlflow.tracking.client import MlflowClient
 
@@ -584,40 +690,45 @@ def build_bento_image() -> tuple[str, int]:
     )
     print(f"Built {tag} from {pinned}")
 
-    image = f"{IMAGE_NAME}:latest"
-    print(f"Containerizing {tag} -> {image} with BentoML...")
-    bentoml.container.build(tag, backend="docker", image_tag=(image,))
+    image = f"{DOCKER_REPO}/{IMAGE_NAME}:latest"
+    containerfile = _write_bento_containerfile(bento)
+    builder = _ensure_buildx_builder()
+    print(f"Containerizing {tag} -> {image} with Docker Buildx...")
+    with _buildx_context(bento) as context:
+        _run_teed(
+            _buildx_build_cmd(
+                builder=builder, containerfile=containerfile, context=context, image=image
+            )
+        )
     return image, int(production.version)
 
 
 def deploy_bento() -> None:
-    """Build then push the promoted image; token login uses stdin.
+    """Authenticate, then build and publish the multi-arch image with Buildx.
 
-    Build prints and push output both stream to the console and to a single
-    deploy_<timestamp>.log opened before the build, so a failed build still
-    leaves a log of the attempt.
+    Build output streams to the console and to a single deploy_<timestamp>.log
+    opened before the build, so a failed build still leaves a log of the
+    attempt. Docker login runs before the build because Buildx's `--push` is
+    part of the build command.
     """
     LOGS.mkdir(parents=True, exist_ok=True)
     deploy_log = LOGS / f"deploy_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-    with deploy_log.open("w") as log:
+    try:
         with (
+            deploy_log.open("w") as log,
             redirect_stdout(_Tee(sys.stdout, log)),
             redirect_stderr(_Tee(sys.stderr, log)),
         ):
-            local_image, production_version = build_bento_image()
-        try:
-            latest = f"{DOCKER_REPO}/{IMAGE_NAME}:latest"
-            # BentoML tags the local image without the Docker Hub repo prefix;
-            # retag so `docker push` targets the correct registry.
-            subprocess.run(
-                ["docker", "tag", local_image, latest], cwd=ROOT, capture_output=True, check=True
-            )
             _docker_login()
-            _run_teed(["docker", "push", latest], log)
-        except subprocess.CalledProcessError as exc:
-            print(f"Deploy step failed ({exc}); image was not published: {local_image}")
-            raise
+            _image, production_version = build_bento_image()
+    except subprocess.CalledProcessError as exc:
+        print(
+            f"Deploy step failed ({exc}); image was not published: "
+            f"{DOCKER_REPO}/{IMAGE_NAME}:latest"
+        )
+        raise
 
+    latest = f"{DOCKER_REPO}/{IMAGE_NAME}:latest"
     state = _read_state()
     _write_state({**state, "deployed_version": production_version, "deployed_image": latest})
     print(f"Published {latest} to Docker Hub")

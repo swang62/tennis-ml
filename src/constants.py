@@ -52,7 +52,7 @@ ARTIFACTS = ROOT / "artifacts"
 OUTPUTS = ARTIFACTS / "notebooks"
 LOGS = ARTIFACTS / "logs"
 DATA_PROCESSED = ROOT / "data" / "processed"
-INIT_SQL = ROOT / "infra" / "postgres" / "init.sql"
+SCHEMA_SQL = ROOT / "infra" / "postgres" / "schema.sql"
 DEPLOY_ARTIFACTS = ROOT / "data" / "deploy"
 
 # Model-tied serving artifacts frozen into DEPLOY_ARTIFACTS on promotion
