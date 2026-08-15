@@ -13,11 +13,11 @@ import pandas as pd
 import requests
 
 from src.constants import (
+    BRONZE_MATCHES_TABLE,
     BRONZE_PROFILES_TABLE,
-    BRONZE_TABLE,
+    BRONZE_RANKINGS_TABLE,
     ENRICH_WORKERS,
-    GOLD_TABLE,
-    RANKINGS_TABLE,
+    GOLD_MATCHES_TABLE,
     ROOT,
 )
 from src.countries import UNK, valid_ioc
@@ -359,7 +359,7 @@ def insert_bronze_rows(df: pd.DataFrame, *, overwrite: bool = False) -> int:
         return 0
 
     return _copy_df_into(
-        BRONZE_TABLE,
+        BRONZE_MATCHES_TABLE,
         cast(pd.DataFrame, valid_df[list(BRONZE_COLUMNS)]),
         conflict_col="match_id",
         update_cols=[c for c in BRONZE_COLUMNS if c != "match_id"] if overwrite else None,
@@ -747,9 +747,6 @@ def _name_matches_seed(name: str, player_ids: set[str], canonical: dict[str, str
 
 # ── Official Rankings Ingest ───────────────────────────────────
 
-# Ingest-facing alias for the shared rankings table constant (kept for callers
-# that import this name; the value is single-sourced in src.constants).
-BRONZE_RANKINGS_TABLE = RANKINGS_TABLE
 RANKINGS_DIR = ROOT / "data" / "raw" / "rankings"
 ATP_PLAYERS_CSV = RANKINGS_DIR / "atp_players.csv"
 

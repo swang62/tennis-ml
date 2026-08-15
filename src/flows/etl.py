@@ -29,10 +29,10 @@ from prefect.events.schemas.automations import EventTrigger
 
 from src import constants
 from src.constants import (
-    BRONZE_TABLE,
-    GOLD_TABLE,
+    BRONZE_MATCHES_TABLE,
+    GOLD_MATCHES_TABLE,
+    GOLD_PROFILES_TABLE,
     LOGS,
-    PROFILES_TABLE,
     SILVER_PLAYER_MATCHES,
     SILVER_ROLLING_FEATURES,
     WORK_POOL_NAME,
@@ -101,11 +101,11 @@ def bronze_to_gold(full_refresh: bool = False) -> int:
     run_dbt_build(log_file=log_file, full_refresh=full_refresh)
     with connection() as conn, conn.cursor() as cur:
         counts = {
-            BRONZE_TABLE: _table_count(cur, BRONZE_TABLE),
+            BRONZE_MATCHES_TABLE: _table_count(cur, BRONZE_MATCHES_TABLE),
             SILVER_PLAYER_MATCHES: _table_count(cur, SILVER_PLAYER_MATCHES),
             SILVER_ROLLING_FEATURES: _table_count(cur, SILVER_ROLLING_FEATURES),
-            GOLD_TABLE: _table_count(cur, GOLD_TABLE),
-            PROFILES_TABLE: _table_count(cur, PROFILES_TABLE),
+            GOLD_MATCHES_TABLE: _table_count(cur, GOLD_MATCHES_TABLE),
+            GOLD_PROFILES_TABLE: _table_count(cur, GOLD_PROFILES_TABLE),
         }
     for table, count in counts.items():
         print(f"{table}: {count} current rows")
@@ -117,7 +117,7 @@ def bronze_to_gold(full_refresh: bool = False) -> int:
         )
         print(f"dbt {model}: {rows} rows {action}")
     print(f"dbt ({mode}): {_dbt_summary(log_file)}")
-    return counts[GOLD_TABLE]
+    return counts[GOLD_MATCHES_TABLE]
 
 
 def _table_count(cur, table: str) -> int:

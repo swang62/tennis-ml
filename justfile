@@ -1,3 +1,8 @@
+# VITE_* build inputs: web/.env is the single source of truth (Vite reads it
+# for pnpm build; just loads it here for the deploy build args). Shell env
+# still overrides via env_var_or_default.
+set dotenv-filename := "web/.env"
+
 # Create the local k3d cluster.
 cluster-create:
     ./infra/k3d/start.sh
@@ -31,6 +36,10 @@ db-reset:
 seed *args:
     uv run python src/db/seed.py {{ args }}
 
+# Insert deterministic cloned real bronze matches for drift testing. --dry-run --force --after.
+seed-random *args:
+    uv run python src/db/seed_drift.py {{ args }}
+
 # Export an atomic PostgreSQL training snapshot, optional as the training pipeline always snapshots first.
 snapshot:
     uv run python src/db/snapshot.py
@@ -38,7 +47,10 @@ snapshot:
 # Build and push all production docker images.
 deploy *args:
     uv run python src/flows/deploy.py {{ args }}
-    docker buildx build --builder tennis-multiarch --platform linux/amd64,linux/arm64 --tag swang62/tennis-web:latest --push web/
+    docker buildx build --builder tennis-multiarch --platform linux/amd64,linux/arm64 \
+        --build-arg VITE_SITE_URL={{ env_var_or_default('VITE_SITE_URL', '') }} \
+        --build-arg VITE_SITE_ID={{ env_var_or_default('VITE_SITE_ID', '') }} \
+        --tag swang62/tennis-web:latest --push web/
 
 # Install Python dependencies.
 deps:

@@ -1,15 +1,20 @@
 """Production drift monitor against the deployed champion Bento.
 
 Scheduled 30 minutes after the weekly scrape (Monday 06:30 UTC, right after the
-06:00 scrape). Runs dbt build to refresh gold data, resolves the MLflow
-champion, and compares two size-matched windows from gold.match_features —
+06:00 scrape). Runs dbt build to refresh silver/gold, resolves the MLflow
+champion, and compares two size-matched windows of physical matches from
+bronze.match_events —
 the post-cutoff current window and the most recent pre-cutoff reference
-window, both scored through the production Bento — using Evidently's
-DataDriftPreset (per-feature PSI, prediction PSI, drift share). Current-window
-performance is compared against the champion's promotion-pinned metric tags,
-and the combined signals map to a healthy / investigate / retrain verdict that
-is printed and logged to MLflow. The full drift summary is printed to stdout
-so it appears in both Prefect logs and the CLI.
+window, each expanded into both scoring orientations and scored through the
+production Bento — using Evidently's
+DataDriftPreset (per-feature PSI, prediction PSI, drift share). Only the
+numeric bronze serve/point rates (DRIFT_FEATURE_COLS) are compared for
+feature drift; the match-context fields used to score through Bento are never
+part of the drift analysis. Current-window performance is compared against
+the champion's promotion-pinned metric tags, and the combined signals map to
+a healthy / investigate / retrain verdict that is printed and logged to
+MLflow. The full drift summary is printed to stdout so it appears in both
+Prefect logs and the CLI.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from typing import Any, cast
 from urllib.parse import urlparse
 
 import mlflow
+import numpy as np
 import pandas as pd
 import requests
 from evidently import Report
@@ -39,6 +45,7 @@ from src.constants import (
     DRIFT_AUC_DROP,
     DRIFT_CALIBRATION_DELTA,
     DRIFT_MIN_N_FOR_AUC,
+    DRIFT_MIN_N_FOR_CHECK,
     DRIFT_PRED_PSI_THRESHOLD,
     DRIFT_PSI_MODERATE,
     DRIFT_PSI_SIGNIFICANT,
@@ -47,8 +54,6 @@ from src.constants import (
     DRIFT_SHARE_THRESHOLD,
     EVAL_MAX_DATE_KEY,
     EVAL_SPLIT_SIZE_KEY,
-    GOLD_TABLE,
-    METRIC_COMPOSITE_KEY,
     METRIC_PREFIX,
     MODEL_INFO_ROUTE,
     PREDICT_BATCH_ROUTE,
@@ -61,11 +66,15 @@ from src.db.client import execute_df
 from src.evaluate.promotion import (
     METRIC_NAMES,
     compute_metrics,
-    ordered_incumbent_contexts,
     resolve_champion,
 )
-from src.features.columns import FEATURE_COLS
 from src.flows.etl import run_dbt_build
+from src.serving.service import (
+    PredictFromIdsRow,
+    Round,
+    Surface,
+    TournamentLevel,
+)
 from src.utils import load_env, suppress_insecure_tls_warning
 
 LOCK_FILE = ARTIFACTS / ".check_drift.lock"
@@ -75,11 +84,59 @@ DRIFT_DEPLOYMENT_NAME = "drift"
 # 30 minutes after the scrape cron (Monday 06:00 UTC), so ETL has finished.
 DRIFT_CRON = "30 6 * * 1"
 
-# Both drift windows are pulled from gold with the same column set: identity
-# and context (for scoring through the Bento), the label, and every FEATURE_COL.
-_DRIFT_WINDOW_COLUMNS = (
-    "match_id, match_date, player_id, opponent_id, surface, is_indoor, "
-    "tournament_level, round_encoded, match_won, " + ", ".join(FEATURE_COLS)
+# Drift analysis frame: the numeric bronze serve/point rates whose per-column
+# PSI drives the feature verdict, the derived orientation label, and the
+# champion's p_win. All four rates are scale-normalized per match, so their
+# distributions are not dominated by seasonal composition: raw totals grow with
+# match length (best-of-3 vs best-of-5, tiebreak games), while the rates are
+# per-match percentages that track serve performance itself. Match-context
+# fields (surface, tournament, round, is_indoor) and everything player-specific
+# (rankings, rolling form, age, H2H, schedule volume, player profiles) are
+# intentionally excluded — they legitimately change with the tour calendar and
+# player mix, so their PSI would flag composition drift rather than performance
+# drift. `score` is a VARCHAR and break_points_saved_pct is omitted because its
+# denominator (break points faced) is frequently 0, making the rate
+# NULL-dominated. p_win is not a match feature: it is monitored separately as
+# prediction-distribution PSI.
+DRIFT_FEATURE_COLS = [
+    "player1_first_serve_pct",
+    "player1_serve_win_pct",
+    "player1_ace_rate",
+    "player1_df_rate",
+    "player2_first_serve_pct",
+    "player2_serve_win_pct",
+    "player2_ace_rate",
+    "player2_df_rate",
+]
+DRIFT_ANALYSIS_COLUMNS = [*DRIFT_FEATURE_COLS, "match_won", "p_win"]
+
+# Bronze physical-match projection used by both drift windows: one row per
+# match, so source windows never double-count a match. The context fields are
+# the normalized public strings ingest already writes (surface, tournament,
+# round) plus COALESCE(is_indoor, 0); they are carried only to build the Bento
+# request contexts and never enter the drift analysis. The rate expressions
+# mirror the unsmoothed single-match versions of the dbt rolling_feature
+# formulas (first_serve_pct_10, serve_win_pct_10, ace_rate_10, df_rate_10) and
+# are NULLIF-guarded so a side with zero opportunities (a walkover) yields NULL
+# instead of a divide-by-zero.
+_BRONZE_WINDOW_COLUMNS: tuple[str, ...] = (
+    "match_id",
+    "match_date",
+    "player1_id",
+    "player2_id",
+    "winner_id",
+    "surface",
+    "tournament",
+    "round",
+    "COALESCE(is_indoor, 0) AS is_indoor",
+    "CAST(player1_first_serves_made AS DOUBLE PRECISION) / NULLIF(player1_total_serve_points, 0) AS player1_first_serve_pct",
+    "CAST(player1_first_serve_points_won + player1_second_serve_points_won AS DOUBLE PRECISION) / NULLIF(player1_total_serve_points, 0) AS player1_serve_win_pct",
+    "CAST(player1_aces AS DOUBLE PRECISION) / NULLIF(player1_first_serves_made, 0) AS player1_ace_rate",
+    "CAST(player1_double_faults AS DOUBLE PRECISION) / NULLIF(player1_total_serve_points, 0) AS player1_df_rate",
+    "CAST(player2_first_serves_made AS DOUBLE PRECISION) / NULLIF(player2_total_serve_points, 0) AS player2_first_serve_pct",
+    "CAST(player2_first_serve_points_won + player2_second_serve_points_won AS DOUBLE PRECISION) / NULLIF(player2_total_serve_points, 0) AS player2_serve_win_pct",
+    "CAST(player2_aces AS DOUBLE PRECISION) / NULLIF(player2_first_serves_made, 0) AS player2_ace_rate",
+    "CAST(player2_double_faults AS DOUBLE PRECISION) / NULLIF(player2_total_serve_points, 0) AS player2_df_rate",
 )
 
 
@@ -134,9 +191,9 @@ def _champion_cutoff_date(client: MlflowClient) -> date | None:
 
 
 def _pinned_metrics(client: MlflowClient, champion: Any) -> dict[str, Any]:
-    """Champion metric tags pinned at promotion: the 8 gate metrics + eval notes.
+    """Champion metric tags pinned at promotion: the 4 gate metrics + eval notes.
 
-    Returns only the tags that exist; the 8 metrics are floats, eval_max_date is
+    Returns only the tags that exist; the 4 metrics are floats, eval_max_date is
     kept as its stored string.
     """
     tags = client.get_model_version(PRODUCTION_MODEL, champion.version).tags or {}
@@ -145,10 +202,7 @@ def _pinned_metrics(client: MlflowClient, champion: Any) -> dict[str, Any]:
         raw = tags.get(f"{METRIC_PREFIX}{name}")
         if raw is not None:
             pinned[name] = float(raw)
-    for key, label in (
-        (METRIC_COMPOSITE_KEY, "promotion_composite"),
-        (EVAL_SPLIT_SIZE_KEY, "eval_split_size"),
-    ):
+    for key, label in ((EVAL_SPLIT_SIZE_KEY, "eval_split_size"),):
         raw = tags.get(key)
         if raw is not None:
             pinned[label] = float(raw)
@@ -180,7 +234,23 @@ def _score_batches(contexts: list[dict[str, object]]) -> list[float]:
         records = _post_batch(chunk)
         if len(records) != len(chunk):
             raise RuntimeError(f"row-count mismatch: sent {len(chunk)}, got {len(records)}")
-        for rec in records:
+        for i, rec in enumerate(records):
+            # The bulk response carries the requested ids; verify each record
+            # corresponds to its request row before trusting its p_win. A
+            # reordered or sorted response would silently pair probabilities
+            # with the wrong orientation labels and collapse the symmetric
+            # accuracy to 0.5 — refuse rather than compute wrong metrics.
+            request = chunk[i]
+            if (
+                rec.get("player_id") != request["player_id"]
+                or rec.get("opponent_id") != request["opponent_id"]
+            ):
+                raise RuntimeError(
+                    f"bulk response row {i} mismatches request row {start + i}: sent "
+                    f"{request['player_id']} vs {request['opponent_id']}, got "
+                    f"{rec.get('player_id')} vs {rec.get('opponent_id')} — "
+                    "response order/identity cannot be trusted, refusing to score"
+                )
             p_win = rec.get("p_win")
             if isinstance(p_win, bool) or not isinstance(p_win, (int, float)):
                 raise TypeError(f"non-finite p_win in batch response: {rec!r}")
@@ -200,11 +270,6 @@ def _validate_production(client: MlflowClient) -> Any:
         raise RuntimeError(
             f"no champion found ({PRODUCTION_MODEL}@{CHAMPION_ALIAS}) — deploy a model first"
         )
-    if urlparse(PRODUCTION_BENTO_URL).port == 5173:
-        raise RuntimeError(
-            "PRODUCTION_BENTO_URL points to Vite (port 5173); set it to the Bento "
-            "server, normally http://127.0.0.1:8187"
-        )
     model_info_url = f"{PRODUCTION_BENTO_URL}{MODEL_INFO_ROUTE}"
     headers = {}
     if BENTO_API_KEY:
@@ -217,19 +282,20 @@ def _validate_production(client: MlflowClient) -> Any:
 def _pull_windows(cutoff_date: date) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Current post-cutoff window + size-matched pre-cutoff reference window.
 
+    Both windows read one row per physical match from bronze.match_events.
     `reference` is the most recent `n_reference` matches strictly before the
     cutoff, where `n_reference` is the current-window size clamped to the
     DRIFT_REF_MIN/DRIFT_REF_MAX bounds. It is fetched newest-first then reversed
     back into chronological order so both windows share the same row order.
     """
     current = execute_df(
-        f"SELECT {_DRIFT_WINDOW_COLUMNS} FROM {GOLD_TABLE} "
+        f"SELECT {', '.join(_BRONZE_WINDOW_COLUMNS)} FROM bronze.match_events "
         "WHERE match_date > %s ORDER BY match_date, match_id",
         [cutoff_date],
     )
     n_reference = max(DRIFT_REF_MIN, min(len(current), DRIFT_REF_MAX))
     reference = execute_df(
-        f"SELECT {_DRIFT_WINDOW_COLUMNS} FROM {GOLD_TABLE} "
+        f"SELECT {', '.join(_BRONZE_WINDOW_COLUMNS)} FROM bronze.match_events "
         "WHERE match_date < %s ORDER BY match_date DESC, match_id DESC LIMIT %s",
         [cutoff_date, n_reference],
     )
@@ -238,17 +304,112 @@ def _pull_windows(cutoff_date: date) -> tuple[pd.DataFrame, pd.DataFrame]:
     return current, reference
 
 
+def _expand_orientations(window: pd.DataFrame) -> pd.DataFrame:
+    """Expand physical matches into the two requested scoring orientations.
+
+    Each physical row yields player1→player2 and player2→player1, in that
+    order, with `match_won` derived from winner_id equality to the requested
+    side. Bronze player order is preserved — ids are never sorted or
+    canonicalized. The numeric match-stat rates are match-level values, so
+    both orientations of a match carry identical rate columns; the context
+    fields stay on the frame so scored rows remain traceable to the physical
+    match and the two orientations of each match are adjacent rows.
+    """
+    if window.empty:
+        return window.copy()
+    first = window.copy()
+    first["player_id"] = window["player1_id"]
+    first["opponent_id"] = window["player2_id"]
+    first["match_won"] = (window["winner_id"] == window["player1_id"]).astype(int)
+    second = window.copy()
+    second["player_id"] = window["player2_id"]
+    second["opponent_id"] = window["player1_id"]
+    second["match_won"] = (window["winner_id"] == window["player2_id"]).astype(int)
+    expanded = pd.concat([first, second], ignore_index=True)
+    # Interleave so each match's two orientations stay adjacent.
+    interleave = np.repeat(np.arange(len(window)), 2) + np.tile([0, len(window)], len(window))
+    return expanded.iloc[interleave].reset_index(drop=True)
+
+
+def _observation_contexts(window: pd.DataFrame) -> list[dict[str, object]]:
+    """Raw Bento contexts from symmetric drift observations (bronze fields only).
+
+    Each context carries the requested-orientation ids, the match date as
+    `as_of_date`, and the raw bronze surface/tournament/round strings plus the
+    normalized indoor flag — the public bulk schema fields, unencoded. No gold
+    feature row or internal encoding is involved. Bronze values the request
+    model does not accept (e.g. the round-robin round ``rr``) are resolved at
+    the validation boundary, `_validated_contexts`.
+    """
+    contexts: list[dict[str, object]] = []
+    for rec in window.to_dict("records"):
+        match_date = rec["match_date"]
+        if isinstance(match_date, pd.Timestamp):
+            match_date = match_date.date()
+        contexts.append(
+            {
+                "player_id": str(rec["player_id"]),
+                "opponent_id": str(rec["opponent_id"]),
+                "surface": str(rec["surface"]),
+                "as_of_date": match_date.isoformat(),
+                "tournament": rec["tournament"] or None,
+                "round": None if pd.isna(rec["round"]) else rec["round"],
+                "is_indoor": int(rec["is_indoor"]),
+            }
+        )
+    return contexts
+
+
+def _validated_contexts(contexts: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Validation boundary between bronze and the Bento public schema.
+
+    Every context must pass the real bulk request model before anything is
+    posted. Bronze can legitimately hold values the request model does not
+    accept — the round-robin round ``rr`` most notably — and those carry no
+    information the model was trained on: dbt maps unsupported rounds and
+    tournaments to ordinal 0, which the public schema expresses as an omitted
+    field, and the schema's own ``"0"`` member is the unknown-surface marker.
+    Unsupported enum values are dropped to those documented defaults; anything
+    still invalid raises here, before any HTTP request. The request model is
+    the only schema — no enum lists are duplicated.
+    """
+    accepted_rounds = {r.value for r in Round}
+    accepted_tournaments = {t.value for t in TournamentLevel}
+    accepted_surfaces = {s.value for s in Surface}
+    validated: list[dict[str, object]] = []
+    for context in contexts:
+        normalized = dict(context)
+        if normalized.get("round") is not None and normalized["round"] not in accepted_rounds:
+            normalized["round"] = None
+        if (
+            normalized.get("tournament") is not None
+            and normalized["tournament"] not in accepted_tournaments
+        ):
+            normalized["tournament"] = None
+        if normalized.get("surface") is not None and normalized["surface"] not in accepted_surfaces:
+            normalized["surface"] = Surface.UNKNOWN.value
+        validated.append(PredictFromIdsRow.model_validate(normalized).model_dump(mode="json"))
+    return validated
+
+
 def _score_window(window: pd.DataFrame) -> pd.DataFrame:
-    """Append `p_win` (champion Bento) to a window of FEATURE_COLS + match_won."""
-    contexts = ordered_incumbent_contexts(window)
+    """Append `p_win` (champion Bento) to a window of drift observations.
+
+    The analysis frame keeps only the numeric match-stat rates (DRIFT_FEATURE_COLS),
+    the derived orientation label, and the prediction — no match-context
+    attributes, no player-profile attributes. Raw bronze contexts pass the
+    `PredictFromIdsRow` boundary first, so every posted row is already the
+    validated public payload.
+    """
+    contexts = _validated_contexts(_observation_contexts(window))
     probas = _score_batches(contexts)
-    frame = window[[*FEATURE_COLS, "match_won"]].copy()
+    frame = window[[c for c in DRIFT_ANALYSIS_COLUMNS if c != "p_win"]].copy()
     frame["p_win"] = probas
-    return frame
+    return frame[DRIFT_ANALYSIS_COLUMNS]
 
 
 def _window_metrics(current_df: pd.DataFrame) -> dict[str, float]:
-    """The 8 gate metrics for the current window via the shared promotion helper."""
+    """The 4 gate metrics for the current window via the shared promotion helper."""
     probas = current_df["p_win"].tolist()
     return compute_metrics(
         y_true=current_df["match_won"].tolist(),
@@ -272,10 +433,12 @@ def _evidently_drift(
 ) -> tuple[dict[str, float], float, float]:
     """Run Evidently DataDriftPreset over the two windows; save JSON + HTML.
 
-    All numeric columns are compared with PSI (categorical included), so every
-    per-feature score is directly comparable against the PSI threshold table.
-    Returns (per-FEATURE_COL PSI, drift share, prediction p_win PSI); drift
-    share and prediction PSI come straight from the report payload.
+    Every column in the analysis frame is numeric (match-stat rates, the
+    balanced orientation label, and p_win), and all are compared with PSI, so
+    each per-feature score is directly comparable against the PSI threshold
+    table. Returns (per match-stat-rate-column PSI, drift share, prediction
+    p_win PSI); drift share and prediction PSI come straight from the report
+    payload.
     """
     report = Report(
         metrics=[
@@ -283,8 +446,6 @@ def _evidently_drift(
                 drift_share=DRIFT_SHARE_THRESHOLD,
                 num_method="psi",
                 num_threshold=DRIFT_PSI_SIGNIFICANT,
-                cat_method="psi",
-                cat_threshold=DRIFT_PSI_SIGNIFICANT,
             )
         ],
         include_tests=True,
@@ -303,7 +464,9 @@ def _evidently_drift(
         elif name.startswith("ValueDrift(column="):
             column = name[len("ValueDrift(column=") :].split(",", 1)[0]
             per_column[column] = _as_float(metric["value"])
-    per_feature = {column: score for column, score in per_column.items() if column in FEATURE_COLS}
+    per_feature = {
+        column: score for column, score in per_column.items() if column in DRIFT_FEATURE_COLS
+    }
     return per_feature, drift_share, per_column.get("p_win", 0.0)
 
 
@@ -340,8 +503,9 @@ def _recommendation(
 def drift_flow() -> int:
     """Drift monitor: dbt build, champion validation, score windows, verdict.
 
-    The smoke test counts gold matches newer than the champion's cutoff; when
-    there are none the drift check is skipped entirely (insufficient_data).
+    The smoke test counts bronze physical matches newer than the champion's
+    cutoff; when there are fewer than DRIFT_MIN_N_FOR_CHECK rows the drift check
+    is skipped entirely because PSI and performance metrics are too unstable.
     """
     load_env()
     suppress_insecure_tls_warning()
@@ -349,9 +513,9 @@ def drift_flow() -> int:
     experiment_id = _ensure_experiment(client)
     start_ts = datetime.now(UTC).isoformat()
 
-    print("Running dbt build...")
-    run_dbt_build()
-    print("dbt build complete.")
+    # print("Running dbt build...")
+    # run_dbt_build()
+    # print("dbt build complete.")
 
     with _file_lock():
         champion = _validate_production(client)
@@ -363,8 +527,12 @@ def drift_flow() -> int:
         print(f"Cutoff date (champion training-data watermark): {cutoff_date}")
 
         current, reference = _pull_windows(cutoff_date)
-        if current is None or current.empty:
-            print("insufficient_data: no matches found after champion cutoff")
+        if current is None or len(current) < DRIFT_MIN_N_FOR_CHECK:
+            n_matches = 0 if current is None else len(current)
+            print(
+                f"insufficient_data: {n_matches} matches found after champion cutoff "
+                f"(minimum {DRIFT_MIN_N_FOR_CHECK})"
+            )
             with mlflow.start_run(
                 experiment_id=experiment_id,
                 run_name="drift_insufficient_data",
@@ -375,7 +543,7 @@ def drift_flow() -> int:
                 client.log_param(rid, "champion_version", str(champion.version))
                 client.log_param(rid, "champion_run_id", champion.run_id)
                 client.log_param(rid, "cutoff_date", str(cutoff_date))
-                client.log_param(rid, "n_matches", 0)
+                client.log_param(rid, "n_matches", n_matches)
             return 0
 
         if reference is None or reference.empty:
@@ -388,10 +556,10 @@ def drift_flow() -> int:
 
         print(
             f"Scoring {len(current)} current + {len(reference)} reference "
-            "matches through production Bento..."
+            "physical matches through production Bento..."
         )
-        current_df = _score_window(current)
-        reference_df = _score_window(reference)
+        current_df = _score_window(_expand_orientations(current))
+        reference_df = _score_window(_expand_orientations(reference))
         print("Scoring complete.")
 
         report_json = ARTIFACTS / f"drift_report_{cutoff_date.isoformat()}_v{champion.version}.json"

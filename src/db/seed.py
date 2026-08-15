@@ -12,7 +12,7 @@ from typing import Any
 
 from src.constants import ROOT
 from src.db.ingest import (
-    BRONZE_TABLE,
+    BRONZE_MATCHES_TABLE,
     atp_rows_to_bronze,
     discover_ranking_csvs,
     enrich_players,
@@ -193,10 +193,10 @@ def main_default(enrich: bool = False, force: bool = False) -> None:
     # overwrites the seed's own rows (DO UPDATE) so repeat runs converge.
     inserted = insert_bronze_rows(bronze, overwrite=force)
     if force:
-        print(f"Inserted {inserted} rows into {BRONZE_TABLE} (overwrite)")
+        print(f"Inserted {inserted} rows into {BRONZE_MATCHES_TABLE} (overwrite)")
     else:
         print(
-            f"Inserted {inserted} rows into {BRONZE_TABLE} "
+            f"Inserted {inserted} rows into {BRONZE_MATCHES_TABLE} "
             f"({len(bronze) - inserted} skipped existing)"
         )
 
@@ -222,10 +222,10 @@ def main_all(enrich: bool = False, force: bool = False) -> None:
 
     inserted = insert_bronze_rows(bronze, overwrite=force)
     if force:
-        print(f"Inserted {inserted} rows into {BRONZE_TABLE} (overwrite)")
+        print(f"Inserted {inserted} rows into {BRONZE_MATCHES_TABLE} (overwrite)")
     else:
         print(
-            f"Inserted {inserted} rows into {BRONZE_TABLE} "
+            f"Inserted {inserted} rows into {BRONZE_MATCHES_TABLE} "
             f"({len(bronze) - inserted} skipped existing)"
         )
 

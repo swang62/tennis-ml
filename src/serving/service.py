@@ -24,7 +24,7 @@ import pandas as pd
 import psycopg.errors as _pg_errors
 from bentoml.exceptions import InvalidArgument
 from bentoml.images import Image
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
@@ -32,14 +32,14 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from src.constants import (
+    BRONZE_MATCHES_TABLE,
     BRONZE_PROFILES_TABLE,
-    BRONZE_TABLE,
+    BRONZE_RANKINGS_TABLE,
     BULK_MAX_ROWS,
     DEPLOY_ARTIFACTS,
     FRAMEWORK_KEY,
+    GOLD_PROFILES_TABLE,
     PRODUCTION_MODEL,
-    PROFILES_TABLE,
-    RANKINGS_TABLE,
     SILVER_PLAYER_MATCHES,
     STACK_ORDER,
     TOUR_AVERAGES_TABLE,
@@ -73,6 +73,39 @@ _log = logging.getLogger("tennis_ml.serving")
 _log.setLevel(getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO))
 if not _log.handlers:
     _log.addHandler(logging.StreamHandler())
+
+
+class _SuppressRequestValidationTraceback(logging.Filter):
+    """BentoML answers malformed API requests with a 400 (pydantic
+    ValidationError raised while deserializing, before the method runs) but
+    also logs a full ERROR traceback for each one. Drop that client-error
+    noise at the emitting logger and log one concise warning instead; 500s
+    and other error tracebacks pass through untouched."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        exc_info = record.exc_info
+        if exc_info is None:
+            return True
+        exc_type, exc, _tb = exc_info
+        if exc_type is None or not issubclass(exc_type, ValidationError):
+            return True
+        assert isinstance(exc, ValidationError)
+        errors = exc.errors(include_input=False, include_context=False)
+        first = errors[0]["msg"] if errors else "invalid request body"
+        _log.warning(
+            "request rejected with 400: %d validation error(s); first: %s",
+            exc.error_count(),
+            first,
+        )
+        return False
+
+
+# The filter must sit on the logger that emits the traceback, not an ancestor
+# (logging only filters records at the emitting logger). BentoML pins the
+# internal name; if a future version renames it the filter degrades to a no-op.
+logging.getLogger("bentoml._internal.server.http_app").addFilter(
+    _SuppressRequestValidationTraceback()
+)
 
 # Serving dependencies stay here. Model packages are pinned because models are pickled.
 # base_image avoids BentoML's default build-essential injection; ca-certificates
@@ -346,7 +379,7 @@ SELECT
     ta.tour_break_point_opportunities_per_return_game,
     ta.tour_return_games_won_pct
 FROM {BRONZE_PROFILES_TABLE} bp
-LEFT JOIN {PROFILES_TABLE} gp ON gp.player_id = bp.player_id
+LEFT JOIN {GOLD_PROFILES_TABLE} gp ON gp.player_id = bp.player_id
 CROSS JOIN {TOUR_AVERAGES_TABLE} ta
 WHERE bp.player_id = %s
 """
@@ -356,7 +389,7 @@ WHERE bp.player_id = %s
 # selected for parity with the source but not exposed.
 _RANK_HISTORY_SQL = f"""
 SELECT ranking_date, rank, points
-FROM {RANKINGS_TABLE}
+FROM {BRONZE_RANKINGS_TABLE}
 WHERE player_id = %s
 ORDER BY ranking_date
 """
@@ -377,11 +410,11 @@ SELECT
     pm.total_serve_points, pm.service_games,
     pm.break_points_saved, pm.break_points_faced
 FROM {SILVER_PLAYER_MATCHES} pm
-LEFT JOIN {BRONZE_TABLE} br ON br.match_id = pm.match_id
+LEFT JOIN {BRONZE_MATCHES_TABLE} br ON br.match_id = pm.match_id
 LEFT JOIN {BRONZE_PROFILES_TABLE} pr ON pr.player_id = pm.opponent_id
 LEFT JOIN LATERAL (
     SELECT rank
-    FROM {RANKINGS_TABLE}
+    FROM {BRONZE_RANKINGS_TABLE}
     WHERE player_id = pm.opponent_id
       AND ranking_date <= pm.match_date
     ORDER BY ranking_date DESC
@@ -396,7 +429,7 @@ LIMIT %s
 _H2H_MEETINGS_SQL = f"""
 SELECT match_id, match_date, tournament, tournament_name, round, surface, score,
        player1_id, player2_id, winner_id
-FROM {BRONZE_TABLE}
+FROM {BRONZE_MATCHES_TABLE}
 WHERE (player1_id = %s AND player2_id = %s)
    OR (player1_id = %s AND player2_id = %s)
 ORDER BY match_date DESC, match_id DESC
@@ -405,7 +438,7 @@ LIMIT %s
 
 _DIRECTORY_INFO_SQL = f"""
 SELECT MAX(match_date) AS latest_match_date
-FROM {BRONZE_TABLE}
+FROM {BRONZE_MATCHES_TABLE}
 """
 
 

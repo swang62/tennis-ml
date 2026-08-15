@@ -24,8 +24,8 @@ from typing import Any, NamedTuple, cast
 import pandas as pd
 
 from src.constants import (
+    BRONZE_MATCHES_TABLE,
     BRONZE_PROFILES_TABLE,
-    BRONZE_TABLE,
     BULK_MAX_ROWS,
     SILVER_PLAYER_MATCHES,
     SILVER_ROLLING_FEATURES,
@@ -94,7 +94,7 @@ WHERE player_id = %s
 # caller counts wins by comparing winner_id to the requested player id.
 _H2H_PRIOR_SQL = f"""
 SELECT match_id, winner_id
-FROM {BRONZE_TABLE}
+FROM {BRONZE_MATCHES_TABLE}
 WHERE ((player1_id = %s AND player2_id = %s)
     OR (player1_id = %s AND player2_id = %s))
   AND match_date < %s::date
@@ -149,7 +149,7 @@ SELECT req.player_id AS req_player_id, req.opponent_id AS req_opponent_id,
 FROM unnest(%s::text[], %s::text[], %s::date[]) AS req(player_id, opponent_id, as_of_iso)
 LEFT JOIN LATERAL (
     SELECT match_id, winner_id
-    FROM {BRONZE_TABLE}
+    FROM {BRONZE_MATCHES_TABLE}
     WHERE ((req.player_id = player1_id AND req.opponent_id = player2_id)
         OR (req.opponent_id = player1_id AND req.player_id = player2_id))
       AND match_date < req.as_of_iso::date

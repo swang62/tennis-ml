@@ -410,7 +410,7 @@ def test_insert_bronze_rows_copies_valid_rows_with_do_nothing(fake_ingest_conn):
 
     assert fake_ingest_conn.copied_rows  # COPY streamed the valid row
     insert_sql, _params = fake_ingest_conn.statements[-1]
-    assert insert_sql.startswith(f"INSERT INTO {ingest.BRONZE_TABLE}")
+    assert insert_sql.startswith(f"INSERT INTO {ingest.BRONZE_MATCHES_TABLE}")
     assert "ON CONFLICT (match_id) DO NOTHING" in insert_sql
     assert "DO UPDATE" not in insert_sql
 
@@ -431,7 +431,7 @@ def test_insert_bronze_rows_overwrite_uses_do_update(fake_ingest_conn):
     assert ingest.insert_bronze_rows(df, overwrite=True) == 1
 
     insert_sql, _params = fake_ingest_conn.statements[-1]
-    assert insert_sql.startswith(f"INSERT INTO {ingest.BRONZE_TABLE}")
+    assert insert_sql.startswith(f"INSERT INTO {ingest.BRONZE_MATCHES_TABLE}")
     assert "ON CONFLICT (match_id) DO UPDATE SET" in insert_sql
     assert "match_id = excluded.match_id" not in insert_sql
     assert "winner_id = excluded.winner_id" in insert_sql

@@ -1,11 +1,13 @@
 """Contract tests for /rank_history, /match_history, and /head_to_head."""
 
+import logging
 from datetime import date
 from typing import Any, cast
 from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
+import pytest
 from sklearn.preprocessing import StandardScaler
 from starlette.testclient import TestClient
 
@@ -18,6 +20,7 @@ from src.serving.service import (
     Surface,
     TennisPredictor,
     TournamentLevel,
+    _SuppressRequestValidationTraceback,
 )
 
 client = TestClient(DATA_APP)
@@ -503,7 +506,6 @@ def test_predict_from_ids_schema_derives_context_and_defaults():
 
 
 def test_predict_from_ids_schema_rejects_numeric_context_fields():
-    import pytest
     from pydantic import ValidationError
 
     with pytest.raises(ValidationError):
@@ -524,3 +526,49 @@ def test_predict_from_ids_schema_rejects_numeric_context_fields():
                 "round_encoded": 0,
             }
         )
+
+
+# ── malformed request deserialization (BentoML serde) ────────────────────────
+# BentoML raises pydantic ValidationError while deserializing the request body,
+# before the endpoint method runs; its server answers a 400 and logs a full
+# ERROR traceback per rejected request. The service filter drops that
+# client-error traceback noise and logs one concise warning instead.
+
+
+def _error_record(exc: Exception) -> logging.LogRecord:
+    """Shaped like the record BentoML's log_exception emits per rejected request."""
+    return logging.LogRecord(
+        name="bentoml._internal.server.http_app",
+        level=logging.ERROR,
+        pathname=__file__,
+        lineno=1,
+        msg="Exception on /predict_from_ids [POST]",
+        args=(),
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+
+
+def test_validation_traceback_filter_drops_pydantic_errors(caplog):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as ctx:
+        PredictFromIdsRow.model_validate_json(
+            '{"player_id": "S0AG", "opponent_id": "Z355", "surface": "sand"}'
+        )
+    with caplog.at_level(logging.WARNING, logger="tennis_ml.serving"):
+        kept = _SuppressRequestValidationTraceback().filter(_error_record(ctx.value))
+
+    assert kept is False  # traceback record dropped
+    assert any(
+        "request rejected with 400" in r.message and "Input should be" in r.message
+        for r in caplog.records
+    )
+
+
+def test_validation_traceback_filter_keeps_server_errors():
+    f = _SuppressRequestValidationTraceback()
+    assert f.filter(_error_record(RuntimeError("boom"))) is True
+    assert (
+        f.filter(logging.LogRecord("x", logging.ERROR, __file__, 1, "msg", (), exc_info=None))
+        is True
+    )

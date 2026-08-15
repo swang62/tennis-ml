@@ -7,44 +7,33 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
-      content="Courtside — model-driven tennis predictions, head-to-heads and player statistics."
+      content="Courtside — model-driven tennis predictions, head-to-head matchups and player statistics."
     />
     <title>Courtside — Tennis Intelligence</title>
-    <!-- seo:canonical -->
-    <!-- seo:og-url -->
     <meta property="og:title" content="Courtside — Tennis Intelligence" />
     <meta
       property="og:description"
-      content="Courtside — model-driven tennis predictions, head-to-heads and player statistics."
+      content="Courtside — model-driven tennis predictions, head-to-head matchups and player statistics."
     />
     <meta property="og:type" content="website" />
     <meta property="og:image" content="/og-image.png" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:image" content="/og-image.png" />
-    <script type="application/ld+json">
-      {
-        "@context": "https://schema.org",
-        "@type": "WebApplication",
-        "name": "Courtside",
-        "description": "Courtside — model-driven tennis predictions, head-to-heads and player statistics.",
-        "applicationCategory": "SportsApplication",
-        "operatingSystem": "Web",
-        "url": "@SITE_URL@"
-      }
-    </script>
     <script>
       // Set the theme class before paint to prevent a light/dark flash.
-      ;(function () {
-        var t = null
-        var light = false
+      (function () {
+        var t = null;
+        var light = false;
         try {
-          t = localStorage.getItem('tm-theme')
-          light = t ? t === 'light' : !window.matchMedia('(prefers-color-scheme: dark)').matches
-          document.documentElement.classList.toggle('light', light)
+          t = localStorage.getItem("tm-theme");
+          light = t
+            ? t === "light"
+            : !window.matchMedia("(prefers-color-scheme: dark)").matches;
+          document.documentElement.classList.toggle("light", light);
         } catch (e) {
-          document.documentElement.classList.remove('light')
+          document.documentElement.classList.remove("light");
         }
-      })()
+      })();
     </script>
   </head>
   <body>
