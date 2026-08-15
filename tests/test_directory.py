@@ -5,6 +5,7 @@ generation path patches execute_df at the module boundary.
 """
 
 import importlib
+import io
 import json
 
 import numpy as np
@@ -150,6 +151,18 @@ def test_generate_directory_artifact_writes_players_json(monkeypatch, tmp_path):
     assert [p["player_id"] for p in players] == ["p2", "p1", "p3"]
     assert players[0]["display_name"] == "B Player"
     assert players[1]["current_rank"] is None
+
+
+def test_deploy_tee_preserves_console_isatty():
+    d = _deploy()
+
+    class Console:
+        def isatty(self):
+            return True
+
+    tee = d._Tee(Console(), io.StringIO())
+
+    assert tee.isatty() is True
 
 
 def test_generate_directory_artifact_is_deterministic(monkeypatch, tmp_path):
