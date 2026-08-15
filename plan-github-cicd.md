@@ -2,26 +2,26 @@
 
 ## Goal
 
-Add one GitHub Actions pipeline that validates every same-repository pull request to `main`, builds both Docker images without publishing on PRs, and, after a successful merge to `main`, publishes the current MLflow `@champion` Bento image plus the web image to Docker Hub as `latest`.
+Add one GitHub Actions workflow that validates same-repository pull requests to `main`, builds the web image without publishing on PRs, and, after successful validation on a push to `main`, builds and publishes the current MLflow `@champion` Bento image plus the corresponding web image to Docker Hub as `latest`.
 
-The pipeline will authenticate to DagsHub only to fetch and verify the immutable artifacts pinned by the current champion. It will not train models, mutate MLflow, access PostgreSQL, run Prefect, or deploy to a production host.
+`just deploy` remains a fully independent manual build-and-publish path. GitHub Actions does not deploy the Compose host, run Prefect, train/promote models, or modify MLflow.
 
 ## Scope
 
 ### Included
 
-- Python lint, type check, and hermetic test suite.
-- Web test, type-check/build, and Docker build.
-- Authenticated DagsHub/MLflow champion resolution and Bento Docker build.
-- Docker Hub push only after a `main` push.
-- GitHub-hosted caches for uv, pnpm, Buildx layers, and verified MLflow/Bento materialization.
-- Branch-protection and repository-secret setup instructions.
+- Python lint, type check, and hermetic test suite on PRs and `main`.
+- Web tests and a non-publishing web Docker build on PRs.
+- Main-only champion resolution, artifact materialization, Bento multi-architecture build/push, and web image build/push.
+- GitHub-hosted caching only: native uv/pnpm caches, BuildKit's GitHub Actions cache backend, and a bounded Actions cache for reusable MLflow/Bento material.
+- Docker Hub publication only for deployable images, never as a BuildKit cache registry.
+- Repository-secret, permissions, cache-limit, branch-protection, and manual-release documentation.
 
 ### Explicitly excluded
 
-- Deploying to the Compose host, SSH, Kubernetes, Prefect, database migrations, ETL, scraping, training, or MLflow promotion.
-- Fork PR support. Repository settings should disallow/avoid fork-contributed workflow runs; no workflow uses `pull_request_target`.
-- Immutable Docker tags. Per decision, main publishes only `latest`.
+- Bento image builds on PRs: those require trusted DagsHub/MLflow and production PostgreSQL access.
+- Registry cache exports/imports (`type=registry`) or a separate Docker cache image/tag.
+- Fork PR support, `pull_request_target`, SSH, Compose deployment, migrations, ETL, scraping, training, model promotion, or immutable Docker release tags.
 
 ## Required GitHub Configuration
 
@@ -29,100 +29,102 @@ The pipeline will authenticate to DagsHub only to fetch and verify the immutable
 
 | Secret | Purpose | Minimum privilege |
 | --- | --- | --- |
-| `DOCKERHUB_TOKEN` | Push `swang62/tennis-bento:latest` and `swang62/tennis-web:latest` after a main merge. | Docker Hub access token restricted to those repositories with read/write access. |
-| `DAGSHUB_TOKEN` | Read the current MLflow champion, its model versions, and lineage-pinned artifacts during Bento builds. | Dedicated CI account/token with read-only access to the DagsHub repository and MLflow artifacts. |
+| `DOCKERHUB_TOKEN` | Push `swang62/tennis-bento:latest` and `swang62/tennis-web:latest` on `main`. | Docker Hub token limited to those repositories with read/write access. |
+| `DAGSHUB_TOKEN` | Resolve the champion and download its immutable lineage-pinned artifacts. | Dedicated read-only DagsHub/MLflow account. |
+| `PRODUCTION_DATABASE_URL` | Read the canonical player directory while generating the production web artifact on `main`. | Read-only PostgreSQL credentials, network-restricted to the required tables. |
 
-### Repository variables (not secrets)
+### Repository variables
 
 | Variable | Value |
 | --- | --- |
-| `DOCKERHUB_USERNAME` | Docker Hub account that owns the two image repositories (currently `swang62`). |
-| `DAGSHUB_USERNAME` | Username of the dedicated DagsHub CI account. |
+| `DOCKERHUB_USERNAME` | Docker Hub account that owns the image repositories (currently `swang62`). |
+| `DAGSHUB_USERNAME` | Dedicated DagsHub CI account username. |
 | `MLFLOW_TRACKING_URI` | DagsHub MLflow URL for this repository. |
 
-Map the DagsHub values only within the Bento-build step as `MLFLOW_TRACKING_USERNAME` and `MLFLOW_TRACKING_PASSWORD`; never print them. No `DATABASE_URL`, `POSTGRES_PASSWORD`, `BENTO_API_KEY`, Prefect credential, or Docker Hub password is needed by CI.
+Map credentials only into the steps requiring them. Never print them or cache `.env`, credential files, logs, database files, or generated environment configuration.
 
-Protect `main` by requiring the CI workflow's required check and prohibiting direct pushes. Grant the workflow only `contents: read`; Docker Hub and DagsHub use their dedicated secrets rather than a broad GitHub token.
+### Cache policy and cost
+
+- Use BuildKit `type=gha` with separate `scope=web` and `scope=bento`; no Docker registry is used for cache storage.
+- `type=gha` is GitHub Actions cache storage. It is free for public repositories; private repositories consume the account's included Actions minutes/cache storage and are subject to GitHub's cache quota (10 GB by default unless repository settings change).
+- Use native setup-action caches keyed by `uv.lock` and `web/pnpm-lock.yaml`. Use a bounded `actions/cache` entry only for selected MLflow/Bento material that is safe to reuse after remote lineage/hash validation.
+- Retain cache keys scoped by OS and image/component. Cache misses must fall back to a correct clean build; cache hits must never suppress champion lookup or artifact integrity checks.
 
 ## Tasks
 
-### [ ] Task 1: Make dependency resolution valid on GitHub-hosted Linux runners
+### [ ] Task 1: Make locked Python dependencies installable on GitHub-hosted Linux runners
 
 - **Description**: Extend uv's supported environments beyond the current macOS arm64-only resolution, then regenerate `uv.lock` with the Linux x86_64 resolution used by `ubuntu-latest`. Preserve Python 3.12 and the existing dependency-group layout.
 - **Files**: `pyproject.toml`, `uv.lock`
 - **Acceptance Criteria**:
-  - A fresh Ubuntu x86_64 runner can install the `dev` dependency group from the committed lockfile.
+  - A fresh Ubuntu x86_64 runner installs the committed `dev` environment from the lockfile.
   - macOS arm64 local resolution remains supported.
-  - No runtime or dependency-group semantics change other than platform support.
-- **Guardrails**: Do not introduce a second package manager, Docker-based test database, or CI-only dependency group unless the existing groups cannot install on Linux.
+  - Dependency-group semantics do not otherwise change.
+- **Guardrails**: Do not add a second package manager, Docker database, or CI-only dependency group unless the existing groups cannot install on Linux.
 
-### [ ] Task 2: Separate local publish behavior from CI build-only behavior
+### [ ] Task 2: Add the unified PR/main GitHub Actions workflow
 
-- **Description**: Extend the existing Bento deploy entrypoint with one explicit build-only/no-push mode for CI. Keep `just deploy` and the default direct invocation behavior publishing the existing multi-architecture (`linux/amd64,linux/arm64`) `latest` image. In no-push mode, build a single runner-native Linux image with Buildx `--load` so the PR job performs a real container build but cannot publish.
-- **Files**: `src/flows/deploy.py`, `justfile` (only if the existing recipe needs to expose the new explicit flag), relevant focused tests under `tests/`
-- **Acceptance Criteria**:
-  - Default local deploy still logs in through `DOCKER_TOKEN` and pushes the current Docker Hub `latest` Bento image.
-  - The CI build-only mode resolves `ensemble_lr_model@champion`, validates all lineage tags/hashes, materializes the same artifacts, and runs a non-publishing Docker build.
-  - The push mode retains multi-architecture output; the PR mode neither runs `docker login` nor includes `--push`.
-  - Tests cover command construction/mode selection without contacting Docker, MLflow, or a database.
-- **Guardrails**: Reuse the existing `build_bento_image`, hash validation, and lineage-pinning path. Do not add a generic CLI wrapper, change model aliases, or perform registry writes.
+- **Description**: Create `.github/workflows/ci.yml`, triggered by `pull_request` targeting `main` and by pushes to `main`. Use concurrency to cancel superseded PR runs while keeping `main` publication runs independent. Pin every third-party action to a full commit SHA.
 
-### [ ] Task 3: Add the unified PR/main GitHub Actions workflow
+  PR path:
+  1. Check out the repository; install Python 3.12/uv and Node 22/Corepack.
+  2. Restore uv and pnpm dependency caches; install from the committed lockfiles.
+  3. Run Python lint/type/hermetic tests with `DATABASE_URL` unset, plus web tests/type-check.
+  4. Create a minimal deterministic `web/public/player-directory.json` test fixture only inside the runner, then build the web Docker image without login, `--push`, or production credentials.
 
-- **Description**: Create a single workflow triggered by `pull_request` targeting `main` and by pushes to `main`. Use concurrency to cancel superseded PR runs while keeping main builds independent. Pin every third-party action to a full commit SHA.
-
-  Jobs/steps:
-  1. Check out the repository, install Python 3.12 and uv, restore uv cache, and install the locked `dev` environment.
-  2. Install Node 22/Corepack, restore pnpm cache from `web/pnpm-lock.yaml`, then run Python lint/type/test and web test/build. Run with `DATABASE_URL` unset so the repository's no-live-database contract remains enforced.
-  3. Configure Buildx and its GitHub Actions cache backend. Restore a separate Actions cache containing `.bentoml`, `data/deploy`, and the minimal generated deploy state needed to reuse downloaded model material.
-  4. Export DagsHub MLflow credentials only for the Bento step. On PRs, call the build-only Bento mode; on `main`, call the normal publishing mode with `DOCKER_TOKEN` mapped from `DOCKERHUB_TOKEN`.
-  5. Build the web Docker image on every PR. On `main` only, log in to Docker Hub and push `swang62/tennis-web:latest`.
-  6. Upload sanitized Bento build logs on failure. Never upload `.env`, credentials, or unredacted command environments.
+  Main path:
+  1. Repeat all validation above.
+  2. Configure Buildx and expose the GitHub Actions runtime variables required by the `type=gha` backend to the existing command-driven Bento build.
+  3. Export the DagsHub credentials, `PRODUCTION_DATABASE_URL`, and Docker Hub token only to `src/flows/deploy.py`; run its existing path to generate the real directory artifact, resolve the champion, build the multi-architecture Bento image, and publish it.
+  4. Build and push `swang62/tennis-web:latest` from the artifact that `deploy.py` generated. Do not regenerate or replace that artifact between Bento and web builds.
+  5. Upload sanitized build logs only on failure.
 - **Files**: `.github/workflows/ci.yml`
 - **Acceptance Criteria**:
-  - A same-repository PR to `main` runs validation and builds both images without pushing either.
-  - A successful push to `main` reruns the same checks and pushes only `swang62/tennis-bento:latest` and `swang62/tennis-web:latest`.
-  - Docker Hub login is conditional on main push; DagsHub credentials are masked and scoped to the authenticated Bento step.
-  - Workflow uses `pull_request`, never `pull_request_target`, and has no deployment command.
-- **Guardrails**: Do not use `latest` as an MLflow model input: the existing champion alias and immutable lineage tags remain the source of truth. Do not add PostgreSQL services to Actions.
+  - Same-repository PRs run all validation and a web image build, without Docker Hub, DagsHub, or PostgreSQL credentials and without publishing either image.
+  - Successful `main` pushes publish exactly `swang62/tennis-bento:latest` and `swang62/tennis-web:latest`.
+  - The main path uses the real current champion and real generated player directory; neither image is built from the PR fixture.
+  - `just deploy` still works unchanged for an on-demand manual publish.
+  - The workflow uses `pull_request`, never `pull_request_target`, and has no host deployment command.
+- **Guardrails**: Do not add PostgreSQL as a GitHub Actions service. Do not use `latest` as an MLflow input: the existing champion alias and immutable lineage tags remain the source of truth.
 
-### [ ] Task 4: Implement cache keys, invalidation, and integrity boundaries
+### [ ] Task 3: Wire GitHub-hosted caches without a registry cache
 
-- **Description**: Use the native setup-action caches for uv and pnpm, GitHub Actions cache backend for each Docker build scope (`bento` and `web`), and a restore/save cache for MLflow/Bento directories. Key the model-material cache by OS, lockfile, Bento/service/feature/model source inputs, and Bentofile inputs, with a conservative restore prefix for reuse across commits.
+- **Description**: Configure uv and pnpm caches through their setup actions. Configure Buildx cache import/export as `type=gha,scope=web` for the web build and `type=gha,scope=bento` for the main-only Bento build, both with `mode=max`. Use the GitHub Actions runtime helper only as needed to make the GHA cache backend available to the existing raw `docker buildx` invocation from `deploy.py`.
 
-  Treat every restored MLflow/Bento file as an untrusted accelerator: the existing deploy path must still resolve the champion from DagsHub and verify URI/version metadata plus lineage artifact SHA-256 values before producing an image.
-- **Files**: `.github/workflows/ci.yml`, `src/flows/deploy.py` (only where needed to pass Buildx cache parameters and preserve local behavior)
+  Add a deliberately bounded `actions/cache` entry for reusable MLflow/Bento material only if profiling confirms its contents fit the repository's Actions cache budget and it materially avoids downloads. Key it from OS plus the relevant Bento/service/feature/model and lockfile inputs; restore with a conservative prefix. The deploy path must always re-resolve `@champion` and verify immutable lineage metadata and SHA-256 hashes before reuse.
+- **Files**: `.github/workflows/ci.yml`, `src/flows/deploy.py` (only if it needs narrowly scoped optional `type=gha` Buildx flags), focused tests under `tests/` if deploy command construction changes
 - **Acceptance Criteria**:
-  - Repeated runs restore uv, pnpm, Docker layers, and model material without changing the resulting validated champion inputs.
-  - A champion change or mismatched artifact hash forces redownload/re-materialization rather than using a stale cache.
-  - Web and Bento Buildx layers do not collide.
-  - Cache paths omit `.env`, logs, database files, and credential-bearing configuration.
-- **Guardrails**: Model caches are intentionally accessible to repository workflow users, per the confirmed decision. Do not treat cache keys as authorization or skip remote lineage validation on a cache hit.
+  - Repeated PRs reuse the `web` BuildKit cache; repeated main runs reuse independent `bento` and `web` caches.
+  - No `--cache-from type=registry`, `--cache-to type=registry`, cache image/tag, or Docker Hub cache repository exists.
+  - Cache use is safe on a clean runner and does not require a persistent Buildx builder.
+  - A stale or mismatched cached model artifact is rejected and rematerialized after remote lineage/hash checks.
+  - Cache paths exclude secrets, `.env`, logs, and database files.
+- **Guardrails**: Do not assume BuildKit cache mounts are exportable as ordinary Actions caches; dependency layers remain cacheable through their lockfile-first Dockerfile ordering. Do not retain an oversized model cache that thrashes GitHub's cache quota.
 
-### [ ] Task 5: Document CI/CD operations and harden action upkeep
+### [ ] Task 4: Document CI/CD operations and action maintenance
 
-- **Description**: Add a concise CI/CD section explaining the triggers, no-fork constraint, registry behavior, required repository variables/secrets, cache contents, and that a main image publication does not deploy the Compose host. Add Dependabot configuration for GitHub Actions updates if the repository does not already manage action-version updates elsewhere.
+- **Description**: Add a concise CI/CD section describing PR vs. main behavior, required secrets/variables, Docker Hub publication, GitHub-only cache behavior and quota caveat, and the fact that publishing does not deploy the Compose host. Document `just deploy` as the retained independent manual release path. Add Dependabot configuration for GitHub Actions updates if absent.
 - **Files**: `README.md`, `.github/dependabot.yml` (if absent)
 - **Acceptance Criteria**:
-  - A maintainer can configure the two secrets and three variables from the documentation without copying any secret into the repository.
-  - Documentation states `latest` is mutable and deployment remains a separate/manual concern.
-  - Action updates remain reviewable as grouped Dependabot PRs.
-- **Guardrails**: Keep documentation operational and brief; do not alter local Compose, Prefect, or production-host instructions beyond accurately distinguishing them from CI.
+  - A maintainer can configure the secrets and variables without committing a credential.
+  - Documentation distinguishes PR fixture builds from main production builds and distinguishes image publication from host deployment.
+  - Documentation states that `latest` is mutable and manual deploy remains supported.
+  - Action updates are reviewable as Dependabot PRs.
+- **Guardrails**: Keep documentation operational and brief; do not alter Compose, Prefect, or production-host setup beyond accurately distinguishing it from CI.
 
 ## Dependencies
 
 1. Task 1 must finish before a Linux-hosted Python CI job can install reproducibly.
-2. Task 2 must finish before a PR can build the Bento without publishing it.
-3. Task 3 depends on Tasks 1 and 2.
-4. Task 4 is implemented with Task 3 and verified after the full workflow exists.
-5. Task 5 follows the final workflow/secret names.
+2. Task 2 depends on Task 1.
+3. Task 3 is implemented with Task 2; confirm cache behavior after the complete workflow exists.
+4. Task 4 follows the final workflow, secret, and cache names.
 
 ## QA/Testing Scenarios
 
-1. Same-repository PR changing Python source: lint, type check, hermetic tests, web tests/build, authenticated champion artifact verification, and both Docker builds succeed; Docker Hub has no new image.
-2. Same-repository PR with a broken frontend Docker build: workflow fails before merge and does not publish.
-3. Main merge: both images publish only as `latest`; no SSH, Compose, Prefect, or deployment command runs.
-4. Cached run: cache hits reduce downloads/layer rebuilding, but DagsHub is still queried and every cached lineage artifact is hash-verified.
-5. Champion changes between runs: the workflow rejects stale cache inputs and builds from the newly resolved champion.
-6. Missing/invalid DagsHub token or missing champion lineage tag: Bento job fails clearly, does not push an image, and exposes no secret in logs.
-7. Python tests pass with `DATABASE_URL` absent and without a PostgreSQL service, preserving `tests/test_no_live_db.py` guarantees.
+1. Same-repository PR changing Python source: lint, type checks, hermetic tests, web tests, and a non-publishing web Docker build succeed with `DATABASE_URL` absent and no external services.
+2. Same-repository PR with a broken frontend image build fails before merge and does not receive production credentials or publish an image.
+3. Main push: validation succeeds; the workflow resolves the current champion, generates the real directory, and pushes Bento and web images only as `latest`.
+4. Cached run: uv/pnpm and image-specific GHA BuildKit caches reduce downloads/rebuilds; the workflow remains correct after cache eviction or on a fresh runner.
+5. Champion changes between runs: main ignores stale cached materials after remote lineage/hash verification and publishes the newly pinned champion.
+6. Missing or invalid DagsHub/database/Docker Hub credentials: main build fails before its relevant image is pushed and exposes no secret in logs.
+7. Manual `just deploy`: still independently generates artifacts and publishes both images outside GitHub Actions.

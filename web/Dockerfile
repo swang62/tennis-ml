@@ -6,8 +6,8 @@ WORKDIR /app
 RUN corepack enable
 # The dashboard is self-contained, so the build context is web/.
 COPY package.json pnpm-lock.yaml ./
-RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store/v3,sharing=locked \
-    pnpm install --frozen-lockfile
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store,sharing=locked \
+    pnpm install --frozen-lockfile --store-dir /pnpm/store
 # Copy the source, then build the dashboard.
 COPY . .
 # Serialize the deploy-time player directory (public/player-directory.json,

@@ -130,6 +130,22 @@ def test_materialize_native_model_reuse_keyed_by_exact_mlflow_version(monkeypatc
     assert str(model.tag) == "linear_best:materialized-new"
 
 
+def test_cached_gbdt_framework_is_keyed_by_mlflow_version(monkeypatch):
+    import sys
+
+    stored = SimpleNamespace(
+        info=SimpleNamespace(metadata={"mlflow_version": "2", "framework": "xgboost"})
+    )
+    fake_bentoml = SimpleNamespace(
+        models=SimpleNamespace(get=lambda _name: stored),
+    )
+    monkeypatch.setitem(sys.modules, "bentoml", fake_bentoml)
+
+    d = _deploy()
+    assert d._cached_gbdt_framework("2") == "xgboost"
+    assert d._cached_gbdt_framework("3") is None
+
+
 # --- model_info.json records the GBDT framework, preserving existing fields ---
 
 

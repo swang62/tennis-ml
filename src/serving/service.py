@@ -89,6 +89,7 @@ SERVING_IMAGE = Image(
     "xgboost-cpu==3.2.0",
     "lightgbm==4.6.0",
     "psycopg[binary]==3.3.4",
+    "psycopg-pool==3.3.1",
     "pandas==2.3.3",
     "numpy==2.4.6",
     "onnxruntime==1.27.0",

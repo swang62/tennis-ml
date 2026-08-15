@@ -20,6 +20,8 @@ import MiniSearch from 'minisearch'
 
 export const MANIFEST_NAME = 'player-index.manifest.json'
 const HASHED_PAYLOAD_RE = /^(?:player-index|player-directory|player-search)\.[0-9a-f]{64}\.json$/
+const color = process.stdout.isTTY || process.env.COURTSIDE_COLOR === '1' ? '\x1b[35m' : ''
+const reset = color ? '\x1b[0m' : ''
 
 // Mirrors the current Home search options exactly; the consumer must pass
 // compatible options to MiniSearch.loadJSON at runtime.
@@ -75,7 +77,7 @@ if (isMain) {
       path.join(publicDir, 'player-directory.json'),
       publicDir,
     )
-    console.log(`Built ${directoryFileName} + ${searchFileName} (${payloadBytes} bytes) + ${MANIFEST_NAME} in ${publicDir}`)
+    console.log(`${color}[minisearch]${reset} built ${directoryFileName} + ${searchFileName} (${payloadBytes} bytes) + ${MANIFEST_NAME} in ${publicDir}`)
   } catch (err) {
     console.error(`build-player-index failed: ${err instanceof Error ? err.message : err}`)
     process.exitCode = 1
