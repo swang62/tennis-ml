@@ -8,10 +8,9 @@ import {
   useLocation,
 } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
 import Home from "./pages/Home";
-import { getDirectoryInfo } from "./api";
 import { formatLongDate } from "./lib/format";
+import { usePlayerDirectory } from "./lib/playerIndex";
 import { useTheme, type ThemeName } from "./theme";
 
 function CourtMark() {
@@ -114,12 +113,7 @@ function Layout() {
   const { theme, toggle } = useTheme();
   const [menuOpen, setMenuOpen] = useState(false);
   const headerRef = useRef<HTMLElement>(null);
-  const directoryInfoQ = useQuery({
-    queryKey: ["directory_info"],
-    queryFn: getDirectoryInfo,
-    staleTime: Infinity,
-    gcTime: Infinity,
-  });
+  const directoryQ = usePlayerDirectory();
   const { pathname } = useLocation();
   useEffect(() => {
     document.title =
@@ -242,9 +236,9 @@ function Layout() {
       </main>
       <footer className="footer container">
         <span>Courtside — model-driven tennis intelligence.</span>
-        {directoryInfoQ.data?.latest_match_date && (
+        {directoryQ.data?.latest_match_date && (
           <span>
-            Last updated {formatLongDate(directoryInfoQ.data.latest_match_date)}
+            Last updated {formatLongDate(directoryQ.data.latest_match_date)}
           </span>
         )}
       </footer>

@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 
 import pandas as pd
+import psycopg
 import pytest
 
 import src.db.client as db_client
@@ -163,3 +164,83 @@ def test_close_resets_connection(monkeypatch):
 
     assert conn.closed
     assert db_client._conn is None
+
+
+# --- Stale connection resilience (regression: closed/broken cached conn) ---
+
+
+class BrokenCursor(FakeCursor):
+    def __init__(self, conn, error):
+        super().__init__(conn)
+        self.error = error
+
+    def execute(self, sql, params=None):
+        # Record the attempt, then fail like a severed connection would.
+        self.conn.statements.append((sql, params))
+        raise self.error
+
+
+class BrokenConn(FakeConn):
+    def __init__(self, error):
+        super().__init__()
+        self.error = error
+
+    def cursor(self, row_factory=None):
+        del row_factory
+        return BrokenCursor(self, self.error)
+
+
+def test_get_conn_reconnects_when_cached_connection_is_closed(monkeypatch):
+    stale = FakeConn()
+    stale.closed = True
+    fresh = FakeConn()
+    monkeypatch.setattr(db_client, "_conn", stale)
+    monkeypatch.setattr(db_client, "_connect", lambda: fresh)
+
+    conn = db_client.get_conn()
+
+    assert conn is fresh
+    assert db_client._conn is fresh
+
+
+def test_execute_df_reconnects_when_cached_connection_is_closed(monkeypatch):
+    stale = FakeConn()
+    stale.closed = True
+    fresh = FakeConn()
+    fresh.results["SELECT 1"] = (["ok"], [(1,)])
+    monkeypatch.setattr(db_client, "_conn", stale)
+    monkeypatch.setattr(db_client, "_connect", lambda: fresh)
+
+    df = db_client.execute_df("SELECT 1")
+
+    assert df.iloc[0].to_dict() == {"ok": 1}
+    assert db_client._conn is fresh
+    assert fresh.statements == [("SELECT 1", None)]
+    assert stale.statements == []  # closed handle never contacted
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        psycopg.OperationalError("connection lost"),
+        psycopg.InterfaceError("connection is closed"),
+    ],
+)
+def test_execute_df_resets_connection_on_failure_then_reconnects(monkeypatch, error):
+    broken = BrokenConn(error)
+    fresh = FakeConn()
+    fresh.results["SELECT 1"] = (["ok"], [(1,)])
+    monkeypatch.setattr(db_client, "_conn", broken)
+    monkeypatch.setattr(db_client, "_connect", lambda: fresh)
+
+    with pytest.raises(type(error)):
+        db_client.execute_df("SELECT 1")
+
+    assert broken.closed  # reset before re-raising
+    assert db_client._conn is None
+
+    # Next request obtains a fresh connection; the failed statement is not replayed.
+    df = db_client.execute_df("SELECT 1")
+    assert df.iloc[0].to_dict() == {"ok": 1}
+    assert broken.statements == [("SELECT 1", None)]  # attempted once on the broken conn
+    assert fresh.statements == [("SELECT 1", None)]

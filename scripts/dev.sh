@@ -112,6 +112,25 @@ fi
 command -v uv >/dev/null 2>&1 || { echo "error: 'uv' not found (install it or run 'just deps')" >&2; exit 1; }
 command -v pnpm >/dev/null 2>&1 || { echo "error: 'pnpm' not found (install it; see package.json)" >&2; exit 1; }
 
+# --- Rebuild the static player index from the local database --------------
+# Vite must never serve a stale or fixture directory (e.g. the old Player
+# A/B/C test data): regenerate web/public/player-directory.json from the
+# configured database, then serialize it with the web index builder into the
+# content-hashed payload + manifest. Both steps fail fast, so Vite starts only
+# after the index reflects the actual database players and MAX(match_date).
+echo "rebuilding static player index from database $DB_NAME..."
+uv run python -c '
+from src.flows.deploy import generate_directory_artifact
+generate_directory_artifact()
+' || {
+    echo "error: player-directory generation failed (database query or artifact write)" >&2
+    exit 1
+}
+node web/scripts/build-player-index.mjs || {
+    echo "error: player index build failed (web dependencies missing? run pnpm install)" >&2
+    exit 1
+}
+
 # --- Start both servers, stop both on exit/interrupt ----------------------
 BENTO_PID= VITE_PID=
 cleanup() {

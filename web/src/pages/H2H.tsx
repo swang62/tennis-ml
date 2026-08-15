@@ -7,7 +7,6 @@ import { format } from "echarts/core";
 import {
   getHeadToHead,
   getPlayerProfile,
-  getPlayers,
   predictFromIds,
   type MatchRound,
   type Surface,
@@ -24,6 +23,7 @@ import {
 } from "../components";
 import { axisOption, baseChartOption, chartTokens } from "../lib/charts";
 import { preferenceEdge } from "../lib/h2hOrientation";
+import { usePlayerDirectory } from "../lib/playerIndex";
 import {
   ROUND_LABEL,
   TIER_LABEL,
@@ -115,7 +115,7 @@ export default function H2H() {
   const [asOfDate, setAsOfDate] = useState(today);
   const [isIndoor, setIsIndoor] = useState<"" | 0 | 1>("");
 
-  const playersQ = useQuery({ queryKey: ["players"], queryFn: getPlayers });
+  const directoryQ = usePlayerDirectory();
 
   const ready = playerA !== null && playerB !== null && playerA !== playerB;
   const h2hQ = useQuery({
@@ -144,16 +144,16 @@ export default function H2H() {
     predict.reset();
   };
 
-  const players = playersQ.data?.players ?? [];
+  const players = directoryQ.data?.players ?? [];
   const playerById = new Map(players.map((p) => [p.player_id, p]));
   // Display names only; an unknown player gets a neutral label, never the raw id.
   const name = (id: string) =>
     playerById.get(id)?.display_name ?? "Unknown player";
 
-  if (playersQ.isLoading) return <Loading label="Loading players" />;
-  if (playersQ.isError)
+  if (directoryQ.isLoading) return <Loading label="Loading players" />;
+  if (directoryQ.isError)
     return (
-      <ErrorBox error={playersQ.error} onRetry={() => playersQ.refetch()} />
+      <ErrorBox error={directoryQ.error} onRetry={() => directoryQ.refetch()} />
     );
 
   const h2h = h2hQ.data;
@@ -562,7 +562,7 @@ export default function H2H() {
         <>
           {/* Matchup comparison */}
           <div className="grid gap-5 lg:grid-cols-2">
-            <Card title="Match comparison">
+            <Card title="Win comparison">
               <div className="mirror">
                 <div className="mirror-head">
                   <Link
@@ -843,7 +843,10 @@ export default function H2H() {
                     </div>
                   );
                 })()}
-                <div className="h2h-meetings-wrap">
+                <section
+                  className="h2h-meetings-wrap tourney-table-wrap"
+                  aria-label={`Head-to-head match history: ${p1} versus ${p2}`}
+                >
                   {sortedMeetings.map((m) => {
                     const aWon = m.player1_won;
                     const winnerName = aWon ? p1 : p2;
@@ -863,61 +866,62 @@ export default function H2H() {
                         key={`${m.match_date}-${m.winner_id}`}
                         className="meeting"
                       >
-                        <span className="meeting-date">{m.match_date}</span>
-                        <span className="meeting-surface">
-                          <span
-                            className="surface-pill"
-                            style={{
-                              color:
-                                SURFACE_COLORS[m.surface] ?? "var(--text-dim)",
-                              borderColor:
-                                SURFACE_COLORS[m.surface] ?? "var(--text-dim)",
-                            }}
-                          >
-                            {m.surface}
-                          </span>
-                        </span>
-                        <span className="meeting-tourney">{tourney}</span>
-                        <span className="meeting-sep" aria-hidden="true">
-                          ·
-                        </span>
-                        <span
-                          className={`meeting-winner result-text ${
-                            aWon ? "is-win" : "is-loss"
-                          }`}
-                        >
-                          {winnerName}
-                        </span>
-                        <span className="meeting-round-note">
-                          {roundLabel ? (
-                            <>
-                              Won in{" "}
-                              <span className="meeting-round-strong">
-                                {roundLabel}
-                              </span>
-                            </>
-                          ) : (
-                            "WON"
-                          )}
-                          <span className="meeting-sep" aria-hidden="true">
-                            ·
-                          </span>
-                          {m.score ? (
-                            <span className="meeting-score">
-                              {scoreSegments(m.score, "winner")?.map((s, i) =>
-                                s.bold ? (
-                                  <strong key={i}>{s.text}</strong>
-                                ) : (
-                                  <span key={i}>{s.text}</span>
-                                ),
-                              )}
+                        <div className="meeting-meta">
+                          <span className="meeting-date">{m.match_date}</span>
+                          <span className="meeting-surface">
+                            <span
+                              className="surface-pill"
+                              style={{
+                                color:
+                                  SURFACE_COLORS[m.surface] ?? "var(--text-dim)",
+                                borderColor:
+                                  SURFACE_COLORS[m.surface] ?? "var(--text-dim)",
+                              }}
+                            >
+                              {m.surface}
                             </span>
-                          ) : null}
-                        </span>
+                          </span>
+                          <span className="meeting-tourney">{tourney}</span>
+                        </div>
+                        <div className="meeting-result">
+                          <span
+                            className={`meeting-winner result-text ml-2 ${
+                              aWon ? "is-win" : "is-loss"
+                            }`}
+                          >
+                            {winnerName}
+                          </span>
+                          <span className="meeting-round-note">
+                            {roundLabel ? (
+                              <>
+                                Won in{" "}
+                                <span className="meeting-round-strong">
+                                  {roundLabel}
+                                </span>
+                              </>
+                            ) : (
+                              "WON"
+                            )}
+                            <span className="meeting-sep" aria-hidden="true">
+                              ·
+                            </span>
+                            {m.score ? (
+                              <span className="meeting-score">
+                                {scoreSegments(m.score, "winner")?.map((s, i) =>
+                                  s.bold ? (
+                                    <strong key={i}>{s.text}</strong>
+                                  ) : (
+                                    <span key={i}>{s.text}</span>
+                                  ),
+                                )}
+                              </span>
+                            ) : null}
+                          </span>
+                        </div>
                       </div>
                     );
                   })}
-                </div>
+                </section>
               </>
             )}
           </Card>

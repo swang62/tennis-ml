@@ -43,7 +43,7 @@ web/             — React + TanStack dashboard (Vite, local dev, HMR)
 React 19 + TypeScript dashboard on Vite, Tailwind CSS 4, and the TanStack suite, with ECharts for visualizations. All model endpoints are proxied through at `/api`
 
 - **Player directory search** — MiniSearch fuzzy search over the full player list
-- **Player similarity** — find similar-playstyle players (FAISS) built with bio embeddings and service/return stats dims
+- **Player similarity** — find similar-playstyle players (FAISS) with bio embeddings and service/return stats
 - **Head-to-head** — cumulative charts and the ensemble's win probability per model
 - **SEO** — canonical / OG / JSON-LD tags, robots.txt and sitemap
 

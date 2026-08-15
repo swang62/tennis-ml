@@ -119,6 +119,86 @@ def _stub_subprocess(monkeypatch):
     monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
 
 
+def test_deploy_bento_generates_directory_before_login_and_build(monkeypatch, tmp_path):
+    """The player-directory artifact is generated first: a failure there aborts
+    the deploy before any image is built or published."""
+    d = _deploy()
+    monkeypatch.setattr(d, "DOCKER_REPO", "acme")
+    monkeypatch.setattr(d, "IMAGE_NAME", "tennis-bento")
+    monkeypatch.setattr(d, "LOGS", tmp_path)
+    monkeypatch.setattr(d, "_read_state", lambda: {})
+    monkeypatch.setattr(d, "_write_state", lambda _s: None)
+    monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
+    order = []
+    monkeypatch.setattr(
+        d, "generate_directory_artifact", lambda: order.append("artifact") or Path(tmp_path)
+    )
+    monkeypatch.setattr(d, "_docker_login", lambda: order.append("login"))
+    monkeypatch.setattr(
+        d,
+        "build_bento_image",
+        lambda: order.append("build") or ("acme/tennis-bento:latest", 5),
+    )
+
+    d.deploy_bento()
+
+    assert order == ["artifact", "login", "build"]
+
+
+def test_deploy_bento_aborts_before_publish_when_artifact_generation_fails(
+    monkeypatch,
+    tmp_path,
+):
+    """A failed directory artifact raises out of deploy before docker login or
+    the image build can run, so nothing is published."""
+    d = _deploy()
+    monkeypatch.setattr(d, "LOGS", tmp_path)
+    monkeypatch.setattr(
+        d, "generate_directory_artifact", lambda: (_ for _ in ()).throw(RuntimeError("no db"))
+    )
+    monkeypatch.setattr(
+        d, "_docker_login", lambda: (_ for _ in ()).throw(AssertionError("must not run"))
+    )
+    monkeypatch.setattr(
+        d, "build_bento_image", lambda: (_ for _ in ()).throw(AssertionError("must not run"))
+    )
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="no db"):
+        d.deploy_bento()
+
+
+def test_deploy_bento_aborts_before_login_when_directory_query_fails(
+    monkeypatch,
+    tmp_path,
+):
+    """A failing directory query (players or latest-match-date) raises out of
+    the real generate_directory_artifact before docker login or the image
+    build can run — a missing database must never be baked into an image."""
+    d = _deploy()
+    monkeypatch.setattr(d, "LOGS", tmp_path)
+    queried = []
+
+    def failing_execute(sql):
+        queried.append(sql)
+        raise RuntimeError("database unreachable")
+
+    monkeypatch.setattr(d, "execute_df", failing_execute)
+    monkeypatch.setattr(
+        d, "_docker_login", lambda: (_ for _ in ()).throw(AssertionError("must not run"))
+    )
+    monkeypatch.setattr(
+        d, "build_bento_image", lambda: (_ for _ in ()).throw(AssertionError("must not run"))
+    )
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="database unreachable"):
+        d.deploy_bento()
+    assert queried  # the directory query was actually attempted
+
+
 def test_deploy_bento_logs_in_before_build_then_writes_state(monkeypatch, tmp_path):
     """Login happens before the build (whose Buildx `--push` is the push); deploy
     itself runs no docker tag/push and only ever targets the Docker Hub latest image."""
@@ -138,6 +218,7 @@ def test_deploy_bento_logs_in_before_build_then_writes_state(monkeypatch, tmp_pa
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(d, "generate_directory_artifact", lambda: None)
     monkeypatch.setattr(d, "_docker_login", lambda: order.append("login"))
     monkeypatch.setattr(
         d,
@@ -162,6 +243,7 @@ def test_deploy_bento_does_not_require_postgres_password(monkeypatch, tmp_path):
     monkeypatch.setattr(d, "IMAGE_NAME", "tennis-bento")
     monkeypatch.setattr(d, "LOGS", tmp_path)
     monkeypatch.setattr(d, "build_bento_image", lambda **_kwargs: ("acme/tennis-bento:latest", 5))
+    monkeypatch.setattr(d, "generate_directory_artifact", lambda: None)
     monkeypatch.setattr(d, "_docker_login", lambda: None)
     monkeypatch.setattr(d, "_read_state", lambda: {})
     monkeypatch.setattr(d, "_write_state", lambda _s: None)
@@ -179,6 +261,7 @@ def test_deploy_bento_does_not_require_postgres_password(monkeypatch, tmp_path):
 def test_deploy_bento_fails_when_buildx_push_fails(monkeypatch, tmp_path):
     d = _deploy()
     monkeypatch.setattr(d, "LOGS", tmp_path)
+    monkeypatch.setattr(d, "generate_directory_artifact", lambda: None)
     monkeypatch.setattr(d, "_docker_login", lambda: None)
 
     def fail_build():
@@ -202,6 +285,7 @@ def test_deploy_bento_logs_build_and_buildx_to_single_file(monkeypatch, tmp_path
     monkeypatch.setattr(d, "LOGS", tmp_path)
     monkeypatch.setattr(d, "DOCKER_REPO", "acme")
     monkeypatch.setattr(d, "IMAGE_NAME", "tennis-bento")
+    monkeypatch.setattr(d, "generate_directory_artifact", lambda: None)
     monkeypatch.setattr(d, "_docker_login", lambda: None)
     monkeypatch.setattr(d, "_read_state", lambda: {})
     monkeypatch.setattr(d, "_write_state", lambda _s: None)
@@ -241,6 +325,7 @@ def test_deploy_bento_leaves_log_when_build_fails(monkeypatch, tmp_path):
     """A raising build still leaves a non-empty deploy_*.log with its output."""
     d = _deploy()
     monkeypatch.setattr(d, "LOGS", tmp_path)
+    monkeypatch.setattr(d, "generate_directory_artifact", lambda: None)
 
     def fail_build():
         print("champion missing lineage tags")
