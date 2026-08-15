@@ -38,7 +38,7 @@ def migrate() -> None:
     schema_sql = SCHEMA_SQL.read_text()
     with connection() as conn, conn.transaction(), conn.cursor() as cur:
         cur.execute(cast(LiteralString, schema_sql))
-    print("PostgreSQL migration: done")
+    print("[db] PostgreSQL migration: done")
 
 
 def actual_target() -> tuple[str | None, int, str]:

@@ -876,6 +876,7 @@ html.light {
     overflow: hidden;
     transition:
       border-color 0.15s var(--ease),
+      background-color 0.15s var(--ease),
       box-shadow 0.15s var(--ease);
   }
 
@@ -896,6 +897,14 @@ html.light {
 
   .picker-trigger-row[data-tone="grass"] {
     border-color: var(--grass);
+  }
+
+  .picker-trigger-row.is-selected[data-tone="clay"] {
+    background: color-mix(in srgb, var(--clay) 10%, var(--bg-raised));
+  }
+
+  .picker-trigger-row.is-selected[data-tone="grass"] {
+    background: color-mix(in srgb, var(--grass) 10%, var(--bg-raised));
   }
 
   .picker-trigger-row[data-tone="clay"]:focus-within {

@@ -108,12 +108,8 @@ export default function H2H() {
   const { playerA: searchPlayerA, playerB: searchPlayerB } =
     h2hRoute.useSearch();
   const navigate = h2hRoute.useNavigate();
-  const [playerA, setPlayerA] = useState<string | null>(
-    searchPlayerA ?? null,
-  );
-  const [playerB, setPlayerB] = useState<string | null>(
-    searchPlayerB ?? null,
-  );
+  const [playerA, setPlayerA] = useState<string | null>(searchPlayerA ?? null);
+  const [playerB, setPlayerB] = useState<string | null>(searchPlayerB ?? null);
   const [surface, setSurface] = useState<Surface>("hard");
   const [tournament, setTournament] = useState<TournamentTier | "">("");
   const [round, setRound] = useState<MatchRound | "">("");
@@ -173,7 +169,8 @@ export default function H2H() {
     if (!ready) return;
     for (const playerId of [playerA, playerB]) {
       const iso2 = playerById.get(playerId)?.iso2?.trim().toLowerCase();
-      if (iso2?.length === 2) new Image().src = `https://flagcdn.com/w40/${iso2}.png`;
+      if (iso2?.length === 2)
+        new Image().src = `https://flagcdn.com/w40/${iso2}.png`;
     }
   }, [playerA, playerB, players, ready]);
 
@@ -901,9 +898,11 @@ export default function H2H() {
                               className="surface-pill"
                               style={{
                                 color:
-                                  SURFACE_COLORS[m.surface] ?? "var(--text-dim)",
+                                  SURFACE_COLORS[m.surface] ??
+                                  "var(--text-dim)",
                                 borderColor:
-                                  SURFACE_COLORS[m.surface] ?? "var(--text-dim)",
+                                  SURFACE_COLORS[m.surface] ??
+                                  "var(--text-dim)",
                               }}
                             >
                               {m.surface}
@@ -935,12 +934,13 @@ export default function H2H() {
                             </span>
                             {m.score ? (
                               <span className="meeting-score">
-                                {scoreSegments(m.score, "winner")?.map((s, i) =>
-                                  s.bold ? (
-                                    <strong key={i}>{s.text}</strong>
-                                  ) : (
-                                    <span key={i}>{s.text}</span>
-                                  ),
+                                {scoreSegments(m.score, "winner")?.map(
+                                  (s, i) =>
+                                    s.bold ? (
+                                      <strong key={i}>{s.text}</strong>
+                                    ) : (
+                                      <span key={i}>{s.text}</span>
+                                    ),
                                 )}
                               </span>
                             ) : null}

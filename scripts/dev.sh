@@ -13,12 +13,40 @@
 
 set -u
 
+if [ -t 1 ]; then
+    COLOR_DB=$(printf '\033[34m')
+    COLOR_MINISEARCH=$(printf '\033[35m')
+    COLOR_BENTO=$(printf '\033[32m')
+    COLOR_DEV=$(printf '\033[90m')
+    COLOR_RESET=$(printf '\033[0m')
+    export COURTSIDE_COLOR=1
+else
+    COLOR_DB=''
+    COLOR_MINISEARCH=''
+    COLOR_BENTO=''
+    COLOR_DEV=''
+    COLOR_RESET=''
+    unset COURTSIDE_COLOR
+fi
+
+log() {
+    category=$1
+    message=$2
+    case "$category" in
+        db) color=$COLOR_DB ;;
+        minisearch) color=$COLOR_MINISEARCH ;;
+        bento) color=$COLOR_BENTO ;;
+        *) color=$COLOR_DEV ;;
+    esac
+    printf '%s[%s]%s %s\n' "$color" "$category" "$COLOR_RESET" "$message"
+}
+
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT" || exit 1
 
 # --- Load the existing .env without printing it ----------------------------
 if [ ! -f .env ]; then
-    echo "error: .env not found in $ROOT; configure DATABASE_URL for Homebrew PostgreSQL" >&2
+    echo "[dev] error: .env not found in $ROOT; configure DATABASE_URL for Homebrew PostgreSQL" >&2
     exit 1
 fi
 
@@ -27,11 +55,11 @@ fi
 # only generate a high-entropy key when none is present (an empty placeholder
 # is replaced). The value is never displayed or committed.
 if ! grep -Eq '^BENTO_API_KEY=.+' .env; then
-    key=$(openssl rand -hex 32) || { echo "error: 'openssl rand' failed (is openssl installed?)" >&2; exit 1; }
+    key=$(openssl rand -hex 32) || { echo "[dev] error: 'openssl rand' failed (is openssl installed?)" >&2; exit 1; }
     sed -i '' '/^BENTO_API_KEY=$/d' .env
     printf '\n# Operational API key for the production Nginx internal routes.\nBENTO_API_KEY=%s\n' "$key" >> .env
     unset key
-    echo "generated BENTO_API_KEY in .env (value not displayed)"
+    echo "[dev] generated BENTO_API_KEY in .env (value not displayed)"
 fi
 
 set -a
@@ -41,7 +69,7 @@ set +a
 # --- Resolve the effective database target --------------------------------
 # DATABASE_URL is used only to connect and is never echoed.
 if [ -z "${DATABASE_URL:-}" ]; then
-    echo "error: .env must set DATABASE_URL for the local workflow (see README)" >&2
+    echo "[dev] error: .env must set DATABASE_URL for the local workflow (see README)" >&2
     exit 1
 fi
 url=${DATABASE_URL#*://}
@@ -67,14 +95,14 @@ command -v psql >/dev/null 2>&1 || {
     exit 1
 }
 
-echo "checking database $DB_NAME at ${DB_HOST:-localhost}:$DB_PORT"
+log db "checking $DB_NAME at ${DB_HOST:-localhost}:$DB_PORT"
 actual_db=$(db_psql "SELECT current_database()") || {
-    echo "error: cannot connect to PostgreSQL at ${DB_HOST:-localhost}:$DB_PORT (database $DB_NAME)" >&2
-    echo "  start Homebrew PostgreSQL and make sure .env points at it" >&2
+    echo "[db] error: cannot connect to PostgreSQL at ${DB_HOST:-localhost}:$DB_PORT (database $DB_NAME)" >&2
+    echo "[db] start Homebrew PostgreSQL and make sure .env points at it" >&2
     exit 1
 }
 if [ -n "$DB_NAME" ] && [ "$actual_db" != "$DB_NAME" ]; then
-    echo "error: connected to database '$actual_db' but .env expects '$DB_NAME'" >&2
+    echo "[db] error: connected to '$actual_db' but .env expects '$DB_NAME'" >&2
     exit 1
 fi
 
@@ -85,8 +113,8 @@ FROM (VALUES ('bronze.match_events'), ('silver.player_matches'),
              ('silver.rolling_features'), ('gold.player_profiles')) AS t(t)
 WHERE to_regclass(t.t) IS NULL") || exit 1
 if [ -n "$missing" ]; then
-    echo "error: required table(s) missing in database '$DB_NAME': $missing" >&2
-    echo "  run 'just db-migrate' then 'just db-seed' and 'just db-etl' to build them" >&2
+    echo "[db] error: required table(s) missing in '$DB_NAME': $missing" >&2
+    echo "[db] run 'just db-migrate' then 'just db-seed' and 'just db-etl' to build them" >&2
     exit 1
 fi
 
@@ -104,13 +132,14 @@ for spec in 3000:Bento 5173:Vite; do
     fi
 done
 if [ -n "$conflicts" ]; then
-    echo "error: cannot start dev servers: $conflicts" >&2
-    echo "  stop the conflicting process(es) and re-run" >&2
+    echo "[dev] error: cannot start dev servers: $conflicts" >&2
+    echo "[dev] stop the conflicting process(es) and re-run" >&2
     exit 1
 fi
 
-command -v uv >/dev/null 2>&1 || { echo "error: 'uv' not found (install it or run 'just deps')" >&2; exit 1; }
-command -v pnpm >/dev/null 2>&1 || { echo "error: 'pnpm' not found (install it; see package.json)" >&2; exit 1; }
+command -v uv >/dev/null 2>&1 || { echo "[dev] error: 'uv' not found (install it or run 'just deps')" >&2; exit 1; }
+command -v pnpm >/dev/null 2>&1 || { echo "[dev] error: 'pnpm' not found (install it; see package.json)" >&2; exit 1; }
+command -v curl >/dev/null 2>&1 || { echo "[dev] error: 'curl' not found" >&2; exit 1; }
 
 # --- Rebuild the static player index from the local database --------------
 # Vite must never serve a stale or fixture directory (e.g. the old Player
@@ -118,16 +147,16 @@ command -v pnpm >/dev/null 2>&1 || { echo "error: 'pnpm' not found (install it; 
 # configured database, then serialize it with the web index builder into the
 # content-hashed payload + manifest. Both steps fail fast, so Vite starts only
 # after the index reflects the actual database players and MAX(match_date).
-echo "rebuilding static player index from database $DB_NAME..."
+log minisearch "rebuilding static player index from database $DB_NAME..."
 uv run python -c '
 from src.flows.deploy import generate_directory_artifact
 generate_directory_artifact()
 ' || {
-    echo "error: player-directory generation failed (database query or artifact write)" >&2
+    echo "[minisearch] error: player-directory generation failed (database query or artifact write)" >&2
     exit 1
 }
 node web/scripts/build-player-index.mjs || {
-    echo "error: player index build failed (web dependencies missing? run pnpm install)" >&2
+    echo "[minisearch] error: player index build failed (web dependencies missing? run pnpm install)" >&2
     exit 1
 }
 
@@ -153,16 +182,16 @@ cleanup() {
         pid=$(port_pid "$port")
         [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null
     done
-    echo "dev servers stopped" >&2
+        echo "[dev] dev servers stopped" >&2
 }
 STOPPED_BY_SIGNAL=0
 trap 'STOPPED_BY_SIGNAL=1; cleanup' INT TERM
 trap cleanup EXIT
 
-echo "preflight ok: PostgreSQL at ${DB_HOST:-localhost}:$DB_PORT (database $DB_NAME), tables present, ports free"
+log db "PostgreSQL at ${DB_HOST:-localhost}:$DB_PORT (database $DB_NAME), tables present, ports free"
 
 # --- Import MLflow models into BentoML local store (idempotent) ----------------
-echo "importing MLflow models into BentoML local store..."
+log bento "resolving @champion and importing cached models..."
 uv run python -c '
 from pathlib import Path
 from src.constants import DATA_PROCESSED, load_env
@@ -180,21 +209,20 @@ if production is None:
 pins = _lineage_pins(client, production)
 
 for key in ("production", "linear", "gbdt"):
-    _import_or_reuse(pins[key])
+    framework = pins[key].get("framework") if key == "gbdt" else None
+    _import_or_reuse(pins[key], framework)
 
 nn_onnx = DATA_PROCESSED / "nn_best.onnx"
 if nn_onnx.exists():
-    print(f"[nn_best] ONNX already exists: {nn_onnx}")
+    print(f"[bento] reusing nn_best ONNX: {nn_onnx}")
 else:
     _materialize_nn_onnx(pins["nn"])
-
-print("dev import complete")
 ' || {
-    echo "error: model import failed — are models registered in MLflow? Run 'just train' first." >&2
+    echo "[bento] error: model import failed — are models registered in MLflow? Run 'just train' first." >&2
     exit 1
 }
 
-echo "starting Bento on http://127.0.0.1:3000 and Vite on http://127.0.0.1:5173; Ctrl-C stops both"
+log bento "starting Bento on http://127.0.0.1:3000 and Vite on http://127.0.0.1:5173; Ctrl-C stops both"
 # --reload restarts only for files matched by bentofile.yaml include and
 # .bentoignore (src/**, infra/postgres/schema.sql, data/processed/*); web/,
 # notebooks/, tests/, and mlruns/ are ignored, so Vite HMR edits never restart
@@ -205,6 +233,29 @@ echo "starting Bento on http://127.0.0.1:3000 and Vite on http://127.0.0.1:5173;
         --host 127.0.0.1 --port 3000 --reload --working-dir "$ROOT"
 ) &
 BENTO_PID=$!
+
+# Bento loads several models before it can answer requests. Wait for its
+# readiness endpoint before starting Vite so the first browser request cannot
+# race the backend startup.
+BENTO_READY=0
+attempts=0
+while [ "$attempts" -lt 120 ]; do
+    if ! kill -0 "$BENTO_PID" 2>/dev/null; then
+        break
+    fi
+    if curl -fsS --max-time 1 http://127.0.0.1:3000/health >/dev/null 2>&1; then
+        BENTO_READY=1
+        break
+    fi
+    attempts=$((attempts + 1))
+    sleep 1
+done
+if [ "$BENTO_READY" -ne 1 ]; then
+    echo "[bento] error: did not become healthy within 120 seconds" >&2
+    cleanup
+    exit 1
+fi
+
 (
     cd "$ROOT/web" && exec pnpm dev
 ) &
@@ -221,5 +272,5 @@ cleanup
 if [ "$STOPPED_BY_SIGNAL" -eq 1 ]; then
     exit 130
 fi
-echo "error: a dev server exited; see its output above" >&2
+echo "[dev] error: a dev server exited; see its output above" >&2
 exit 1
