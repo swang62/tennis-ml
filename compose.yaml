@@ -33,17 +33,17 @@ services:
     volumes:
       - tennis-ml-postgres:/var/lib/postgresql
       - ./infra/postgres/tls:/mnt/tls:ro
-    entrypoint: ["/mnt/tls/entrypoint.sh"]
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: tennis
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d tennis"]
+      test: [ "CMD-SHELL", "pg_isready -U postgres -d tennis" ]
       interval: 60s
       timeout: 5s
       retries: 6
       start_period: 30s
+    entrypoint: [ "/mnt/tls/entrypoint.sh" ]
 
   bento:
     image: swang62/tennis-bento:latest
@@ -55,15 +55,15 @@ services:
       SERVING_MODE: production
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/tennis
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          'python -c ''import urllib.request;urllib.request.urlopen("http://localhost:3000/readyz")''',
-        ]
+      test: [ "CMD-SHELL", 'python -c ''import urllib.request;urllib.request.urlopen("http://localhost:3000/readyz")''' ]
       interval: 60s
       timeout: 5s
       retries: 3
       start_period: 30s
+    command:
+      - >-
+        export PYTHONPATH="$$BENTO_PATH/src" && python "$$PYTHONPATH/src/db/migrate_db.py" migrate && exec bentoml serve "$$BENTO_PATH"
+    entrypoint: [ "/bin/sh", "-c" ]
     pull_policy: always
 
 volumes:

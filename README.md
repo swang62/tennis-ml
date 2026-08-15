@@ -56,11 +56,11 @@ Only requirement is a free account on [Dagshub](https://dagshub.com), [Docker](h
 just setup
 
 # 2. Apply schema migrations, then seed the matches into PostgreSQL bronze
-just db-migrate
-just db-seed
+just migrate
+just seed
 
 # 3. Generate silver/gold tables
-just db-etl
+just etl
 
 # 4. Local dev: Bento API (:3000) + Vite dashboard (:5173)
 just dev

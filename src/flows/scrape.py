@@ -157,7 +157,7 @@ def missing_ranking_mondays(
 
     Returns ``(watermark, weeks)``; ``watermark`` is None when the table is
     empty and ``weeks`` is then empty because the flow must not scrape history
-    from scratch (run ``just db-seed`` first).
+    from scratch (run ``just seed`` first).
 
     With no ``start_date`` the scan starts one week after the watermark (the
     max stored Monday); with an explicit ``start_date`` it starts there (snapped
@@ -418,7 +418,7 @@ def scrape_flow(start_date: date | None = None, end_date: date | None = None):
     if watermark is None:
         print(
             "bronze.rankings is empty — initial seed not complete; "
-            "run `just db-seed` first. Skipping browser work."
+            "run `just seed` first. Skipping browser work."
         )
         return
     if not weeks:

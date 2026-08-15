@@ -2,7 +2,7 @@
 
 Training notebooks and modules read ONLY from the local DuckDB training
 snapshot (``src.db.snapshot``), never from the operational PostgreSQL client —
-this keeps training reproducible and offline-capable once ``just db-snapshot``
+this keeps training reproducible and offline-capable once ``just snapshot``
 has produced a valid snapshot. Deliberately does not import ``src.db.client``.
 
 The snapshot is opened lazily, read-only, and fails fast with a pointing error
@@ -26,7 +26,7 @@ def connect() -> duckdb.DuckDBPyConnection:
     if _conn is None:
         if not SNAPSHOT_PATH.exists():
             raise FileNotFoundError(
-                f"training snapshot not found at {SNAPSHOT_PATH}; run `just db-snapshot` first"
+                f"training snapshot not found at {SNAPSHOT_PATH}; run `just snapshot` first"
             )
         _conn = duckdb.connect(str(SNAPSHOT_PATH), read_only=True)
     return _conn
