@@ -12,7 +12,7 @@ from pathlib import Path
 
 DEV_SH = Path(__file__).resolve().parent.parent / "scripts" / "dev.sh"
 
-_GENERATOR = "generate_directory_artifact"
+_GENERATOR = "generate_navigation_artifacts"
 _NODE_BUILDER = "web/scripts/build-player-index.mjs"
 
 

@@ -17,7 +17,6 @@ from typing import TextIO
 import papermill as pm
 
 from src.constants import (
-    DATA_PROCESSED,
     LOGS,
     OUTPUTS,
     PARAMS,
@@ -66,21 +65,10 @@ def run_notebook(name: str, parameters: dict | None = None) -> None:
     print(f"  Done: {name}")
 
 
-def _file_hash(path: Path) -> str:
-    import hashlib
-
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def generate_cluster_artifacts() -> None:
     """Fit player-archetype clusters from the fresh DuckDB snapshot and write
-    the artifacts PlayerSimilarity.build consumes (one-hot memberships +
-    archetype labels). Runs after the snapshot refresh so a stale assignment
-    can never leak into the similarity index build.
+    the deploy-time similarity build consumes (one-hot memberships + archetype
+    labels). Runs after the snapshot refresh so assignments stay current.
     """
     from src.models.similarity import build_cluster_artifacts
 
@@ -90,36 +78,6 @@ def generate_cluster_artifacts() -> None:
         query=training.to_dataframe,
         random_state=PLAYSTYLE_RANDOM_STATE,
     )
-
-
-def build_similarity_index() -> None:
-    """Build snapshot-backed player similarity artifacts and pin them in one MLflow run.
-
-    Only the similarity index and its metadata are pinned here; the web player
-    directory is generated at deploy time from the same DuckDB snapshot (see
-    src.flows.deploy.generate_directory_artifact), never champion-pinned.
-    """
-    import json
-
-    import mlflow
-
-    from src.models.similarity import DEFAULT_INDEX, DEFAULT_METADATA, PlayerSimilarity
-
-    PlayerSimilarity().build(query=training.to_dataframe)
-    mlflow.set_experiment("artifacts")
-    with mlflow.start_run():
-        mlflow.log_artifact(str(DEFAULT_INDEX))
-        mlflow.log_artifact(str(DEFAULT_METADATA))
-
-        run_id = mlflow.active_run().info.run_id  # type: ignore[union-attr]  # non-None inside start_run()
-        pins = {
-            "similarity_index_uri": f"runs:/{run_id}/player_similarity.index",
-            "similarity_index_hash": _file_hash(DEFAULT_INDEX),
-            "similarity_metadata_uri": f"runs:/{run_id}/player_metadata.json",
-            "similarity_metadata_hash": _file_hash(DEFAULT_METADATA),
-        }
-        DATA_PROCESSED.mkdir(parents=True, exist_ok=True)
-        (DATA_PROCESSED / "similarity_pins.json").write_text(json.dumps(pins, indent=2) + "\n")
 
 
 class _Tee:
@@ -161,18 +119,11 @@ if __name__ == "__main__":
         refresh_snapshot()
         print(f"  Snapshot refreshed: {SNAPSHOT_PATH}")
 
-        # Fit player-archetype clusters from the fresh snapshot before the
-        # similarity index build so the index consumes freshly generated
-        # cluster artifacts (memberships + labels).
+        # Fit player-archetype clusters from the fresh snapshot. Deploy later
+        # consumes these snapshot artifacts to build navigation assets.
         print("\nGenerating playstyle clusters...")
         generate_cluster_artifacts()
         print("  Cluster artifacts written.")
-
-        # Build the player similarity index from the DuckDB snapshot so it is
-        # always fresh and never depends on a running PostgreSQL.
-        print("\nBuilding player similarity FAISS index...")
-        build_similarity_index()
-        print("  Similarity index built.")
 
         print("Pipeline starting...")
         for name in NB_ORDER:

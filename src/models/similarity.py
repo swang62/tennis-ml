@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Iterable
+from pathlib import Path
 from typing import Any, NotRequired, TypedDict
 
 import faiss
@@ -32,11 +33,8 @@ from src.db.client import to_dataframe
 MODEL_NAME = "BAAI/bge-small-en-v1.5"
 
 # The similarity index is independent of the prediction models (a dashboard
-# feature rebuilt from the fresh snapshot on every train). Training writes it
-# to data/processed (DEFAULT_*) and pipeline.py logs it to MLflow as run
-# artifacts; the deploy flow then downloads the pinned artifacts into
-# data/deploy and packages them into the Bento, where load() reads them back
-# from the SERVING_* paths.
+# feature rebuilt from the fresh snapshot at deploy). Deploy writes it to
+# data/deploy, where load() reads it back from the SERVING_* paths.
 DEFAULT_INDEX = DATA_PROCESSED / "player_similarity.index"
 DEFAULT_METADATA = DATA_PROCESSED / "player_metadata.json"
 SERVING_INDEX = DEPLOY_ARTIFACTS / "player_similarity.index"
@@ -381,6 +379,22 @@ def _read_cluster_assignments() -> pd.DataFrame | None:
     return assignments
 
 
+def load_cluster_artifacts() -> tuple[pd.DataFrame, dict[str, str]]:
+    """Load the pipeline-generated cluster assignments and labels for deploy."""
+    assignments = _read_cluster_assignments()
+    if assignments is None or not DEFAULT_CLUSTER_LABELS.exists():
+        raise RuntimeError(
+            "playstyle cluster artifacts are missing; run `just train` before deploy"
+        )
+    try:
+        labels = json.loads(DEFAULT_CLUSTER_LABELS.read_text())
+    except (FileNotFoundError, ValueError) as exc:
+        raise RuntimeError(
+            "playstyle cluster labels are invalid; run `just train` before deploy"
+        ) from exc
+    return assignments, {str(cluster_id): str(label) for cluster_id, label in labels.items()}
+
+
 def build_cluster_artifacts(
     n_clusters: int,
     labels: dict[str, str],
@@ -390,8 +404,8 @@ def build_cluster_artifacts(
 ) -> tuple[pd.DataFrame, Any]:
     """Fit player-archetype clusters and write the two runtime artifacts.
 
-    Shared by the pipeline (after every snapshot refresh, exactly before the
-    similarity index build) and the playstyle-cluster EDA notebook. Uses the
+    Shared by the pipeline (after every snapshot refresh) and the playstyle-
+    cluster EDA notebook. Uses the
     exact playstyle vectors of ``PlayerSimilarity.build`` — without any prior
     cluster assignment, so discovery is never skewed by a previous archetype —
     fits deterministic KMeans, validates that ``labels`` covers exactly the
@@ -454,13 +468,20 @@ class PlayerSimilarity:
     def build(
         self,
         query: Callable[[str], pd.DataFrame] | None = None,
+        *,
+        profiles: pd.DataFrame | None = None,
+        cluster_assignments: pd.DataFrame | None = None,
+        cluster_labels: dict[str, str] | None = None,
+        index_path: Path | None = None,
+        metadata_path: Path | None = None,
     ) -> None:
-        """Build and save the index using the live client or an offline query helper."""
+        """Build and save the index using a query helper or supplied snapshot rows."""
         query = query or to_dataframe
-        profiles = query(
-            f"SELECT player_id, display_name, backhand, handedness, summary "
-            f"FROM {BRONZE_PROFILES_TABLE}"
-        )
+        if profiles is None:
+            profiles = query(
+                f"SELECT player_id, display_name, backhand, handedness, summary "
+                f"FROM {BRONZE_PROFILES_TABLE}"
+            )
         profiles = profiles[profiles["player_id"] != ""].reset_index(drop=True)
         if profiles.empty:
             return
@@ -471,7 +492,9 @@ class PlayerSimilarity:
         # Recent rolling match performance and identity/bio metadata are
         # excluded. Cluster membership is an optional one-hot block appended
         # when the artifact exists.
-        assignments = _read_cluster_assignments()
+        assignments = (
+            cluster_assignments if cluster_assignments is not None else _read_cluster_assignments()
+        )
         features = build_playstyle_matrix(profiles, query, assignments)
 
         self.index = faiss.IndexFlatIP(features.shape[1])
@@ -483,15 +506,20 @@ class PlayerSimilarity:
             )
         ]
         self.player_ids = profiles["player_id"].tolist()
-        self.cluster_labels = self._load_cluster_labels(profiles["player_id"], assignments)
+        self.cluster_labels = self._load_cluster_labels(
+            profiles["player_id"], assignments, cluster_labels
+        )
         self._attach_cluster_labels()
 
-        DEFAULT_INDEX.parent.mkdir(parents=True, exist_ok=True)
-        faiss.write_index(self.index, str(DEFAULT_INDEX))
-        with open(DEFAULT_METADATA, "w") as f:
+        index_path = index_path or DEFAULT_INDEX
+        metadata_path = metadata_path or DEFAULT_METADATA
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        faiss.write_index(self.index, str(index_path))
+        with open(metadata_path, "w") as f:
             json.dump(self.players, f)
 
-        print(f"Index ({len(self.players)} players) saved to {DEFAULT_INDEX}")
+        print(f"Index ({len(self.players)} players) saved to {index_path}")
 
     # ── Load saved index ────────────────────────────
 
@@ -513,7 +541,9 @@ class PlayerSimilarity:
 
     @staticmethod
     def _load_cluster_labels(
-        player_ids: Iterable[str], assignments: pd.DataFrame | None
+        player_ids: Iterable[str],
+        assignments: pd.DataFrame | None,
+        labels: dict[str, str] | None = None,
     ) -> dict[str, str]:
         """Map player_id -> cluster label from the clustering artifacts, if present.
 
@@ -521,12 +551,14 @@ class PlayerSimilarity:
         notebook has not produced clusters yet), so similarity never breaks on
         a missing cluster file.
         """
-        if assignments is None or not DEFAULT_CLUSTER_LABELS.exists():
+        if assignments is None:
             return {}
-        try:
-            labels = json.loads(DEFAULT_CLUSTER_LABELS.read_text())
-        except (FileNotFoundError, ValueError, KeyError):
-            return {}
+        if labels is None:
+            try:
+                labels = json.loads(DEFAULT_CLUSTER_LABELS.read_text())
+            except (FileNotFoundError, ValueError, KeyError):
+                return {}
+        assert labels is not None
         id_to_cluster = {
             str(row["player_id"]): str(row["cluster_id"]) for _, row in assignments.iterrows()
         }

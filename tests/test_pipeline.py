@@ -4,9 +4,7 @@ Only the player-similarity rebuild wiring is covered here (the notebook run
 loop is out of scope). No live database, MLflow, or papermill execution.
 """
 
-import json
-import sys
-from types import SimpleNamespace
+from pathlib import Path
 
 from src.constants import (
     PLAYSTYLE_CLUSTER_LABELS,
@@ -45,65 +43,12 @@ def test_generate_cluster_artifacts_uses_snapshot_query_and_configured_config(mo
     assert captured["random_state"] == PLAYSTYLE_RANDOM_STATE
 
 
-def test_build_similarity_index_rebuilds_with_snapshot_query(monkeypatch, tmp_path):
-    """The runner rebuilds the index via PlayerSimilarity.build using the
-    DuckDB snapshot query helper — it never loads a previously saved index —
-    then logs the artifacts to MLflow and writes the similarity pins file."""
-    captured: list[object] = []
-    logged: list[str] = []
-
-    class _FakeRun:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
-    fake_mlflow = SimpleNamespace(
-        set_experiment=lambda _name: None,
-        start_run=lambda: _FakeRun(),
-        log_artifact=lambda path: logged.append(path),
-        active_run=lambda: SimpleNamespace(info=SimpleNamespace(run_id="run-xyz")),
-    )
-
-    index_file = tmp_path / "player_similarity.index"
-    metadata_file = tmp_path / "player_metadata.json"
-    data_processed = tmp_path / "processed"
-
-    class _FakePlayerSimilarity:
-        def build(self, query=None) -> None:
-            captured.append(query)
-            index_file.write_bytes(b"index-bytes")
-            metadata_file.write_bytes(b"metadata-bytes")
-
-    class _FakeQuery:
-        def __call__(self, _sql):
-            return None
-
-    fake_query = _FakeQuery()
-    monkeypatch.setattr(pipeline.training, "to_dataframe", fake_query)
-    monkeypatch.setattr(similarity, "PlayerSimilarity", _FakePlayerSimilarity)
-    monkeypatch.setattr(similarity, "DEFAULT_INDEX", index_file)
-    monkeypatch.setattr(similarity, "DEFAULT_METADATA", metadata_file)
-    monkeypatch.setattr(pipeline, "DATA_PROCESSED", data_processed)
-    monkeypatch.setitem(sys.modules, "mlflow", fake_mlflow)
-
-    pipeline.build_similarity_index()
-
-    assert captured == [fake_query]
-    # Only the similarity index and metadata are logged/pinned; the web player
-    # directory is generated at deploy time from the same snapshot.
-    assert logged == [str(index_file), str(metadata_file)]
-    assert not (data_processed / "player_directory.json").exists()
-
-    pins = json.loads((data_processed / "similarity_pins.json").read_text())
-    assert set(pins) == {
-        "similarity_index_uri",
-        "similarity_index_hash",
-        "similarity_metadata_uri",
-        "similarity_metadata_hash",
-    }
-    assert pins["similarity_index_uri"] == "runs:/run-xyz/player_similarity.index"
-    assert pins["similarity_metadata_uri"] == "runs:/run-xyz/player_metadata.json"
-    assert pins["similarity_index_hash"] == pipeline._file_hash(index_file)
-    assert pins["similarity_metadata_hash"] == pipeline._file_hash(metadata_file)
+def test_pipeline_source_has_no_navigation_build_or_mlflow_pins():
+    source = pipeline.__file__
+    assert source is not None
+    text = Path(source).read_text()
+    assert "build_similarity_index" not in text
+    assert "similarity_pins.json" not in text
+    assert "mlflow" not in text
+    notebook = Path("notebooks/parameters/03_train_ensemble.ipynb").read_text()
+    assert "similarity_pins.json" not in notebook
