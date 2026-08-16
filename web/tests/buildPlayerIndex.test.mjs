@@ -2,7 +2,7 @@
 // fixture directory only: no network, no database, no repo state.
 
 import assert from "node:assert";
-import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -109,7 +109,7 @@ test("is deterministic and content-hash sensitive", async () => {
 
 test("cleans stale payloads from earlier builds and rewrites the manifest", async () => {
   const dir = await fixtureDir({ players: PLAYERS_FIXTURE });
-  const staleName = "player-search." + "a".repeat(64) + ".json";
+  const staleName = `player-search.${"a".repeat(64)}.json`;
   await writeFile(path.join(dir, staleName), "stale");
   await writeFile(path.join(dir, MANIFEST_NAME), "old manifest");
 

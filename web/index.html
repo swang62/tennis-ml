@@ -30,7 +30,7 @@
             ? t === "light"
             : !window.matchMedia("(prefers-color-scheme: dark)").matches;
           document.documentElement.classList.toggle("light", light);
-        } catch (e) {
+        } catch (_e) {
           document.documentElement.classList.remove("light");
         }
       })();

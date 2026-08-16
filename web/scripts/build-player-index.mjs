@@ -68,10 +68,10 @@ export async function buildPlayerIndex(inputPath, outDir) {
     writeFile(path.join(outDir, searchFileName), searchBytes),
     writeFile(
       path.join(outDir, MANIFEST_NAME),
-      JSON.stringify({
+      `${JSON.stringify({
         directoryPath: `/${directoryFileName}`,
         searchPath: `/${searchFileName}`,
-      }) + "\n",
+      })}\n`,
     ),
   ]);
   // Consume the raw directory input so it is never copied into dist/.

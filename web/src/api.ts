@@ -295,7 +295,7 @@ export interface PredictInput {
 
 // Raw (unwrapped) response — the backend returns the flat dict directly.
 async function doPredictFromIds(input: PredictInput): Promise<PredictResponse> {
-  const res = await fetch(BASE + "/predict_from_ids", {
+  const res = await fetch(`${BASE}/predict_from_ids`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ row: input }),

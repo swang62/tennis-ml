@@ -380,10 +380,14 @@ export default function ProfileContent({
     tooltip: {
       ...baseChartOption(t).tooltip,
       trigger: "axis",
-      formatter: (params: any) => {
-        const d = new Date(params[0].value[0] as number);
+      formatter: (params: unknown) => {
+        const item = Array.isArray(params) ? params[0] : undefined;
+        if (!item || typeof item !== "object") return "";
+        const { value } = item as { value?: unknown };
+        if (!Array.isArray(value)) return "";
+        const d = new Date(Number(value[0]));
         const date = `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
-        return `${date}<br/>Rank #${params[0].value[1]}`;
+        return `${date}<br/>Rank #${value[1]}`;
       },
     },
     // Desktop leaves room for the vertical "Rank" axis name; mobile hides the

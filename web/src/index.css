@@ -950,11 +950,6 @@ html.light {
     position: relative;
   }
 
-  .picker.is-centered .picker-clear {
-    position: absolute;
-    right: 0;
-  }
-
   .picker-clear {
     flex: none;
     border: 0;
@@ -964,6 +959,11 @@ html.light {
     line-height: 1;
     padding: 0.4rem 0.4rem;
     cursor: pointer;
+  }
+
+  .picker.is-centered .picker-clear {
+    position: absolute;
+    right: 0;
   }
 
   .picker-clear:hover {
@@ -1770,9 +1770,7 @@ html.light {
     }
 
     .tourney-table,
-    .tourney-table tbody,
-    .tourney-table tr,
-    .tourney-table td {
+    .tourney-table :where(tbody, tr, td) {
       display: block;
       width: 100%;
     }
