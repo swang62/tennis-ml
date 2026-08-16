@@ -136,14 +136,14 @@ export default function H2H() {
     // immutable history, so match Home's Infinity staleness to avoid
     // refetching a cached profile on page switch.
     queryKey: ["profile", playerA],
-    queryFn: () => getPlayerProfile(playerA!),
+    queryFn: () => getPlayerProfile(requireId(playerA)),
     enabled: ready,
     staleTime: Infinity,
     gcTime: Infinity,
   });
   const profileBQ = useQuery({
     queryKey: ["profile", playerB],
-    queryFn: () => getPlayerProfile(playerB!),
+    queryFn: () => getPlayerProfile(requireId(playerB)),
     enabled: ready,
     staleTime: Infinity,
     gcTime: Infinity,
@@ -216,10 +216,16 @@ export default function H2H() {
         tooltip: {
           ...baseChartOption(t).tooltip,
           trigger: "item",
-          formatter: (params: any) => {
-            const edge = params[0].value as number;
-            const favored = edge <= 0 ? name(playerA!) : name(playerB!);
-            return `${params[0].axisValue}<br/>${favored} +${Math.round(Math.abs(edge) * 100)} pts`;
+          formatter: (params: unknown) => {
+            const item = Array.isArray(params) ? params[0] : undefined;
+            if (!item || typeof item !== "object") return "";
+            const { axisValue, value } = item as {
+              axisValue?: unknown;
+              value?: unknown;
+            };
+            const edge = Number(value);
+            const favored = edge <= 0 ? name(playerA) : name(playerB);
+            return `${String(axisValue ?? "")}<br/>${favored} +${Math.round(Math.abs(edge) * 100)} pts`;
           },
         },
         grid: {
@@ -251,8 +257,8 @@ export default function H2H() {
               if (edge === 0) return "Even";
               if (compactLabels) return `+${sign}`;
               return edge < 0
-                ? `${name(playerA!)} +${sign}`
-                : `${name(playerB!)} +${sign}`;
+                ? `${name(playerA)} +${sign}`
+                : `${name(playerB)} +${sign}`;
             },
           },
           splitLine: ax.splitLine,
@@ -271,7 +277,7 @@ export default function H2H() {
               show: false,
               color: t.text,
               fontSize: 11,
-              formatter: (params: any) =>
+              formatter: (params) =>
                 `${Math.round(Number(params.value) * 100)}`,
               position: "inside",
             },
@@ -482,8 +488,8 @@ export default function H2H() {
                 type="button"
                 onClick={() =>
                   predict.mutate({
-                    player_id: playerA!,
-                    opponent_id: playerB!,
+                    player_id: requireId(playerA),
+                    opponent_id: requireId(playerB),
                     surface,
                     ...(tournament ? { tournament } : {}),
                     ...(round ? { round } : {}),
@@ -506,7 +512,7 @@ export default function H2H() {
                     predict.error instanceof Error
                       ? predict.error.message
                       : String(predict.error),
-                    [playerA!, playerB!],
+                    [playerA ?? "", playerB ?? ""],
                   )}
                 </p>
               </div>
@@ -536,7 +542,7 @@ export default function H2H() {
                         : undefined
                     }
                   >
-                    <span className="odds-label">{name(playerA!)}</span>
+                    <span className="odds-label">{name(playerA)}</span>
                     <span
                       className={`odds-num num ${orientA >= 0.5 ? "is-fav" : ""}`}
                     >
@@ -553,7 +559,7 @@ export default function H2H() {
                         : undefined
                     }
                   >
-                    <span className="odds-label">{name(playerB!)}</span>
+                    <span className="odds-label">{name(playerB)}</span>
                     <span
                       className={`odds-num num ${orientA < 0.5 ? "is-fav" : ""}`}
                     >
@@ -564,7 +570,7 @@ export default function H2H() {
                 <p className="mt-2 text-center text-[0.65rem] text-(--text-faint)">
                   Decimal odds show total return per 1 unit staked. A price of{" "}
                   {fairOdds(orientA)} returns {fairOdds(orientA)} units,
-                  including the stake, if {name(playerA!)} wins.
+                  including the stake, if {name(playerA)} wins.
                 </p>
                 <div className="mt-4">
                   <ReactECharts
@@ -575,8 +581,8 @@ export default function H2H() {
                   />
                 </div>
                 <p className="mt-2 text-center text-[0.65rem] text-(--text-faint)">
-                  Relative preference: left favors {name(playerA!)}, right
-                  favors {name(playerB!)}
+                  Relative preference: left favors {name(playerA)}, right favors{" "}
+                  {name(playerB)}
                 </p>
               </div>
             )}
@@ -589,7 +595,7 @@ export default function H2H() {
         <ErrorBox
           error={h2hQ.error}
           onRetry={() => h2hQ.refetch()}
-          knownIds={[playerA!, playerB!]}
+          knownIds={[playerA ?? "", playerB ?? ""]}
         />
       )}
 
@@ -695,8 +701,14 @@ export default function H2H() {
                     tooltip: {
                       show: true,
                       trigger: "item",
-                      formatter: (params: any) =>
-                        `<span style="color:${params.color};font-weight:700">${format.encodeHTML(params.name)}</span>`,
+                      formatter: (params: unknown) => {
+                        if (!params || typeof params !== "object") return "";
+                        const { color, name: seriesName } = params as {
+                          color?: unknown;
+                          name?: unknown;
+                        };
+                        return `<span style="color:${String(color ?? "")};font-weight:700">${format.encodeHTML(String(seriesName ?? ""))}</span>`;
+                      },
                       renderMode: "html",
                       backgroundColor: "transparent",
                       borderWidth: 0,
@@ -734,14 +746,14 @@ export default function H2H() {
                         emphasis: { label: { show: false } },
                         data: [
                           {
-                            name: name(playerA!),
+                            name: name(playerA),
                             value: radarMetrics.map(([, a]) => a ?? 0),
                             lineStyle: { color: t.grass, width: 2 },
                             itemStyle: { color: t.grass },
                             areaStyle: { color: `${t.grass}66` },
                           },
                           {
-                            name: name(playerB!),
+                            name: name(playerB),
                             value: radarMetrics.map(([, , b]) => b ?? 0),
                             lineStyle: { color: t.clay, width: 2 },
                             itemStyle: { color: t.clay },
@@ -757,7 +769,7 @@ export default function H2H() {
                       option={radarOption}
                       style={{ height: 310, width: "100%" }}
                       className="chart-frame"
-                      aria-label={`Strength comparison: ${name(playerA!)} versus ${name(playerB!)}`}
+                      aria-label={`Strength comparison: ${name(playerA)} versus ${name(playerB)}`}
                     />
                   );
                 })()
@@ -798,12 +810,14 @@ export default function H2H() {
                     tooltip: {
                       ...baseChartOption(t).tooltip,
                       trigger: "axis",
-                      formatter: (params: any) => {
-                        const items = params as Array<{
-                          name: string;
-                          seriesName: string;
-                          value: number;
-                        }>;
+                      formatter: (params: unknown) => {
+                        const items = Array.isArray(params)
+                          ? (params as Array<{
+                              name: string;
+                              seriesName: string;
+                              value: number;
+                            }>)
+                          : [];
                         return [
                           items[0]?.name ?? "",
                           ...items.map(
