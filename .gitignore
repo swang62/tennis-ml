@@ -35,8 +35,9 @@ infra/postgres/tls/server.key
 *.joblib
 *.json
 
-# Package manifests (repository-owned; not hidden by *.json above)
+# Package manifests and web toolchain config (repository-owned; not hidden by *.json above)
 !/web/package.json
+!/web/biome.json
 
 # Deploy-generated web directory artifact (written by src/flows/deploy.py)
 web/public/player-directory.json

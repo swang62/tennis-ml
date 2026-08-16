@@ -1,7 +1,8 @@
 """Hermetic tests for the shared player-directory contract and its deploy artifact.
 
 No live database: the query result is a fixture DataFrame and the deploy
-generation path patches execute_df at the module boundary.
+generation path patches the DuckDB snapshot query helper at the module
+boundary.
 """
 
 import importlib
@@ -159,34 +160,60 @@ def test_players_sql_columns_cover_the_player_contract():
         assert field in PLAYERS_SQL
 
 
-# ── Deploy-time artifact generation ─────────────────────────────────────────
+# ── Deployment staging ──────────────────────────────────────────────────────
 
 
 def _deploy():
     return importlib.import_module("src.flows.deploy")
 
 
-def _fake_execute(sql: str) -> pd.DataFrame:
-    """Hermetic stand-in for the directory query."""
-    if sql == _deploy().PLAYERS_SQL:
-        return _directory_df()
-    raise AssertionError(f"unexpected SQL: {sql}")
-
-
-def test_generate_directory_artifact_writes_players_json(monkeypatch, tmp_path):
+def test_generate_directory_artifact_builds_from_snapshot(monkeypatch, tmp_path):
+    """The deploy-time artifact is generated from the DuckDB training snapshot —
+    no champion-pinned directory file, no MLflow download."""
     d = _deploy()
     out = tmp_path / "web" / "public" / "player-directory.json"
     monkeypatch.setattr(d, "WEB_DIRECTORY_ARTIFACT", out)
-    monkeypatch.setattr(d, "execute_df", _fake_execute)
+    monkeypatch.setattr("src.db.training.to_dataframe", lambda _sql: _directory_df())
 
     path = d.generate_directory_artifact()
 
     assert path == out
-    data = json.loads(out.read_text())
-    players = data["players"]
-    assert [p["player_id"] for p in players] == ["p2", "p1", "p3"]
-    assert players[0]["display_name"] == "B Player"
-    assert players[1]["current_rank"] is None
+    artifact = json.loads(out.read_text())
+    assert artifact == {"players": directory_players(_directory_df())}
+    # The web loader contract: every player carries the static-picker fields.
+    for field in (
+        "player_id",
+        "display_name",
+        "matches_played",
+        "current_rank",
+        "ioc",
+        "iso2",
+        "cluster_label",
+    ):
+        assert all(field in player for player in artifact["players"])
+    assert [p["player_id"] for p in artifact["players"]] == ["p2", "p1", "p3"]
+
+
+def test_generate_directory_artifact_requires_snapshot(monkeypatch, tmp_path):
+    """Without the training snapshot the deploy fails with the actionable
+    snapshot-missing error and stages nothing."""
+    d = _deploy()
+    out = tmp_path / "web" / "public" / "player-directory.json"
+    monkeypatch.setattr(d, "WEB_DIRECTORY_ARTIFACT", out)
+
+    def no_snapshot(_sql):
+        raise FileNotFoundError(
+            "training snapshot not found at data/processed/training_snapshot.duckdb; "
+            "run `just snapshot` first"
+        )
+
+    monkeypatch.setattr("src.db.training.to_dataframe", no_snapshot)
+
+    import pytest
+
+    with pytest.raises(FileNotFoundError, match="training snapshot not found"):
+        d.generate_directory_artifact()
+    assert not out.exists()
 
 
 def test_deploy_tee_preserves_console_isatty():
@@ -201,52 +228,10 @@ def test_deploy_tee_preserves_console_isatty():
     assert tee.isatty() is True
 
 
-def test_generate_directory_artifact_is_deterministic(monkeypatch, tmp_path):
-    d = _deploy()
-    out = tmp_path / "web" / "public" / "player-directory.json"
-    monkeypatch.setattr(d, "WEB_DIRECTORY_ARTIFACT", out)
-    monkeypatch.setattr(d, "execute_df", _fake_execute)
-
-    d.generate_directory_artifact()
-    first = out.read_bytes()
-    d.generate_directory_artifact()
-    assert out.read_bytes() == first
-
-
-def test_generate_directory_artifact_uses_canonical_queries(monkeypatch, tmp_path):
-    d = _deploy()
-    monkeypatch.setattr(d, "WEB_DIRECTORY_ARTIFACT", tmp_path / "player-directory.json")
-    called = []
-    monkeypatch.setattr(d, "execute_df", lambda sql: called.append(sql) or _fake_execute(sql))
-
-    d.generate_directory_artifact()
-
-    assert called == [d.PLAYERS_SQL]
-
-
-def test_generate_directory_artifact_raises_and_writes_nothing_on_query_failure(
-    monkeypatch, tmp_path
-):
-    d = _deploy()
-    out = tmp_path / "web" / "public" / "player-directory.json"
-
-    def boom(_sql):
-        raise RuntimeError("connection refused")
-
-    monkeypatch.setattr(d, "execute_df", boom)
-    monkeypatch.setattr(d, "WEB_DIRECTORY_ARTIFACT", out)
-
-    import pytest
-
-    with pytest.raises(RuntimeError, match="connection refused"):
-        d.generate_directory_artifact()
-    assert not out.exists()
-
-
 def test_generate_directory_artifact_raises_when_write_fails(monkeypatch, tmp_path):
-    """A write failure also aborts the artifact (and therefore the deploy)."""
+    """A staging failure also aborts the artifact (and therefore the deploy)."""
     d = _deploy()
-    monkeypatch.setattr(d, "execute_df", _fake_execute)
+    monkeypatch.setattr("src.db.training.to_dataframe", lambda _sql: _directory_df().head(0))
     blocked = tmp_path / "blocked"
     blocked.write_text("not a directory")
     monkeypatch.setattr(d, "WEB_DIRECTORY_ARTIFACT", blocked / "player-directory.json")

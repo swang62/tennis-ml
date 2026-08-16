@@ -69,7 +69,6 @@ from src.evaluate.promotion import (
     compute_metrics,
     resolve_champion,
 )
-from src.flows.etl import run_dbt_build
 from src.serving.service import (
     PredictFromIdsRow,
     Round,
@@ -676,10 +675,6 @@ def drift_flow(cutoff: date | None = None) -> int:
     client = MlflowClient()
     experiment_id = _ensure_experiment(client)
     start_ts = datetime.now(UTC).isoformat()
-
-    # print("Running dbt build...")
-    # run_dbt_build()
-    # print("dbt build complete.")
 
     with _file_lock():
         champion = _validate_production(client)

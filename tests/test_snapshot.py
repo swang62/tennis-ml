@@ -256,3 +256,82 @@ def test_training_module_does_not_import_operational_client() -> None:
     """Notebooks must use the training helper, not the PostgreSQL client."""
     assert "client" not in vars(training)
     assert "psycopg" not in vars(training)
+
+
+def test_redact_pg_url_masks_secrets_preserves_detail() -> None:
+    """A log-safe source URL keeps username, host/port, path, and non-sensitive
+    query parameters/fragments; passwords and sensitive parameter values become ****."""
+    cases = [
+        # The password in userinfo is masked; the username is retained.
+        (
+            "postgresql://alice:hunter2@db:5432/tennis",
+            "postgresql://alice:****@db:5432/tennis",
+        ),
+        # Username-only userinfo and non-sensitive params survive.
+        (
+            "postgresql://alice@db:5432/tennis?sslmode=require",
+            "postgresql://alice@db:5432/tennis?sslmode=require",
+        ),
+        # Sensitive query params (case-insensitive keys) are masked, others kept.
+        (
+            "postgresql://db:5432/tennis?token=xJ9&secret=abc&sslmode=require",
+            "postgresql://db:5432/tennis?token=****&secret=****&sslmode=require",
+        ),
+        # Secret values hiding in a query-string-like fragment are masked too.
+        (
+            "postgresql://alice:hunter2@db:5432/tennis#access_token=xJ9",
+            "postgresql://alice:****@db:5432/tennis#access_token=****",
+        ),
+        # A plain fragment is preserved.
+        (
+            "postgresql://alice:hunter2@db:5432/tennis?sslmode=require#view",
+            "postgresql://alice:****@db:5432/tennis?sslmode=require#view",
+        ),
+        # The full acceptance example.
+        (
+            "postgresql://alice:hunter2@db:5432/tennis?sslmode=require&password=x#view",
+            "postgresql://alice:****@db:5432/tennis?sslmode=require&password=****#view",
+        ),
+    ]
+    for raw, expected in cases:
+        redacted = snapshot._redact_pg_url(raw)
+        assert redacted == expected
+        assert "hunter2" not in redacted and "xJ9" not in redacted
+
+
+def test_refresh_snapshot_logs_safe_diagnostics(tmp_path, monkeypatch, capsys) -> None:
+    """A normal refresh logs the redacted source URL (secrets masked, useful
+    detail retained), per-table counts, and the installed DuckDB file size /
+    PRAGMA database_size."""
+    p = tmp_path / "live_snap.duckdb"
+    monkeypatch.setattr(snapshot, "_copy_tables", lambda tmp, _pg: _write_valid_snapshot(tmp))
+    snapshot.refresh_snapshot(
+        p,
+        pg_url="postgresql://alice:hunter2@db:5432/tennis?sslmode=require&password=x#view",
+    )
+
+    out = capsys.readouterr().out
+    assert "postgresql://alice:****@db:5432/tennis?sslmode=require&password=****#view" in out
+    assert "hunter2" not in out and "password=x" not in out
+    assert "copied gold.match_features: 2 rows" in out
+    assert "copied gold.player_profiles: 1 rows" in out
+    assert "copied bronze.player_profiles: 1 rows" in out
+    assert "MB on disk" in out
+    assert "database_size=" in out
+    assert "total_blocks=" in out
+
+
+def test_refresh_snapshot_counts_stay_useful_when_table_empty(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """An empty copied table still logs a 0 count before validation rejects it."""
+    p = tmp_path / "live_snap.duckdb"
+    monkeypatch.setattr(
+        snapshot,
+        "_copy_tables",
+        lambda tmp, _pg: _write_valid_snapshot(tmp, empty=True),
+    )
+    with pytest.raises(snapshot.SnapshotError, match="is empty"):
+        snapshot.refresh_snapshot(p, pg_url="postgresql://db:5432/tennis")
+    out = capsys.readouterr().out
+    assert "copied gold.match_features: 0 rows" in out

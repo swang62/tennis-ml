@@ -1,14 +1,13 @@
-import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import ReactECharts from "../lib/echarts";
 import type { EChartsOption } from "echarts";
 import { format } from "echarts/core";
+import { useEffect, useState } from "react";
 import {
   getHeadToHead,
   getPlayerProfile,
-  predictFromIds,
   type MatchRound,
+  predictFromIds,
   type Surface,
   type TournamentTier,
 } from "../api";
@@ -21,16 +20,17 @@ import {
   PlayerPicker,
 } from "../components";
 import { axisOption, baseChartOption, chartTokens } from "../lib/charts";
-import { preferenceEdge } from "../lib/h2hOrientation";
-import { usePlayerDirectory } from "../lib/playerIndex";
+import ReactECharts from "../lib/echarts";
 import {
-  ROUND_LABEL,
-  TIER_LABEL,
   fairOdds,
   pct,
+  ROUND_LABEL,
   sanitizeErrorMessage,
   scoreSegments,
+  TIER_LABEL,
 } from "../lib/format";
+import { preferenceEdge } from "../lib/h2hOrientation";
+import { usePlayerDirectory } from "../lib/playerIndex";
 import { h2hRoute } from "../routes";
 import { useTheme } from "../theme";
 
@@ -119,9 +119,16 @@ export default function H2H() {
   const directoryQ = usePlayerDirectory();
 
   const ready = playerA !== null && playerB !== null && playerA !== playerB;
+  // Queries and prediction callbacks below run only once both ids are set
+  // (enabled/rendered under the ready gate); the guard keeps ids non-null in
+  // those paths without per-site assertions.
+  const requireId = (id: string | null): string => {
+    if (id === null) throw new Error("player not selected");
+    return id;
+  };
   const h2hQ = useQuery({
     queryKey: ["h2h", playerA, playerB],
-    queryFn: () => getHeadToHead(playerA!, playerB!),
+    queryFn: () => getHeadToHead(requireId(playerA), requireId(playerB)),
     enabled: ready,
   });
   const profileAQ = useQuery({
@@ -162,13 +169,16 @@ export default function H2H() {
   const players = directoryQ.data?.players ?? [];
   const playerById = new Map(players.map((p) => [p.player_id, p]));
   // Display names only; an unknown player gets a neutral label, never the raw id.
-  const name = (id: string) =>
-    playerById.get(id)?.display_name ?? "Unknown player";
+  const name = (id: string | null) =>
+    playerById.get(id ?? "")?.display_name ?? "Unknown player";
 
   useEffect(() => {
     if (!ready) return;
     for (const playerId of [playerA, playerB]) {
-      const iso2 = playerById.get(playerId)?.iso2?.trim().toLowerCase();
+      const iso2 = players
+        .find((p) => p.player_id === playerId)
+        ?.iso2?.trim()
+        .toLowerCase();
       if (iso2?.length === 2)
         new Image().src = `https://flagcdn.com/w40/${iso2}.png`;
     }
@@ -934,13 +944,12 @@ export default function H2H() {
                             </span>
                             {m.score ? (
                               <span className="meeting-score">
-                                {scoreSegments(m.score, "winner")?.map(
-                                  (s, i) =>
-                                    s.bold ? (
-                                      <strong key={i}>{s.text}</strong>
-                                    ) : (
-                                      <span key={i}>{s.text}</span>
-                                    ),
+                                {scoreSegments(m.score, "winner")?.map((s) =>
+                                  s.bold ? (
+                                    <strong key={s.text}>{s.text}</strong>
+                                  ) : (
+                                    <span key={s.text}>{s.text}</span>
+                                  ),
                                 )}
                               </span>
                             ) : null}

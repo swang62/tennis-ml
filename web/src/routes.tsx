@@ -1,18 +1,18 @@
+import { useQuery } from "@tanstack/react-query";
 import {
   createRootRoute,
   createRoute,
   HeadContent,
-  lazyRouteComponent,
   Link,
+  lazyRouteComponent,
   Outlet,
   useLocation,
 } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
-import Home from "./pages/Home";
 import { getDirectoryInfo } from "./api";
 import { formatLongDate } from "./lib/format";
-import { useTheme, type ThemeName } from "./theme";
+import Home from "./pages/Home";
+import { type ThemeName, useTheme } from "./theme";
 
 function CourtMark() {
   return (
@@ -220,9 +220,9 @@ function Layout() {
               target="_blank"
               rel="noopener noreferrer"
               className="theme-btn"
-              aria-label="GitHub repository"
               title="GitHub repository"
             >
+              <span className="sr-only">GitHub repository</span>
               <svg
                 width="16"
                 height="16"
@@ -270,10 +270,8 @@ export const h2hRoute = createRoute({
   path: "/h2h",
   component: lazyRouteComponent(() => import("./pages/H2H")),
   validateSearch: (search: Record<string, unknown>) => ({
-    playerA:
-      typeof search.playerA === "string" ? search.playerA : undefined,
-    playerB:
-      typeof search.playerB === "string" ? search.playerB : undefined,
+    playerA: typeof search.playerA === "string" ? search.playerA : undefined,
+    playerB: typeof search.playerB === "string" ? search.playerB : undefined,
   }),
 });
 

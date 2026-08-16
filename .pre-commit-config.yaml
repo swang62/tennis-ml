@@ -10,6 +10,14 @@ repos:
 
   - repo: local
     hooks:
+      - id: biome-web
+        name: biome format+lint (web)
+        description: Format and lint staged web files with Biome
+        language: system
+        entry: 'sh -c ''cd web && for f do pnpm exec biome check --write "${f#web/}" || exit 1; done'' --'
+        files: ^web/.+\.(js|jsx|ts|tsx|mjs|cjs|json|jsonc|css|html)$
+        exclude: ^web/(public|dist|node_modules)/
+
       - id: kubeconform
         name: kubeconform
         description: Validate Kubernetes YAML manifests

@@ -25,10 +25,15 @@ export type PlayerSearch = (query: string) => Player[];
 
 // The MiniSearch module and serialized index are loaded only after the user
 // types a query; initial picker defaults use the directory payload alone.
-export async function deserializePlayerSearch(indexPayload: string, players: Player[]): Promise<PlayerSearch> {
+export async function deserializePlayerSearch(
+  indexPayload: string,
+  players: Player[],
+): Promise<PlayerSearch> {
   const { default: MiniSearch } = await import("minisearch");
   const index = MiniSearch.loadJSON(indexPayload, MINISEARCH_OPTS);
-  const playersById = new Map(players.map((player) => [player.player_id, player]));
+  const playersById = new Map(
+    players.map((player) => [player.player_id, player]),
+  );
   return (query: string): Player[] => {
     const q = query.trim();
     if (!q) return [];
@@ -48,7 +53,11 @@ export async function fetchPlayerIndex(): Promise<PlayerIndexData> {
     searchPath?: string;
     path?: string;
   };
-  const payloadRes = await fetch(manifest.directoryPath ?? manifest.path!);
+  const directoryPath = manifest.directoryPath ?? manifest.path;
+  if (!directoryPath) {
+    throw new Error("player index manifest: missing directory path");
+  }
+  const payloadRes = await fetch(directoryPath);
   if (!payloadRes.ok) {
     throw new Error(`player index payload: HTTP ${payloadRes.status}`);
   }
@@ -63,13 +72,18 @@ export async function fetchPlayerIndex(): Promise<PlayerIndexData> {
       searchPromise ??= manifest.searchPath
         ? fetch(manifest.searchPath)
             .then((res) => {
-              if (!res.ok) throw new Error(`player search index: HTTP ${res.status}`);
+              if (!res.ok)
+                throw new Error(`player search index: HTTP ${res.status}`);
               return res.json() as Promise<{ index: string }>;
             })
-            .then(({ index }) => deserializePlayerSearch(index, payload.players))
+            .then(({ index }) =>
+              deserializePlayerSearch(index, payload.players),
+            )
         : payload.index
           ? deserializePlayerSearch(payload.index, payload.players)
-          : Promise.reject(new Error("player search index missing from manifest"));
+          : Promise.reject(
+              new Error("player search index missing from manifest"),
+            );
       return searchPromise;
     },
   };

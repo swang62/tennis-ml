@@ -1,7 +1,7 @@
 import { writeFile } from "node:fs/promises";
-import { defineConfig, loadEnv, type Plugin } from "vite";
-import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import react from "@vitejs/plugin-react";
+import { defineConfig, loadEnv, type Plugin } from "vite";
 
 // Build-time UTC date (YYYY-MM-DD) for the sitemap lastmod, computed once when
 // the config module loads so both routes share one deterministic value per

@@ -7,6 +7,10 @@ training table) -> gold.player_profiles (derived player-grain aggregates).
 
 Wikipedia bio enrichment happens at seed time via `just seed --enrich`
 (never after ETL); re-run `just etl` to pick up new summaries.
+
+ETL defaults to a full refresh (`dbt build --full-refresh`); pass
+`--incremental` to append only new rows. The scrape-triggered Prefect
+deployment runs incremental.
 """
 
 import argparse
@@ -56,10 +60,10 @@ SCRAPE_ETL_AUTOMATION_NAME = "scrape-triggers-etl"
 def run_dbt_build(
     profiles_dir: str | Path = "dbt",
     log_file: Path | None = None,
-    full_refresh: bool = False,
+    incremental: bool = False,
 ) -> subprocess.CompletedProcess:
     """Build dbt models, optionally streaming output to ``log_file``."""
-    cmd = [*DBT_BUILD_CMD, "--full-refresh"] if full_refresh else DBT_BUILD_CMD
+    cmd = DBT_BUILD_CMD if incremental else [*DBT_BUILD_CMD, "--full-refresh"]
     if str(profiles_dir) != "dbt":
         cmd = [*DBT_BUILD_CMD[:-2], "--profiles-dir", str(profiles_dir)]
     env = {**os.environ, **dbt_env(constants.get_database_url())}
@@ -94,11 +98,11 @@ def _etl_log_file() -> Path:
 
 
 @task(retries=0)
-def bronze_to_gold(full_refresh: bool = False) -> int:
+def bronze_to_gold(incremental: bool = False) -> int:
     log_file = _etl_log_file()
-    mode = "full refresh" if full_refresh else "incremental"
+    mode = "incremental" if incremental else "full_refresh"
     print(f"dbt mode: {mode}")
-    run_dbt_build(log_file=log_file, full_refresh=full_refresh)
+    run_dbt_build(log_file=log_file, incremental=incremental)
     with connection() as conn, conn.cursor() as cur:
         counts = {
             BRONZE_MATCHES_TABLE: _table_count(cur, BRONZE_MATCHES_TABLE),
@@ -112,7 +116,7 @@ def bronze_to_gold(full_refresh: bool = False) -> int:
     for model, rows in _dbt_model_rows().items():
         action = (
             "rebuilt"
-            if full_refresh or model in {"player_profiles", "tour_averages"}
+            if not incremental or model in {"player_profiles", "tour_averages"}
             else "inserted/replaced"
         )
         print(f"dbt {model}: {rows} rows {action}")
@@ -147,12 +151,15 @@ def _dbt_model_rows() -> dict[str, int]:
 
 
 @flow(log_prints=True, retries=2)
-def etl_flow(full_refresh: bool = False):
+def etl_flow(incremental: bool = False):
     """Bronze → gold ETL: dbt build only. Enrichment is a seed-time step —
     run `just seed --enrich`, then re-run `just etl`.
+
+    Full refresh by default; `incremental=True` runs dbt without
+    `--full-refresh`, so only new rows are appended.
     """
     load_env()
-    rows = bronze_to_gold(full_refresh=full_refresh)
+    rows = bronze_to_gold(incremental=incremental)
     print(f"ETL complete: {rows} gold rows")
 
 
@@ -161,7 +168,9 @@ def register_deployment() -> None:
 
     Registered on the host ``tennis-pool`` work pool so the automation's
     ``RunDeployment`` action can resolve it by ``etl-flow/etl``. No cron — ETL
-    runs only when the scrape flow completes successfully.
+    runs only when the scrape flow completes successfully. The deployment pins
+    ``incremental=True`` so scrape-triggered ETL appends new rows instead of
+    rebuilding from bronze.
     """
     repo_root = Path(__file__).resolve().parent.parent.parent
     from typing import Any, cast
@@ -176,11 +185,15 @@ def register_deployment() -> None:
     deployment.deploy(
         name=ETL_DEPLOYMENT_NAME,
         work_pool_name=WORK_POOL_NAME,
+        parameters={"incremental": True},
         build=False,
         ignore_warnings=True,
         print_next_steps=False,
     )
-    print(f"Registered deployment {ETL_DEPLOYMENT_NAME!r} (no cron — automation-triggered)")
+    print(
+        f"Registered deployment {ETL_DEPLOYMENT_NAME!r} "
+        "(no cron — automation-triggered, incremental)"
+    )
 
 
 def build_scrape_etl_automation(etl_deployment_id: UUID) -> Automation:
@@ -224,11 +237,20 @@ def register_automation() -> None:
     )
 
 
-if __name__ == "__main__":
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--full-refresh",
+        "--incremental",
         action="store_true",
-        help="rebuild all dbt-managed silver/gold models from bronze",
+        help="append only new rows (dbt build without --full-refresh)",
     )
-    etl_flow(full_refresh=parser.parse_args().full_refresh)
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    etl_flow(incremental=args.incremental)
+
+
+if __name__ == "__main__":
+    main()

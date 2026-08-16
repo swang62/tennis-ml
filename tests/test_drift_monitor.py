@@ -147,7 +147,6 @@ def test_development_bento_is_valid_for_drift(monkeypatch):
 
 def test_empty_population_insufficient_data(monkeypatch, tmp_path):
     monkeypatch.setattr(drift, "ARTIFACTS", tmp_path)
-    monkeypatch.setattr(drift, "run_dbt_build", lambda **__kwargs: None)
     monkeypatch.setattr(drift, "load_env", lambda: None)
     _setup_model_info_stub(monkeypatch)
 
@@ -790,7 +789,6 @@ def test_evidently_drift_extracts_numeric_match_stats_and_p_win_psi(tmp_path, mo
 
 def test_normal_flow_runs_evidently_and_logs_drift_check(monkeypatch, tmp_path):
     monkeypatch.setattr(drift, "ARTIFACTS", tmp_path)
-    monkeypatch.setattr(drift, "run_dbt_build", lambda **__kwargs: None)
     monkeypatch.setattr(drift, "load_env", lambda: None)
     _setup_model_info_stub(monkeypatch)
 
@@ -890,7 +888,6 @@ def test_cutoff_override_replaces_champion_watermark(monkeypatch, tmp_path, caps
     constrained relative to the watermark.
     """
     monkeypatch.setattr(drift, "ARTIFACTS", tmp_path)
-    monkeypatch.setattr(drift, "run_dbt_build", lambda **__kwargs: None)
     monkeypatch.setattr(drift, "load_env", lambda: None)
     _setup_model_info_stub(monkeypatch)
 
@@ -965,7 +962,6 @@ def test_cutoff_override_replaces_champion_watermark(monkeypatch, tmp_path, caps
 
 def test_match_stat_drift_triggers_retrain_verdict(monkeypatch, tmp_path):
     monkeypatch.setattr(drift, "ARTIFACTS", tmp_path)
-    monkeypatch.setattr(drift, "run_dbt_build", lambda **__kwargs: None)
     monkeypatch.setattr(drift, "load_env", lambda: None)
     _setup_model_info_stub(monkeypatch)
 

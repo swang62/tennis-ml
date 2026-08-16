@@ -1,6 +1,5 @@
-import { useEffect, useState } from "react";
-import ReactECharts from "../lib/echarts";
 import type { EChartsOption } from "echarts";
+import { useEffect, useState } from "react";
 import type {
   MatchHistory,
   PlayerProfile,
@@ -16,15 +15,16 @@ import {
   chartTokens,
   withAlpha,
 } from "../lib/charts";
-import { careerBestRank, yearAxisDomain } from "../lib/rankHistoryAxis";
+import ReactECharts from "../lib/echarts";
 import {
-  ROUND_LABEL,
-  TIER_LABEL,
   formatDelta,
   formatMetric,
   formatRate,
+  ROUND_LABEL,
   scoreSegments,
+  TIER_LABEL,
 } from "../lib/format";
+import { careerBestRank, yearAxisDomain } from "../lib/rankHistoryAxis";
 
 const SURFACE_COLORS: Record<string, string> = {
   clay: "var(--clay)",
@@ -234,15 +234,15 @@ export default function ProfileContent({
     </dl>
   );
 
+  const similarPlayers = similarQ.data?.similar_players ?? [];
   const similarFooter = (
     <div className="profile-footer">
       <span className="field-label">Similar playstyle to</span>
       {similarQ.isLoading ? (
         <span className="text-sm text-[var(--text-faint)]">Loading...</span>
-      ) : similarQ.isError ||
-        (similarQ.data?.similar_players ?? []).length === 0 ? null : (
+      ) : similarQ.isError || similarPlayers.length === 0 ? null : (
         <span className="similar-inline">
-          {similarQ.data!.similar_players.map((sp, i, arr) => (
+          {similarPlayers.map((sp, i, arr) => (
             <span key={sp.player_id}>
               <button
                 type="button"
@@ -279,11 +279,11 @@ export default function ProfileContent({
       ) : sortedMatches.length === 0 ? (
         <Empty message="No match history" />
       ) : (
-        <div
+        <section
           className="tourney-table-wrap"
-          role="region"
-          tabIndex={0}
           aria-label={`Recent matches for ${profile.display_name}`}
+          // biome-ignore lint/a11y/noNoninteractiveTabindex: scrollable match table needs keyboard focus for arrow scrolling
+          tabIndex={0}
         >
           <table className="tourney-table">
             <colgroup>
@@ -348,11 +348,11 @@ export default function ProfileContent({
                       {scoreSegments(
                         m.score,
                         m.result === "won" ? "winner" : "loser",
-                      )?.map((s, i) =>
+                      )?.map((s) =>
                         s.bold ? (
-                          <strong key={i}>{s.text}</strong>
+                          <strong key={s.text}>{s.text}</strong>
                         ) : (
-                          <span key={i}>{s.text}</span>
+                          <span key={s.text}>{s.text}</span>
                         ),
                       ) ?? "—"}
                     </td>
@@ -370,7 +370,7 @@ export default function ProfileContent({
               })}
             </tbody>
           </table>
-        </div>
+        </section>
       )}
     </Card>
   );

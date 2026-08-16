@@ -33,11 +33,6 @@ from src.constants import (
     ROOT,
     load_env,
 )
-from src.db.client import execute_df
-from src.serving.directory import (
-    PLAYERS_SQL,
-    directory_players,
-)
 from src.utils import suppress_insecure_tls_warning
 
 # --- Deploy-only paths and names ---
@@ -47,9 +42,9 @@ PINNED_BENTOFILE = DATA_PROCESSED / "bentofile.pinned.yaml"
 BENTO_TAG_FILE = DATA_PROCESSED / "bento_tag.txt"
 STATE_FILE = DATA_PROCESSED / "bento_build_state.json"
 
-# Raw player directory baked into the web image: written from the canonical
-# src.serving.directory query before any image is published, consumed by the
-# web build (`just deploy` builds web/ after deploy.py). Git-ignored.
+# Raw player directory baked into the web image, generated from the local
+# DuckDB training snapshot at deploy time (see generate_directory_artifact).
+# Git-ignored after the web build consumes it. Never champion-pinned.
 WEB_DIRECTORY_ARTIFACT = ROOT / "web" / "public" / "player-directory.json"
 
 # Multi-architecture publishing: one Docker Hub manifest list for both platforms.
@@ -231,13 +226,15 @@ def _write_model_info(
 def _download_aux_artifacts(client: Any, tags: dict[str, str]) -> None:  # noqa: ARG001 — tags carry everything; client kept for the caller contract
     """Download the champion's lineage-pinned aux artifacts into DEPLOY_ARTIFACTS.
 
-    Five serving artifacts are pinned on the champion model version via
+    Five artifacts are pinned on the champion model version via
     URI+hash lineage tags. A local copy is reused when its content hash
     already matches the pin; otherwise the artifact is downloaded from its
     exact URI (one retry on a transient download failure) and verified
     against its content hash before the build proceeds. A champion missing
     any required tag is not deployable and must be re-promoted from a full
-    training run.
+    training run. The player directory is NOT among them: it is a navigation
+    artifact rebuilt from the DuckDB snapshot at deploy time, never
+    champion-pinned.
     """
     import mlflow
 
@@ -723,6 +720,7 @@ def build_bento_image() -> tuple[str, int]:
     _reuse_or_materialize_nn_onnx(state, pins["nn"])
     version_tags = client.get_model_version(PRODUCTION_MODEL, production.version).tags
     _download_aux_artifacts(client, version_tags)
+    generate_directory_artifact()
     fingerprint = build_input_fingerprint(client, production)
     _write_model_info(client, production, pins, fingerprint)
 
@@ -755,21 +753,24 @@ def build_bento_image() -> tuple[str, int]:
 
 
 def generate_directory_artifact() -> Path:
-    """Query the player directory once and write the deterministic raw JSON
-    artifact under web/public/ for the web image build.
+    """Generate the raw web player directory from the local DuckDB training snapshot.
 
-    Runs before any image is published: a query or write failure raises and
-    aborts the deploy, so the web image can never bake a missing directory.
-    Deterministic for a given database state (same rows, same ordering, same
-    bytes).
+    The web image build consumes ``web/public/player-directory.json`` and
+    serializes it into the content-hashed MiniSearch payload + manifest (see
+    web/scripts/build-player-index.mjs). Navigation artifacts are rebuilt at
+    deploy time from the snapshot — never downloaded from MLflow or pinned on
+    the champion. A missing snapshot aborts the deploy with the snapshot
+    helper's actionable error.
     """
-    players = directory_players(execute_df(PLAYERS_SQL))
-    artifact = {"players": players}
+    from src.db import training
+    from src.serving.directory import PLAYERS_SQL, directory_players
+
+    players = directory_players(training.to_dataframe(PLAYERS_SQL))
     WEB_DIRECTORY_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
-    WEB_DIRECTORY_ARTIFACT.write_text(json.dumps(artifact, indent=2) + "\n")
+    WEB_DIRECTORY_ARTIFACT.write_text(json.dumps({"players": players}, indent=2) + "\n")
     _log(
         "minisearch",
-        f"wrote web directory artifact: {WEB_DIRECTORY_ARTIFACT} ({len(players)} players)",
+        f"staged snapshot-backed web directory artifact: {WEB_DIRECTORY_ARTIFACT}",
     )
     return WEB_DIRECTORY_ARTIFACT
 
@@ -777,11 +778,10 @@ def generate_directory_artifact() -> Path:
 def deploy_bento() -> None:
     """Authenticate, then build and publish the multi-arch image with Buildx.
 
-    The player-directory artifact is generated first — a failure there aborts
-    before any image is published. Build output streams to the console and to
-    a single deploy_<timestamp>.log opened before the build, so a failed build
-    still leaves a log of the attempt. Docker login runs before the build
-    because Buildx's `--push` is part of the build command.
+    Build output streams to the console and to a single deploy_<timestamp>.log
+    opened before the build, so a failed build still leaves a log of the
+    attempt. Docker login runs before the build because Buildx's `--push` is
+    part of the build command.
     """
     LOGS.mkdir(parents=True, exist_ok=True)
     deploy_log = LOGS / f"deploy_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
@@ -791,7 +791,6 @@ def deploy_bento() -> None:
             redirect_stdout(_Tee(sys.stdout, log)),
             redirect_stderr(_Tee(sys.stderr, log)),
         ):
-            generate_directory_artifact()
             _docker_login()
             _image, production_version = build_bento_image()
     except subprocess.CalledProcessError as exc:

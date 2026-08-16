@@ -4,13 +4,14 @@ models:
   - name: player_profiles
     description: >
       One row per player with derived aggregates only: match counts, career
-      service/return aggregates, surface counts/win rates, latest rolling
-      snapshot, rank points, and estimated current rank. Materialized by dbt
-      from bronze.player_profiles (player_id driver) + silver.player_matches
-      (aggregates) + silver.rolling_features (latest snapshot). Identity and
-      biography metadata lives only in bronze.player_profiles — consumers join
-      bronze metadata with this table's aggregates. Zero-match players are
-      preserved with zero counts and null rates.
+      service/return aggregates, surface counts/win rates, career win rate,
+      latest rolling snapshot, rank points, and estimated current rank.
+      Materialized by dbt from bronze.player_profiles (player_id driver) +
+      silver.player_matches (aggregates) + silver.rolling_features (latest
+      snapshot). Identity and biography metadata lives only in
+      bronze.player_profiles — consumers join bronze metadata with this
+      table's aggregates. Zero-match players are preserved with zero counts
+      and null rates.
     columns:
       - name: player_id
         description: Canonical ATP id (primary key).
@@ -80,6 +81,11 @@ models:
         description: Career clay court win rate.
       - name: grass_win_rate
         description: Career grass court win rate.
+      - name: career_win_rate
+        description: >
+          Career win rate across all matches (weighted SUM(match_won) /
+          COUNT(*)). NULL for zero-match players; used as a reputation signal
+          by player similarity.
       - name: recent_snapshot_date
         description: Date of latest rolling features snapshot.
       - name: win_rate_10

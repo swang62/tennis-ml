@@ -1,7 +1,8 @@
 -- gold.player_profiles: one row per player with derived aggregates only —
--- match counts, career service/return aggregates, surface counts,
--- recent rolling form, rank points, and current rank (official ATP
--- weekly ranking with match-time rank fallback for unranked players).
+-- match counts, career service/return aggregates, surface counts/win rates,
+-- career win rate, recent rolling form, rank points, and current rank
+-- (official ATP weekly ranking with match-time rank fallback for unranked
+-- players).
 --
 -- Identity/biography metadata is NOT duplicated here: bronze.player_profiles
 -- owns it (display_name, handedness, summary, ...), and consumers join
@@ -79,7 +80,10 @@ WITH player_agg AS (
         CAST(SUM(CASE WHEN pm.surface = 'clay'  THEN pm.match_won ELSE 0 END) AS DOUBLE PRECISION)
             / NULLIF(COUNT(*) FILTER (WHERE pm.surface = 'clay'), 0)                  AS clay_win_rate,
         CAST(SUM(CASE WHEN pm.surface = 'grass' THEN pm.match_won ELSE 0 END) AS DOUBLE PRECISION)
-            / NULLIF(COUNT(*) FILTER (WHERE pm.surface = 'grass'), 0)                 AS grass_win_rate
+            / NULLIF(COUNT(*) FILTER (WHERE pm.surface = 'grass'), 0)                 AS grass_win_rate,
+        -- career win rate across all matches (reputation signal for similarity)
+        CAST(SUM(pm.match_won) AS DOUBLE PRECISION)
+            / NULLIF(COUNT(*), 0)                                                     AS career_win_rate
 
     FROM {{ ref('player_matches') }} pm
     GROUP BY pm.player_id
@@ -184,6 +188,7 @@ SELECT
     pa.hard_win_rate,
     pa.clay_win_rate,
     pa.grass_win_rate,
+    pa.career_win_rate,
 
     -- recent form
     ls.recent_snapshot_date,
