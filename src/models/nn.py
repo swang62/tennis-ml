@@ -26,25 +26,33 @@ class TabularBioMLP(L.LightningModule):
     scores both directions and projects to a symmetric probability.
     """
 
-    def __init__(self, tab_dim, bio_dim, hidden_dim=64, dropout=0.0, lr=1e-3):  # noqa: ARG002 — lr is persisted via save_hyperparameters()
+    def __init__(
+        self,
+        tab_dim,
+        bio_dim,
+        hidden_dim=64,
+        n_layers=1,
+        dropout=0.0,
+        lr=1e-3,  # noqa: ARG002 — persisted via save_hyperparameters()
+        weight_decay=0.0,  # noqa: ARG002 — persisted via save_hyperparameters()
+    ):
         super().__init__()
         self.save_hyperparameters()
-        self.tab_mlp = nn.Sequential(
-            nn.Linear(tab_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-        )
-        self.bio_mlp = nn.Sequential(
-            nn.Linear(bio_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-        )
+        self.tab_mlp = self._mlp(tab_dim, hidden_dim, n_layers, dropout)
+        self.bio_mlp = self._mlp(bio_dim, hidden_dim, n_layers, dropout)
         self.head = nn.Sequential(
             nn.Linear(hidden_dim * 4, 32),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(32, 1),
         )
+
+    @staticmethod
+    def _mlp(in_dim, hidden_dim, n_layers, dropout):
+        layers = [nn.Linear(in_dim, hidden_dim), nn.ReLU(), nn.Dropout(dropout)]
+        for _ in range(n_layers - 1):
+            layers += [nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), nn.Dropout(dropout)]
+        return nn.Sequential(*layers)
 
     @override
     def forward(self, tab, bio_p, bio_o):
@@ -76,4 +84,6 @@ class TabularBioMLP(L.LightningModule):
 
     @override
     def configure_optimizers(self):
-        return torch.optim.Adam(self.parameters(), lr=self.hparams["lr"])
+        return torch.optim.Adam(
+            self.parameters(), lr=self.hparams["lr"], weight_decay=self.hparams["weight_decay"]
+        )

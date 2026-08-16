@@ -22,7 +22,7 @@ repos:
         description: Static type checking of staged files (errors only; config in pyproject.toml)
         language: system
         entry: uv run basedpyright
-        types: [python]
+        types_or: [python, jupyter]
 
       - id: tests
         name: pytest

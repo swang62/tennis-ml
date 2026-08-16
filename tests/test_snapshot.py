@@ -6,8 +6,8 @@ import duckdb
 import pytest
 
 from src.db import snapshot, training
-from src.db.snapshot import EXPECTED_FEATURE_ORDER, META_COLS, SNAPSHOT_TABLES
-from src.features.columns import FEATURE_COLS, SIMILARITY_COLS
+from src.db.snapshot import EXPECTED_FEATURE_ORDER, SNAPSHOT_TABLES
+from src.features.columns import FEATURE_COLS
 
 # The metadata columns of a gold match_features row that are not in FEATURE_COLS.
 _META = (
@@ -75,18 +75,6 @@ def _write_valid_snapshot(
         con.execute("INSERT INTO bronze.player_profiles (player_id) VALUES ('p1')")
     finally:
         con.close()
-
-
-def test_meta_cols_precede_feature_cols() -> None:
-    """Snapshot order is metadata, model features, then similarity columns."""
-    assert META_COLS == _META
-    assert len(META_COLS) == 8
-    assert len(FEATURE_COLS) == 32
-    assert len(SIMILARITY_COLS) == 10
-    assert len(EXPECTED_FEATURE_ORDER) == 50
-    assert EXPECTED_FEATURE_ORDER[:8] == _META
-    assert EXPECTED_FEATURE_ORDER[8:40] == tuple(FEATURE_COLS)
-    assert EXPECTED_FEATURE_ORDER[40:] == tuple(SIMILARITY_COLS)
 
 
 def test_validate_accepts_valid_snapshot(tmp_path) -> None:

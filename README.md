@@ -23,24 +23,10 @@ Use this site to predict the next Wimbledon match betwen your two favorite playe
 | Data warehouse      | PostgreSQL                                |
 | Development         | Jupyter + Papermill                       |
 
-## Project Structure
-
-```
-infra/           — k3d config, static K8s manifests, PostgreSQL init SQL
-notebooks/       — EDA + parameterized Papermill notebooks
-src/
-  db/            — PostgreSQL related functions
-  evaluate/      — Evaluate model performance
-  features/      — Feature column definitions
-  flows/         — ETL Prefect flow + pipelines
-  models/        — Player similarity and neural networks
-  serving/       — BentoML service
-web/             — React + TanStack dashboard (Vite, local dev, HMR)
-```
 
 ## Web App
 
-React 19 + TypeScript dashboard on Vite, Tailwind CSS 4, and the TanStack suite, with ECharts for visualizations. All model endpoints are proxied through at `/api`
+React 19 + TypeScript dashboard on Vite, Tailwind CSS 4, and the TanStack suite, with ECharts for visualizations.
 
 - **Player directory search** — MiniSearch fuzzy search over the full player list
 - **Player similarity** — find similar-playstyle players (FAISS) with bio embeddings and service/return stats
@@ -56,8 +42,7 @@ Only requirement is a free account on [Dagshub](https://dagshub.com), [Docker](h
 just setup
 
 # 2. Apply schema migrations, then seed the matches into PostgreSQL bronze
-just migrate
-just seed
+just migrate && just seed
 
 # 3. Generate silver/gold tables
 just etl
