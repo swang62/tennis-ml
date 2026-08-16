@@ -39,9 +39,9 @@ FINAL_DIFFS = [
 
 
 def test_feature_col_counts():
-    assert len(FEATURE_COLS) == 39
+    assert len(FEATURE_COLS) == 32
     assert len(DIFF_COLS) == 16
-    assert len(CONTEXT_COLS) == 7
+    assert len(CONTEXT_COLS) == 6
 
 
 def test_gold_rolling_cols_exact_order():
@@ -150,7 +150,7 @@ def test_rate_exposure_cols_minimal_pair():
     for col in RATE_EXPOSURE_COLS:
         assert col in FEATURE_COLS
     assert len(RATE_EXPOSURE_COLS) == 2
-    assert "player_matches_30d" in FEATURE_COLS  # distinct 30-day count kept
+    assert "player_matches_30d" not in FEATURE_COLS  # removed from the contract
     assert "matches_10" not in FEATURE_COLS  # never a pair-level shared count
 
 
@@ -164,17 +164,11 @@ def test_return_strength_diff_position():
 
 
 def test_feature_cols_exact_final_contract():
-    """The exact 39-column FEATURE_COLS contract."""
+    """The exact 32-column FEATURE_COLS contract."""
     assert [
         *DIFF_COLS,
         "player_weighted_form_10",
         "opponent_weighted_form_10",
-        "player_days_since_last_match",
-        "opponent_days_since_last_match",
-        "player_matches_30d",
-        "opponent_matches_30d",
-        "player_surface_win_rate_10",
-        "opponent_surface_win_rate_10",
         *RATE_EXPOSURE_COLS,
         "player_is_left_handed",
         "opponent_is_left_handed",
@@ -234,6 +228,8 @@ def test_no_old_99_column_shape_columns():
         "player_avg_rank_faced_5",
         "player_height",
         "player_h2h_win_rate",
+        "player_matches_30d",
+        "player_surface_win_rate_10",
         "opponent_height",
         "weighted_form_5",
         "win_streak_diff",
@@ -346,7 +342,6 @@ def test_old_99_column_shape_rejected():
         "player_avg_rank_faced_5",
         "player_win_streak",
         "player_loss_streak",
-        "player_days_since_last_match",
         "player_matches_30d",
         "player_surface_win_rate_10",
         "player_height",
@@ -358,9 +353,8 @@ def test_old_99_column_shape_rejected():
         "handedness_diff",
         "years_pro_diff",
     ]
-    # The rejection property is NOT per-column absence: several old names were
-    # retained verbatim (player_weighted_form_10, player_days_since_last_match,
-    # player_matches_30d, player_surface_win_rate_10). The rejection comes from
+    # The rejection property is NOT per-column absence: only
+    # player_weighted_form_10 is retained verbatim. The rejection comes from
     # required-columns-missing: an old-shape row drops at least one finalized
     # column the serving endpoint demands, so its required-column check fires.
     missing = [c for c in FEATURE_COLS if c not in old_99_cols]
@@ -369,9 +363,6 @@ def test_old_99_column_shape_rejected():
     # materialized contract.
     retained_overlap = {
         "player_weighted_form_10",
-        "player_days_since_last_match",
-        "player_matches_30d",
-        "player_surface_win_rate_10",
     }
     for col in old_99_cols:
         if col not in retained_overlap:

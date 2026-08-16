@@ -178,7 +178,7 @@ def test_empty_population_insufficient_data(monkeypatch, tmp_path):
     )
 
 
-def test_small_population_insufficient_data(monkeypatch, tmp_path):
+def test_small_population_insufficient_data(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(drift, "ARTIFACTS", tmp_path)
     monkeypatch.setattr(drift, "load_env", lambda: None)
     _setup_model_info_stub(monkeypatch)
@@ -202,14 +202,22 @@ def test_small_population_insufficient_data(monkeypatch, tmp_path):
     def fake_start_run(experiment_id=None, run_name=None, tags=None, log_system_metrics=False):
         del experiment_id, log_system_metrics
         mlflow_runs.append({"name": run_name, "tags": tags})
-        return MagicMock(
-            info=SimpleNamespace(run_id="small-window"), __enter__=MagicMock(), __exit__=MagicMock()
-        )
+        run = MagicMock(info=SimpleNamespace(run_id="small-window"))
+        run.__enter__.return_value = run
+        run.__exit__.return_value = False
+        return run
 
     monkeypatch.setattr(drift.mlflow, "start_run", fake_start_run)
 
-    assert drift.drift_flow.fn() == 0
+    # An explicit cutoff replaces the champion watermark even on the
+    # insufficient-data path: it is what selects the (empty) current window,
+    # what gets logged, and what the message reports.
+    assert drift.drift_flow.fn(cutoff=date(2024, 11, 30)) == 0
     assert mlflow_runs[0]["tags"]["status"] == "insufficient_data"
+    assert client.logged_params["small-window"]["cutoff_date"] == "2024-11-30"
+    output = capsys.readouterr().out
+    assert "2024-11-30" in output
+    assert "insufficient_data" in output
     assert not list(tmp_path.glob("drift_report_*"))
 
 
@@ -416,6 +424,182 @@ def test_symmetric_orientation_invariants_and_accuracy_count_both_rows(monkeypat
     assert metrics["accuracy"] == pytest.approx(1.0)
 
 
+def test_valid_winner_orientations_are_complementary_and_balanced():
+    """A valid A/B winner yields labels [1,0] or [0,1] and an exactly 50/50 batch."""
+    frame = _fake_bronze_window(4, seed=5)
+    # Alternate the winner between A (player1) and B (player2) so both
+    # orientation label patterns appear: [1,0] for A, [0,1] for B.
+    frame.loc[1::2, "winner_id"] = frame.loc[1::2, "player2_id"].to_numpy()
+
+    expanded = drift._expand_orientations(frame)
+    assert len(expanded) == 8
+    assert expanded["match_won"].tolist() == [1, 0, 0, 1, 1, 0, 0, 1]
+    # Exactly one 1 and one 0 per physical match: labels are non-empty,
+    # balanced 50/50, and every adjacent pair sums to 1.
+    assert expanded["match_won"].sum() == len(expanded) // 2
+    assert expanded["match_won"].mean() == 0.5
+    assert expanded.groupby("match_id")["match_won"].sum().tolist() == [1] * 4
+
+
+def test_invalid_winner_rejected_at_bronze_boundary():
+    """Missing, unidentifiable, and ambiguous winner ids fail before expansion."""
+    base = _fake_bronze_window(3, seed=6)
+
+    # Missing winner.
+    bad = base.copy()
+    bad.loc[0, "winner_id"] = None
+    with pytest.raises(ValueError, match="missing winner_id"):
+        drift._expand_orientations(bad)
+
+    # Winner equal to neither player.
+    bad = base.copy()
+    bad.loc[1, "winner_id"] = "999"
+    with pytest.raises(ValueError, match="neither player"):
+        drift._expand_orientations(bad)
+
+    # Ambiguous winner: both sides share one id, so winner_id equals both.
+    bad = base.copy()
+    bad.loc[2, "player2_id"] = bad.loc[2, "player1_id"]
+    with pytest.raises(ValueError, match="both players"):
+        drift._expand_orientations(bad)
+
+
+def test_invalid_player_ids_rejected_at_bronze_boundary():
+    """A physical match with a missing player id is rejected before expansion."""
+    base = _fake_bronze_window(2, seed=10)
+
+    bad = base.copy()
+    bad.loc[0, "player1_id"] = None
+    with pytest.raises(ValueError, match="missing player id"):
+        drift._expand_orientations(bad)
+
+    bad = base.copy()
+    bad.loc[1, "player2_id"] = None
+    with pytest.raises(ValueError, match="missing player id"):
+        drift._expand_orientations(bad)
+
+
+def test_corrupted_expanded_batch_rejected_before_scoring(monkeypatch):
+    """A non-complementary, odd, or empty expanded batch fails before any API call.
+
+    `_score_window` re-validates the expanded frame on entry, so a pre-expanded
+    (or externally corrupted) batch is refused even though it did not come from
+    `_expand_orientations`. Labels are never silently repaired.
+    """
+    frame = _fake_bronze_window(2, seed=7)  # winner == player1 for both matches
+    expanded = drift._expand_orientations(frame)
+    assert expanded["match_won"].tolist() == [1, 0, 1, 0]
+
+    monkeypatch.setattr(
+        drift, "_score_batches", lambda _ctxs: pytest.fail("scoring called on invalid batch")
+    )
+
+    # Non-complementary pair: rows 0-1 become [1, 1] instead of [1, 0].
+    corrupted = expanded.copy()
+    corrupted.loc[1, "match_won"] = 1
+    with pytest.raises(ValueError, match="do not sum to 1"):
+        drift._score_window(corrupted)
+
+    # Odd row count breaks the adjacent-pair structure.
+    with pytest.raises(ValueError, match="odd row count"):
+        drift._score_window(expanded.iloc[:-1])
+
+    # Empty batch: no labels at all.
+    with pytest.raises(ValueError, match="expanded drift frame is empty"):
+        drift._score_window(pd.DataFrame())
+
+
+def test_all_tie_p_win_batch_rejected(monkeypatch):
+    """An all-0.5 p_win batch is rejected; a lone tie among varying ones passes.
+
+    A symmetric order-preserving model ties (p == 1 - p == 0.5) only when it
+    has no signal on a match, so a window whose predictions are ALL exactly
+    0.5 indicates a broken serving path and must fail before metrics. A single
+    tie in a small sample is a legitimate edge and must not fail.
+    """
+    frame = _fake_bronze_window(2, seed=9)
+    expanded = drift._expand_orientations(frame)
+
+    monkeypatch.setattr(drift, "_score_batches", lambda _ctxs: [0.5, 0.5, 0.5, 0.5])
+    with pytest.raises(ValueError, match="constant-tie"):
+        drift._score_window(expanded)
+
+    # One tie among varying predictions is fine.
+    monkeypatch.setattr(drift, "_score_batches", lambda _ctxs: [0.9, 0.5, 0.5, 0.1])
+    scored = drift._score_window(expanded)
+    assert scored["p_win"].tolist() == [0.9, 0.5, 0.5, 0.1]
+    assert scored["match_won"].tolist() == expanded["match_won"].tolist()
+
+
+def test_scored_frame_validator_direct():
+    """`_validate_scored_frame` rejects non-finite, out-of-range, and all-tie p_win.
+
+    The validator is the fail-fast gate between the scored rows and every
+    downstream metric, so it is exercised directly: each violation must raise
+    with row-level diagnostics embedded, and a valid frame must pass.
+    """
+    base = pd.DataFrame(
+        {
+            "match_id": ["m0", "m0"],
+            "player_id": ["100", "200"],
+            "opponent_id": ["200", "100"],
+            "match_won": [1, 0],
+        }
+    )
+
+    # Non-finite p_win (NaN) must be rejected, with diagnostics attached.
+    bad = base.copy()
+    bad["p_win"] = [0.9, np.nan]
+    with pytest.raises(ValueError, match="non-finite") as excinfo:
+        drift._validate_scored_frame(bad)
+    assert "match_id" in str(excinfo.value) and "p_win" in str(excinfo.value)
+
+    # Out-of-range p_win.
+    bad = base.copy()
+    bad["p_win"] = [1.2, -0.1]
+    with pytest.raises(ValueError, match="outside"):
+        drift._validate_scored_frame(bad)
+
+    # Constant-tie batch.
+    bad = base.copy()
+    bad["p_win"] = [0.5, 0.5]
+    with pytest.raises(ValueError, match="constant-tie"):
+        drift._validate_scored_frame(bad)
+
+    # Missing traceability columns.
+    bad = base.copy()
+    bad["p_win"] = [0.9, 0.1]
+    with pytest.raises(ValueError, match="missing required columns"):
+        drift._validate_scored_frame(bad.drop(columns=["match_id"]))
+
+    # A valid frame passes without raising.
+    good = base.copy()
+    good["p_win"] = [0.9, 0.1]
+    drift._validate_scored_frame(good)
+
+
+def test_alternating_winners_symmetric_probas_score_accuracy_1(monkeypatch):
+    """Correct symmetric mock p_win yields accuracy 1.0 when predictions match labels.
+
+    Predictions are orientation-accurate (0.9 for the winner, 0.1 for the
+    loser across both [1,0] and [0,1] patterns), so both rows of every pair
+    count as correct — a design that collapses either orientation would land
+    at 0.5, not 1.0.
+    """
+    frame = _fake_bronze_window(4, seed=8)
+    frame.loc[1::2, "winner_id"] = frame.loc[1::2, "player2_id"].to_numpy()
+    expanded = drift._expand_orientations(frame)
+    assert expanded["match_won"].tolist() == [1, 0, 0, 1, 1, 0, 0, 1]
+
+    monkeypatch.setattr(
+        drift, "_score_batches", lambda _ctxs: [0.9, 0.1, 0.1, 0.9, 0.9, 0.1, 0.1, 0.9]
+    )
+    scored = drift._score_window(expanded)
+    assert scored["p_win"].tolist() == [0.9, 0.1, 0.1, 0.9, 0.9, 0.1, 0.1, 0.9]
+    assert scored["match_won"].tolist() == [1, 0, 0, 1, 1, 0, 0, 1]
+    assert drift._window_metrics(scored)["accuracy"] == pytest.approx(1.0)
+
+
 def test_scrambled_bulk_response_rejected_instead_of_silent_05(monkeypatch):
     """A bulk response whose row order/identity cannot be trusted must fail.
 
@@ -506,13 +690,15 @@ def test_unresolvable_context_raises_at_boundary():
     assert set(drift.DRIFT_FEATURE_COLS) <= set(columns)
 
 
-def test_evidently_drift_extracts_numeric_match_stats_and_p_win_psi(tmp_path):
-    """Per-column PSI extraction covers the numeric match-stat rates only.
+def test_evidently_drift_extracts_numeric_match_stats_and_p_win_psi(tmp_path, monkeypatch):
+    """The DataDriftPreset input/report hold exactly features + p_win, never labels.
 
-    The report sees exactly the analysis-frame columns (the eight numeric
-    match-stat rates, the balanced orientation label, and p_win), each once;
-    the feature verdict excludes the label and p_win, which are reported
-    separately via the prediction PSI. No categorical context columns exist.
+    The frames carry the orientation label plus traceability/context columns
+    (like the real scored frames), but Evidently receives only the eight
+    numeric match-stat rates and the prediction column: `match_won`, ids, and
+    context are excluded from the report, per the DataDriftPreset contract.
+    The per-feature verdict covers the match-stat rates only; p_win is
+    reported separately via the prediction PSI.
     """
     base_rates = {
         "player1_first_serve_pct": 0.65,
@@ -526,17 +712,55 @@ def test_evidently_drift_extracts_numeric_match_stats_and_p_win_psi(tmp_path):
     }
     current = pd.DataFrame(
         {col: [value] * 60 for col, value in base_rates.items()}
-        | {"match_won": [1, 0] * 30, "p_win": [0.9, 0.1] * 30}
+        | {
+            "match_won": [1, 0] * 30,
+            "p_win": [0.9, 0.1] * 30,
+            "player_id": ["100", "200"] * 30,
+            "opponent_id": ["200", "100"] * 30,
+            "surface": ["hard"] * 60,
+            "tournament": ["atp_500"] * 60,
+            "round": ["r64"] * 60,
+            "is_indoor": [0] * 60,
+        }
     )
     reference = pd.DataFrame(
-        {col: [0.3] * 60 for col in base_rates} | {"match_won": [1, 0] * 30, "p_win": [0.5] * 60}
+        {col: [0.3] * 60 for col in base_rates}
+        | {
+            "match_won": [1, 0] * 30,
+            "p_win": [0.5] * 60,
+            "player_id": ["100", "200"] * 30,
+            "opponent_id": ["200", "100"] * 30,
+            "surface": ["hard"] * 60,
+            "tournament": ["atp_500"] * 60,
+            "round": ["r64"] * 60,
+            "is_indoor": [0] * 60,
+        }
     )
     json_path = tmp_path / "report.json"
     html_path = tmp_path / "report.html"
 
+    # Record the exact frames handed to the report while still running the
+    # real Evidently report underneath.
+    recorded: list[tuple[pd.DataFrame, pd.DataFrame]] = []
+    real_run = drift.Report.run
+
+    def record_run(self, *args, **kwargs):
+        if "current_data" in kwargs:
+            recorded.append((kwargs["current_data"], kwargs["reference_data"]))
+        return real_run(self, *args, **kwargs)
+
+    monkeypatch.setattr(drift.Report, "run", record_run)
+
     per_feature, drift_share, prediction_psi = drift._evidently_drift(
         current, reference, json_path, html_path
     )
+
+    # Evidently sees exactly the monitored feature columns plus p_win — the
+    # label, ids, and context columns never reach the report.
+    evidently_columns = [*drift.DRIFT_FEATURE_COLS, "p_win"]
+    assert len(recorded) == 1
+    for frame in recorded[0]:
+        assert list(frame.columns) == evidently_columns
 
     # Per-feature PSI covers exactly the numeric match-stat rates, all of which
     # are disjoint between the windows. The balanced label and p_win are not
@@ -550,17 +774,17 @@ def test_evidently_drift_extracts_numeric_match_stats_and_p_win_psi(tmp_path):
     # Prediction PSI comes from the report's p_win column.
     assert prediction_psi > 0
 
-    # The saved report covers exactly the analysis-frame columns, each once,
-    # and none of them is a categorical match-context column.
+    # The saved report covers exactly the monitored features plus p_win, each
+    # once; the label and ids/context never enter the report.
     payload = json.loads(json_path.read_text())
     drifted_columns = {
         metric["metric_name"][len("ValueDrift(column=") :].split(",", 1)[0]
         for metric in payload["metrics"]
         if metric["metric_name"].startswith("ValueDrift(column=")
     }
-    assert drifted_columns == set(drift.DRIFT_ANALYSIS_COLUMNS)
-    assert len(drifted_columns) == len(drift.DRIFT_ANALYSIS_COLUMNS)
-    assert not {"surface", "tournament", "round", "is_indoor"} & drifted_columns
+    assert drifted_columns == set(evidently_columns)
+    assert len(drifted_columns) == len(evidently_columns)
+    assert not {"match_won", "surface", "tournament", "round", "is_indoor"} & drifted_columns
     assert html_path.exists()
 
 
@@ -656,6 +880,89 @@ def test_normal_flow_runs_evidently_and_logs_drift_check(monkeypatch, tmp_path):
     assert (tmp_path / "drift_report_2025-01-10_v3.html").exists()
 
 
+def test_cutoff_override_replaces_champion_watermark(monkeypatch, tmp_path, capsys):
+    """An explicit cutoff wins over the pinned TRAIN_DATA_MAX_DATE watermark.
+
+    The champion tag says 2025-01-10, the override says 2024-12-01; the
+    override must drive window selection SQL, the report artifact names, the
+    logged params, and the summary/messaging. Post-cutoff training-era matches
+    are intentionally treated as current data — the override is never
+    constrained relative to the watermark.
+    """
+    monkeypatch.setattr(drift, "ARTIFACTS", tmp_path)
+    monkeypatch.setattr(drift, "run_dbt_build", lambda **__kwargs: None)
+    monkeypatch.setattr(drift, "load_env", lambda: None)
+    _setup_model_info_stub(monkeypatch)
+
+    champion = _FakeModelVersion(
+        version="3", run_id="champ-run-id", creation_timestamp=1700000000000
+    )
+    client = _FakeMlflowClient(champion=champion, tags=_champion_tags(_PINNED_METRICS))
+    monkeypatch.setattr(drift, "MlflowClient", lambda: client)
+
+    current_frame = _fake_bronze_window(60, seed=1)
+    reference_frame = _fake_bronze_window(60, seed=2)
+    sql_calls: list[tuple[str, list[object]]] = []
+
+    def fake_execute_df(sql, params=None):
+        sql_calls.append((sql, params or []))
+        if "match_date > %s" in sql:
+            return current_frame
+        if "match_date < %s" in sql:
+            return reference_frame
+        raise AssertionError(f"unexpected drift SQL: {sql}")
+
+    monkeypatch.setattr(drift, "execute_df", fake_execute_df)
+
+    posts: list[list[dict[str, object]]] = []
+
+    def fake_post_batch(url, json=None, headers=None, timeout=None):
+        del url, headers, timeout
+        ctxs = _validated_batch_rows(json or {})
+        posts.append(ctxs)
+        fake_resp = MagicMock()
+        fake_resp.raise_for_status = lambda: None
+        fake_resp.json.return_value = _stub_batch_response(ctxs)
+        return fake_resp
+
+    monkeypatch.setattr(drift.requests, "post", fake_post_batch)
+
+    mlflow_runs = []
+
+    def fake_start_run(experiment_id=None, run_name=None, tags=None, log_system_metrics=False):
+        del experiment_id, log_system_metrics
+        run_id = f"run-{len(mlflow_runs)}-{run_name}"
+        mlflow_runs.append({"name": run_name, "tags": tags})
+        run = MagicMock(info=SimpleNamespace(run_id=run_id))
+        run.__enter__.return_value = run
+        run.__exit__.return_value = False
+        return run
+
+    monkeypatch.setattr(drift.mlflow, "start_run", fake_start_run)
+
+    override = date(2024, 12, 1)
+    result = drift.drift_flow.fn(cutoff=override)
+    assert result == 0
+    assert mlflow_runs[0]["name"] == "drift_check"
+
+    # The override — not the 2025-01-10 watermark tag — selects both windows.
+    current_sql, reference_sql = sql_calls
+    assert current_sql[1] == [override]
+    assert reference_sql[1] == [override, 60]
+
+    # Report artifacts and logged params/summary carry the override date.
+    assert sorted(Path(path).name for _, path in client.logged_artifacts) == [
+        "drift_report_2024-12-01_v3.html",
+        "drift_report_2024-12-01_v3.json",
+    ]
+    assert client.logged_params["run-0-drift_check"]["cutoff_date"] == "2024-12-01"
+    summary = json.loads(
+        next(text for _, text, name in client.logged_texts if name == "drift_summary.json")
+    )
+    assert summary["cutoff_date"] == "2024-12-01"
+    assert "Cutoff date (override): 2024-12-01" in capsys.readouterr().out
+
+
 def test_match_stat_drift_triggers_retrain_verdict(monkeypatch, tmp_path):
     monkeypatch.setattr(drift, "ARTIFACTS", tmp_path)
     monkeypatch.setattr(drift, "run_dbt_build", lambda **__kwargs: None)
@@ -672,7 +979,7 @@ def test_match_stat_drift_triggers_retrain_verdict(monkeypatch, tmp_path):
     # yields one win and one loss), so the retrain verdict must come from
     # Evidently drift: every numeric match-stat rate is pushed apart between
     # the windows (rate_shift +-0.3), and the scored p_win distributions
-    # differ (0.9/0.1 vs 0.5).
+    # differ (0.9/0.1 vs 0.6/0.4).
     current_frame = _fake_bronze_window(60, seed=3, rate_shift=0.3)
     reference_frame = _fake_bronze_window(60, seed=4, rate_shift=-0.3)
 
@@ -690,7 +997,7 @@ def test_match_stat_drift_triggers_retrain_verdict(monkeypatch, tmp_path):
     def fake_post_batch(url, json=None, headers=None, timeout=None):
         del url, headers, timeout
         ctxs = _validated_batch_rows(json or {})
-        probs = [0.9, 0.1] if not posts else [0.5, 0.5]
+        probs = [0.9, 0.1] if not posts else [0.6, 0.4]
         posts.append(ctxs)
         fake_resp = MagicMock()
         fake_resp.raise_for_status = lambda: None

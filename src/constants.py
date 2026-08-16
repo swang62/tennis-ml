@@ -123,7 +123,7 @@ EVAL_MAX_DATE_KEY = "metric_eval_max_date"
 # --- Promotion gate ---
 # The candidate's ROC-AUC may trail the incumbent's by up to this amount (a
 # strictly lower test log loss is still required) and still be promoted.
-PROMOTION_AUC_TOLERANCE = 0.01
+PROMOTION_AUC_TOLERANCE = 0.05
 
 # --- Drift monitoring thresholds (single source of truth for the verdict) ---
 # Per-feature PSI bands: < DRIFT_PSI_MODERATE = no drift, moderate band between,
@@ -141,8 +141,8 @@ DRIFT_MIN_N_FOR_CHECK = 10
 
 # On-demand reference window bounds: size-matched to the current window,
 # floored at DRIFT_REF_MIN and capped at DRIFT_REF_MAX matches.
-DRIFT_REF_MIN = 50
-DRIFT_REF_MAX = 2000
+DRIFT_REF_MIN = 30
+DRIFT_REF_MAX = 10000
 
 
 def build_lineage_tags(

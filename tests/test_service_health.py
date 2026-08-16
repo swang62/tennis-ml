@@ -8,9 +8,9 @@ from starlette.testclient import TestClient
 
 from src.serving.service import DATA_APP, TennisPredictor
 
-client = TestClient(DATA_APP)
-
 NGINX_TEMPLATE = Path(__file__).resolve().parents[1] / "web" / "nginx.conf.template"
+
+client = TestClient(DATA_APP)
 
 
 def test_health_ok_when_database_reachable():

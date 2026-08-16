@@ -82,18 +82,6 @@ player_match_enriched AS (
             AS player_rank_points,
         COALESCE(pr.latest_player_age, fd.latest_player_age) AS player_age,
 
-        -- Correct pre-match activity count; cold-start players use the pool
-        -- median instead of a hardcoded 0.
-        CASE WHEN pr.player_id IS NULL THEN fd.matches_30d_default
-             ELSE CAST(pm.matches_30d_before AS INTEGER)
-        END AS matches_30d,
-
-        -- Days since the player's latest prior snapshot; cold-start players
-        -- use the pool median instead of a hardcoded 365.
-        CASE WHEN pr.player_id IS NULL THEN fd.days_since_default
-             ELSE CAST(pm.match_date - pr.snapshot_date AS INTEGER)
-        END AS days_since_last_match,
-
         -- Rate-exposure carry: number of prior matches in the 10-match window
         -- backing the smoothed rates; cold start uses literal 0 (no prior match).
         CASE WHEN pr.player_id IS NULL THEN 0
@@ -127,15 +115,6 @@ player_match_enriched AS (
         COALESCE(pr.avg_rank_faced_10, fd.avg_rank_faced_10) AS avg_rank_faced_10,
 
         COALESCE(pr.streak, fd.streak) AS streak,
-
-        -- Surface-specific form: prior snapshot's rate on the current surface;
-        -- carpet and unknown/0 surface use the fixed rate default.
-        CASE pm.surface
-            WHEN 'clay'  THEN COALESCE(pr.clay_win_rate_10, fd.clay_win_rate_10)
-            WHEN 'grass' THEN COALESCE(pr.grass_win_rate_10, fd.grass_win_rate_10)
-            WHEN 'hard'  THEN COALESCE(pr.hard_win_rate_10, fd.hard_win_rate_10)
-            ELSE fd.rate_default
-        END AS surface_win_rate_10,
 
         -- Missing or non-L/R handedness uses the pool left-handed rate.
         COALESCE(
@@ -236,12 +215,6 @@ SELECT
     -- ── Absolute state values where both sides matter ──
     p.weighted_form_10      AS player_weighted_form_10,
     o.weighted_form_10      AS opponent_weighted_form_10,
-    p.days_since_last_match AS player_days_since_last_match,
-    o.days_since_last_match AS opponent_days_since_last_match,
-    p.matches_30d           AS player_matches_30d,
-    o.matches_30d           AS opponent_matches_30d,
-    p.surface_win_rate_10   AS player_surface_win_rate_10,
-    o.surface_win_rate_10   AS opponent_surface_win_rate_10,
     -- Rate-exposure counts backing the smoothed 10-match rates (0 cold start).
     p.matches_10            AS player_matches_10,
     o.matches_10            AS opponent_matches_10,
@@ -259,7 +232,6 @@ SELECT
     CAST(CASE WHEN p.surface = 'clay'  THEN 1 ELSE 0 END AS SMALLINT) AS is_clay,
     CAST(CASE WHEN p.surface = 'grass' THEN 1 ELSE 0 END AS SMALLINT) AS is_grass,
     CAST(CASE WHEN p.surface = 'hard'  THEN 1 ELSE 0 END AS SMALLINT) AS is_hard,
-    CAST(CASE WHEN p.surface = 'carpet' THEN 1 ELSE 0 END AS SMALLINT) AS is_carpet,
     p.is_indoor,
     CAST(CASE p.tournament
         WHEN 'grand_slam' THEN 4 WHEN 'masters' THEN 3

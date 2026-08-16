@@ -56,13 +56,188 @@ from src.features.inference import (
 from src.models.similarity import PlayerSimilarity
 from src.utils import load_env
 
-ort.set_default_logger_severity(3)  # ERROR: suppress virtual-CPU warnings from ONNX Runtime.
-
-AUX_DIR = DEPLOY_ARTIFACTS
-
 # Canonical champion manifest baked at deploy time (written by deploy.py from
 # the champion's exact lineage tags; packaged via bentofile.yaml).
+AUX_DIR = DEPLOY_ARTIFACTS
 MODEL_INFO_FILE = AUX_DIR / "model_info.json"
+
+# Serving dependencies stay here. Model packages are pinned because models are pickled.
+# base_image avoids BentoML's default build-essential injection; ca-certificates
+# and bash are the only system deps needed at runtime.
+SERVING_IMAGE = Image(
+    base_image="python:3.12-slim",
+    distro="",
+    lock_python_packages=False,
+    commands=[
+        "apt-get update && apt-get install -y --no-install-recommends ca-certificates bash libgomp1 && rm -rf /var/lib/apt/lists/*"
+    ],
+).python_packages(
+    "bentoml==1.4.39",
+    "scikit-learn==1.8.0",
+    "xgboost-cpu==3.2.0",
+    "lightgbm==4.6.0",
+    "psycopg[binary]==3.3.4",
+    "psycopg-pool==3.3.1",
+    "pandas==2.3.3",
+    "numpy==2.4.6",
+    "onnxruntime==1.27.0",
+    "faiss-cpu==1.14.3",
+    "python-dotenv==1.2.2",
+)
+
+_NORMALIZE_KEYS = frozenset(
+    {
+        "player_id",
+        "opponent_id",
+        "surface",
+        "as_of_date",
+        "tournament_level",
+        "round_encoded",
+        "tournament",
+        "round",
+        "is_indoor",
+        "indoor",
+    }
+)
+
+# ── SQL (table names interpolated from constants; values always via `%s`) ──
+
+# One point query: bronze metadata (bp.*) joined to the dbt-materialized gold
+# aggregates (gp.*) and the one-row tour singleton (cross join). current_rank
+# is already materialized in gold.player_profiles via dbt (official ranking
+# with match-time fallback); no per-query CTE needed. Tour comparison deltas
+# are computed in Python, not SQL.
+_PROFILE_SQL = f"""
+SELECT
+    bp.*,
+    gp.match_count, gp.latest_match_date,
+    gp.latest_rank_points, gp.earliest_rank_points,
+    gp.earliest_rank_points_date, gp.latest_rank_points_date,
+    gp.rank_points_delta, gp.current_rank,
+    gp.first_serve_in_pct, gp.aces_per_first_serve,
+    gp.first_serve_points_won_pct, gp.second_serve_points_won_pct,
+    gp.overall_serve_points_won_pct, gp.double_faults_per_serve_point,
+    gp.aces_per_service_game, gp.break_points_saved_pct,
+    gp.return_points_won_pct, gp.first_serve_return_points_won_pct,
+    gp.second_serve_return_points_won_pct, gp.return_games_won_pct,
+    gp.break_point_conversion_pct,
+    gp.break_point_opportunities_per_return_game,
+    gp.hard_matches, gp.clay_matches, gp.grass_matches,
+    gp.hard_win_rate, gp.clay_win_rate, gp.grass_win_rate,
+    gp.recent_snapshot_date, gp.win_rate_10,
+    ta.tour_first_serve_win_pct,
+    ta.tour_second_serve_win_pct,
+    ta.tour_ace_rate,
+    ta.tour_first_serve_pct,
+    ta.tour_break_points_saved_pct,
+    ta.tour_serve_win_pct,
+    ta.tour_return_points_won_pct,
+    ta.tour_df_rate,
+    ta.tour_aces_per_svc_game,
+    ta.tour_break_point_opportunities_per_return_game,
+    ta.tour_return_games_won_pct
+FROM {BRONZE_PROFILES_TABLE} bp
+LEFT JOIN {GOLD_PROFILES_TABLE} gp ON gp.player_id = bp.player_id
+CROSS JOIN {TOUR_AVERAGES_TABLE} ta
+WHERE bp.player_id = %s
+"""
+
+# Official weekly history only: bronze.rankings, chronological. Never derived
+# from match rows. The response envelope stays {rank_date, rank}; points is
+# selected for parity with the source but not exposed.
+_RANK_HISTORY_SQL = f"""
+SELECT ranking_date, rank, points
+FROM {BRONZE_RANKINGS_TABLE}
+WHERE player_id = %s
+ORDER BY ranking_date
+"""
+
+# Individual match rows, newest first: no tournament dedup, so every round of
+# an occurrence appears (e.g. the Rome final and its earlier rounds) up to the
+# visible limit. bronze.match_date is the tournament start date, so
+# same-occurrence rows tie and are broken deterministically by match_id.
+_MATCH_HISTORY_SQL = f"""
+SELECT
+    pm.match_id, pm.match_date, br.tournament, br.tournament_name, pm.surface, br.round,
+    br.score,
+    pm.opponent_id, pr.display_name AS opponent_name,
+    COALESCE(pm.opponent_ranking, historical_rank.rank) AS opponent_ranking, pm.match_won,
+    (pr.player_id IS NOT NULL) AS opponent_known,
+    pm.aces, pm.double_faults,
+    pm.first_serve_points_won, pm.second_serve_points_won,
+    pm.total_serve_points, pm.service_games,
+    pm.break_points_saved, pm.break_points_faced
+FROM {SILVER_PLAYER_MATCHES} pm
+LEFT JOIN {BRONZE_MATCHES_TABLE} br ON br.match_id = pm.match_id
+LEFT JOIN {BRONZE_PROFILES_TABLE} pr ON pr.player_id = pm.opponent_id
+LEFT JOIN LATERAL (
+    SELECT rank
+    FROM {BRONZE_RANKINGS_TABLE}
+    WHERE player_id = pm.opponent_id
+      AND ranking_date <= pm.match_date
+    ORDER BY ranking_date DESC
+    LIMIT 1
+) historical_rank ON pm.opponent_ranking IS NULL
+WHERE pm.player_id = %s
+ORDER BY pm.match_date DESC, pm.match_id DESC
+LIMIT %s
+"""
+
+# Direct bronze pair read: one row per meeting, no silver expansion or dedup.
+_H2H_MEETINGS_SQL = f"""
+SELECT match_id, match_date, tournament, tournament_name, round, surface, score,
+       player1_id, player2_id, winner_id
+FROM {BRONZE_MATCHES_TABLE}
+WHERE (player1_id = %s AND player2_id = %s)
+   OR (player1_id = %s AND player2_id = %s)
+ORDER BY match_date DESC, match_id DESC
+LIMIT %s
+"""
+
+_DIRECTORY_INFO_SQL = f"""
+SELECT MAX(match_date) AS latest_match_date
+FROM {BRONZE_MATCHES_TABLE}
+"""
+
+# BentoML uses the build context's README as the bento doc (OpenAPI
+# info.description) unless the service sets its own. The repo README is not an
+# API reference, so every /api/ endpoint is documented here manually: the
+# Starlette GET routes are mounted handlers the OpenAPI generator does not
+# introspect, so they exist in this description only.
+SERVICE_DESCRIPTION = """\
+# Tennis Match Prediction API
+
+Symmetric player-vs-player predictions with feature snapshot construction.
+Prediction context accepts optional tournament and round enums; encoded fields
+are derived internally by the service. `is_indoor` defaults to 0 and `as_of_date` defaults
+to today. The first-supplied player_id is the canonical player side and used for p_win.
+
+## POST /predict_from_ids
+Scalar ids-based prediction.
+- `player_id`, `opponent_id` — required `str`
+- `surface` — required `str` (`clay` / `grass` / `hard` / `carpet`)
+- `tournament` — optional enum (`grand_slam` / `masters` / `atp_500` / `atp_250` / `davis_cup` / `atp_finals` / `olympics` / `professional`)
+- `round` — optional enum (`r128` / `r64` / `r32` / `r16` / `qf` / `sf` / `f`)
+- `as_of_date` — optional `date`, default today
+- `is_indoor` — optional `int` (`0` / `1`), default 0
+
+The service derives `tournament_level` and `round_encoded` from the enum values;
+those numeric fields are not accepted request inputs.
+
+## POST /predict_from_ids_bulk
+Bulk ids-based prediction (API-key gated). Body envelope `{"rows": [ { ... } ]}` with the \
+same per-row fields as `POST /predict_from_ids`; max 1000 rows; unknown fields are rejected.
+
+## GET endpoints
+Read-only dashboard data: `GET /directory_info`, `GET /player_profile`, `GET /rank_history`, `GET /match_history`, \
+`GET /head_to_head`, `GET /similar_players`.
+`GET /model_info` — API-key gated model metadata. `GET /health` — liveness.
+
+Only the POST routes appear as OpenAPI paths; the GET routes are mounted Starlette
+handlers that the OpenAPI generator does not introspect, so they are documented here only.
+"""
+
+ort.set_default_logger_severity(3)  # ERROR: suppress virtual-CPU warnings from ONNX Runtime.
 
 load_env()
 
@@ -106,31 +281,6 @@ class _SuppressRequestValidationTraceback(logging.Filter):
 logging.getLogger("bentoml._internal.server.http_app").addFilter(
     _SuppressRequestValidationTraceback()
 )
-
-# Serving dependencies stay here. Model packages are pinned because models are pickled.
-# base_image avoids BentoML's default build-essential injection; ca-certificates
-# and bash are the only system deps needed at runtime.
-SERVING_IMAGE = Image(
-    base_image="python:3.12-slim",
-    distro="",
-    lock_python_packages=False,
-    commands=[
-        "apt-get update && apt-get install -y --no-install-recommends ca-certificates bash libgomp1 && rm -rf /var/lib/apt/lists/*"
-    ],
-).python_packages(
-    "bentoml==1.4.39",
-    "scikit-learn==1.8.0",
-    "xgboost-cpu==3.2.0",
-    "lightgbm==4.6.0",
-    "psycopg[binary]==3.3.4",
-    "psycopg-pool==3.3.1",
-    "pandas==2.3.3",
-    "numpy==2.4.6",
-    "onnxruntime==1.27.0",
-    "faiss-cpu==1.14.3",
-    "python-dotenv==1.2.2",
-)
-
 
 # ── Read-only data endpoints (GET, no auth) ────────────────────────────────
 # Bento APIs are POST-only, so dashboard GET routes use a mounted Starlette app.
@@ -201,22 +351,6 @@ def _require_id(request: Request, name: str) -> str | None:
     if raw is None or not raw.strip():
         return None
     return raw.strip()
-
-
-_NORMALIZE_KEYS = frozenset(
-    {
-        "player_id",
-        "opponent_id",
-        "surface",
-        "as_of_date",
-        "tournament_level",
-        "round_encoded",
-        "tournament",
-        "round",
-        "is_indoor",
-        "indoor",
-    }
-)
 
 
 def _positive_class_probability(model: Any, features: Any) -> np.ndarray:
@@ -340,106 +474,6 @@ def _predict_from_ids_bulk_impl(
         f" mean_p_win={float(out['p_win'].mean()):.6f}"
     )
     return out
-
-
-# ── SQL (table names interpolated from constants; values always via `%s`) ──
-
-# One point query: bronze metadata (bp.*) joined to the dbt-materialized gold
-# aggregates (gp.*) and the one-row tour singleton (cross join). current_rank
-# is already materialized in gold.player_profiles via dbt (official ranking
-# with match-time fallback); no per-query CTE needed. Tour comparison deltas
-# are computed in Python, not SQL.
-_PROFILE_SQL = f"""
-SELECT
-    bp.*,
-    gp.match_count, gp.latest_match_date,
-    gp.latest_rank_points, gp.earliest_rank_points,
-    gp.earliest_rank_points_date, gp.latest_rank_points_date,
-    gp.rank_points_delta, gp.current_rank,
-    gp.first_serve_in_pct, gp.aces_per_first_serve,
-    gp.first_serve_points_won_pct, gp.second_serve_points_won_pct,
-    gp.overall_serve_points_won_pct, gp.double_faults_per_serve_point,
-    gp.aces_per_service_game, gp.break_points_saved_pct,
-    gp.return_points_won_pct, gp.first_serve_return_points_won_pct,
-    gp.second_serve_return_points_won_pct, gp.return_games_won_pct,
-    gp.break_point_conversion_pct,
-    gp.break_point_opportunities_per_return_game,
-    gp.hard_matches, gp.clay_matches, gp.grass_matches,
-    gp.hard_win_rate, gp.clay_win_rate, gp.grass_win_rate,
-    gp.recent_snapshot_date, gp.win_rate_10,
-    ta.tour_first_serve_win_pct,
-    ta.tour_second_serve_win_pct,
-    ta.tour_ace_rate,
-    ta.tour_first_serve_pct,
-    ta.tour_break_points_saved_pct,
-    ta.tour_serve_win_pct,
-    ta.tour_return_points_won_pct,
-    ta.tour_df_rate,
-    ta.tour_aces_per_svc_game,
-    ta.tour_break_point_opportunities_per_return_game,
-    ta.tour_return_games_won_pct
-FROM {BRONZE_PROFILES_TABLE} bp
-LEFT JOIN {GOLD_PROFILES_TABLE} gp ON gp.player_id = bp.player_id
-CROSS JOIN {TOUR_AVERAGES_TABLE} ta
-WHERE bp.player_id = %s
-"""
-
-# Official weekly history only: bronze.rankings, chronological. Never derived
-# from match rows. The response envelope stays {rank_date, rank}; points is
-# selected for parity with the source but not exposed.
-_RANK_HISTORY_SQL = f"""
-SELECT ranking_date, rank, points
-FROM {BRONZE_RANKINGS_TABLE}
-WHERE player_id = %s
-ORDER BY ranking_date
-"""
-
-# Individual match rows, newest first: no tournament dedup, so every round of
-# an occurrence appears (e.g. the Rome final and its earlier rounds) up to the
-# visible limit. bronze.match_date is the tournament start date, so
-# same-occurrence rows tie and are broken deterministically by match_id.
-_MATCH_HISTORY_SQL = f"""
-SELECT
-    pm.match_id, pm.match_date, br.tournament, br.tournament_name, pm.surface, br.round,
-    br.score,
-    pm.opponent_id, pr.display_name AS opponent_name,
-    COALESCE(pm.opponent_ranking, historical_rank.rank) AS opponent_ranking, pm.match_won,
-    (pr.player_id IS NOT NULL) AS opponent_known,
-    pm.aces, pm.double_faults,
-    pm.first_serve_points_won, pm.second_serve_points_won,
-    pm.total_serve_points, pm.service_games,
-    pm.break_points_saved, pm.break_points_faced
-FROM {SILVER_PLAYER_MATCHES} pm
-LEFT JOIN {BRONZE_MATCHES_TABLE} br ON br.match_id = pm.match_id
-LEFT JOIN {BRONZE_PROFILES_TABLE} pr ON pr.player_id = pm.opponent_id
-LEFT JOIN LATERAL (
-    SELECT rank
-    FROM {BRONZE_RANKINGS_TABLE}
-    WHERE player_id = pm.opponent_id
-      AND ranking_date <= pm.match_date
-    ORDER BY ranking_date DESC
-    LIMIT 1
-) historical_rank ON pm.opponent_ranking IS NULL
-WHERE pm.player_id = %s
-ORDER BY pm.match_date DESC, pm.match_id DESC
-LIMIT %s
-"""
-
-# Direct bronze pair read: one row per meeting, no silver expansion or dedup.
-_H2H_MEETINGS_SQL = f"""
-SELECT match_id, match_date, tournament, tournament_name, round, surface, score,
-       player1_id, player2_id, winner_id
-FROM {BRONZE_MATCHES_TABLE}
-WHERE (player1_id = %s AND player2_id = %s)
-   OR (player1_id = %s AND player2_id = %s)
-ORDER BY match_date DESC, match_id DESC
-LIMIT %s
-"""
-
-_DIRECTORY_INFO_SQL = f"""
-SELECT MAX(match_date) AS latest_match_date
-FROM {BRONZE_MATCHES_TABLE}
-"""
 
 
 # ── Route handlers ─────────────────────────────────────────────────────────
@@ -892,45 +926,6 @@ class _LGBMProbaAdapter:
         return np.column_stack([1.0 - p, p])
 
 
-# BentoML uses the build context's README as the bento doc (OpenAPI
-# info.description) unless the service sets its own. The repo README is not an
-# API reference, so every /api/ endpoint is documented here manually: the
-# Starlette GET routes are mounted handlers the OpenAPI generator does not
-# introspect, so they exist in this description only.
-SERVICE_DESCRIPTION = """\
-# Tennis Match Prediction API
-
-Symmetric player-vs-player predictions with feature snapshot construction.
-Prediction context accepts optional tournament and round enums; encoded fields
-are derived internally by the service. `is_indoor` defaults to 0 and `as_of_date` defaults
-to today. The first-supplied player_id is the canonical player side and used for p_win.
-
-## POST /predict_from_ids
-Scalar ids-based prediction.
-- `player_id`, `opponent_id` — required `str`
-- `surface` — required `str` (`clay` / `grass` / `hard` / `carpet`)
-- `tournament` — optional enum (`grand_slam` / `masters` / `atp_500` / `atp_250` / `davis_cup` / `atp_finals` / `olympics` / `professional`)
-- `round` — optional enum (`r128` / `r64` / `r32` / `r16` / `qf` / `sf` / `f`)
-- `as_of_date` — optional `date`, default today
-- `is_indoor` — optional `int` (`0` / `1`), default 0
-
-The service derives `tournament_level` and `round_encoded` from the enum values;
-those numeric fields are not accepted request inputs.
-
-## POST /predict_from_ids_bulk
-Bulk ids-based prediction (API-key gated). Body envelope `{"rows": [ { ... } ]}` with the \
-same per-row fields as `POST /predict_from_ids`; max 1000 rows; unknown fields are rejected.
-
-## GET endpoints
-Read-only dashboard data: `GET /directory_info`, `GET /player_profile`, `GET /rank_history`, `GET /match_history`, \
-`GET /head_to_head`, `GET /similar_players`.
-`GET /model_info` — API-key gated model metadata. `GET /health` — liveness.
-
-Only the POST routes appear as OpenAPI paths; the GET routes are mounted Starlette
-handlers that the OpenAPI generator does not introspect, so they are documented here only.
-"""
-
-
 @bentoml.service(
     image=SERVING_IMAGE,
     description=SERVICE_DESCRIPTION,
@@ -1148,12 +1143,7 @@ class TennisPredictor:
             f" opponent_snapshot_date={meta['opponent_snapshot_date']}"
             f" player_rolling_match_number={meta['player_rolling_match_number']}"
             f" opponent_rolling_match_number={meta['opponent_rolling_match_number']}"
-            f" player_matches_30d={meta['player_matches_30d']}"
-            f" opponent_matches_30d={meta['opponent_matches_30d']}"
-            f" player_days_since_last_match={meta['player_days_since_last_match']}"
-            f" opponent_days_since_last_match={meta['opponent_days_since_last_match']}"
             f" median_days_since={meta['median_days_since']}"
-            f" median_matches_30d={meta['median_matches_30d']}"
             f" build_ms={meta['build_ms']}"
             f" response_ms={(perf_counter() - started_at) * 1000:.3f}"
             f" p_win={rec['p_win']:.6f}"

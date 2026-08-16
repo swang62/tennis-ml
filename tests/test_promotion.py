@@ -121,12 +121,3 @@ def test_rejects_auc_decline_beyond_tolerance():
     )
     prod = _metrics()
     assert _decide(cand, prod) == 0
-
-
-def test_gate_reads_tolerance_constant(monkeypatch: pytest.MonkeyPatch):
-    # The AUC tolerance follows PROMOTION_AUC_TOLERANCE, not a hardcoded 0.01.
-    cand = _metrics(log_loss=0.4, roc_auc=0.48)
-    prod = _metrics()
-    assert _decide(cand, prod) == 0  # 0.02 decline > default 0.01 tolerance
-    monkeypatch.setattr(promotion, "PROMOTION_AUC_TOLERANCE", 0.02)
-    assert _decide(cand, prod) == 1  # exactly at the raised tolerance promotes

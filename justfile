@@ -36,10 +36,6 @@ db-reset:
 seed *args:
     uv run python src/db/seed.py {{ args }}
 
-# Insert deterministic cloned real bronze matches for drift testing. --dry-run --force --after.
-seed-random *args:
-    uv run python src/db/seed_drift.py {{ args }}
-
 # Export an atomic PostgreSQL training snapshot, optional as the training pipeline always snapshots first.
 snapshot:
     uv run python src/db/snapshot.py
@@ -60,9 +56,9 @@ deps:
 dev:
     ./scripts/dev.sh
 
-# Run production drift monitoring.
-drift:
-    uv run python src/flows/drift.py
+# Run production drift monitoring; pass --cutoff YYYY-MM-DD to override the champion watermark.
+drift *args:
+    uv run python src/flows/drift.py {{ args }}
 
 # Run all configured linters.
 lint:
