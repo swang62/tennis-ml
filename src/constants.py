@@ -82,8 +82,12 @@ STACK_ORDER = ("linear", "gbdt", "nn")
 
 
 # --- Champion lineage tags (single source of truth for the tag schema) ---
-# Tag-key names and prefixes used by the flattened `base_*`/`aux_*` champion
-# lineage tags; shared by the tag builder here, promotion, and the deploy flow.
+# Model-prediction only: the flattened `base_*`/`aux_*` champion lineage tags
+# cover exactly the inputs that affect match predictions (base models, the
+# scaler, embeddings, and bio feature columns). MLflow/champion tags are never
+# used for navigation artifacts (similarity index, similarity metadata, player
+# directory) — those are rebuilt at deploy time, not pinned on the champion.
+# Shared by the tag builder here, promotion, and the deploy flow.
 LINEAGE_MODEL_NAME_KEY = "registered_model_name"
 LINEAGE_VERSION_KEY = "version"
 LINEAGE_RUN_ID_KEY = "run_id"
@@ -100,10 +104,6 @@ LINEAGE_AUX_KEYS = (
     "embeddings_hash",
     "bio_feature_cols_uri",
     "bio_feature_cols_hash",
-    "similarity_index_uri",
-    "similarity_index_hash",
-    "similarity_metadata_uri",
-    "similarity_metadata_hash",
 )
 BASE_TAG_PREFIX = "base_"
 AUX_TAG_PREFIX = "aux_"
@@ -144,6 +144,61 @@ DRIFT_MIN_N_FOR_CHECK = 10
 DRIFT_REF_MIN = 30
 DRIFT_REF_MAX = 10000
 
+# --- Player playstyle clustering (archetypes for the similarity index) ---
+# The similarity index consumes cluster membership as a one-hot vector block
+# and bakes the archetype labels into player metadata. The pipeline refits
+# clusters from the fresh snapshot on every train run; the playstyle-cluster
+# EDA notebook reuses this config to review the same fit. Labels are the
+# reviewed archetype names keyed by fitted cluster id (KMeans ids are
+# data+seed dependent, so the mapping can move between fits — review in the
+# notebook after data changes). n_clusters is an explicit selection, never a
+# vector-shape contract.
+PLAYSTYLE_N_CLUSTERS = 5
+PLAYSTYLE_RANDOM_STATE = 42
+PLAYSTYLE_CLUSTER_LABELS: dict[str, str] = {
+    "0": "PLACEHOLDER - describe cluster 0",
+    "1": "PLACEHOLDER - describe cluster 1",
+    "2": "PLACEHOLDER - describe cluster 2",
+    "3": "PLACEHOLDER - describe cluster 3",
+    "4": "PLACEHOLDER - describe cluster 4",
+}
+
+# --- Player similarity block calibration (explicit, reviewed weights) ---
+# The similarity vector is a weighted concatenation of independently calibrated
+# blocks: identity (one-hot), lifetime playstyle stats, surface career
+# performance, reputation, a PCA-reduced bio block, and optional cluster
+# membership. Each numeric block is normalized or bounded-transformed, scaled
+# by its explicit weight, concatenated, and the row L2-normalized once — so a
+# block's influence is bounded by its weight, never by raw scale or
+# dimensionality.
+# Relative weights: identity 0.10, playstyle 0.35, surface 0.25,
+# reputation 0.25, bio 0.05 (minor auxiliary), cluster 0.10 (sums to 1.0
+# without cluster). The primary signals are playstyle, surface, and
+# reputation; bio is a tiny bonus on top.
+SIM_IDENTITY_WEIGHT = 0.10
+SIM_PLAYSTYLE_WEIGHT = 0.35
+SIM_SURFACE_WEIGHT = 0.25
+SIM_REPUTATION_WEIGHT = 0.25
+SIM_BIO_WEIGHT = 0.05
+SIM_CLUSTER_WEIGHT = 0.10
+# Bio block projection: raw summary-text embeddings are PCA-reduced to at most
+# SIM_BIO_PCA_DIM components inside build_playstyle_matrix (fit per build over
+# the batch), so the similarity index and KMeans clustering consume exactly the
+# same low-weight bio block. n_components = min(SIM_BIO_PCA_DIM, n_samples,
+# n_features); with fewer players or features the block simply shrinks. PCA is
+# fit at index/clustering build time only — no serving-time transformer
+# artifact is needed or produced.
+SIM_BIO_PCA_DIM = 10
+# Surface win-rate confidence: shrunk = 0.5 + (rate - 0.5) * n / (n + K) pulls
+# small-sample rates toward the neutral 0.5 prior; the same K bounds exposure
+# counts (n / (n + K)) inside the surface block.
+SIM_SURFACE_SHRINK_K = 30.0
+# Reputation bounded transforms: current_rank -> exp(-rank / scale) (0.0 when
+# the player has no rank), match_count -> n / (n + K) experience; career win
+# rate is already in [0, 1].
+SIM_RANK_SCALE = 200.0
+SIM_EXPERIENCE_K = 100.0
+
 
 def build_lineage_tags(
     base_pins: dict[str, dict[str, str]], aux_pins: dict[str, str]
@@ -152,7 +207,9 @@ def build_lineage_tags(
 
     base_pins is the {name: pin} map consolidated by 03 (registered_model_name,
     version, run_id, model_uri, plus scaler_uri/scaler_hash for linear).
-    aux_pins comes from 00 (embeddings/bio_feature_cols URIs + hashes).
+    aux_pins comes from 00 and carries only predictive-model inputs
+    (embeddings/bio_feature_cols URIs + hashes); navigation artifacts are
+    never pinned on the champion.
     """
     tags: dict[str, str] = {}
     for name, pin in base_pins.items():

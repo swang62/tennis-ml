@@ -10,46 +10,58 @@
 // starts at the earliest rank date. Runs with `node --test tests/`
 // (Node >= 23.6 strips types from the imported .ts helpers natively).
 
-import { test } from 'node:test'
-import assert from 'node:assert'
-import * as echarts from 'echarts/core'
-import { LineChart } from 'echarts/charts'
-import { GridComponent, LegendComponent, TooltipComponent, AriaComponent } from 'echarts/components'
-import { SVGRenderer } from 'echarts/renderers'
-import { axisOption, baseChartOption } from '../src/lib/charts.ts'
-import { careerBestRank, yearAxisDomain } from '../src/lib/rankHistoryAxis.ts'
+import assert from "node:assert";
+import { test } from "node:test";
+import { LineChart } from "echarts/charts";
+import {
+  AriaComponent,
+  GridComponent,
+  LegendComponent,
+  TooltipComponent,
+} from "echarts/components";
+import * as echarts from "echarts/core";
+import { SVGRenderer } from "echarts/renderers";
+import { axisOption, baseChartOption } from "../src/lib/charts.ts";
+import { careerBestRank, yearAxisDomain } from "../src/lib/rankHistoryAxis.ts";
 
-echarts.use([LineChart, GridComponent, LegendComponent, TooltipComponent, AriaComponent, SVGRenderer])
+echarts.use([
+  LineChart,
+  GridComponent,
+  LegendComponent,
+  TooltipComponent,
+  AriaComponent,
+  SVGRenderer,
+]);
 
-const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000
+const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
 
 const tokens = {
-  theme: 'dark',
-  text: '#e8e8e8',
-  dim: '#9aa0aa',
-  faint: '#666666',
-  line: '#333333',
-  clay: '#c98d63',
-  grass: '#3fae7a',
-  ice: '#5f9fc9',
-  raised: '#1c1c22',
-  inset: '#141419',
-}
+  theme: "dark",
+  text: "#e8e8e8",
+  dim: "#9aa0aa",
+  faint: "#666666",
+  line: "#333333",
+  clay: "#c98d63",
+  grass: "#3fae7a",
+  ice: "#5f9fc9",
+  raised: "#1c1c22",
+  inset: "#141419",
+};
 
 // Same shape as Profile.tsx builds for the rank chart: base options
 // (including the aria decal) plus the chart-specific axis configuration.
 function rankOption() {
-  const t = tokens
-  const ax = axisOption(t)
-  const base = baseChartOption(t)
-  const dates = ['2020-03-01', '2021-04-15', '2022-09-01']
-  const rankAxis = yearAxisDomain(dates)
+  const t = tokens;
+  const ax = axisOption(t);
+  const base = baseChartOption(t);
+  const dates = ["2020-03-01", "2021-04-15", "2022-09-01"];
+  const rankAxis = yearAxisDomain(dates);
   return {
     ...base,
-    tooltip: { ...base.tooltip, trigger: 'axis' },
+    tooltip: { ...base.tooltip, trigger: "axis" },
     grid: { left: 50, right: 24, top: 16, bottom: 28, containLabel: false },
     xAxis: {
-      type: 'time',
+      type: "time",
       min: rankAxis?.min,
       max: rankAxis?.max,
       minInterval: ONE_YEAR_MS,
@@ -59,107 +71,118 @@ function rankOption() {
       axisLabel: {
         ...ax.axisLabel,
         margin: 8,
-        formatter: '{yyyy}',
+        formatter: "{yyyy}",
       },
       splitLine: { ...ax.splitLine, show: true },
     },
     yAxis: {
-      type: 'value',
+      type: "value",
       inverse: true,
       min: 1,
       max: 200,
       minInterval: 50,
-      splitLine: { ...ax.splitLine, lineStyle: { ...ax.splitLine.lineStyle, type: 'dashed' } },
+      splitLine: {
+        ...ax.splitLine,
+        lineStyle: { ...ax.splitLine.lineStyle, type: "dashed" },
+      },
     },
     series: [
       {
-        type: 'line',
+        type: "line",
         data: dates.map((d, i) => [d, [90, 40, 12][i]]),
         smooth: true,
         showSymbol: false,
         lineStyle: { color: t.ice, width: 2.5 },
         areaStyle: {
           color: {
-            type: 'linear',
+            type: "linear",
             x: 0,
             y: 0,
             x2: 0,
             y2: 1,
             colorStops: [
-              { offset: 0, color: 'rgba(95, 159, 201, 0.28)' },
-              { offset: 1, color: 'rgba(95, 159, 201, 0.02)' },
+              { offset: 0, color: "rgba(95, 159, 201, 0.28)" },
+              { offset: 1, color: "rgba(95, 159, 201, 0.02)" },
             ],
           },
         },
       },
     ],
-  }
+  };
 }
 
 function renderSvg(option) {
   const chart = echarts.init(null, null, {
-    renderer: 'svg',
+    renderer: "svg",
     ssr: true,
     width: 800,
     height: 320,
-  })
+  });
   try {
-    chart.setOption(option)
-    return chart.renderToSVGString()
+    chart.setOption(option);
+    return chart.renderToSVGString();
   } finally {
-    chart.dispose()
+    chart.dispose();
   }
 }
 
-test('baseChartOption enables the aria decal that paints the hatch', () => {
-  const base = baseChartOption(tokens)
-  assert.equal(base.aria?.enabled, true)
-  assert.equal(base.aria?.decal?.show, true)
-})
+test("baseChartOption enables the aria decal that paints the hatch", () => {
+  const base = baseChartOption(tokens);
+  assert.equal(base.aria?.enabled, true);
+  assert.equal(base.aria?.decal?.show, true);
+});
 
-test('careerBestRank keeps the first date for the best lifetime rank', () => {
+test("careerBestRank keeps the first date for the best lifetime rank", () => {
   assert.deepEqual(
     careerBestRank([
-      { rank_date: '2020-03-01', rank: 90 },
-      { rank_date: '2021-04-15', rank: 12 },
-      { rank_date: '2022-09-01', rank: 12 },
+      { rank_date: "2020-03-01", rank: 90 },
+      { rank_date: "2021-04-15", rank: 12 },
+      { rank_date: "2022-09-01", rank: 12 },
     ]),
-    { rank_date: '2021-04-15', rank: 12 },
-  )
-})
+    { rank_date: "2021-04-15", rank: 12 },
+  );
+});
 
-test('SSR: default decal renders a diagonal hatch pattern over the area', () => {
-  const svg = renderSvg(rankOption())
-  const patterns = svg.match(/<pattern/g) ?? []
-  assert.equal(patterns.length, 1, 'expected the aria decal hatch pattern')
-  assert.match(svg, /patternTransform="rotate\([^"]+\)"/, 'expected a rotated (diagonal) hatch')
-})
+test("SSR: default decal renders a diagonal hatch pattern over the area", () => {
+  const svg = renderSvg(rankOption());
+  const patterns = svg.match(/<pattern/g) ?? [];
+  assert.equal(patterns.length, 1, "expected the aria decal hatch pattern");
+  assert.match(
+    svg,
+    /patternTransform="rotate\([^"]+\)"/,
+    "expected a rotated (diagonal) hatch",
+  );
+});
 
-test('SSR: rank chart keeps the hatch, yearly grid lines/ticks, and unpadded domain', () => {
-  const opt = rankOption()
-  const svg = renderSvg(opt)
+test("SSR: rank chart keeps the hatch, yearly grid lines/ticks, and unpadded domain", () => {
+  const opt = rankOption();
+  const svg = renderSvg(opt);
 
   // The hatch is inherited from baseChartOption's aria decal.
-  const patterns = svg.match(/<pattern/g) ?? []
-  assert.equal(patterns.length, 1, 'expected the aria decal hatch pattern')
-  assert.match(svg, /patternTransform="rotate\([^"]+\)"/, 'expected a rotated (diagonal) hatch')
+  const patterns = svg.match(/<pattern/g) ?? [];
+  assert.equal(patterns.length, 1, "expected the aria decal hatch pattern");
+  assert.match(
+    svg,
+    /patternTransform="rotate\([^"]+\)"/,
+    "expected a rotated (diagonal) hatch",
+  );
 
   // Dashed grid split lines (vertical year lines + horizontal rank lines).
-  const dashed = (svg) => svg.match(/<path[^>]*stroke-dasharray[^>]*>/g) ?? []
+  const dashed = (svg) => svg.match(/<path[^>]*stroke-dasharray[^>]*>/g) ?? [];
   const vertical = (svg) =>
-    dashed(svg).filter((p) => /M(\d+(?:\.\d+)?) (?:[\d.]+)L\1 /.test(p))
-  assert.ok(vertical(svg).length > 0, 'expected vertical year grid lines')
+    dashed(svg).filter((p) => /M(\d+(?:\.\d+)?) (?:[\d.]+)L\1 /.test(p));
+  assert.ok(vertical(svg).length > 0, "expected vertical year grid lines");
 
   // Yearly tick labels render for years whose Jan 1 lies in the domain.
   // The domain starts at the first data date (2020-03-01), so 2020's Jan-1
   // tick predates it and is not rendered.
-  const years = [...svg.matchAll(/>(\d{4})<\/text>/g)].map((m) => m[1])
-  for (const year of ['2021', '2022']) {
-    assert.ok(years.includes(year), `expected yearly tick label ${year}`)
+  const years = [...svg.matchAll(/>(\d{4})<\/text>/g)].map((m) => m[1]);
+  for (const year of ["2021", "2022"]) {
+    assert.ok(years.includes(year), `expected yearly tick label ${year}`);
   }
-  assert.ok(!years.includes('2020'), 'no tick before the first data date')
+  assert.ok(!years.includes("2020"), "no tick before the first data date");
 
   // No padded domain: the axis starts at the earliest rank date, not Jan 1.
-  assert.equal(opt.xAxis.min, new Date(2020, 2, 1).getTime())
-  assert.notEqual(opt.xAxis.min, new Date(2020, 0, 1).getTime())
-})
+  assert.equal(opt.xAxis.min, new Date(2020, 2, 1).getTime());
+  assert.notEqual(opt.xAxis.min, new Date(2020, 0, 1).getTime());
+});

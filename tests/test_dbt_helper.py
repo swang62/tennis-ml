@@ -29,7 +29,7 @@ def test_run_dbt_build_invokes_dbt_build_with_exact_args(monkeypatch):
 
     assert len(calls) == 1
     args, kwargs = calls[0]
-    assert args == (DBT_BUILD_CMD,)
+    assert args == ([*DBT_BUILD_CMD, "--full-refresh"],)
     assert kwargs["cwd"] == ROOT
     assert kwargs["check"] is True
     # dbt receives fields derived from the single DATABASE_URL.
@@ -55,34 +55,6 @@ def test_run_dbt_build_propagates_called_process_error(monkeypatch):
     assert excinfo.value.cmd == DBT_BUILD_CMD
 
 
-def test_run_dbt_build_appends_full_refresh(monkeypatch):
-    calls = []
-
-    def fake_run(*args, **kwargs):
-        calls.append((args, kwargs))
-        return "fake-result"
-
-    monkeypatch.setattr("src.flows.etl.subprocess.run", fake_run)
-    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@db:5432/tennis")
-
-    run_dbt_build(full_refresh=True)
-
-    assert calls[0][0] == ([*DBT_BUILD_CMD, "--full-refresh"],)
-
-
-def test_dbt_build_cmd_is_exact():
-    assert DBT_BUILD_CMD == [
-        "uv",
-        "run",
-        "dbt",
-        "build",
-        "--project-dir",
-        "dbt",
-        "--profiles-dir",
-        "dbt",
-    ]
-
-
 def test_etl_flow_builds_without_enrichment(monkeypatch):
     """ETL builds bronze-to-gold without enrichment — it's a separate step."""
     monkeypatch.setattr("src.flows.etl.bronze_to_gold", lambda **_: FAKE_GOLD_COUNT)
@@ -92,6 +64,80 @@ def test_etl_flow_builds_without_enrichment(monkeypatch):
     # a real flow run on the Prefect server (PREFECT_API_URL is set in .env),
     # polluting the deployment history from a hermetic test.
     etl_flow.fn()
+
+
+def test_etl_flow_maps_incremental_to_bronze_to_gold(monkeypatch):
+    """etl_flow's user-facing incremental option flows through untouched."""
+    received = []
+
+    def fake_bronze_to_gold(**kwargs):
+        received.append(kwargs)
+        return FAKE_GOLD_COUNT
+
+    monkeypatch.setattr("src.flows.etl.bronze_to_gold", fake_bronze_to_gold)
+    monkeypatch.setattr("src.flows.etl.load_env", lambda: None)
+
+    etl_flow.fn(incremental=True)
+    etl_flow.fn()
+
+    assert received == [{"incremental": True}, {"incremental": False}]
+
+
+def test_bronze_to_gold_maps_incremental_to_dbt_full_refresh(monkeypatch):
+    """bronze_to_gold translates incremental=False (default) into dbt
+    --full-refresh; incremental=True skips it. run_dbt_build keeps its
+    full_refresh parameter for other callers (e.g. drift)."""
+    from unittest.mock import MagicMock
+
+    dbt_calls = []
+    monkeypatch.setattr("src.flows.etl.run_dbt_build", lambda **kwargs: dbt_calls.append(kwargs))
+    monkeypatch.setattr("src.flows.etl._dbt_model_rows", lambda: {})
+    monkeypatch.setattr("src.flows.etl._dbt_summary", lambda _log: "Done. PASS=1")
+
+    conn = MagicMock()
+    cursor = MagicMock()
+    cursor.fetchone.return_value = None
+    conn.cursor.return_value.__enter__.return_value = cursor
+    monkeypatch.setattr("src.flows.etl.connection", lambda: conn)
+
+    etl.bronze_to_gold.fn(incremental=False)
+    etl.bronze_to_gold.fn(incremental=True)
+
+    assert [call["incremental"] for call in dbt_calls] == [False, True]
+
+
+def test_cli_default_runs_full_refresh(monkeypatch):
+    """`just etl` (no args) invokes the flow with incremental=False."""
+    calls = []
+    monkeypatch.setattr("src.flows.etl.etl_flow", lambda **kwargs: calls.append(kwargs))
+
+    etl.main(["--incremental"])
+    etl.main([])
+
+    assert calls == [{"incremental": True}, {"incremental": False}]
+
+
+def test_register_deployment_pins_incremental_parameters(monkeypatch):
+    """The ETL deployment carries explicit incremental=True parameters, so the
+    scrape-triggered ETL appends new rows regardless of flow defaults."""
+    deploy_kwargs = {}
+
+    class FakeDeployment:
+        def deploy(self, **kwargs):
+            deploy_kwargs.update(kwargs)
+
+    class FakeFlow:
+        name = "etl-flow"
+
+        @staticmethod
+        def from_source(**_kwargs):
+            return FakeDeployment()
+
+    monkeypatch.setattr("src.flows.etl.etl_flow", FakeFlow)
+
+    etl.register_deployment()
+
+    assert deploy_kwargs["parameters"] == {"incremental": True}
 
 
 def test_enrich_missing_is_callable():

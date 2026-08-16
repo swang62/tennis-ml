@@ -16,7 +16,15 @@ from typing import TextIO
 
 import papermill as pm
 
-from src.constants import DATA_PROCESSED, LOGS, OUTPUTS, PARAMS
+from src.constants import (
+    DATA_PROCESSED,
+    LOGS,
+    OUTPUTS,
+    PARAMS,
+    PLAYSTYLE_CLUSTER_LABELS,
+    PLAYSTYLE_N_CLUSTERS,
+    PLAYSTYLE_RANDOM_STATE,
+)
 from src.db import training
 from src.db.snapshot import SNAPSHOT_PATH, refresh_snapshot
 from src.utils import ensure_kernel, load_env, suppress_insecure_tls_warning
@@ -68,11 +76,28 @@ def _file_hash(path: Path) -> str:
     return h.hexdigest()
 
 
-def build_similarity_index() -> None:
-    """Rebuild the player similarity index from the fresh DuckDB snapshot.
+def generate_cluster_artifacts() -> None:
+    """Fit player-archetype clusters from the fresh DuckDB snapshot and write
+    the artifacts PlayerSimilarity.build consumes (one-hot memberships +
+    archetype labels). Runs after the snapshot refresh so a stale assignment
+    can never leak into the similarity index build.
+    """
+    from src.models.similarity import build_cluster_artifacts
 
-    Always rebuilds from scratch; training never reuses a previously saved
-    index, so a stale index can never leak into a training run.
+    build_cluster_artifacts(
+        n_clusters=PLAYSTYLE_N_CLUSTERS,
+        labels=PLAYSTYLE_CLUSTER_LABELS,
+        query=training.to_dataframe,
+        random_state=PLAYSTYLE_RANDOM_STATE,
+    )
+
+
+def build_similarity_index() -> None:
+    """Build snapshot-backed player similarity artifacts and pin them in one MLflow run.
+
+    Only the similarity index and its metadata are pinned here; the web player
+    directory is generated at deploy time from the same DuckDB snapshot (see
+    src.flows.deploy.generate_directory_artifact), never champion-pinned.
     """
     import json
 
@@ -81,7 +106,6 @@ def build_similarity_index() -> None:
     from src.models.similarity import DEFAULT_INDEX, DEFAULT_METADATA, PlayerSimilarity
 
     PlayerSimilarity().build(query=training.to_dataframe)
-
     mlflow.set_experiment("artifacts")
     with mlflow.start_run():
         mlflow.log_artifact(str(DEFAULT_INDEX))
@@ -137,13 +161,20 @@ if __name__ == "__main__":
         refresh_snapshot()
         print(f"  Snapshot refreshed: {SNAPSHOT_PATH}")
 
+        # Fit player-archetype clusters from the fresh snapshot before the
+        # similarity index build so the index consumes freshly generated
+        # cluster artifacts (memberships + labels).
+        print("\nGenerating playstyle clusters...")
+        generate_cluster_artifacts()
+        print("  Cluster artifacts written.")
+
         # Build the player similarity index from the DuckDB snapshot so it is
         # always fresh and never depends on a running PostgreSQL.
-        print("\nBuilding player similarity index (snapshot)...")
+        print("\nBuilding player similarity FAISS index...")
         build_similarity_index()
         print("  Similarity index built.")
 
-        print(f"Pipeline starting — {len(NB_ORDER)} notebooks")
+        print("Pipeline starting...")
         for name in NB_ORDER:
             parameters = (
                 {"force_promote": args.force_promote} if name == "04_evaluate.ipynb" else None

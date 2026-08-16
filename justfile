@@ -11,38 +11,21 @@ cluster-create:
 cluster-destroy:
     k3d cluster delete tennis-ml
 
-# Restart Kubernetes workloads.
+# Restart the Prefect server Deployment and wait for rollout readiness.
 cluster-restart:
-    kubectl rollout restart deployment
-    kubectl rollout restart daemonset
-    kubectl rollout restart statefulset
+    kubectl rollout restart deployment/prefect-server
+    kubectl rollout status deployment/prefect-server --timeout=300s
 
-# Create the cluster, manifests, and database.
-cluster-setup: deps cluster-create migrate
-
-# Run bronze-to-gold ETL; pass --full-refresh to rebuild silver/gold from bronze.
-etl *args:
-    uv run python src/flows/etl.py {{ args }}
-
-# Apply idempotent PostgreSQL schema migrations without dropping data.
-migrate:
-    uv run python src/db/migrate_db.py migrate
+# End-to-end pipeline, targets the .env DATABASE_URL currently set
+data-pipeline: deps lint test cluster-create cluster-restart probe migrate seed etl train deploy docker
 
 # Drop and recreate PostgreSQL schemas.
 db-reset:
     uv run python src/db/migrate_db.py reset
 
-# Seed deterministic raw matches. --all (every CSV) --enrich (Wikipedia bios) --force (overwrite).
-seed *args:
-    uv run python src/db/seed.py {{ args }}
-
-# Export an atomic PostgreSQL training snapshot, optional as the training pipeline always snapshots first.
-snapshot:
-    uv run python src/db/snapshot.py
-
-# Build and push all production docker images.
+# Build and push all production docker images, bento and web images.
 deploy *args:
-    uv run python src/flows/deploy.py {{ args }}
+    uv run python src/flows/deploy.py
     docker buildx build --builder tennis-multiarch --platform linux/amd64,linux/arm64 \
         --build-arg VITE_SITE_URL={{ env_var_or_default('VITE_SITE_URL', '') }} \
         --build-arg VITE_SITE_ID={{ env_var_or_default('VITE_SITE_ID', '') }} \
@@ -56,27 +39,51 @@ deps:
 dev:
     ./scripts/dev.sh
 
-# Run production drift monitoring; pass --cutoff YYYY-MM-DD to override the champion watermark.
+# Run production drift monitoring; pass --cutoff YYYY-MM-DD to override the champion cutoff date.
 drift *args:
     uv run python src/flows/drift.py {{ args }}
+
+# Run production docker compose detached with 10 minute health check wait
+docker:
+    docker compose up -d --force-recreate --build --wait --wait-timeout 600
+
+# Run bronze-to-gold ETL; pass --incremental to process only latest matches.
+etl *args:
+    uv run python src/flows/etl.py {{ args }}
 
 # Run all configured linters.
 lint:
     uv run pre-commit run --all-files
 
+# Apply idempotent PostgreSQL schema migrations without dropping data.
+migrate:
+    uv run python src/db/migrate_db.py migrate
+
 # Delete every registered model and non-default experiment from MLflow.
 mlflow-reset:
     uv run python scripts/reset_mlflow.py
 
-# Trigger the Prefect scrape deployment; pass Prefect CLI args through unchanged (see scrape_flow docstring).
+# Fail-fast, non-mutating preflight for the host pipeline environment/
+probe:
+    uv run python scripts/probe.py
+
+# Trigger the Prefect scrape deployment; --param start_date=YYYY-MM-DD --param end_date=YYYY-MM-DD.
 scrape *args:
     uv run prefect deployment run scrape-flow/scrape {{ args }}
+
+# Seed deterministic raw matches. --all (every match) --enrich (Wikipedia bios) --force (overwrite existing rows).
+seed *args:
+    uv run python src/db/seed.py {{ args }}
+
+# Export an atomic PostgreSQL training snapshot, optional as the training pipeline always snapshots first.
+snapshot:
+    uv run python src/db/snapshot.py
 
 # Run the Python and web test suites.
 test:
     uv run pytest
     pnpm --dir web test
 
-# Run the notebook training pipeline.
+# Run the notebook training pipeline. --force-promote will always promote the candidate model as @champion
 train *args:
     uv run python src/flows/pipeline.py {{ args }}

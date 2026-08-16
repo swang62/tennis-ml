@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 import duckdb
 
@@ -166,17 +167,109 @@ def validate_snapshot(path: Path) -> None:
         con.close()
 
 
+# Query/fragment parameter names whose values are secrets. Matched case-insensitively
+# against the decoded key when logging a snapshot source URL.
+_SENSITIVE_PARAMS = frozenset(
+    (
+        "password",
+        "passwd",
+        "pwd",
+        "secret",
+        "token",
+        "access_token",
+        "api_key",
+        "apikey",
+        "api-key",
+        "api_token",
+        "apitoken",
+        "api-token",
+    )
+)
+
+
+def _mask_secret_values(raw: str) -> str:
+    """Replace values of sensitive key=value parameters in a query string with ****."""
+    masked = []
+    for item in raw.split("&"):
+        if not item:
+            continue
+        key, eq, _value = item.partition("=")
+        if eq and unquote(key).lower() in _SENSITIVE_PARAMS:
+            masked.append(f"{key}=****")
+        else:
+            masked.append(item)
+    return "&".join(masked)
+
+
+def _redact_pg_url(url: str) -> str:
+    """Return *url* safe to log: scheme, username, host/port, and database path
+    retained, plus non-sensitive query parameters and fragments. The password in
+    userinfo and values of sensitive query/fragment parameters become ****."""
+    parts = urlsplit(url)
+    if "@" in parts.netloc:
+        userinfo, host = parts.netloc.rsplit("@", 1)
+        user, _, password = userinfo.partition(":")
+        netloc = f"{user}:****@{host}" if password else f"{userinfo}@{host}"
+    else:
+        netloc = parts.netloc
+    fragment = _mask_secret_values(parts.fragment) if "=" in parts.fragment else parts.fragment
+    return urlunsplit(
+        (parts.scheme, netloc, parts.path, _mask_secret_values(parts.query), fragment)
+    )
+
+
+def _row_counts(path: Path) -> dict[tuple[str, str], int]:
+    """Rows per table in *path* (the snapshot tables once validation passes)."""
+    con = duckdb.connect(str(path), read_only=True)
+    try:
+        counts: dict[tuple[str, str], int] = {}
+        for schema, table in con.execute(
+            "SELECT schema_name, table_name FROM duckdb_tables()"
+        ).fetchall():
+            count_row = con.execute(f'SELECT COUNT(*) FROM "{schema}"."{table}"').fetchone()
+            assert count_row is not None
+            counts[(str(schema), str(table))] = int(count_row[0])
+        return counts
+    finally:
+        con.close()
+
+
+def _database_size_summary(path: Path) -> str:
+    """One-line PRAGMA database_size summary for the installed file."""
+    con = duckdb.connect(str(path), read_only=True)
+    try:
+        pragma = con.execute("PRAGMA database_size")
+        row = pragma.fetchone()
+        assert row is not None
+    finally:
+        con.close()
+    # Documented columns: database_name, database_size, block_size,
+    # total_blocks, used_blocks, free_blocks, wal_size, memory_usage, memory_limit.
+    _, size, block_size, total_blocks, used_blocks, free_blocks, wal_size, _, _ = row
+    return (
+        f"database_size={size} block_size={block_size} total_blocks={total_blocks} "
+        f"used_blocks={used_blocks} free_blocks={free_blocks} wal_size={wal_size}"
+    )
+
+
 def refresh_snapshot(path: Path = SNAPSHOT_PATH, pg_url: str | None = None) -> Path:
     """Build, validate, and atomically replace the training snapshot."""
+    pg_url = pg_url or get_database_url()
+    print(f"Snapshot source: {_redact_pg_url(pg_url)}")
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
-        _copy_tables(tmp, pg_url or get_database_url())
+        _copy_tables(tmp, pg_url)
+        for (schema, table), count in _row_counts(tmp).items():
+            print(f"  copied {schema}.{table}: {count} rows")
         validate_snapshot(tmp)
         os.replace(tmp, path)
     finally:
         if tmp.exists():
             tmp.unlink()
+    size = path.stat().st_size
+    print(f"Installed snapshot: {path} ({size / 1_000_000:.1f} MB on disk)")
+    print(f"  {_database_size_summary(path)}")
     return path
 
 

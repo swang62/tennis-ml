@@ -23,12 +23,21 @@ export function formatRate(value: number | null): string {
 
 export function formatLongDate(value: string): string {
   const [year, month, day] = value.split("-").map(Number);
-  const suffix = day % 10 === 1 && day !== 11 ? "st" : day % 10 === 2 && day !== 12 ? "nd" : day % 10 === 3 && day !== 13 ? "rd" : "th";
-  return new Date(year, month - 1, day).toLocaleDateString(undefined, {
-    month: "long",
-    day: "numeric",
-    year: "numeric",
-  }).replace(String(day), `${day}${suffix}`);
+  const suffix =
+    day % 10 === 1 && day !== 11
+      ? "st"
+      : day % 10 === 2 && day !== 12
+        ? "nd"
+        : day % 10 === 3 && day !== 13
+          ? "rd"
+          : "th";
+  return new Date(year, month - 1, day)
+    .toLocaleDateString(undefined, {
+      month: "long",
+      day: "numeric",
+      year: "numeric",
+    })
+    .replace(String(day), `${day}${suffix}`);
 }
 
 export function formatDelta(
@@ -87,15 +96,18 @@ export function scoreSegments(
   perspective: "winner" | "loser",
 ): ScoreSegment[] | null {
   if (!score) return null;
-  return score.trim().split(/\s+/).map((token, i) => {
-    const match = /^(\d+)-(\d+)$/.exec(token);
-    const playerWonSet =
-      match &&
-      (perspective === "winner"
-        ? Number(match[1]) > Number(match[2])
-        : Number(match[2]) > Number(match[1]));
-    return { text: i > 0 ? ` ${token}` : token, bold: Boolean(playerWonSet) };
-  });
+  return score
+    .trim()
+    .split(/\s+/)
+    .map((token, i) => {
+      const match = /^(\d+)-(\d+)$/.exec(token);
+      const playerWonSet =
+        match &&
+        (perspective === "winner"
+          ? Number(match[1]) > Number(match[2])
+          : Number(match[2]) > Number(match[1]));
+      return { text: i > 0 ? ` ${token}` : token, bold: Boolean(playerWonSet) };
+    });
 }
 
 const escapeRegExp = (s: string): string =>

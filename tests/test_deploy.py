@@ -119,9 +119,7 @@ def _stub_subprocess(monkeypatch):
     monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
 
 
-def test_deploy_bento_generates_directory_before_login_and_build(monkeypatch, tmp_path):
-    """The player-directory artifact is generated first: a failure there aborts
-    the deploy before any image is built or published."""
+def test_deploy_bento_logs_in_before_build(monkeypatch, tmp_path):
     d = _deploy()
     monkeypatch.setattr(d, "DOCKER_REPO", "acme")
     monkeypatch.setattr(d, "IMAGE_NAME", "tennis-bento")
@@ -130,9 +128,6 @@ def test_deploy_bento_generates_directory_before_login_and_build(monkeypatch, tm
     monkeypatch.setattr(d, "_write_state", lambda _s: None)
     monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
     order = []
-    monkeypatch.setattr(
-        d, "generate_directory_artifact", lambda: order.append("artifact") or Path(tmp_path)
-    )
     monkeypatch.setattr(d, "_docker_login", lambda: order.append("login"))
     monkeypatch.setattr(
         d,
@@ -142,61 +137,7 @@ def test_deploy_bento_generates_directory_before_login_and_build(monkeypatch, tm
 
     d.deploy_bento()
 
-    assert order == ["artifact", "login", "build"]
-
-
-def test_deploy_bento_aborts_before_publish_when_artifact_generation_fails(
-    monkeypatch,
-    tmp_path,
-):
-    """A failed directory artifact raises out of deploy before docker login or
-    the image build can run, so nothing is published."""
-    d = _deploy()
-    monkeypatch.setattr(d, "LOGS", tmp_path)
-    monkeypatch.setattr(
-        d, "generate_directory_artifact", lambda: (_ for _ in ()).throw(RuntimeError("no db"))
-    )
-    monkeypatch.setattr(
-        d, "_docker_login", lambda: (_ for _ in ()).throw(AssertionError("must not run"))
-    )
-    monkeypatch.setattr(
-        d, "build_bento_image", lambda: (_ for _ in ()).throw(AssertionError("must not run"))
-    )
-
-    import pytest
-
-    with pytest.raises(RuntimeError, match="no db"):
-        d.deploy_bento()
-
-
-def test_deploy_bento_aborts_before_login_when_directory_query_fails(
-    monkeypatch,
-    tmp_path,
-):
-    """A failing directory query (players or latest-match-date) raises out of
-    the real generate_directory_artifact before docker login or the image
-    build can run — a missing database must never be baked into an image."""
-    d = _deploy()
-    monkeypatch.setattr(d, "LOGS", tmp_path)
-    queried = []
-
-    def failing_execute(sql):
-        queried.append(sql)
-        raise RuntimeError("database unreachable")
-
-    monkeypatch.setattr(d, "execute_df", failing_execute)
-    monkeypatch.setattr(
-        d, "_docker_login", lambda: (_ for _ in ()).throw(AssertionError("must not run"))
-    )
-    monkeypatch.setattr(
-        d, "build_bento_image", lambda: (_ for _ in ()).throw(AssertionError("must not run"))
-    )
-
-    import pytest
-
-    with pytest.raises(RuntimeError, match="database unreachable"):
-        d.deploy_bento()
-    assert queried  # the directory query was actually attempted
+    assert order == ["login", "build"]
 
 
 def test_deploy_bento_logs_in_before_build_then_writes_state(monkeypatch, tmp_path):
@@ -399,6 +340,7 @@ def _stub_bento_build(monkeypatch):
     )
     monkeypatch.setattr(d, "_reuse_or_materialize_nn_onnx", lambda _state, _nn: False)
     monkeypatch.setattr(d, "_download_aux_artifacts", lambda _client, _tags: None)
+    monkeypatch.setattr(d, "generate_directory_artifact", lambda: None)
     monkeypatch.setattr(d, "build_input_fingerprint", lambda _client, _prod: "fp")
     monkeypatch.setattr(d, "_read_state", lambda: {"fingerprint": "fp"})
     monkeypatch.setattr(
@@ -682,6 +624,21 @@ def test_download_aux_artifacts_reuses_matching_local_files(monkeypatch, tmp_pat
     assert sorted(p.name for p in artifacts_dir.iterdir()) == sorted(name for _, _, name in _specs)
 
 
+def test_download_aux_artifacts_requires_no_directory_tags(monkeypatch, tmp_path):
+    """The player directory is a navigation artifact rebuilt at deploy time
+    from the snapshot: a champion carrying no aux_player_directory_* tags must
+    still deploy (regression for the reverted directory champion-pinning)."""
+    d = _deploy()
+    _specs, tags, _downloaded, artifacts_dir = _aux_tags_and_files(
+        monkeypatch, tmp_path, d, pre_populate=True
+    )
+    monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", artifacts_dir)
+
+    assert not any("directory" in tag for tag in tags)
+    d._download_aux_artifacts(None, tags)  # no RuntimeError for missing directory tags
+    assert not (artifacts_dir / "player_directory.json").exists()
+
+
 def test_download_aux_artifacts_downloads_missing_files(monkeypatch, tmp_path):
     """Missing artifacts are downloaded once each and verified against the pin."""
     d = _deploy()
@@ -846,10 +803,6 @@ def _lineage_tags():
         "aux_embeddings_hash": "bbb",
         "aux_bio_feature_cols_uri": "runs:/run-aux/bio_feature_cols.json",
         "aux_bio_feature_cols_hash": "ccc",
-        "aux_similarity_index_uri": "runs:/run-aux/player_similarity.index",
-        "aux_similarity_index_hash": "ddd",
-        "aux_similarity_metadata_uri": "runs:/run-aux/player_metadata.json",
-        "aux_similarity_metadata_hash": "eee",
     }
 
 
@@ -1006,10 +959,6 @@ def test_build_lineage_tags_flattens_exact_pins():
         "embeddings_hash": "bbb",
         "bio_feature_cols_uri": "runs:/run-aux/bio_feature_cols.json",
         "bio_feature_cols_hash": "ccc",
-        "similarity_index_uri": "runs:/run-aux/player_similarity.index",
-        "similarity_index_hash": "ddd",
-        "similarity_metadata_uri": "runs:/run-aux/player_metadata.json",
-        "similarity_metadata_hash": "eee",
     }
     tags = c.build_lineage_tags(base_pins, aux_pins)
 
@@ -1020,10 +969,14 @@ def test_build_lineage_tags_flattens_exact_pins():
     assert tags["base_nn_model_uri"] == "runs:/run-nn/nn_model"
     assert tags["aux_embeddings_hash"] == "bbb"
     assert tags["aux_bio_feature_cols_uri"] == "runs:/run-aux/bio_feature_cols.json"
-    assert tags["aux_similarity_index_uri"] == "runs:/run-aux/player_similarity.index"
-    assert tags["aux_similarity_index_hash"] == "ddd"
-    assert tags["aux_similarity_metadata_uri"] == "runs:/run-aux/player_metadata.json"
-    assert tags["aux_similarity_metadata_hash"] == "eee"
+    # Navigation artifacts (similarity index/metadata, player directory) are not
+    # model lineage: build_lineage_tags never emits their tags.
+    for nav_key in (
+        "aux_similarity_index_uri",
+        "aux_similarity_metadata_uri",
+        "aux_player_directory_uri",
+    ):
+        assert nav_key not in tags
 
 
 # --- Task 2: static notebook/deploy contracts ---

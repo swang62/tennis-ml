@@ -1,12 +1,12 @@
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import {
   lazy,
   Suspense,
+  type SyntheticEvent,
   useCallback,
   useEffect,
-  type SyntheticEvent,
 } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
 import {
   getMatchHistory,
   getPlayerProfile,
@@ -36,30 +36,37 @@ export default function Home() {
   const selectedPlayer =
     players.find((p) => p.player_id === selectedId) ?? null;
 
+  // Queries below run only when a player is selected (enabled), so the id is
+  // non-null there; assert it once instead of at every call site.
+  const requireSelectedId = (): string => {
+    if (selectedId === null) throw new Error("no player selected");
+    return selectedId;
+  };
+
   const profileQ = useQuery({
     queryKey: ["profile", selectedId],
-    queryFn: () => getPlayerProfile(selectedId!),
+    queryFn: () => getPlayerProfile(requireSelectedId()),
     enabled: selectedId !== null,
     staleTime: Infinity,
     gcTime: Infinity,
   });
   const rankQ = useQuery({
     queryKey: ["rank_history", selectedId],
-    queryFn: () => getRankHistory(selectedId!),
+    queryFn: () => getRankHistory(requireSelectedId()),
     enabled: selectedId !== null,
     staleTime: Infinity,
     gcTime: Infinity,
   });
   const matchesQ = useQuery({
     queryKey: ["match_history", selectedId, 20],
-    queryFn: () => getMatchHistory(selectedId!, 20),
+    queryFn: () => getMatchHistory(requireSelectedId(), 20),
     enabled: selectedId !== null,
     staleTime: Infinity,
     gcTime: Infinity,
   });
   const similarQ = useQuery({
     queryKey: ["similar_players", selectedId],
-    queryFn: () => getSimilarPlayers(selectedId!, 3),
+    queryFn: () => getSimilarPlayers(requireSelectedId(), 3),
     enabled: selectedId !== null,
     staleTime: Infinity,
     gcTime: Infinity,
@@ -151,7 +158,9 @@ export default function Home() {
             </div>
             <div className="stat">
               <span className="stat-label">Matches</span>
-              <span className="stat-num num">{totalMatches.toLocaleString("en-US")}</span>
+              <span className="stat-num num">
+                {totalMatches.toLocaleString("en-US")}
+              </span>
             </div>
           </div>
         )}
@@ -189,6 +198,7 @@ export default function Home() {
       )}
 
       {selectedId !== null && (
+        // biome-ignore lint/a11y/noStaticElementInteractions: container delegates mouse/focus prefetch to .similar-link child buttons
         <div
           id="profile-anchor"
           className="mt-8"
