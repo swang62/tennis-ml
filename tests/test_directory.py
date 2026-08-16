@@ -82,22 +82,8 @@ def test_directory_players_deterministic():
     assert directory_players(_directory_df()) == directory_players(_directory_df())
 
 
-def test_directory_players_cluster_labels_from_artifacts(monkeypatch, tmp_path):
-    """When the clustering artifacts exist, each entry carries its archetype
-    label; players without an assignment stay null."""
-    import src.serving.directory as directory
-
-    (tmp_path / "cluster_assignments.parquet").parent.mkdir(exist_ok=True)
-    pd.DataFrame({"player_id": ["p2", "p1"], "cluster_id": ["0", "0"]}).to_parquet(
-        tmp_path / "cluster_assignments.parquet"
-    )
-    (tmp_path / "cluster_descriptions.json").write_text(
-        json.dumps({"0": "Big Server", "1": "Counterpuncher"})
-    )
-    monkeypatch.setattr(directory, "DEFAULT_CLUSTERS", tmp_path / "cluster_assignments.parquet")
-    monkeypatch.setattr(directory, "DEFAULT_CLUSTER_LABELS", tmp_path / "cluster_descriptions.json")
-
-    players = directory_players(_directory_df())
+def test_directory_players_use_supplied_cluster_labels():
+    players = directory_players(_directory_df(), {"p2": "Big Server", "p1": "Big Server"})
 
     assert players[0]["cluster_label"] == "Big Server"  # p2
     assert players[1]["cluster_label"] == "Big Server"  # p1
@@ -105,14 +91,7 @@ def test_directory_players_cluster_labels_from_artifacts(monkeypatch, tmp_path):
     assert [p["player_id"] for p in players] == ["p2", "p1", "p3"]  # row order kept
 
 
-def test_directory_players_malformed_cluster_artifacts_are_ignored(monkeypatch, tmp_path):
-    """A corrupt artifact must not break the directory: it behaves as absent."""
-    import src.serving.directory as directory
-
-    (tmp_path / "cluster_descriptions.json").write_text("{not json")
-    monkeypatch.setattr(directory, "DEFAULT_CLUSTER_LABELS", tmp_path / "cluster_descriptions.json")
-    monkeypatch.setattr(directory, "DEFAULT_CLUSTERS", tmp_path / "missing.parquet")
-
+def test_directory_players_without_cluster_labels_use_null():
     players = directory_players(_directory_df())
     assert all(p["cluster_label"] is None for p in players)
 
@@ -167,19 +146,49 @@ def _deploy():
     return importlib.import_module("src.flows.deploy")
 
 
-def test_generate_directory_artifact_builds_from_snapshot(monkeypatch, tmp_path):
-    """The deploy-time artifact is generated from the DuckDB training snapshot —
-    no champion-pinned directory file, no MLflow download."""
+def test_generate_navigation_artifacts_builds_from_snapshot(monkeypatch, tmp_path):
+    """Deploy builds matching directory and similarity metadata from one snapshot read."""
     d = _deploy()
     out = tmp_path / "web" / "public" / "player-directory.json"
     monkeypatch.setattr(d, "WEB_DIRECTORY_ARTIFACT", out)
-    monkeypatch.setattr("src.db.training.to_dataframe", lambda _sql: _directory_df())
+    monkeypatch.setattr(d, "SIMILARITY_INDEX", tmp_path / "player_similarity.index")
+    monkeypatch.setattr(d, "SIMILARITY_METADATA", tmp_path / "player_metadata.json")
+    calls = []
+    monkeypatch.setattr(
+        "src.db.training.to_dataframe", lambda sql: calls.append(sql) or _directory_df()
+    )
+    assignments = pd.DataFrame({"player_id": ["p1", "p2"], "cluster_id": ["0", "1"]})
+    monkeypatch.setattr(
+        "src.models.similarity.load_cluster_artifacts",
+        lambda: (assignments, {"0": "Big Server", "1": "Counterpuncher"}),
+    )
 
-    path = d.generate_directory_artifact()
+    class FakeSimilarity:
+        def build(self, **kwargs):
+            self.players = [
+                {"player_id": "p2", "cluster_label": "Counterpuncher"},
+                {"player_id": "p1", "cluster_label": "Big Server"},
+                {"player_id": "p3", "cluster_label": None},
+            ]
+            kwargs["index_path"].write_bytes(b"index")
+            kwargs["metadata_path"].write_text(
+                json.dumps(
+                    [
+                        {"player_id": "p2", "cluster_label": "Counterpuncher"},
+                        {"player_id": "p1", "cluster_label": "Big Server"},
+                    ]
+                )
+            )
+
+    monkeypatch.setattr("src.models.similarity.PlayerSimilarity", FakeSimilarity)
+
+    path = d.generate_navigation_artifacts()
 
     assert path == out
     artifact = json.loads(out.read_text())
-    assert artifact == {"players": directory_players(_directory_df())}
+    assert [p["player_id"] for p in artifact["players"]] == ["p2", "p1", "p3"]
+    assert artifact["players"][0]["cluster_label"] == "Counterpuncher"
+    assert calls == [PLAYERS_SQL]
     # The web loader contract: every player carries the static-picker fields.
     for field in (
         "player_id",
@@ -194,7 +203,7 @@ def test_generate_directory_artifact_builds_from_snapshot(monkeypatch, tmp_path)
     assert [p["player_id"] for p in artifact["players"]] == ["p2", "p1", "p3"]
 
 
-def test_generate_directory_artifact_requires_snapshot(monkeypatch, tmp_path):
+def test_generate_navigation_artifacts_requires_snapshot(monkeypatch, tmp_path):
     """Without the training snapshot the deploy fails with the actionable
     snapshot-missing error and stages nothing."""
     d = _deploy()
@@ -212,7 +221,7 @@ def test_generate_directory_artifact_requires_snapshot(monkeypatch, tmp_path):
     import pytest
 
     with pytest.raises(FileNotFoundError, match="training snapshot not found"):
-        d.generate_directory_artifact()
+        d.generate_navigation_artifacts()
     assert not out.exists()
 
 
@@ -228,10 +237,21 @@ def test_deploy_tee_preserves_console_isatty():
     assert tee.isatty() is True
 
 
-def test_generate_directory_artifact_raises_when_write_fails(monkeypatch, tmp_path):
+def test_generate_navigation_artifacts_raises_when_write_fails(monkeypatch, tmp_path):
     """A staging failure also aborts the artifact (and therefore the deploy)."""
     d = _deploy()
-    monkeypatch.setattr("src.db.training.to_dataframe", lambda _sql: _directory_df().head(0))
+    monkeypatch.setattr("src.db.training.to_dataframe", lambda _sql: _directory_df())
+    monkeypatch.setattr(
+        "src.models.similarity.load_cluster_artifacts", lambda: (pd.DataFrame(), {})
+    )
+
+    def no_build(self, *_args, **_kwargs):
+        self.players = [
+            {"player_id": player_id, "cluster_label": None} for player_id in ("p2", "p1", "p3")
+        ]
+        return None
+
+    monkeypatch.setattr("src.models.similarity.PlayerSimilarity.build", no_build)
     blocked = tmp_path / "blocked"
     blocked.write_text("not a directory")
     monkeypatch.setattr(d, "WEB_DIRECTORY_ARTIFACT", blocked / "player-directory.json")
@@ -239,4 +259,4 @@ def test_generate_directory_artifact_raises_when_write_fails(monkeypatch, tmp_pa
     import pytest
 
     with pytest.raises(OSError):
-        d.generate_directory_artifact()
+        d.generate_navigation_artifacts()

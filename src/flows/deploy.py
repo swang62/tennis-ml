@@ -43,7 +43,7 @@ BENTO_TAG_FILE = DATA_PROCESSED / "bento_tag.txt"
 STATE_FILE = DATA_PROCESSED / "bento_build_state.json"
 
 # Raw player directory baked into the web image, generated from the local
-# DuckDB training snapshot at deploy time (see generate_directory_artifact).
+# DuckDB training snapshot at deploy time (see generate_navigation_artifacts).
 # Git-ignored after the web build consumes it. Never champion-pinned.
 WEB_DIRECTORY_ARTIFACT = ROOT / "web" / "public" / "player-directory.json"
 
@@ -62,10 +62,8 @@ BASE_BENTO_NAMES = {"linear": "linear_best", "gbdt": "gbdt_best", "nn": "nn_best
 MLFLOW_URI_META_KEY = "mlflow_uri"
 MLFLOW_VERSION_META_KEY = "mlflow_version"
 
-# Packaged artifacts; serving reads PostgreSQL live, never training data.
-# Everything serving reads from disk lives in the frozen DEPLOY_ARTIFACTS folder
-# (populated by 05 on promotion), so deploy never depends on the mutable
-# training folder.
+# Model artifacts are materialized into DEPLOY_ARTIFACTS from champion lineage;
+# navigation artifacts are freshly rebuilt there from the training snapshot.
 NN_ONNX_FILE = DEPLOY_ARTIFACTS / "nn_best.onnx"
 # Packaged index for offline /similar_players requests.
 SIMILARITY_INDEX = DEPLOY_ARTIFACTS / "player_similarity.index"
@@ -81,11 +79,10 @@ AUX_FILES = [
 ]
 
 # Files whose content is a build input but is NOT pinned in champion lineage.
-# Lineage-pinned artifacts (bases, scaler, embeddings, similarity index and
-# metadata) enter the fingerprint through the champion's exact tags instead of
-# their mutable data/processed copies. nn_best.onnx is a deploy-time export of
-# the pinned nn version and model_info.json is generated from the fingerprint
-# itself, so both are excluded too. The packaged runtime feature inputs below
+# Lineage-pinned artifacts (bases, scaler, and embeddings) enter the fingerprint
+# through the champion's exact tags. nn_best.onnx is a deploy-time export of the
+# pinned nn version and model_info.json is generated from the fingerprint itself,
+# so both are excluded too. The packaged runtime feature inputs below
 # can change predictions without changing service.py, so they are fingerprinted
 # directly.
 SOURCE_FINGERPRINT_FILES = [
@@ -226,15 +223,14 @@ def _write_model_info(
 def _download_aux_artifacts(client: Any, tags: dict[str, str]) -> None:  # noqa: ARG001 — tags carry everything; client kept for the caller contract
     """Download the champion's lineage-pinned aux artifacts into DEPLOY_ARTIFACTS.
 
-    Five artifacts are pinned on the champion model version via
+    Three model-affecting artifacts are pinned on the champion model version via
     URI+hash lineage tags. A local copy is reused when its content hash
     already matches the pin; otherwise the artifact is downloaded from its
     exact URI (one retry on a transient download failure) and verified
     against its content hash before the build proceeds. A champion missing
     any required tag is not deployable and must be re-promoted from a full
-    training run. The player directory is NOT among them: it is a navigation
-    artifact rebuilt from the DuckDB snapshot at deploy time, never
-    champion-pinned.
+    training run. Navigation artifacts are rebuilt from the DuckDB snapshot at
+    deploy time and are never champion-pinned.
     """
     import mlflow
 
@@ -242,8 +238,6 @@ def _download_aux_artifacts(client: Any, tags: dict[str, str]) -> None:  # noqa:
         ("base_linear_scaler_uri", "base_linear_scaler_hash", "linear_scaler.pkl"),
         ("aux_embeddings_uri", "aux_embeddings_hash", "bio_embeddings.npz"),
         ("aux_bio_feature_cols_uri", "aux_bio_feature_cols_hash", "bio_feature_cols.json"),
-        ("aux_similarity_index_uri", "aux_similarity_index_hash", "player_similarity.index"),
-        ("aux_similarity_metadata_uri", "aux_similarity_metadata_hash", "player_metadata.json"),
     ]
     DEPLOY_ARTIFACTS.mkdir(parents=True, exist_ok=True)
     for uri_tag, hash_tag, filename in specs:
@@ -720,7 +714,7 @@ def build_bento_image() -> tuple[str, int]:
     _reuse_or_materialize_nn_onnx(state, pins["nn"])
     version_tags = client.get_model_version(PRODUCTION_MODEL, production.version).tags
     _download_aux_artifacts(client, version_tags)
-    generate_directory_artifact()
+    generate_navigation_artifacts()
     fingerprint = build_input_fingerprint(client, production)
     _write_model_info(client, production, pins, fingerprint)
 
@@ -752,8 +746,8 @@ def build_bento_image() -> tuple[str, int]:
     return image, int(production.version)
 
 
-def generate_directory_artifact() -> Path:
-    """Generate the raw web player directory from the local DuckDB training snapshot.
+def generate_navigation_artifacts() -> Path:
+    """Build and stage all navigation assets from the local DuckDB snapshot.
 
     The web image build consumes ``web/public/player-directory.json`` and
     serializes it into the content-hashed MiniSearch payload + manifest (see
@@ -763,14 +757,40 @@ def generate_directory_artifact() -> Path:
     helper's actionable error.
     """
     from src.db import training
+    from src.models.similarity import PlayerSimilarity, load_cluster_artifacts
     from src.serving.directory import PLAYERS_SQL, directory_players
 
-    players = directory_players(training.to_dataframe(PLAYERS_SQL))
+    profiles = training.to_dataframe(PLAYERS_SQL)
+    if profiles.empty:
+        raise RuntimeError("training snapshot has no player profiles; refresh it before deploy")
+    assignments, labels = load_cluster_artifacts()
+    cluster_labels = {
+        str(row["player_id"]): labels.get(str(row["cluster_id"]), f"cluster_{row['cluster_id']}")
+        for _, row in assignments.iterrows()
+    }
+    similarity = PlayerSimilarity()
+    similarity.build(
+        query=training.to_dataframe,
+        profiles=profiles,
+        cluster_assignments=assignments,
+        cluster_labels=labels,
+        index_path=SIMILARITY_INDEX,
+        metadata_path=SIMILARITY_METADATA,
+    )
+    players = directory_players(profiles, cluster_labels)
+    metadata = {str(player["player_id"]): player for player in similarity.players}
+    if set(metadata) != {str(player["player_id"]) for player in players}:
+        raise RuntimeError("directory and similarity player IDs differ in the training snapshot")
+    if any(
+        metadata[str(player["player_id"])].get("cluster_label") != player["cluster_label"]
+        for player in players
+    ):
+        raise RuntimeError("directory and similarity cluster labels differ")
     WEB_DIRECTORY_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
     WEB_DIRECTORY_ARTIFACT.write_text(json.dumps({"players": players}, indent=2) + "\n")
     _log(
         "minisearch",
-        f"staged snapshot-backed web directory artifact: {WEB_DIRECTORY_ARTIFACT}",
+        f"staged snapshot-backed navigation artifacts: {SIMILARITY_INDEX}, {WEB_DIRECTORY_ARTIFACT}",
     )
     return WEB_DIRECTORY_ARTIFACT
 

@@ -150,8 +150,8 @@ command -v curl >/dev/null 2>&1 || { echo "[dev] error: 'curl' not found" >&2; e
 # after changing DATABASE_URL).
 log minisearch "rebuilding static player index from training snapshot..."
 uv run python -c '
-from src.flows.deploy import generate_directory_artifact
-generate_directory_artifact()
+from src.flows.deploy import generate_navigation_artifacts
+generate_navigation_artifacts()
 ' || {
     echo "[minisearch] error: player-directory generation failed (missing training snapshot or artifact write)" >&2
     exit 1

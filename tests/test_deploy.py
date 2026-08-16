@@ -159,7 +159,7 @@ def test_deploy_bento_logs_in_before_build_then_writes_state(monkeypatch, tmp_pa
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr("subprocess.run", fake_run)
-    monkeypatch.setattr(d, "generate_directory_artifact", lambda: None)
+    monkeypatch.setattr(d, "generate_navigation_artifacts", lambda: None)
     monkeypatch.setattr(d, "_docker_login", lambda: order.append("login"))
     monkeypatch.setattr(
         d,
@@ -184,7 +184,7 @@ def test_deploy_bento_does_not_require_postgres_password(monkeypatch, tmp_path):
     monkeypatch.setattr(d, "IMAGE_NAME", "tennis-bento")
     monkeypatch.setattr(d, "LOGS", tmp_path)
     monkeypatch.setattr(d, "build_bento_image", lambda **_kwargs: ("acme/tennis-bento:latest", 5))
-    monkeypatch.setattr(d, "generate_directory_artifact", lambda: None)
+    monkeypatch.setattr(d, "generate_navigation_artifacts", lambda: None)
     monkeypatch.setattr(d, "_docker_login", lambda: None)
     monkeypatch.setattr(d, "_read_state", lambda: {})
     monkeypatch.setattr(d, "_write_state", lambda _s: None)
@@ -202,7 +202,7 @@ def test_deploy_bento_does_not_require_postgres_password(monkeypatch, tmp_path):
 def test_deploy_bento_fails_when_buildx_push_fails(monkeypatch, tmp_path):
     d = _deploy()
     monkeypatch.setattr(d, "LOGS", tmp_path)
-    monkeypatch.setattr(d, "generate_directory_artifact", lambda: None)
+    monkeypatch.setattr(d, "generate_navigation_artifacts", lambda: None)
     monkeypatch.setattr(d, "_docker_login", lambda: None)
 
     def fail_build():
@@ -226,7 +226,7 @@ def test_deploy_bento_logs_build_and_buildx_to_single_file(monkeypatch, tmp_path
     monkeypatch.setattr(d, "LOGS", tmp_path)
     monkeypatch.setattr(d, "DOCKER_REPO", "acme")
     monkeypatch.setattr(d, "IMAGE_NAME", "tennis-bento")
-    monkeypatch.setattr(d, "generate_directory_artifact", lambda: None)
+    monkeypatch.setattr(d, "generate_navigation_artifacts", lambda: None)
     monkeypatch.setattr(d, "_docker_login", lambda: None)
     monkeypatch.setattr(d, "_read_state", lambda: {})
     monkeypatch.setattr(d, "_write_state", lambda _s: None)
@@ -266,7 +266,7 @@ def test_deploy_bento_leaves_log_when_build_fails(monkeypatch, tmp_path):
     """A raising build still leaves a non-empty deploy_*.log with its output."""
     d = _deploy()
     monkeypatch.setattr(d, "LOGS", tmp_path)
-    monkeypatch.setattr(d, "generate_directory_artifact", lambda: None)
+    monkeypatch.setattr(d, "generate_navigation_artifacts", lambda: None)
 
     def fail_build():
         print("champion missing lineage tags")
@@ -340,7 +340,7 @@ def _stub_bento_build(monkeypatch):
     )
     monkeypatch.setattr(d, "_reuse_or_materialize_nn_onnx", lambda _state, _nn: False)
     monkeypatch.setattr(d, "_download_aux_artifacts", lambda _client, _tags: None)
-    monkeypatch.setattr(d, "generate_directory_artifact", lambda: None)
+    monkeypatch.setattr(d, "generate_navigation_artifacts", lambda: None)
     monkeypatch.setattr(d, "build_input_fingerprint", lambda _client, _prod: "fp")
     monkeypatch.setattr(d, "_read_state", lambda: {"fingerprint": "fp"})
     monkeypatch.setattr(
@@ -581,8 +581,6 @@ def _aux_tags_and_files(monkeypatch, tmp_path, d, pre_populate=True):
         ("base_linear_scaler_uri", "base_linear_scaler_hash", "linear_scaler.pkl"),
         ("aux_embeddings_uri", "aux_embeddings_hash", "bio_embeddings.npz"),
         ("aux_bio_feature_cols_uri", "aux_bio_feature_cols_hash", "bio_feature_cols.json"),
-        ("aux_similarity_index_uri", "aux_similarity_index_hash", "player_similarity.index"),
-        ("aux_similarity_metadata_uri", "aux_similarity_metadata_hash", "player_metadata.json"),
     ]
     tags = {}
     for uri_tag, hash_tag, name in specs:
@@ -620,22 +618,20 @@ def test_download_aux_artifacts_reuses_matching_local_files(monkeypatch, tmp_pat
 
     d._download_aux_artifacts(None, tags)
 
-    assert downloaded == []  # all five reused
+    assert downloaded == []  # all model artifacts reused
     assert sorted(p.name for p in artifacts_dir.iterdir()) == sorted(name for _, _, name in _specs)
 
 
-def test_download_aux_artifacts_requires_no_directory_tags(monkeypatch, tmp_path):
-    """The player directory is a navigation artifact rebuilt at deploy time
-    from the snapshot: a champion carrying no aux_player_directory_* tags must
-    still deploy (regression for the reverted directory champion-pinning)."""
+def test_download_aux_artifacts_requires_no_navigation_tags(monkeypatch, tmp_path):
+    """Navigation artifacts are rebuilt from the snapshot, never downloaded."""
     d = _deploy()
     _specs, tags, _downloaded, artifacts_dir = _aux_tags_and_files(
         monkeypatch, tmp_path, d, pre_populate=True
     )
     monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", artifacts_dir)
 
-    assert not any("directory" in tag for tag in tags)
-    d._download_aux_artifacts(None, tags)  # no RuntimeError for missing directory tags
+    assert not any("similarity" in tag or "directory" in tag for tag in tags)
+    d._download_aux_artifacts(None, tags)
     assert not (artifacts_dir / "player_directory.json").exists()
 
 
@@ -660,11 +656,11 @@ def test_download_aux_artifacts_missing_tag_fails(monkeypatch, tmp_path):
     d = _deploy()
     _specs, tags, _downloaded, artifacts_dir = _aux_tags_and_files(monkeypatch, tmp_path, d)
     monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", artifacts_dir)
-    del tags["aux_similarity_index_uri"]
+    del tags["aux_embeddings_uri"]
 
     import pytest
 
-    with pytest.raises(RuntimeError, match="aux_similarity_index_uri"):
+    with pytest.raises(RuntimeError, match="aux_embeddings_uri"):
         d._download_aux_artifacts(None, tags)
 
 
@@ -979,12 +975,11 @@ def test_build_lineage_tags_flattens_exact_pins():
         assert nav_key not in tags
 
 
-# --- Task 2: static notebook/deploy contracts ---
+# --- Navigation boundary contracts ---
 
 
-def test_similarity_artifacts_are_lineage_pinned_not_fingerprint_inputs():
-    """The similarity index and metadata are pinned in the champion lineage
-    tags (aux_similarity_*), not hashed as standalone build-input files."""
+def test_similarity_artifacts_are_snapshot_built_not_fingerprint_inputs():
+    """Navigation artifacts are rebuilt at deploy, not champion lineage inputs."""
     d = _deploy()
     assert d.SIMILARITY_INDEX not in d.SOURCE_FINGERPRINT_FILES
     assert d.SIMILARITY_METADATA not in d.SOURCE_FINGERPRINT_FILES
