@@ -27,7 +27,6 @@ from src.constants import (
     BRONZE_MATCHES_TABLE,
     BRONZE_PROFILES_TABLE,
     BULK_MAX_ROWS,
-    SILVER_PLAYER_MATCHES,
     SILVER_ROLLING_FEATURES,
     TOUR_AVERAGES_TABLE,
 )
@@ -65,12 +64,6 @@ _ROUND_ENCODINGS = {
     "f": 7,
 }
 
-_SURFACE_TO_SNAPSHOT_COL = {
-    "clay": "clay_win_rate_10",
-    "grass": "grass_win_rate_10",
-    "hard": "hard_win_rate_10",
-}
-
 # Latest snapshot per player strictly before the as-of date. Point lookup.
 _LATEST_SNAPSHOT_SQL = f"""
 SELECT * FROM {SILVER_ROLLING_FEATURES}
@@ -78,15 +71,6 @@ WHERE player_id = %s
   AND snapshot_date < %s::date
 ORDER BY player_match_number DESC
 LIMIT 1
-"""
-
-# Pre-match activity count for [as_of - 30 days, as_of).
-_MATCHES_30D_SQL = f"""
-SELECT COUNT(*) AS n
-FROM {SILVER_PLAYER_MATCHES}
-WHERE player_id = %s
-  AND match_date >= %s::date - INTERVAL '30 days'
-  AND match_date < %s::date
 """
 
 # Last five distinct, strictly-prior meetings for the requested pair. Bronze
@@ -125,16 +109,6 @@ LEFT JOIN LATERAL (
     ORDER BY player_match_number DESC
     LIMIT 1
 ) s ON true
-"""
-
-_MATCHES_30D_BULK_SQL = f"""
-SELECT req.player_id AS req_player_id, req.as_of_iso, COUNT(pm.player_id) AS n
-FROM unnest(%s::text[], %s::date[]) AS req(player_id, as_of_iso)
-LEFT JOIN {SILVER_PLAYER_MATCHES} pm
-  ON pm.player_id = req.player_id
- AND pm.match_date >= req.as_of_iso::date - INTERVAL '30 days'
- AND pm.match_date < req.as_of_iso::date
-GROUP BY req.player_id, req.as_of_iso
 """
 
 _PROFILES_BULK_SQL = f"""
@@ -179,17 +153,12 @@ def _to_date(value: object) -> date:
 
 def _side_values(
     row: dict[str, object] | None,
-    as_of_date: date,
-    surface: str,
     defaults: dict[str, float],
-    matches_30d: int | None = None,
 ) -> dict[str, int | float]:
     """Build one side's values from its latest snapshot or the tour-averages
     singleton fallbacks.
 
-    `matches_30d` supplies the pre-match activity count when the caller already
-    looked it up (bulk path); when omitted, the scalar path queries it on
-    demand for snapshot-bearing sides.
+    Rolling snapshot values are used only for the retained model features.
     """
 
     def cell(snapshot_col: str, default_col: str) -> float:
@@ -205,25 +174,6 @@ def _side_values(
     age = cell("latest_player_age", "latest_player_age")
     avg_rank_10 = cell("avg_player_rank_10", "avg_player_rank_10")
 
-    if row is not None:
-        days_since = int((as_of_date - _to_date(row["snapshot_date"])).days)
-        if matches_30d is None:
-            matches_30d = int(
-                execute_df(
-                    _MATCHES_30D_SQL,
-                    [row["player_id"], as_of_date.isoformat(), as_of_date.isoformat()],
-                ).iloc[0]["n"]
-            )
-    else:
-        # Defaults are pre-rounded whole values in the materialized table.
-        days_since = int(defaults["days_since_default"])
-        matches_30d = int(defaults["matches_30d_default"])
-
-    surface_win_rate = (
-        cell(_SURFACE_TO_SNAPSHOT_COL[surface], _SURFACE_TO_SNAPSHOT_COL[surface])
-        if surface in _SURFACE_TO_SNAPSHOT_COL
-        else float(defaults["rate_default"])
-    )
     return {
         "ranking": ranking,
         "rank_points": rank_points,
@@ -242,11 +192,7 @@ def _side_values(
         "rank_trend_10": avg_rank_10 - ranking,
         "avg_rank_faced_10": cell("avg_rank_faced_10", "avg_rank_faced_10"),
         "streak": int(cell("streak", "streak")),
-        "days_since_last_match": days_since,
-        "matches_30d": matches_30d,
-        "surface_win_rate_10": surface_win_rate,
-        # Matches observed in the 10-match rolling window; cold start is literal 0
-        # (no tour_averages fallback), matching gold.match_features.
+        # Matches observed in the 10-match rolling window; cold start is literal 0.
         "matches_10": int(float(cast(Real, row["matches_10"]))) if row is not None else 0,
     }
 
@@ -440,12 +386,6 @@ def _assemble_row(
     for name in (
         "player_weighted_form_10",
         "opponent_weighted_form_10",
-        "player_days_since_last_match",
-        "opponent_days_since_last_match",
-        "player_matches_30d",
-        "opponent_matches_30d",
-        "player_surface_win_rate_10",
-        "opponent_surface_win_rate_10",
         "player_matches_10",
         "opponent_matches_10",
         "player_is_left_handed",
@@ -463,7 +403,6 @@ def _assemble_row(
     row["is_clay"] = int(ctx.surface == "clay")
     row["is_grass"] = int(ctx.surface == "grass")
     row["is_hard"] = int(ctx.surface == "hard")
-    row["is_carpet"] = int(ctx.surface == "carpet")
     row["is_indoor"] = ctx.is_indoor
     row["tournament_level"] = ctx.tournament_level
     row["round_encoded"] = ctx.round_encoded
@@ -513,8 +452,8 @@ def _build_inference_features_with_meta(
     player_snapshot = _latest_snapshot(ctx.player_id)
     opponent_snapshot = _latest_snapshot(ctx.opponent_id)
 
-    player_side = _side_values(player_snapshot, ctx.as_of_date, ctx.surface, defaults)
-    opponent_side = _side_values(opponent_snapshot, ctx.as_of_date, ctx.surface, defaults)
+    player_side = _side_values(player_snapshot, defaults)
+    opponent_side = _side_values(opponent_snapshot, defaults)
     player_side.update(_profile_values(ctx.player_id, ctx.as_of_date, defaults))
     opponent_side.update(_profile_values(ctx.opponent_id, ctx.as_of_date, defaults))
 
@@ -553,7 +492,6 @@ def _build_inference_features_with_meta(
         "profile_rows": int(float(cast(Real, ta["profile_rows"] or 0))),
         "player_match_rows": int(float(cast(Real, ta["player_match_rows"] or 0))),
         "median_days_since": float(defaults["days_since_default"]),
-        "median_matches_30d": float(defaults["matches_30d_default"]),
         "player_snapshot_found": player_snapshot is not None,
         "opponent_snapshot_found": opponent_snapshot is not None,
         "player_snapshot_date": None
@@ -568,10 +506,6 @@ def _build_inference_features_with_meta(
         "opponent_rolling_match_number": None
         if opponent_snapshot is None
         else int(float(cast(Real, opponent_snapshot["player_match_number"]))),
-        "player_matches_30d": int(player_side["matches_30d"]),
-        "opponent_matches_30d": int(opponent_side["matches_30d"]),
-        "player_days_since_last_match": int(player_side["days_since_last_match"]),
-        "opponent_days_since_last_match": int(opponent_side["days_since_last_match"]),
         "h2h_prior_meetings": h2h_exposure,
         "build_ms": builtins.round((perf_counter() - started_at) * 1000, 3),
     }
@@ -641,10 +575,6 @@ def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame
                 {k: v for k, v in rec.items() if k not in ("req_player_id", "as_of_iso")},
             )
 
-    matches_30d: dict[tuple[str, date], int] = {}
-    for rec in execute_df(_MATCHES_30D_BULK_SQL, [pair_pids, pair_dates]).to_dict("records"):
-        matches_30d[(rec["req_player_id"], _to_date(rec["as_of_iso"]))] = int(rec["n"])
-
     profiles: dict[str, dict[str, object]] = {}
     players = sorted({p for c in ctxs for p in (c.player_id, c.opponent_id)})
     for rec in execute_df(_PROFILES_BULK_SQL, [players]).to_dict("records"):
@@ -675,17 +605,11 @@ def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame
         opponent_snapshot = snapshots.get((ctx.opponent_id, ctx.as_of_date))
         player_side = _side_values(
             player_snapshot,
-            ctx.as_of_date,
-            ctx.surface,
             defaults,
-            matches_30d.get((ctx.player_id, ctx.as_of_date)),
         )
         opponent_side = _side_values(
             opponent_snapshot,
-            ctx.as_of_date,
-            ctx.surface,
             defaults,
-            matches_30d.get((ctx.opponent_id, ctx.as_of_date)),
         )
         player_side.update(
             _profile_values_from_row(profiles.get(ctx.player_id), ctx.as_of_date, defaults)

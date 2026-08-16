@@ -150,12 +150,13 @@ def _reference_limit_for(n_current: int, monkeypatch: pytest.MonkeyPatch) -> int
 
 
 def test_reference_window_floor_at_drift_ref_min(monkeypatch):
-    assert _reference_limit_for(10, monkeypatch) == drift.DRIFT_REF_MIN
+    assert _reference_limit_for(drift.DRIFT_REF_MIN - 1, monkeypatch) == drift.DRIFT_REF_MIN
 
 
 def test_reference_window_matches_current_size_in_band(monkeypatch):
-    assert _reference_limit_for(500, monkeypatch) == 500
+    in_band = (drift.DRIFT_REF_MIN + drift.DRIFT_REF_MAX) // 2
+    assert _reference_limit_for(in_band, monkeypatch) == in_band
 
 
 def test_reference_window_capped_at_drift_ref_max(monkeypatch):
-    assert _reference_limit_for(5000, monkeypatch) == drift.DRIFT_REF_MAX
+    assert _reference_limit_for(drift.DRIFT_REF_MAX + 1, monkeypatch) == drift.DRIFT_REF_MAX

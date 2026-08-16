@@ -81,12 +81,12 @@ def test_meta_cols_precede_feature_cols() -> None:
     """Snapshot order is metadata, model features, then similarity columns."""
     assert META_COLS == _META
     assert len(META_COLS) == 8
-    assert len(FEATURE_COLS) == 39
+    assert len(FEATURE_COLS) == 32
     assert len(SIMILARITY_COLS) == 10
-    assert len(EXPECTED_FEATURE_ORDER) == 57
+    assert len(EXPECTED_FEATURE_ORDER) == 50
     assert EXPECTED_FEATURE_ORDER[:8] == _META
-    assert EXPECTED_FEATURE_ORDER[8:47] == tuple(FEATURE_COLS)
-    assert EXPECTED_FEATURE_ORDER[47:] == tuple(SIMILARITY_COLS)
+    assert EXPECTED_FEATURE_ORDER[8:40] == tuple(FEATURE_COLS)
+    assert EXPECTED_FEATURE_ORDER[40:] == tuple(SIMILARITY_COLS)
 
 
 def test_validate_accepts_valid_snapshot(tmp_path) -> None:

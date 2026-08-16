@@ -111,6 +111,20 @@ USER_AGENT = "TennisML/0.1 (research project; contact@tennis-ml.local)"
 # Wikipedia bios stay brief enough for the profile view.
 SUMMARY_MAX_CHARS = 1000
 
+# ── Official Rankings Ingest ───────────────────────────────────
+
+RANKINGS_DIR = ROOT / "data" / "raw" / "rankings"
+ATP_PLAYERS_CSV = RANKINGS_DIR / "atp_players.csv"
+
+# Only atp_rankings_*.csv are discovered; atp_players.csv is metadata.
+RANKINGS_GLOB = "atp_rankings_*.csv"
+
+# Documented raw ranking shape. `player` is the ATP ranking source id; `points`
+# is empty (NULL) in early eras.
+RANKINGS_COLUMNS = ["ranking_date", "rank", "player", "points"]
+RANKING_TARGET_COLUMNS = ["ranking_date", "player_id", "rank", "points"]
+PLAYER_ID_RE = re.compile(r"^\d+$")
+
 load_env()
 
 # ── Raw ATP → Bronze transform (shared with seed.py) ──────────────
@@ -743,21 +757,6 @@ def _name_matches_seed(name: str, player_ids: set[str], canonical: dict[str, str
     if not norm:
         return False
     return any(_normalize_name(canonical.get(pid, "")) == norm for pid in player_ids)
-
-
-# ── Official Rankings Ingest ───────────────────────────────────
-
-RANKINGS_DIR = ROOT / "data" / "raw" / "rankings"
-ATP_PLAYERS_CSV = RANKINGS_DIR / "atp_players.csv"
-
-# Only atp_rankings_*.csv are discovered; atp_players.csv is metadata.
-RANKINGS_GLOB = "atp_rankings_*.csv"
-
-# Documented raw ranking shape. `player` is the ATP ranking source id; `points`
-# is empty (NULL) in early eras.
-RANKINGS_COLUMNS = ["ranking_date", "rank", "player", "points"]
-RANKING_TARGET_COLUMNS = ["ranking_date", "player_id", "rank", "points"]
-PLAYER_ID_RE = re.compile(r"^\d+$")
 
 
 def discover_ranking_csvs(rankings_dir: Path = RANKINGS_DIR) -> list[Path]:

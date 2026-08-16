@@ -2,10 +2,10 @@
 
 The seeded PostgreSQL used by earlier versions of this suite is replaced by a
 per-test in-memory DuckDB holding the same deterministic fixture data. Every
-SQL call the builder makes (latest snapshot, 30-day activity, profiles,
-head-to-head, the gold.tour_averages singleton, and the direct cross-checks in
-this file) executes against that DuckDB with `%s` params translated to `?`. No
-live database, connection, DATABASE_URL, or seed is involved.
+SQL call the builder makes (latest snapshot, profiles, head-to-head, the
+gold.tour_averages singleton, and the direct cross-checks in this file)
+executes against that DuckDB with `%s` params translated to `?`. No live
+database, connection, DATABASE_URL, or seed is involved.
 """
 
 import math
@@ -40,8 +40,8 @@ def execute_df(sql: str, params: list[object] | None = None) -> pd.DataFrame:
 # Mirrors the deterministic seeded set the live suite used, narrowed to the
 # players the tests reference:
 #   S0AG (righty, turned pro 2018) and Z355 (righty, 2013) both have rolling
-#   snapshots; A0E2 and F0FV have one snapshot each so their 30-day window is
-#   exercised; the single S0AG-vs-Z355 meeting (2026-07-12) drives head-to-head
+#   snapshots; A0E2 and F0FV have one snapshot each; the single S0AG-vs-Z355
+#   meeting (2026-07-12) drives head-to-head
 #   and the train/inference parity check; gold.tour_averages holds one
 #   full-pool singleton row whose rate cells equal the pool aggregates, exactly
 #   as dbt materializes them.
@@ -175,28 +175,9 @@ def _snap_rows() -> list[tuple[object, ...]]:
     return rows
 
 
-def _match_rows() -> list[tuple[object, ...]]:
-    """Both player perspectives for seeded matches (match_number assigned)."""
-    return [
-        ("pm-s1", date(2026, 1, 20), "hard", "S0AG", "OPP1", 2.0, 20.0, 11500.0, 24.43, 1, 1),
-        ("pm-s2", date(2026, 2, 16), "hard", "S0AG", "OPP2", 2.0, 20.0, 11500.0, 24.43, 1, 2),
-        ("pm-s3", date(2026, 2, 18), "hard", "S0AG", "OPP3", 2.0, 20.0, 11500.0, 24.43, 1, 3),
-        ("pm-s4", date(2026, 3, 7), "hard", "S0AG", "OPP4", 2.0, 20.0, 11500.0, 24.43, 1, 4),
-        ("pm-s5", date(2026, 5, 20), "hard", "S0AG", "OPP5", 2.0, 20.0, 11500.0, 24.43, 1, 5),
-        ("pm-s6", date(2026, 7, 12), "hard", "S0AG", "Z355", 2.0, 4.0, 11500.0, 24.43, 1, 6),
-        ("pm-s6", date(2026, 7, 12), "hard", "Z355", "S0AG", 4.0, 2.0, 4555.0, 28.85, 0, 4),
-        ("pm-z1", date(2026, 1, 4), "hard", "Z355", "OPP6", 4.0, 20.0, 4555.0, 28.85, 1, 1),
-        ("pm-z2", date(2026, 1, 18), "hard", "Z355", "OPP7", 4.0, 20.0, 4555.0, 28.85, 1, 2),
-        ("pm-z3", date(2026, 2, 25), "hard", "Z355", "OPP8", 4.0, 20.0, 4555.0, 28.85, 1, 3),
-        ("pm-a1", date(2026, 3, 15), "hard", "A0E2", "X1", 1.0, 30.0, 12050.0, 22.7, 1, 1),
-        ("pm-a2", date(2026, 3, 21), "hard", "A0E2", "F0FV", 1.0, 32.0, 12050.0, 22.7, 1, 2),
-        ("pm-f1", date(2026, 3, 21), "hard", "F0FV", "A0E2", 32.0, 1.0, 1510.0, 19.4, 0, 1),
-    ]
-
-
 # Hand-computed gold row for the single parity match (S0AG vs Z355, hard,
 # 2026-07-12): the independent expectation the inference builder must reproduce.
-# Value order: match metadata (5), then FEATURE_COLS (39). Both directional
+# Value order: match metadata (5), then FEATURE_COLS. Both directional
 # perspectives are seeded; the mirror row (Z355 perspective) negates diffs,
 # exchanges paired sides, and shares context + h2h_exposure.
 _PARITY_GOLD = (
@@ -223,15 +204,9 @@ _PARITY_GOLD = (
     0.0,
     -5.0,
     2.0,
-    # 14 absolute state values (incl. matches_10 exposure pair)
+    # 8 absolute state values (incl. matches_10 exposure pair)
     0.8,
     0.4,
-    53.0,
-    137.0,
-    0.0,
-    0.0,
-    0.8,
-    0.6,
     5.0,  # player_matches_10 (S0AG s5)
     3.0,  # opponent_matches_10 (Z355 z3)
     0.0,
@@ -241,12 +216,11 @@ _PARITY_GOLD = (
     # 2 pair-level head-to-head (no strictly-prior meetings)
     0.0,
     0.0,
-    # 7 context values (is_clay, is_grass, is_hard, is_carpet, is_indoor,
+    # 6 context values (is_clay, is_grass, is_hard, is_indoor,
     # tournament_level, round_encoded)
     0.0,
     0.0,
     1.0,
-    0.0,
     0.0,
     0.0,
     0.0,
@@ -276,14 +250,8 @@ _PARITY_GOLD_BA = (
     0.0,
     5.0,
     -2.0,
-    # 14 absolute state values (Z355 first; matches_10 pair exchanged)
+    # 8 absolute state values (Z355 first; matches_10 pair exchanged)
     0.4,
-    0.8,
-    137.0,
-    53.0,
-    0.0,
-    0.0,
-    0.6,
     0.8,
     3.0,  # player_matches_10 (Z355 z3)
     5.0,  # opponent_matches_10 (S0AG s5)
@@ -294,11 +262,10 @@ _PARITY_GOLD_BA = (
     # 2 pair-level head-to-head (shared, no prior meetings)
     0.0,
     0.0,
-    # 7 context values
+    # 6 context values
     0.0,
     0.0,
     1.0,
-    0.0,
     0.0,
     0.0,
     0.0,
@@ -317,17 +284,6 @@ def _seed(con: duckdb.DuckDBPyConnection) -> None:
         CREATE TABLE silver.rolling_features (
             player_id VARCHAR, match_id VARCHAR, snapshot_date DATE,
             player_match_number INTEGER, surface VARCHAR, {snap_ddl}
-        )
-        """
-    )
-    con.execute(
-        """
-        CREATE TABLE silver.player_matches (
-            match_id VARCHAR, match_date DATE, surface VARCHAR,
-            player_id VARCHAR, opponent_id VARCHAR,
-            player_ranking DOUBLE, opponent_ranking DOUBLE,
-            player_rank_points DOUBLE, player_age DOUBLE,
-            match_won INTEGER, player_match_number INTEGER
         )
         """
     )
@@ -371,10 +327,6 @@ def _seed(con: duckdb.DuckDBPyConnection) -> None:
     con.executemany(
         f"INSERT INTO silver.rolling_features VALUES ({', '.join(['?'] * 26)})",
         _snap_rows(),
-    )
-    con.executemany(
-        f"INSERT INTO silver.player_matches VALUES ({', '.join(['?'] * 11)})",
-        _match_rows(),
     )
     # The only seeded pair meeting is pm-s6 (S0AG beat Z355 on 2026-07-12),
     # stored bronze-style: winner on player1_id (constraint winner_id =
@@ -430,7 +382,7 @@ def _seed(con: duckdb.DuckDBPyConnection) -> None:
         list(singleton.values()),
     )
     con.executemany(
-        f"INSERT INTO gold.match_features VALUES ({', '.join(['?'] * 44)})",
+        f"INSERT INTO gold.match_features VALUES ({', '.join(['?'] * (len(FEATURE_COLS) + 5))})",
         [_PARITY_GOLD, _PARITY_GOLD_BA],
     )
 
@@ -493,7 +445,7 @@ def test_output_schema_contract():
     """Exact column order [*FEATURE_COLS, "player_id", "opponent_id"], one row."""
     out = build_inference_features("S0AG", "Z355", "clay", as_of_date=AS_OF_AFTER_ALL_MATCHES)
     assert out.columns.tolist() == [*FEATURE_COLS, "player_id", "opponent_id"]
-    assert len(out.columns) == 41  # 39 features + 2 ids
+    assert len(out.columns) == len(FEATURE_COLS) + 2  # features + 2 ids
     assert len(out) == 1
     assert out["player_id"].dtype == object
     assert out["opponent_id"].dtype == object
@@ -506,13 +458,13 @@ def test_two_known_players_each_surface(surface):
     row = out.iloc[0]
     assert row["player_id"] == "S0AG"  # requested order preserved
     assert row["opponent_id"] == "Z355"
-    expected_one_hots = {"is_clay": 0, "is_grass": 0, "is_hard": 0, "is_carpet": 0}
-    expected_one_hots[f"is_{surface}"] = 1
+    expected_one_hots = {"is_clay": 0, "is_grass": 0, "is_hard": 0}
+    if surface != "carpet":
+        expected_one_hots[f"is_{surface}"] = 1
     assert row["is_clay"] == expected_one_hots["is_clay"]
     assert row["is_grass"] == expected_one_hots["is_grass"]
     assert row["is_hard"] == expected_one_hots["is_hard"]
-    assert row["is_carpet"] == expected_one_hots["is_carpet"]
-    assert sum(expected_one_hots.values()) == 1
+    assert "is_carpet" not in out.columns  # carpet no longer has a model feature
     for col in FEATURE_COLS:
         assert math.isfinite(row[col]), f"{col} is not finite: {row[col]!r}"
     assert row["tournament_level"] == 0
@@ -594,14 +546,14 @@ def test_materialized_defaults_return_expected_values():
     for col in DIFF_COLS:
         assert row[col] == 0, f"{col} should be neutral for two unknowns: {row[col]!r}"
     assert row["player_weighted_form_10"] == pytest.approx(float(defaults["weighted_form_10"]))
-    assert row["player_surface_win_rate_10"] == pytest.approx(float(defaults["hard_win_rate_10"]))
     # win_rate_10 / ace_rate_10 are only exposed as canonical-minus-opponent
     # diffs; two unknowns impute the same default on both sides, so the diffs
     # collapse to exactly 0 and lock the imputed default values.
     assert row["win_rate_diff"] == 0
     assert row["ace_rate_diff"] == 0
-    assert row["player_days_since_last_match"] == int(defaults["days_since_default"])
-    assert row["player_matches_30d"] == int(defaults["matches_30d_default"])
+    # The removed per-side features are absent from the finalized contract.
+    for col in ("player_days_since_last_match", "player_matches_30d", "player_surface_win_rate_10"):
+        assert col not in row
     assert row["player_is_left_handed"] == pytest.approx(float(defaults["left_handed_rate"]))
     assert row["player_years_pro"] == pytest.approx(float(defaults["avg_years_pro"]))
 
@@ -643,9 +595,12 @@ def test_default_today_fecha(monkeypatch):
     row = out_default.iloc[0]
     assert not out_default[FEATURE_COLS].isnull().to_numpy().any()
     for side in ("player", "opponent"):
-        assert row[f"{side}_days_since_last_match"] >= 0
-        assert row[f"{side}_matches_30d"] >= 0
-        assert math.isfinite(row[f"{side}_matches_30d"])
+        for col in (
+            f"{side}_days_since_last_match",
+            f"{side}_matches_30d",
+            f"{side}_surface_win_rate_10",
+        ):
+            assert col not in row  # removed from the finalized contract
 
 
 @pytest.mark.parametrize(
@@ -670,8 +625,7 @@ def test_one_missing_player_imputed_no_nans(args):
     pool = execute_df(
         "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY streak) AS streak, "
         "AVG(weighted_form_10) AS weighted_form_10, "
-        "AVG(win_rate_10) AS win_rate_10, "
-        "AVG(hard_win_rate_10) AS hard_win_rate_10 "
+        "AVG(win_rate_10) AS win_rate_10 "
         f"FROM {SILVER_ROLLING_FEATURES} WHERE snapshot_date < %s::date",
         ["2026-09-01"],
     ).iloc[0]
@@ -681,9 +635,6 @@ def test_one_missing_player_imputed_no_nans(args):
     known_prefix = "opponent" if unknown_prefix == "player" else "player"
     assert row[f"{unknown_prefix}_weighted_form_10"] == pytest.approx(
         float(pool["weighted_form_10"])
-    )
-    assert row[f"{unknown_prefix}_surface_win_rate_10"] == pytest.approx(
-        float(pool["hard_win_rate_10"])
     )
     # Profile-derived features for the unknown player are pool-imputed from
     # the gold.tour_averages singleton. They must be finite, non-NaN, and
@@ -930,29 +881,6 @@ def test_tournament_string_non_string_raises(kwargs):
         )
 
 
-@pytest.mark.parametrize(
-    "player_id, as_of, expected",
-    [
-        # F0FV's only prior seeded match is 2026-03-21 (vs A0E2); the
-        # [2026-04-28, 2026-05-28) window contains none of his matches, so the
-        # count is 0. The old ROWS-frame formulation returned 1 here (every
-        # preceding match, regardless of date) — this case catches that bug.
-        ("F0FV", date(2026, 5, 28), 0),
-        # [2026-02-20, 2026-03-22): A0E2's 2026-03-15 and 2026-03-21 matches
-        # are inside; the 2026-03-22 match itself is excluded (strict <).
-        ("A0E2", date(2026, 3, 22), 2),
-    ],
-    ids=["30d-window-empty", "30d-window-two"],
-)
-def test_matches_30d_window_regression(player_id, as_of, expected):
-    """Regression: matches_30d uses a real date window, not a ROWS frame."""
-    out = build_inference_features(player_id, "UNKNOWN_PLAYER", "hard", as_of_date=as_of)
-    row = out.iloc[0]
-    assert row["player_id"] == player_id  # requested order preserved
-    assert row["opponent_id"] == "UNKNOWN_PLAYER"
-    assert row["player_matches_30d"] == expected
-
-
 def test_null_handedness_falls_back_to_pool_rate(monkeypatch):
     """A profile with NULL handedness uses the pool left-handed rate, not a
     silent hardcoded 0 (parity with match_features.sql, which keeps non-L/R
@@ -1137,7 +1065,7 @@ def test_train_inference_parity_on_historical_match():
         compared += 1
     # The fixture must actually compare the whole contract, so it cannot
     # silently degenerate to a handful of columns.
-    assert compared == len(FEATURE_COLS) == 39
+    assert compared == len(FEATURE_COLS) == 32
 
     # The opposite perspective of the SAME physical match must also match its
     # gold row, and the two inference orientations must mirror each other.

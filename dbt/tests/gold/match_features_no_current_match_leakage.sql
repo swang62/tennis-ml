@@ -13,7 +13,7 @@
 -- Silver now STORES the Beta(1,1)-smoothed rates ((successes+1)/(opportunities+2)),
 -- and match_features consumes those stored values directly, so the
 -- re-derived prior values below simply read the same stored smoothed columns
--- (win_rate_10, the surface rates, etc.) from the prior snapshot — the
+-- (win_rate_10, streak, weighted_form_10, etc.) from the prior snapshot — the
 -- comparison holds by construction as long as the prior snapshot join matches.
 --
 -- Fallback cells (prior value NULL, imputed from the singleton) are excluded
@@ -27,8 +27,8 @@
 -- opponent), so the strongest leakage check re-derives each diff from the
 -- two prior snapshots (COALESCE'd to the singleton defaults row) and compares
 -- it with the stored value. Per-side absolute values (weighted_form_10,
--- surface_win_rate_10, days_since_last_match, matches_30d) are compared
--- directly against the prior snapshot / current silver row, again COALESCE'd
+-- matches_10 exposure) are compared
+-- directly against the prior snapshot, again COALESCE'd
 -- to the singleton for cold starts. As-of-date values (ranking, rank_points,
 -- age, rank_trend) come from the PRIOR snapshot (pre-match known, never from
 -- current-match raw stats).
@@ -42,9 +42,6 @@
 --                    aces_per_svc_game_diff
 --   diff strength:  avg_rank_faced_diff, rank_trend_diff
 --   per-side:       player/opponent_weighted_form_10,
---                    player/opponent_surface_win_rate_10,
---                    player/opponent_days_since_last_match,
---                    player/opponent_matches_30d,
 --                    player/opponent_matches_10 (exposure, from prior snapshot)
 --   as-of-date:     player/opponent_ranking, player/opponent_age,
 --                    rank_points_diff (prior snapshot)
@@ -85,9 +82,6 @@ WITH prior_snapshot AS (
         mf.rank_diff, mf.rank_points_diff, mf.age_diff,
         -- Stored per-side absolute values
         mf.player_weighted_form_10, mf.opponent_weighted_form_10,
-        mf.player_surface_win_rate_10, mf.opponent_surface_win_rate_10,
-        mf.player_days_since_last_match, mf.opponent_days_since_last_match,
-        mf.player_matches_30d, mf.opponent_matches_30d,
         -- Prior snapshot inputs (N-1), COALESCE'd to the singleton defaults so
         -- cold-start rows and NULL cells impute exactly as match_features does.
         -- Each feature also carries its RAW prior value: comparisons below are
@@ -135,31 +129,6 @@ WITH prior_snapshot AS (
             AS player_prior_age,
         COALESCE(pro.latest_player_age, fd.latest_player_age)
             AS opponent_prior_age,
-        prp.snapshot_date AS player_prior_snapshot_date,
-        pro.snapshot_date AS opponent_prior_snapshot_date,
-        prp.clay_win_rate_10 AS player_raw_clay_win_rate_10,
-        prp.grass_win_rate_10 AS player_raw_grass_win_rate_10,
-        prp.hard_win_rate_10 AS player_raw_hard_win_rate_10,
-        pro.clay_win_rate_10 AS opponent_raw_clay_win_rate_10,
-        pro.grass_win_rate_10 AS opponent_raw_grass_win_rate_10,
-        pro.hard_win_rate_10 AS opponent_raw_hard_win_rate_10,
-        COALESCE(prp.clay_win_rate_10, fd.clay_win_rate_10)
-            AS player_prior_clay_win_rate_10,
-        COALESCE(prp.grass_win_rate_10, fd.grass_win_rate_10)
-            AS player_prior_grass_win_rate_10,
-        COALESCE(prp.hard_win_rate_10, fd.hard_win_rate_10)
-            AS player_prior_hard_win_rate_10,
-        COALESCE(pro.clay_win_rate_10, fd.clay_win_rate_10)
-            AS opponent_prior_clay_win_rate_10,
-        COALESCE(pro.grass_win_rate_10, fd.grass_win_rate_10)
-            AS opponent_prior_grass_win_rate_10,
-        COALESCE(pro.hard_win_rate_10, fd.hard_win_rate_10)
-            AS opponent_prior_hard_win_rate_10,
-        pm.matches_30d_before AS player_cur_matches_30d,
-        po.matches_30d_before AS opponent_cur_matches_30d,
-        fd.days_since_default,
-        fd.matches_30d_default,
-        fd.rate_default,
         -- Stored exposure values (0 for cold start) and the prior snapshot's
         -- matches_10 backing the smoothed 10-match rates.
         mf.player_matches_10,
@@ -220,42 +189,6 @@ comparisons AS (
            opponent_raw_weighted_form_10 IS NOT NULL AS guard
     FROM prior_snapshot
     UNION ALL
-    SELECT match_id, 'player_days_since_last_match' AS feature,
-           player_days_since_last_match AS mf_val,
-           CASE WHEN player_prior_snapshot_date IS NULL
-                THEN days_since_default
-                ELSE CAST(match_date - player_prior_snapshot_date AS INTEGER)
-           END AS prior_val,
-           player_prior_snapshot_date IS NOT NULL AS guard
-    FROM prior_snapshot
-    UNION ALL
-    SELECT match_id, 'opponent_days_since_last_match' AS feature,
-           opponent_days_since_last_match AS mf_val,
-           CASE WHEN opponent_prior_snapshot_date IS NULL
-                THEN days_since_default
-                ELSE CAST(match_date - opponent_prior_snapshot_date AS INTEGER)
-           END AS prior_val,
-           opponent_prior_snapshot_date IS NOT NULL AS guard
-    FROM prior_snapshot
-    UNION ALL
-    SELECT match_id, 'player_matches_30d' AS feature,
-           player_matches_30d AS mf_val,
-           CASE WHEN player_prior_snapshot_date IS NULL
-                THEN matches_30d_default
-                ELSE CAST(player_cur_matches_30d AS INTEGER)
-           END AS prior_val,
-           player_prior_snapshot_date IS NOT NULL AS guard
-    FROM prior_snapshot
-    UNION ALL
-    SELECT match_id, 'opponent_matches_30d' AS feature,
-           opponent_matches_30d AS mf_val,
-           CASE WHEN opponent_prior_snapshot_date IS NULL
-                THEN matches_30d_default
-                ELSE CAST(opponent_cur_matches_30d AS INTEGER)
-           END AS prior_val,
-           opponent_prior_snapshot_date IS NOT NULL AS guard
-    FROM prior_snapshot
-    UNION ALL
     SELECT match_id, 'player_matches_10' AS feature,
            player_matches_10 AS mf_val, player_prior_matches_10 AS prior_val,
            player_raw_matches_10 IS NOT NULL AS guard
@@ -264,38 +197,6 @@ comparisons AS (
     SELECT match_id, 'opponent_matches_10' AS feature,
            opponent_matches_10 AS mf_val, opponent_prior_matches_10 AS prior_val,
            opponent_raw_matches_10 IS NOT NULL AS guard
-    FROM prior_snapshot
-    UNION ALL
-    SELECT match_id, 'player_surface_win_rate_10' AS feature,
-           player_surface_win_rate_10 AS mf_val,
-           CASE match_surface
-               WHEN 'clay'  THEN player_prior_clay_win_rate_10
-               WHEN 'grass' THEN player_prior_grass_win_rate_10
-               WHEN 'hard'  THEN player_prior_hard_win_rate_10
-               ELSE rate_default
-           END AS prior_val,
-           CASE match_surface
-               WHEN 'clay'  THEN player_raw_clay_win_rate_10 IS NOT NULL
-               WHEN 'grass' THEN player_raw_grass_win_rate_10 IS NOT NULL
-               WHEN 'hard'  THEN player_raw_hard_win_rate_10 IS NOT NULL
-               ELSE TRUE  -- rate_default is the fixed neutral constant 0.5
-           END AS guard
-    FROM prior_snapshot
-    UNION ALL
-    SELECT match_id, 'opponent_surface_win_rate_10' AS feature,
-           opponent_surface_win_rate_10 AS mf_val,
-           CASE match_surface
-               WHEN 'clay'  THEN opponent_prior_clay_win_rate_10
-               WHEN 'grass' THEN opponent_prior_grass_win_rate_10
-               WHEN 'hard'  THEN opponent_prior_hard_win_rate_10
-               ELSE rate_default
-           END AS prior_val,
-           CASE match_surface
-               WHEN 'clay'  THEN opponent_raw_clay_win_rate_10 IS NOT NULL
-               WHEN 'grass' THEN opponent_raw_grass_win_rate_10 IS NOT NULL
-               WHEN 'hard'  THEN opponent_raw_hard_win_rate_10 IS NOT NULL
-               ELSE TRUE  -- rate_default is the fixed neutral constant 0.5
-           END AS guard
     FROM prior_snapshot
     UNION ALL
     SELECT match_id, 'age_diff' AS feature, age_diff AS mf_val,

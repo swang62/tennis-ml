@@ -52,14 +52,6 @@ STATE_FILE = DATA_PROCESSED / "bento_build_state.json"
 # web build (`just deploy` builds web/ after deploy.py). Git-ignored.
 WEB_DIRECTORY_ARTIFACT = ROOT / "web" / "public" / "player-directory.json"
 
-# .env is loaded by src.constants before the inline settings are read.
-load_env()
-suppress_insecure_tls_warning()
-
-assert IMAGE_NAME is not None, "IMAGE_NAME not set in env; load_env() must be called first"
-# Docker Hub uses only `latest`; MLflow pins determine the packaged model versions.
-DOCKER_REPO = os.getenv("DOCKER_REPO", "swang62")
-
 # Multi-architecture publishing: one Docker Hub manifest list for both platforms.
 MULTIARCH_PLATFORMS = ("linux/amd64", "linux/arm64")
 # Named docker-container Buildx builder reused across deploys (keeps its cache).
@@ -74,18 +66,6 @@ BASE_BENTO_NAMES = {"linear": "linear_best", "gbdt": "gbdt_best", "nn": "nn_best
 # (the shared FRAMEWORK_KEY comes from src.constants for the serving manifest).
 MLFLOW_URI_META_KEY = "mlflow_uri"
 MLFLOW_VERSION_META_KEY = "mlflow_version"
-
-
-def _log(category: str, message: str) -> None:
-    colors = {"bento": "\033[32m", "minisearch": "\033[35m"}
-    color = (
-        colors.get(category, "")
-        if sys.stdout.isatty() or os.getenv("COURTSIDE_COLOR") == "1"
-        else ""
-    )
-    reset = "\033[0m" if color else ""
-    print(f"{color}[{category}]{reset} {message}")
-
 
 # Packaged artifacts; serving reads PostgreSQL live, never training data.
 # Everything serving reads from disk lives in the frozen DEPLOY_ARTIFACTS folder
@@ -130,6 +110,25 @@ SOURCE_FINGERPRINT_FILES = [
     ROOT / "src" / "models" / "similarity.py",
     ROOT / "src" / "models" / "nn.py",
 ]
+
+# .env is loaded by src.constants before the inline settings are read.
+load_env()
+suppress_insecure_tls_warning()
+
+assert IMAGE_NAME is not None, "IMAGE_NAME not set in env; load_env() must be called first"
+# Docker Hub uses only `latest`; MLflow pins determine the packaged model versions.
+DOCKER_REPO = os.getenv("DOCKER_REPO", "swang62")
+
+
+def _log(category: str, message: str) -> None:
+    colors = {"bento": "\033[32m", "minisearch": "\033[35m"}
+    color = (
+        colors.get(category, "")
+        if sys.stdout.isatty() or os.getenv("COURTSIDE_COLOR") == "1"
+        else ""
+    )
+    reset = "\033[0m" if color else ""
+    print(f"{color}[{category}]{reset} {message}")
 
 
 def _latest_production_version(client: Any) -> Any:

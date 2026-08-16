@@ -12,14 +12,14 @@ from starlette.testclient import TestClient
 
 from src.serving.service import DATA_APP
 
-client = TestClient(DATA_APP)
-
 # The fixture player id used by the rank-source contract test; its profile
 # exists in the serving fixtures (Sebastian Baez, ARG).
 _SEEDED_PLAYER = "B0BI"
 # A weekly ranking Monday well after the deterministic seed matches (2026).
 _TEST_DATE = "2026-08-03"
 _TEST_RANK = 37
+
+client = TestClient(DATA_APP)
 
 
 # ── Unit (mocked DB) ────────────────────────────────────────────────────────

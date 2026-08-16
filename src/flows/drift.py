@@ -19,6 +19,7 @@ Prefect logs and the CLI.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from contextlib import contextmanager
@@ -304,6 +305,90 @@ def _pull_windows(cutoff_date: date) -> tuple[pd.DataFrame, pd.DataFrame]:
     return current, reference
 
 
+def _validate_physical_matches(window: pd.DataFrame) -> None:
+    """Bronze boundary: reject rows whose winner is not exactly one of the two players.
+
+    Every physical match must carry a valid winner_id equal to exactly one of
+    player1_id/player2_id. A missing, ambiguous (equal to both), or
+    unidentifiable (equal to neither) winner would silently corrupt the
+    complementary orientation labels and the 50/50 batch balance, so it is
+    rejected here — before any expansion or API scoring.
+    """
+    if window.empty:
+        return
+    missing = {"player1_id", "player2_id", "winner_id"} - set(window.columns)
+    if missing:
+        raise ValueError(f"bronze window missing required columns: {sorted(missing)}")
+    missing_player_rows = int(window[["player1_id", "player2_id"]].isna().sum().sum())
+    if missing_player_rows:
+        raise ValueError(
+            f"{missing_player_rows} bronze rows have a missing player id; "
+            "both sides of a physical match must carry valid ids"
+        )
+    winner = window["winner_id"]
+    missing_rows = winner.isna()
+    if missing_rows.any():
+        raise ValueError(
+            f"{int(missing_rows.sum())} bronze rows have a missing winner_id; "
+            "every physical match must have exactly one winner"
+        )
+    equals_p1 = winner == window["player1_id"]
+    equals_p2 = winner == window["player2_id"]
+    ambiguous = (equals_p1 & equals_p2).sum()
+    if ambiguous:
+        raise ValueError(
+            f"{int(ambiguous)} bronze rows have winner_id equal to both players; "
+            "a match cannot be won by both sides"
+        )
+    invalid = int((~(equals_p1 | equals_p2)).sum())
+    if invalid:
+        raise ValueError(
+            f"{invalid} bronze rows have winner_id equal to neither player; "
+            "winner_id must be exactly player1_id or player2_id"
+        )
+
+
+def _validate_expanded_window(frame: pd.DataFrame) -> None:
+    """Expanded-orientation invariant: exactly one 1 and one 0 per physical match.
+
+    Adjacent rows are the two orientations of one physical match, so their
+    labels must be complementary (sum exactly 1). The whole batch must be
+    non-empty with an even row count and an exactly 50/50 label balance
+    (mean 0.5). Any violation raises before a single API call — labels are
+    never silently repaired.
+    """
+    if frame.empty:
+        raise ValueError("expanded drift frame is empty")
+    if "match_won" not in frame.columns:
+        raise ValueError("expanded drift frame missing required column 'match_won'")
+    labels = pd.to_numeric(frame["match_won"], errors="coerce")
+    if labels.isna().any():
+        raise ValueError(
+            f"expanded drift frame has {int(labels.isna().sum())} non-numeric match_won labels"
+        )
+    if not set(labels) <= {0, 1}:
+        raise ValueError(
+            f"expanded drift frame has match_won labels outside {{0, 1}}: "
+            f"{sorted(set(labels) - {0, 1})[:5]}"
+        )
+    n = len(frame)
+    if n % 2 != 0:
+        raise ValueError(f"expanded drift frame has odd row count {n}")
+    label_arr = labels.to_numpy()
+    pair_sums = label_arr[0::2] + label_arr[1::2]
+    bad_pairs = np.where(pair_sums != 1)[0]
+    if len(bad_pairs):
+        raise ValueError(
+            f"{len(bad_pairs)} adjacent orientation pairs do not sum to 1 "
+            f"(first at row {int(bad_pairs[0]) * 2}); each physical match must "
+            "yield exactly one match_won=1 and one match_won=0"
+        )
+    if float(labels.mean()) != 0.5:
+        raise ValueError(
+            f"expanded drift frame labels are not balanced: mean {float(labels.mean()):.4f} != 0.5"
+        )
+
+
 def _expand_orientations(window: pd.DataFrame) -> pd.DataFrame:
     """Expand physical matches into the two requested scoring orientations.
 
@@ -313,8 +398,11 @@ def _expand_orientations(window: pd.DataFrame) -> pd.DataFrame:
     canonicalized. The numeric match-stat rates are match-level values, so
     both orientations of a match carry identical rate columns; the context
     fields stay on the frame so scored rows remain traceable to the physical
-    match and the two orientations of each match are adjacent rows.
+    match and the two orientations of each match are adjacent rows. The
+    bronze winner invariant is checked on input and the complementary-label
+    invariant on the interleaved result.
     """
+    _validate_physical_matches(window)
     if window.empty:
         return window.copy()
     first = window.copy()
@@ -328,7 +416,9 @@ def _expand_orientations(window: pd.DataFrame) -> pd.DataFrame:
     expanded = pd.concat([first, second], ignore_index=True)
     # Interleave so each match's two orientations stay adjacent.
     interleave = np.repeat(np.arange(len(window)), 2) + np.tile([0, len(window)], len(window))
-    return expanded.iloc[interleave].reset_index(drop=True)
+    expanded = expanded.iloc[interleave].reset_index(drop=True)
+    _validate_expanded_window(expanded)
+    return expanded
 
 
 def _observation_contexts(window: pd.DataFrame) -> list[dict[str, object]]:
@@ -392,6 +482,56 @@ def _validated_contexts(contexts: list[dict[str, object]]) -> list[dict[str, obj
     return validated
 
 
+def _scored_diagnostics(frame: pd.DataFrame) -> str:
+    """Structured JSON of every scored row: match_id/player_id/opponent_id/match_won/p_win/pred.
+
+    `pred` is the standard thresholded prediction (p_win >= 0.5), matching the
+    accuracy computation. Only match ids and probabilities are logged — no
+    credentials or context payloads.
+    """
+    diag = frame[["match_id", "player_id", "opponent_id", "match_won", "p_win"]].copy()
+    diag["pred"] = (pd.to_numeric(diag["p_win"], errors="coerce") >= 0.5).astype(int)
+    return json.dumps({"scored_rows": diag.to_dict("records")}, indent=2, default=str)
+
+
+def _validate_scored_frame(frame: pd.DataFrame) -> None:
+    """Scored-row invariant before any metrics: finite in-range p_win, not all ties.
+
+    Every scored row must carry a finite p_win in [0, 1]; NaN or out-of-range
+    probabilities mean the Bento response cannot be trusted and are rejected.
+    A batch whose predictions are ALL exactly 0.5 is rejected as a
+    constant-tie batch — a symmetric model ties (p == 1 - p == 0.5) only when
+    it has no signal on a match, so all ties indicate a broken serving path.
+    A single 0.5 tie among otherwise varying predictions is a legitimate
+    small-sample edge and passes. On any violation the full scored frame is
+    embedded as structured JSON in the error before raising, so
+    match_id/player_id/opponent_id/match_won/p_win/pred of every scored row
+    are inspectable in the run log.
+    """
+    required = {"match_id", "player_id", "opponent_id", "match_won", "p_win"}
+    missing = required - set(frame.columns)
+    if missing:
+        raise ValueError(f"scored frame missing required columns: {sorted(missing)}")
+    p_win = pd.to_numeric(frame["p_win"], errors="coerce")
+    non_finite = int((~np.isfinite(p_win)).sum())
+    if non_finite:
+        raise ValueError(
+            f"{non_finite} scored rows have a non-finite p_win; refusing to compute "
+            f"metrics\n{_scored_diagnostics(frame)}"
+        )
+    out_of_range = int(((p_win < 0) | (p_win > 1)).sum())
+    if out_of_range:
+        raise ValueError(
+            f"{out_of_range} scored rows have p_win outside [0, 1]; refusing to compute "
+            f"metrics\n{_scored_diagnostics(frame)}"
+        )
+    if len(frame) and bool((p_win == 0.5).all()):
+        raise ValueError(
+            "every scored p_win is exactly 0.5 (constant-tie batch); a model with no "
+            f"signal on any match cannot be drift-scored\n{_scored_diagnostics(frame)}"
+        )
+
+
 def _score_window(window: pd.DataFrame) -> pd.DataFrame:
     """Append `p_win` (champion Bento) to a window of drift observations.
 
@@ -399,10 +539,18 @@ def _score_window(window: pd.DataFrame) -> pd.DataFrame:
     the derived orientation label, and the prediction — no match-context
     attributes, no player-profile attributes. Raw bronze contexts pass the
     `PredictFromIdsRow` boundary first, so every posted row is already the
-    validated public payload.
+    validated public payload. The expanded-orientation invariant is checked
+    on entry and the scored-row invariant (finite in-range p_win, not an
+    all-tie batch) on the traceable frame before the context columns are
+    dropped, so a pre-expanded frame is protected even when it did not come
+    from `_expand_orientations`.
     """
+    _validate_expanded_window(window)
     contexts = _validated_contexts(_observation_contexts(window))
     probas = _score_batches(contexts)
+    traceable = window[["match_id", "player_id", "opponent_id", "match_won"]].copy()
+    traceable["p_win"] = probas
+    _validate_scored_frame(traceable)
     frame = window[[c for c in DRIFT_ANALYSIS_COLUMNS if c != "p_win"]].copy()
     frame["p_win"] = probas
     return frame[DRIFT_ANALYSIS_COLUMNS]
@@ -433,16 +581,22 @@ def _evidently_drift(
 ) -> tuple[dict[str, float], float, float]:
     """Run Evidently DataDriftPreset over the two windows; save JSON + HTML.
 
-    Every column in the analysis frame is numeric (match-stat rates, the
-    balanced orientation label, and p_win), and all are compared with PSI, so
-    each per-feature score is directly comparable against the PSI threshold
-    table. Returns (per match-stat-rate-column PSI, drift share, prediction
-    p_win PSI); drift share and prediction PSI come straight from the report
-    payload.
+    The report input is restricted to exactly the monitored match-stat rates
+    and the prediction column: the balanced orientation label (`match_won`),
+    traceability ids, and match-context columns are excluded, per the
+    DataDriftPreset contract. `match_won` is not a monitored distribution —
+    it stays on the scored frames only for window metrics and calibration
+    outside Evidently. Every compared column is numeric and scored with PSI,
+    so each per-feature score is directly comparable against the PSI
+    threshold table. Returns (per match-stat-rate-column PSI, drift share,
+    prediction p_win PSI); drift share and prediction PSI come straight from
+    the report payload.
     """
+    evidently_columns = [*DRIFT_FEATURE_COLS, "p_win"]
     report = Report(
         metrics=[
             DataDriftPreset(
+                columns=evidently_columns,
                 drift_share=DRIFT_SHARE_THRESHOLD,
                 num_method="psi",
                 num_threshold=DRIFT_PSI_SIGNIFICANT,
@@ -450,7 +604,10 @@ def _evidently_drift(
         ],
         include_tests=True,
     )
-    snapshot = report.run(current_data=current_df, reference_data=reference_df)
+    snapshot = report.run(
+        current_data=current_df[evidently_columns],
+        reference_data=reference_df[evidently_columns],
+    )
     payload = json.loads(snapshot.json())
     json_path.write_text(json.dumps(payload, indent=2, default=str))
     snapshot.save_html(str(html_path))
@@ -500,12 +657,19 @@ def _recommendation(
 
 
 @flow(log_prints=True, retries=2)
-def drift_flow() -> int:
+def drift_flow(cutoff: date | None = None) -> int:
     """Drift monitor: dbt build, champion validation, score windows, verdict.
 
-    The smoke test counts bronze physical matches newer than the champion's
-    cutoff; when there are fewer than DRIFT_MIN_N_FOR_CHECK rows the drift check
-    is skipped entirely because PSI and performance metrics are too unstable.
+    An optional cutoff date overrides the champion's training-data watermark:
+    both windows are selected relative to it, and it is used for reporting,
+    logged params, artifact names, and insufficient-data messaging. The
+    override is never constrained relative to the champion — post-cutoff
+    training-era matches are intentionally treated as current data. Without an
+    override the champion watermark (TRAIN_DATA_MAX_DATE_KEY) governs.
+
+    The smoke test counts bronze physical matches newer than the cutoff; when
+    there are fewer than DRIFT_MIN_N_FOR_CHECK rows the drift check is skipped
+    entirely because PSI and performance metrics are too unstable.
     """
     load_env()
     suppress_insecure_tls_warning()
@@ -521,16 +685,17 @@ def drift_flow() -> int:
         champion = _validate_production(client)
         print(f"Champion: {PRODUCTION_MODEL} v{champion.version} (run {champion.run_id})")
 
-        cutoff_date = _champion_cutoff_date(client)
+        cutoff_date = cutoff if cutoff is not None else _champion_cutoff_date(client)
         if cutoff_date is None:
             raise RuntimeError("could not resolve champion cutoff date")
-        print(f"Cutoff date (champion training-data watermark): {cutoff_date}")
+        cutoff_source = "override" if cutoff is not None else "champion training-data watermark"
+        print(f"Cutoff date ({cutoff_source}): {cutoff_date}")
 
         current, reference = _pull_windows(cutoff_date)
         if current is None or len(current) < DRIFT_MIN_N_FOR_CHECK:
             n_matches = 0 if current is None else len(current)
             print(
-                f"insufficient_data: {n_matches} matches found after champion cutoff "
+                f"insufficient_data: {n_matches} matches found after cutoff "
                 f"(minimum {DRIFT_MIN_N_FOR_CHECK})"
             )
             with mlflow.start_run(
@@ -675,4 +840,10 @@ def register_deployment() -> None:
 
 
 if __name__ == "__main__":
-    drift_flow()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--cutoff",
+        type=date.fromisoformat,
+        help="override the champion training-data watermark cutoff (YYYY-MM-DD)",
+    )
+    drift_flow(cutoff=parser.parse_args().cutoff)

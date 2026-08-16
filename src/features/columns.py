@@ -181,7 +181,6 @@ CONTEXT_COLS: list[str] = [
     "is_clay",
     "is_grass",
     "is_hard",
-    "is_carpet",
     "is_indoor",
     "tournament_level",
     "round_encoded",
@@ -198,12 +197,6 @@ FEATURE_COLS: list[str] = [
     # Values where the absolute state of both players matters.
     "player_weighted_form_10",
     "opponent_weighted_form_10",
-    "player_days_since_last_match",
-    "opponent_days_since_last_match",
-    "player_matches_30d",
-    "opponent_matches_30d",
-    "player_surface_win_rate_10",
-    "opponent_surface_win_rate_10",
     # Per-side exposure counts backing the smoothed 10-match rates.
     *RATE_EXPOSURE_COLS,
     "player_is_left_handed",
