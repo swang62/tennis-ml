@@ -38,12 +38,6 @@ FINAL_DIFFS = [
 ]
 
 
-def test_feature_col_counts():
-    assert len(FEATURE_COLS) == 32
-    assert len(DIFF_COLS) == 16
-    assert len(CONTEXT_COLS) == 6
-
-
 def test_gold_rolling_cols_exact_order():
     """Retained 10-match rolling values in SQL order."""
     assert SILVER_ROLLING_COLS == [

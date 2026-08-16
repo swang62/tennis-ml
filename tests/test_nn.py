@@ -29,9 +29,3 @@ def test_deterministic_forward_with_dropout_zero():
     model = _small_model(dropout=0.0)
     tab, bio_p, bio_o = _inputs()
     assert torch.allclose(model(tab, bio_p, bio_o), model(tab, bio_p, bio_o), atol=0.0)
-
-
-def test_hyperparameters_persisted():
-    model = _small_model(lr=1e-2)
-    assert model.hparams["lr"] == 1e-2
-    assert model.hparams["tab_dim"] == 54

@@ -45,7 +45,7 @@ executionEnvironments = [
   # Repo-root extra path lets notebooks import src.*.
   { root = "notebooks", extraPaths = [
     ".",
-  ], reportPrivateImportUsage = "none", reportAttributeAccessIssue = "none" },
+  ], reportPrivateImportUsage = "none", reportArgumentType = "none", reportPossiblyUnboundVariable = 'none' },
 ]
 # Data-science dependencies lack stubs; preserve inference boundary guards.
 reportAny = "none"

@@ -14,6 +14,7 @@ if [ -r /mnt/tls/server.crt ] && [ -r /mnt/tls/server.key ]; then
       && chown postgres:postgres "$CERT" "$KEY" \
       && chmod 600 "$KEY"; then
     SSL_ARGS="-c ssl=on -c ssl_cert_file=$CERT -c ssl_key_file=$KEY"
+      echo "TLS certs found, starting with SSL"
   else
     echo "postgres entrypoint: failed to stage TLS certs; starting without SSL" >&2
   fi

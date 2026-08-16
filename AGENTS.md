@@ -6,10 +6,10 @@ Commands run via `just` (not make). `uv` is the package manager (not pip/poetry)
 
 End-to-end MLOps pipeline for tennis match prediction. Data flows CSV → PostgreSQL bronze → dbt silver (player-perspective expansion + post-match rolling snapshots; preprocessing: rank 0 → NULL, non-draw rounds → ordinal 0) → dbt gold (canonical match training rows) → Papermill notebooks (Optuna tuning across 3 model classes) → MLflow registry (exact lineage tags, no stages; single `@champion` alias) → BentoML serving via Docker Hub + Docker Compose.
 
-**Model strategy:** three model classes (linear, GBDT, neural net) compete independently via Optuna, then a logistic-regression meta-model stacks their probability outputs. Architecturally designed for ~80k match samples.
+**Model strategy:** three model classes (linear, GBDT, neural net) compete independently via Optuna, then a logistic-regression meta-model stacks their probability outputs. Architecturally designed for ~200k match samples.
 
 **Separation of concerns:**
-- **Training** is standalone (no Prefect) — `just train` runs all notebooks in order.
+- **Training** is standalone — `just train` runs all notebooks in order.
 - **ETL** is a Prefect flow that runs `dbt build` (one command, dependency-ordered). All promoted models are registered in MLFlow.
 - **Deploy** is a separate Prefect flow gated on the latest promoted model — it only redeploys when the `@champion` alias or serving artifacts actually changed (or when run with `--force`).
 
@@ -48,13 +48,11 @@ dbt/             — silver→gold SQL models + tests (bronze is the PostgreSQL 
 
 **Ranking identity map** — `data/ranking_player_map.csv` is the authoritative reviewed mapping from ranking-source player id (`ranking_player_id`, the id in `data/raw/rankings/atp_rankings_*.csv`) to the canonical player id (`player_id`, the ATP_Database id space used by matches and profiles); `ranking_name` is an audit/review field only, never a production match key. Ingestion validates the map (structure, duplicate source ids, conflicting targets, unknown canonical ids) before any write and rejects it otherwise; unmapped top-200 rows are skipped and reported with source id, name, and count, never silently name-matched. `ranking_name_candidates()` in `src/db/ingest.py` is a deterministic normalized-name review aid for maintainers extending the map.
 
-**Tests are self-contained — no live data, ever.** Tests must never read or use `DATABASE_URL`, open database clients/connections (`get_conn`, `psycopg.connect`, `refresh_snapshot` against a real source), call `migrate_db`/`seed`/dbt against a DB, or include the deleted live-db fixture names (`postgres_ready`, `gold_ready`, `seeded_test_db`, `_postgres_reachable`). The suite must pass with `DATABASE_URL` unset or blocked, with no PostgreSQL server, gold tables, or any pre-built external state. External database behavior is asserted hermetically at the boundary: mock `execute_df` where the code under test imports it (string-patched module attributes), or run the same SQL against an in-memory DuckDB fixture (see `test_inference_features.py`). A test that depends on a live database is a contract violation — convert it to a boundary mock, never skip it. `tests/test_no_live_db.py` is a static guard that fails CI if these patterns are reintroduced.
-
-**Official rankings** — ingested ranks are strictly official ATP top-200 values per week; downstream rank/current-rank values are actual official ranks only, never estimated or interpolated.
+**Tests are self-contained — no live data, ever.** Use `just lint` to run all lint/typechecks on all files. Tests must never read or use `DATABASE_URL`, open database clients/connections (`get_conn`, `psycopg.connect`, `refresh_snapshot` against a real source). The suite must pass with `DATABASE_URL` unset or blocked, with no PostgreSQL server, gold tables, or any pre-built external state. External database behavior is asserted hermetically at the boundary: mock `execute_df` where the code under test imports it (string-patched module attributes), or run the same SQL against an in-memory DuckDB fixture (see `test_inference_features.py`). A test that depends on a live database is a contract violation — convert it to a boundary mock, never skip it. `tests/test_no_live_db.py` is a static guard that fails CI if these patterns are reintroduced.
 
 ## Extra Notes
 
 - **Symmetric, order-preserving** — the ensemble satisfies `p_win(player, opponent) = 1 - p_win(opponent, player)`; the first-supplied id is the player side, so `p_win` always means "first-supplied id wins". H2H and all endpoints report ids in the order supplied — no sorting or canonicalization.
 - **Rolling form lookup** — live inference reads each player's newest snapshot strictly before `as_of_date`
 - **Cold-start imputation** — missing players use the materialized `gold.tour_averages` singleton (pre-computed full-pool defaults + weighted tour benchmarks), never on-demand aggregates.
-- **Bento image data sources** — Bento loads native sklearn/XGBoost/LightGBM models materialized at deploy time from the champion's exact lineage tags; no MLflow at serving time. NN is ONNX Runtime. Bio embeddings are compressed NumPy `.npz`, not Parquet. Production serving reads PostgreSQL live through sidecar.
+- **Bento image data sources** — Bento loads native sklearn/XGBoost/LightGBM models materialized at deploy time from the champion's exact lineage tags; no MLflow at serving time. NN is ONNX Runtime. Bio embeddings are compressed NumPy `.npz`, not Parquet. Production serving reads PostgreSQL proxied through bento/nginx.
