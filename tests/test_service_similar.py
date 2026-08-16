@@ -26,11 +26,11 @@ def _hand_built_finder() -> PlayerSimilarity:
         )
     )
     finder.players = [
-        {"player_id": "P1", "display_name": "Alice"},
-        {"player_id": "P2", "display_name": "Bob"},
-        {"player_id": "P3", "display_name": "Carol"},
-        {"player_id": "P4", "display_name": "Dave"},
-        {"player_id": "P5", "display_name": "Eve"},
+        {"player_id": "P1", "display_name": "Alice", "cluster_label": None},
+        {"player_id": "P2", "display_name": "Bob", "cluster_label": "Big Server"},
+        {"player_id": "P3", "display_name": "Carol", "cluster_label": "Big Server"},
+        {"player_id": "P4", "display_name": "Dave", "cluster_label": "Counterpuncher"},
+        {"player_id": "P5", "display_name": "Eve", "cluster_label": "Counterpuncher"},
     ]
     finder.player_ids = ["P1", "P2", "P3", "P4", "P5"]
     return finder
@@ -69,13 +69,26 @@ def test_similar_players_limit_clamped_to_three(setup):
         assert len(res.json()["data"]["similar_players"]) == 3
 
 
-def test_similar_players_response_keys_are_ids_and_names_only(setup):
-    """Results expose only the link id, display name, and numeric score."""
+def test_similar_players_response_keys_are_static_player_fields_only(setup):
+    """Results expose the static player fields (id, name, cluster label) and
+    the numeric score — never dynamic profile data like rank."""
     client, _ = setup
     res = client.get("/similar_players", params={"player_id": "P1", "limit": 3})
     assert res.status_code == 200
     for entry in res.json()["data"]["similar_players"]:
-        assert set(entry.keys()) == {"player_id", "display_name", "score"}
+        assert set(entry.keys()) == {"player_id", "display_name", "score", "cluster_label"}
+
+
+def test_similar_players_returns_cluster_labels(setup):
+    client, _ = setup
+    res = client.get("/similar_players", params={"player_id": "P1", "limit": 3})
+    assert res.status_code == 200
+    similar = res.json()["data"]["similar_players"]
+    assert [r["cluster_label"] for r in similar] == [
+        "Big Server",
+        "Big Server",
+        "Counterpuncher",
+    ]
 
 
 def test_similar_players_single_search_per_request(setup):
