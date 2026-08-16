@@ -1,17 +1,14 @@
 # tennis-ml
 
-Tennis match predictions end to end. I made this repo with the goal of learning modern MLOps, deploying a full stack pipeline with automated ingestion, training, evaluation, promotion, deployment, and a nice UI to boot. I love tennis, and so I built a simple and fun way to look up stats and match predictions, and avoiding the ATP website as much as possible (which is a true eyesore).
-
-Use this site to predict the next Wimbledon match betwen your two favorite players, and maybe gain an edge over your local bookie while you're at it ;)
+End-to-end tennis match prediction with automated ingestion, feature building, model training, evaluation, promotion, deployment, and a web dashboard.
 
 ## Features
 
-- **Weekly ATP scrape** — a Prefect flow pulls weekly rankings from ATP Tour site through a stealth browser. Self-healing backfills.
-- **Prefect automation** — automatic ingest/ETL triggers with drift detection to track model performance and evolving feature distributions
-- **dbt warehouse** — bronze (validated matches + rankings) → silver (player-perspective matches + post-match rolling snapshots) → gold (canonical match rows, player profiles, tour averages)
-- **Deterministic training** — Papermill notebooks tune linear, GBDT, and NN model families with Optuna, ensemble logistic regression as final model, and gated promotion.
-- **Exact lineage, one alias** — full lineage tracking in MLFlow, name, version, run, and artifact tags; final  `@champion` alias in production
-- **Drift monitoring** — Evidently PSI on feature and prediction distributions, current-window performance vs. the champion's metrics, and retraining recommendations.
+- **Weekly ATP scrape** — Prefect rankings ingestion with self-healing backfills.
+- **Warehouse pipeline** — PostgreSQL bronze → dbt silver → dbt gold.
+- **Model training** — Optuna tunes linear, GBDT, and neural-network models before an OOF-trained logistic stacker combines them.
+- **Reproducible deployment** — MLflow lineage, a single `@champion` alias, and BentoML serving.
+- **Monitoring** — Evidently drift checks and current-window performance checks.
 
 ## Stack
 
@@ -19,35 +16,36 @@ Use this site to predict the next Wimbledon match betwen your two favorite playe
 | ------------------- | ----------------------------------------- |
 | Orchestration       | Prefect (cron, retries, ETL triggers)     |
 | Experiment tracking | MLflow (model registry, trial comparison) |
-| Model serving       | BentoML, Nginx, TanStack React Vite       |
+| Model serving       | BentoML, Docker Compose                  |
+| Web app             | React, TypeScript, Vite, TanStack, ECharts |
 | Data warehouse      | PostgreSQL                                |
 | Development         | Jupyter + Papermill                       |
 
 
 ## Web App
 
-React 19 + TypeScript dashboard on Vite, Tailwind CSS 4, and the TanStack suite, with ECharts for visualizations.
+React 19 + TypeScript dashboard built with Vite, Tailwind CSS 4, TanStack, and ECharts.
 
-- **Player directory search** — MiniSearch fuzzy search over the full player list
-- **Player similarity** — find similar-playstyle players (FAISS) with bio embeddings and service/return stats
-- **Head-to-head** — cumulative charts and the ensemble's win probability per model
-- **SEO** — canonical / OG / JSON-LD tags, robots.txt and sitemap
+- **Player directory** — MiniSearch fuzzy search over the player list.
+- **Player similarity** — FAISS search using bio embeddings and service/return statistics.
+- **Head-to-head** — cumulative charts and per-model win probabilities.
+- **SEO** — canonical, Open Graph, JSON-LD, robots, and sitemap metadata.
 
 ## Quick Start for Local Development
 
-Only requirement is a free account on [Dagshub](https://dagshub.com), [Docker](https://www.docker.com/), and [Justfile](https://just.systems/).
+Requirements: [DagsHub](https://dagshub.com), [Docker](https://www.docker.com/), [Just](https://just.systems/), and `uv`.
 
 ```bash
-# 1. Full local dev setup (deps + k3d cluster for Prefect + PostgreSQL init)
-just setup
+# 1. Install dependencies and create the local cluster
+just cluster-setup
 
-# 2. Apply schema migrations, then seed the matches into PostgreSQL bronze
+# 2. Apply migrations and seed PostgreSQL bronze
 just migrate && just seed
 
-# 3. Generate silver/gold tables
+# 3. Build silver and gold
 just etl
 
-# 4. Local dev: Bento API (:3000) + Vite dashboard (:5173)
+# 4. Start local Bento and Vite services
 just dev
 
 # 5. Optional use serviceman to run worker as daemon on MacOS
@@ -58,57 +56,84 @@ serviceman logs tennis-prefect-worker
 ## Data Architecture
 
 ```
- Weekly ATP scrape (rankings) → seed.py (validated PostgreSQL)
-                      ↓
-            ┌──────────────────────┐
-            │        BRONZE        │
-            │  (match_events)      │
-            └──────────┬───────────┘
-                       │ dbt build
-                       ↓
-            ┌──────────────────────┐
-            │        SILVER        │
-            │  player_matches +    │
-            │  rolling_features    │
-            └──────────┬───────────┘
-                       │ dbt build
-                       ↓
-            ┌──────────────────────┐
-            │        GOLD          │
-            │  match_features      │
-            └──────────┬───────────┘
-                       ↓
-Training (features, tuning, evaluation, promotion)
-                       ↓
-                MLflow registry
-                       ↓
-          BentoML production endpoints
-                       ↓
-          Drift monitor (Evidently, weekly)
+Rankings and match data → PostgreSQL bronze
+                         → dbt silver: player-perspective matches and rolling features
+                         → dbt gold: training rows, player profiles, and tour averages
+                         → training and evaluation
+                         → MLflow `@champion`
+                         → BentoML serving
+                         → weekly drift monitoring
 ```
+
+## Modeling Techniques
+
+Training uses player-perspective rows: each physical match produces both orientations with complementary binary labels. Features are built from information available before the match.
+
+### Validation and tuning
+
+- **Five time-forward folds** — validation uses later date bands while training uses strictly earlier matches.
+- **Match-safe grouping** — both orientations of a physical match stay in the same fold, preventing leakage.
+- **Stratification** — every validation fold preserves the one-positive/one-negative directional label balance.
+- **Optuna tuning** — each model family is tuned independently against validation log loss.
+- **Early stopping** — GBDT models stop when validation loss stops improving; neural networks use validation BCE with patience and pruning.
+
+### Base models
+
+- **Linear family:** logistic regression, SVM, and Gaussian Naive Bayes.
+- **Gradient boosting:** XGBoost and LightGBM, with native early stopping.
+- **Neural network:** a tabular/bio-feature MLP trained with Adam and binary cross-entropy with logits (`BCEWithLogitsLoss`).
+
+Log loss is binary cross-entropy evaluated on predicted probabilities. The neural network uses the numerically stable logits form of the same objective.
+
+### OOF ensemble
+
+Each selected base model produces out-of-fold (OOF) predictions for training matches and separate predictions for the untouched test set. OOF predictions are converted to symmetric match evidence and used to fit a zero-intercept logistic-regression stacker.
+
+This prevents the ensemble from training on predictions made by models that saw those rows during fitting. Base models are ranked by OOF ROC-AUC; the final ensemble is judged on the held-out test set.
+
+## Evaluation and Promotion
+
+Candidate and production models are compared on held-out test predictions using:
+
+- **Log loss** — primary probability-quality metric.
+- **ROC-AUC** — ranking quality.
+- **Brier score** — probability calibration.
+- **Accuracy** — thresholded classification quality.
+
+A candidate is promoted when its test log loss is strictly lower than the incumbent's and its ROC-AUC does not fall by more than the configured tolerance. The first candidate is promoted automatically. `@champion` stores the exact base-model versions and artifact lineage used by the ensemble.
+
+## Drift Monitoring
+
+The weekly drift flow scores new production data through the champion Bento and compares it with a size-matched historical reference window. It checks:
+
+- PSI for monitored input features and prediction probabilities.
+- The share of features with significant PSI.
+- Current-window ROC-AUC and calibration against the champion's pinned metrics when enough matches are available.
+
+PSI, calibration, and performance use configured thresholds and minimum sample sizes. Crossing a feature or prediction PSI threshold, losing calibration, or dropping in ROC-AUC produces a drift report and retraining recommendation. Drift monitoring does not silently replace the champion.
 
 ## Pipelines / Flows
 
-- `scrape.py` — weekly ATP rankings backfill. Fetches every missing Monday from the ATP Tour site via stealth-Chromium
-- `seed.py` — seed either miniset or full dataset into bronze, rankings + Wikipedia enrichment
-- `etl.py` —  bronze → silver → gold: player_matches + rolling_features → match_features + player_profiles
-- `pipeline.py` — duckdb snapshot of all gold features → training → feature engineering → tune 3 model categories → pick best → train final → evaluate → promote
-- `drift.py` — Evidently PSI on current vs. reference windows scored through the production Bento, performance vs. the champion's pinned metrics
-- `deploy.py` — build the champion's Bento image (NN exported to ONNX) and push to Docker Hub
+- `scrape.py` — weekly ATP rankings backfill.
+- `seed.py` — load matches and rankings into bronze, with optional enrichment.
+- `etl.py` — build bronze → silver → gold with dbt.
+- `pipeline.py` — snapshot data, train models, build the ensemble, evaluate, and promote.
+- `drift.py` — compare current production data and performance with the champion.
+- `deploy.py` — materialize the champion's serving artifacts and publish the Bento image.
 
 ## Production Serving & Inference
 
 ### Docker Overview
 
-| Service    | Image source                  | Host port | Healthcheck                                 |
-| ---------- | ----------------------------- | --------- | ------------------------------------------- |
-| `postgres` | `postgres:18.4`               | 6543      | `pg_isready` (database readiness)           |
-| `bento`    | `swang62/tennis-bento:latest` | none      | authenticated `SELECT 1` against PostgreSQL |
-| `web`      | `swang62/tennis-web:latest`   | 8187      | `wget` of the SPA root inside the container |
+| Service    | Image source                  | Host port | Purpose                  |
+| ---------- | ----------------------------- | --------- | ------------------------ |
+| `postgres` | `postgres:18.4`               | 6543      | Feature and serving data |
+| `bento`    | `swang62/tennis-bento:latest` | internal  | Model API                |
+| `web`      | `swang62/tennis-web:latest`   | 8187      | Dashboard                |
 
 ### Standalone Compose deployment
 
-The stack runs from published images only; the only host requirement is Docker. For optional SSL, you can generate SSL certs in `infra/postgres/tls/` and upload them to your server.
+The stack runs from published images. The only host requirement is Docker.
 
 ```bash
 cp .env.example .env
@@ -137,7 +162,7 @@ The `/predict_from_ids` endpoint accepts a JSON object with the following fields
 
 ## Dependency Groups
 
-The project uses uv's nested dependency groups. The `inference` group is the strict runtime subset:
+The `inference` group is the strict runtime subset used by the production Bento:
 
 ```bash
 # Full local development (all notebooks, ETL, linting, tests)

@@ -1913,6 +1913,19 @@ wheels = [
 ]
 
 [[package]]
+name = "kneed"
+version = "0.8.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/72/64/4bb8f8a7a4627b585a66d5bec0c9b30ae5b39a4caea1775c8bfb3fb3f4cf/kneed-0.8.6.tar.gz", hash = "sha256:65b22727c623661701f15edf057f2e6c73e2b1ad4e68cd9ca4291675c318b5ef", size = 13161, upload-time = "2026-03-20T21:01:51.966Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4a/cd/23c89d53c36028bccb39f55aa5dd24c4bdaab76c4d556ad43dc8cf026918/kneed-0.8.6-py3-none-any.whl", hash = "sha256:3412e7b70bce07717386d24fab37f0f985968d1b85ea0c749a6b98caccaf65ec", size = 10797, upload-time = "2026-03-20T21:01:50.87Z" },
+]
+
+[[package]]
 name = "lark"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -3329,6 +3342,22 @@ wheels = [
 ]
 
 [[package]]
+name = "pynndescent"
+version = "0.6.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "joblib" },
+    { name = "llvmlite" },
+    { name = "numba" },
+    { name = "scikit-learn" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4a/fb/7f58c397fb31666756457ee2ac4c0289ef2daad57f4ae4be8dec12f80b03/pynndescent-0.6.0.tar.gz", hash = "sha256:7ffde0fb5b400741e055a9f7d377e3702e02250616834231f6c209e39aac24f5", size = 2992987, upload-time = "2026-01-08T21:29:58.943Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b2/e6/94145d714402fd5ade00b5661f2d0ab981219e07f7db9bfa16786cdb9c04/pynndescent-0.6.0-py3-none-any.whl", hash = "sha256:dc8c74844e4c7f5cbd1e0cd6909da86fdc789e6ff4997336e344779c3d5538ef", size = 73511, upload-time = "2026-01-08T21:29:57.306Z" },
+]
+
+[[package]]
 name = "pyparsing"
 version = "3.3.2"
 source = { registry = "https://pypi.org/simple" }
@@ -4028,6 +4057,7 @@ dev = [
     { name = "ipykernel" },
     { name = "ipywidgets" },
     { name = "jupyter" },
+    { name = "kneed" },
     { name = "lightgbm" },
     { name = "lightning" },
     { name = "llvmlite" },
@@ -4059,6 +4089,7 @@ dev = [
     { name = "shap" },
     { name = "tennis-ml" },
     { name = "torch" },
+    { name = "umap-learn" },
     { name = "xgboost" },
 ]
 inference = [
@@ -4085,6 +4116,7 @@ local = [
     { name = "ipykernel" },
     { name = "ipywidgets" },
     { name = "jupyter" },
+    { name = "kneed" },
     { name = "lightgbm" },
     { name = "lightning" },
     { name = "llvmlite" },
@@ -4109,6 +4141,7 @@ local = [
     { name = "seaborn" },
     { name = "shap" },
     { name = "torch" },
+    { name = "umap-learn" },
     { name = "xgboost" },
 ]
 training = [
@@ -4119,6 +4152,7 @@ training = [
     { name = "ipykernel" },
     { name = "ipywidgets" },
     { name = "jupyter" },
+    { name = "kneed" },
     { name = "lightgbm" },
     { name = "lightning" },
     { name = "llvmlite" },
@@ -4142,6 +4176,7 @@ training = [
     { name = "seaborn" },
     { name = "shap" },
     { name = "torch" },
+    { name = "umap-learn" },
     { name = "xgboost" },
 ]
 
@@ -4160,6 +4195,7 @@ dev = [
     { name = "ipykernel", specifier = ">=7.2" },
     { name = "ipywidgets", specifier = ">=8.1.8" },
     { name = "jupyter", specifier = ">=1.1.1" },
+    { name = "kneed", specifier = ">=0.8" },
     { name = "lightgbm", specifier = ">=4.6" },
     { name = "lightning", specifier = ">=2.6" },
     { name = "llvmlite", specifier = ">=0.47" },
@@ -4191,6 +4227,7 @@ dev = [
     { name = "shap", specifier = ">=0.52" },
     { name = "tennis-ml", editable = "." },
     { name = "torch", specifier = ">=2.12" },
+    { name = "umap-learn", specifier = ">=0.5" },
     { name = "xgboost", specifier = ">=3.2" },
 ]
 inference = [
@@ -4217,6 +4254,7 @@ local = [
     { name = "ipykernel", specifier = ">=7.2" },
     { name = "ipywidgets", specifier = ">=8.1.8" },
     { name = "jupyter", specifier = ">=1.1.1" },
+    { name = "kneed", specifier = ">=0.8" },
     { name = "lightgbm", specifier = ">=4.6" },
     { name = "lightning", specifier = ">=2.6" },
     { name = "llvmlite", specifier = ">=0.47" },
@@ -4241,6 +4279,7 @@ local = [
     { name = "seaborn", specifier = ">=0.13" },
     { name = "shap", specifier = ">=0.52" },
     { name = "torch", specifier = ">=2.12" },
+    { name = "umap-learn", specifier = ">=0.5" },
     { name = "xgboost", specifier = ">=3.2" },
 ]
 training = [
@@ -4251,6 +4290,7 @@ training = [
     { name = "ipykernel", specifier = ">=7.2" },
     { name = "ipywidgets", specifier = ">=8.1.8" },
     { name = "jupyter", specifier = ">=1.1.1" },
+    { name = "kneed", specifier = ">=0.8" },
     { name = "lightgbm", specifier = ">=4.6" },
     { name = "lightning", specifier = ">=2.6" },
     { name = "llvmlite", specifier = ">=0.47" },
@@ -4274,6 +4314,7 @@ training = [
     { name = "seaborn", specifier = ">=0.13" },
     { name = "shap", specifier = ">=0.52" },
     { name = "torch", specifier = ">=2.12" },
+    { name = "umap-learn", specifier = ">=0.5" },
     { name = "xgboost", specifier = ">=3.2" },
 ]
 
@@ -4484,6 +4525,23 @@ sdist = { url = "https://files.pythonhosted.org/packages/89/7a/c8bb37c8f6f3623d6
 wheels = [
     { url = "https://files.pythonhosted.org/packages/88/4f/b03bcc9eaf4621ac9008dec90918d8fb4839d611666cb99eb255696c67fe/ujson-5.13.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:7edf16359c52ed53406e216565d83e6b98c23c3cb9a0a01673f2493f8fb15edf", size = 54390, upload-time = "2026-06-14T22:35:29.857Z" },
     { url = "https://files.pythonhosted.org/packages/30/70/dbdd277d64bd3a149532567ceb082fe26f4ead58c39e0a97566ccbdf14a3/ujson-5.13.0-graalpy312-graalpy250_312_native-macosx_11_0_arm64.whl", hash = "sha256:3e074a1f7778d58aa3b3056bab7b6251aabb3f381808018ca2b7fb8dbdeef7ab", size = 58393, upload-time = "2026-06-14T22:36:28.702Z" },
+]
+
+[[package]]
+name = "umap-learn"
+version = "0.5.12"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numba" },
+    { name = "numpy" },
+    { name = "pynndescent" },
+    { name = "scikit-learn" },
+    { name = "scipy" },
+    { name = "tqdm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/02/ee/af4171241117f85c74b5ca6448ea1033cc28d599c13651d67289bacd4083/umap_learn-0.5.12.tar.gz", hash = "sha256:6aff02ecac5f2aad9f3c65ee518d7ae93e1a985ae38721fdcffceee4232c33c7", size = 96672, upload-time = "2026-04-08T20:03:54.012Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1b/98/f63318ccbe75c810011fe9233884c5d348d94d90005de1b79e5f93bef9c0/umap_learn-0.5.12-py3-none-any.whl", hash = "sha256:f2a85d2a2adcb52b541bed9b27a23ca169b56bb1b23283abeebfb8dfb8a42fe5", size = 91849, upload-time = "2026-04-08T20:03:52.561Z" },
 ]
 
 [[package]]

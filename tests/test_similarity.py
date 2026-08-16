@@ -1,5 +1,6 @@
 """Similarity tests with fake embeddings and DuckDB fixtures."""
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -752,3 +753,131 @@ def test_duck_and_snapshot_fixtures_produce_identical_vectors(
     assert direct.index.ntotal == offline.index.ntotal
     for i in range(direct.index.ntotal):
         assert np.array_equal(direct.index.reconstruct(i), offline.index.reconstruct(i))
+
+
+# ── Playstyle-cluster integration ───────────────────────────────────────────
+
+
+def _four_identical_profiles() -> pd.DataFrame:
+    """Four profiled players whose every non-cluster signal is identical."""
+    return pd.DataFrame(
+        {
+            "player_id": ["A", "B", "C", "D"],
+            "display_name": ["A", "B", "C", "D"],
+            "backhand": ["1H", "1H", "1H", "1H"],
+            "handedness": ["R", "R", "R", "R"],
+            "summary": ["", "", "", ""],
+        }
+    )
+
+
+def _flat_lifetime_query(_sql: str) -> pd.DataFrame:
+    """Gold lifetime aggregates stub: identical rows for all four players."""
+    return pd.DataFrame(
+        {
+            "player_id": ["A", "B", "C", "D"],
+            **dict.fromkeys(LIFETIME_PLAYSTYLE_COLS, 0.4),
+        }
+    )
+
+
+def test_build_playstyle_matrix_without_assignments_has_no_cluster_block(monkeypatch):
+    """The notebook's call (no assignments) yields exactly the base layout."""
+    _patch_embedding(monkeypatch)
+    matrix = similarity.build_playstyle_matrix(
+        _four_identical_profiles(), query=_flat_lifetime_query
+    )
+    assert matrix.shape == (4, ONE_HOT + len(STYLE) + 4)
+    assert not any(c.startswith("cluster_") for c in matrix.columns)
+
+
+def test_cluster_one_hot_makes_same_archetype_players_more_similar(monkeypatch):
+    """The appended cluster block is deterministic and skews similarity toward
+    same-archetype players, even when every other signal is identical."""
+    _patch_embedding(monkeypatch)
+    assignments = pd.DataFrame(
+        {"player_id": ["A", "B", "C", "D"], "cluster_id": ["0", "0", "1", "1"]}
+    )
+    matrix = similarity.build_playstyle_matrix(
+        _four_identical_profiles(), query=_flat_lifetime_query, cluster_assignments=assignments
+    )
+    assert matrix.shape == (4, ONE_HOT + len(STYLE) + 4 + 2)
+
+    index = faiss.IndexFlatIP(matrix.shape[1])
+    index.add(np.ascontiguousarray(matrix.to_numpy(np.float32)))
+    cos_ab = float(index.reconstruct(0) @ index.reconstruct(1))
+    cos_ac = float(index.reconstruct(0) @ index.reconstruct(2))
+    assert cos_ab > cos_ac  # same cluster strictly more similar
+    _scores, ids = index.search(matrix.to_numpy(np.float32)[0:1], 4)
+    row = ids[0].tolist()
+    assert row.index(1) < row.index(2)  # B (same cluster) ahead of C
+    assert row.index(1) < row.index(3)  # and ahead of D
+
+
+def test_build_with_cluster_artifacts_appends_block_and_labels(tmp_path, monkeypatch):
+    """build() reads data/processed cluster artifacts: one-hot block in the
+    vector, archetype labels baked into players, metadata, and search results."""
+    assignments = pd.DataFrame(
+        {"player_id": ["P1", "P2", "P3", "P4"], "cluster_id": ["0", "0", "1", "1"]}
+    )
+    assignments.to_parquet(tmp_path / "cluster_assignments.parquet")
+    (tmp_path / "cluster_descriptions.json").write_text(
+        json.dumps({"0": "Big Server", "1": "Counterpuncher"})
+    )
+    monkeypatch.setattr(similarity, "DEFAULT_CLUSTERS", tmp_path / "cluster_assignments.parquet")
+    monkeypatch.setattr(
+        similarity, "DEFAULT_CLUSTER_LABELS", tmp_path / "cluster_descriptions.json"
+    )
+
+    finder = _build_with_fixture(tmp_path, monkeypatch)
+
+    assert finder.index is not None
+    assert finder.index.d == ONE_HOT + len(STYLE) + 4 + 2  # deterministic one-hot block
+    p1 = finder.index.reconstruct(finder.player_ids.index("P1"))
+    cluster_block = p1[ONE_HOT + len(STYLE) + 4 :]
+    assert cluster_block[0] > 0.0 and cluster_block[1] == 0.0  # P1 in cluster "0"
+    p3 = finder.index.reconstruct(finder.player_ids.index("P3"))
+    assert p3[ONE_HOT + len(STYLE) + 4 :][0] == 0.0  # P3 not in cluster "0"
+
+    assert finder.players[0].get("cluster_label") == "Big Server"  # P1
+    assert finder.players[2].get("cluster_label") == "Counterpuncher"  # P3
+    meta = json.loads((tmp_path / "meta.json").read_text())
+    assert meta[0]["cluster_label"] == "Big Server"  # persisted in player_metadata.json
+    results = finder.search("P1", top_k=3)
+    assert all("cluster_label" in r for r in results)
+    assert results[0]["cluster_label"] == "Big Server"  # P2, same archetype
+
+
+def test_build_without_cluster_artifacts_preserves_base_behavior(tmp_path, monkeypatch):
+    """Absent artifacts: identical index shape and labels default to None."""
+    finder = _build_with_fixture(tmp_path, monkeypatch)
+    assert finder.index is not None
+    assert finder.index.d == ONE_HOT + len(STYLE) + 4  # no cluster block
+    assert all(p.get("cluster_label") is None for p in finder.players)
+    results = finder.search("P1", top_k=3)
+    assert all(r["cluster_label"] is None for r in results)
+
+
+def test_load_keeps_labels_baked_into_serving_metadata(tmp_path, monkeypatch):
+    """Serving load() preserves the labels baked into player_metadata.json at
+    build time — no cluster files are staged into the deploy folder."""
+    assignments = pd.DataFrame(
+        {"player_id": ["P1", "P2", "P3", "P4"], "cluster_id": ["0", "0", "1", "1"]}
+    )
+    assignments.to_parquet(tmp_path / "cluster_assignments.parquet")
+    (tmp_path / "cluster_descriptions.json").write_text(
+        json.dumps({"0": "Big Server", "1": "Counterpuncher"})
+    )
+    monkeypatch.setattr(similarity, "DEFAULT_CLUSTERS", tmp_path / "cluster_assignments.parquet")
+    monkeypatch.setattr(
+        similarity, "DEFAULT_CLUSTER_LABELS", tmp_path / "cluster_descriptions.json"
+    )
+    monkeypatch.setattr(similarity, "SERVING_INDEX", tmp_path / "idx")
+    monkeypatch.setattr(similarity, "SERVING_METADATA", tmp_path / "meta.json")
+
+    finder = _build_with_fixture(tmp_path, monkeypatch)  # writes tmp/meta.json with labels
+    loaded = PlayerSimilarity()
+    loaded.load()
+
+    assert loaded.players == finder.players  # labels survive the round trip
+    assert loaded.players[0].get("cluster_label") == "Big Server"

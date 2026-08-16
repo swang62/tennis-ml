@@ -57,6 +57,7 @@ def test_directory_players_matches_players_contract():
         "ioc": "ESP",
         "iso2": "ES",
         "current_rank": 1,
+        "cluster_label": None,  # no clustering artifacts: no archetype yet
     }
     # unranked players keep the entry with null rank data and UNK country
     assert players[1]["current_rank"] is None
@@ -78,6 +79,41 @@ def test_directory_players_preserves_sql_row_order():
 
 def test_directory_players_deterministic():
     assert directory_players(_directory_df()) == directory_players(_directory_df())
+
+
+def test_directory_players_cluster_labels_from_artifacts(monkeypatch, tmp_path):
+    """When the clustering artifacts exist, each entry carries its archetype
+    label; players without an assignment stay null."""
+    import src.serving.directory as directory
+
+    (tmp_path / "cluster_assignments.parquet").parent.mkdir(exist_ok=True)
+    pd.DataFrame({"player_id": ["p2", "p1"], "cluster_id": ["0", "0"]}).to_parquet(
+        tmp_path / "cluster_assignments.parquet"
+    )
+    (tmp_path / "cluster_descriptions.json").write_text(
+        json.dumps({"0": "Big Server", "1": "Counterpuncher"})
+    )
+    monkeypatch.setattr(directory, "DEFAULT_CLUSTERS", tmp_path / "cluster_assignments.parquet")
+    monkeypatch.setattr(directory, "DEFAULT_CLUSTER_LABELS", tmp_path / "cluster_descriptions.json")
+
+    players = directory_players(_directory_df())
+
+    assert players[0]["cluster_label"] == "Big Server"  # p2
+    assert players[1]["cluster_label"] == "Big Server"  # p1
+    assert players[2]["cluster_label"] is None  # p3 has no assignment
+    assert [p["player_id"] for p in players] == ["p2", "p1", "p3"]  # row order kept
+
+
+def test_directory_players_malformed_cluster_artifacts_are_ignored(monkeypatch, tmp_path):
+    """A corrupt artifact must not break the directory: it behaves as absent."""
+    import src.serving.directory as directory
+
+    (tmp_path / "cluster_descriptions.json").write_text("{not json")
+    monkeypatch.setattr(directory, "DEFAULT_CLUSTER_LABELS", tmp_path / "cluster_descriptions.json")
+    monkeypatch.setattr(directory, "DEFAULT_CLUSTERS", tmp_path / "missing.parquet")
+
+    players = directory_players(_directory_df())
+    assert all(p["cluster_label"] is None for p in players)
 
 
 def test_directory_players_empty_df():
