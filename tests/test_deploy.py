@@ -778,7 +778,10 @@ def test_build_database_url_missing_contract_fails_fast(monkeypatch):
 
 def _lineage_tags():
     """The exact tag set 05_evaluate writes onto the promoted ensemble version."""
+    import json
+
     import src.constants as c
+    from src.features.columns import FEATURE_COLS
 
     return {
         "base_linear_registered_model_name": "linear_best",
@@ -799,6 +802,8 @@ def _lineage_tags():
         "aux_embeddings_hash": "bbb",
         "aux_bio_feature_cols_uri": "runs:/run-aux/bio_feature_cols.json",
         "aux_bio_feature_cols_hash": "ccc",
+        c.FEATURE_COLS_TAG: json.dumps(FEATURE_COLS, separators=(",", ":")),
+        c.FEATURE_COLS_HASH_TAG: _deploy()._feature_cols_hash(FEATURE_COLS),
     }
 
 

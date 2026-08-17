@@ -61,6 +61,24 @@ from src.utils import load_env
 AUX_DIR = DEPLOY_ARTIFACTS
 MODEL_INFO_FILE = AUX_DIR / "model_info.json"
 
+
+def _validate_feature_contract(estimator: Any, artifact_name: str) -> None:
+    """Fail readiness when a fitted artifact disagrees with serving features."""
+    fitted = getattr(estimator, "feature_names_in_", None)
+    if fitted is None:
+        return
+    actual = [str(name) for name in fitted]
+    expected = list(FEATURE_COLS)
+    if actual != expected:
+        missing = [name for name in actual if name not in expected]
+        added = [name for name in expected if name not in actual]
+        raise RuntimeError(
+            f"{artifact_name} feature contract mismatch: fitted={len(actual)}, "
+            f"serving={len(expected)}, missing_from_serving={missing}, "
+            f"missing_from_model={added}; retrain before serving"
+        )
+
+
 # Serving dependencies stay here. Model packages are pinned because models are pickled.
 # base_image avoids BentoML's default build-essential injection; ca-certificates
 # and bash are the only system deps needed at runtime.
@@ -944,6 +962,12 @@ class TennisPredictor:
     def __init__(self):
         self.linear: Any = bentoml.sklearn.load_model(self.bento_linear)
         manifest = json.loads(MODEL_INFO_FILE.read_text())
+        contract = manifest.get("feature_contract", {})
+        if contract.get("columns") != list(FEATURE_COLS):
+            raise RuntimeError(
+                "model_info feature contract does not match serving FEATURE_COLS; "
+                "rebuild from the promoted model"
+            )
         # Fixed evidence stack order shared by training and serving.
         self._stack_order: list[str] = list(STACK_ORDER)
         gbdt_framework = manifest["bases"]["gbdt"][FRAMEWORK_KEY]
@@ -966,6 +990,7 @@ class TennisPredictor:
 
         with open(AUX_DIR / "linear_scaler.pkl", "rb") as f:
             self.scaler = pickle.load(f)
+        _validate_feature_contract(self.scaler, "linear_scaler.pkl")
         with open(AUX_DIR / "bio_feature_cols.json") as f:
             self.bio_feature_cols = json.load(f)
         bio_data = np.load(str(AUX_DIR / "bio_embeddings.npz"), allow_pickle=True)

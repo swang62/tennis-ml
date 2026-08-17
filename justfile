@@ -9,7 +9,7 @@ cluster-create:
 
 # Delete the local k3d cluster.
 cluster-destroy:
-    k3d cluster delete tennis-ml
+    bash -c 'printf "Delete k3d cluster tennis-ml and its data? [y/N] "; read -r answer; case "$$answer" in y|Y|yes|YES) k3d cluster delete tennis-ml ;; *) printf "%s\n" "Cluster deletion cancelled." ;; esac'
 
 # Restart the Prefect server Deployment and wait for rollout readiness.
 cluster-restart:
@@ -17,7 +17,12 @@ cluster-restart:
     kubectl rollout status deployment/prefect-server --timeout=300s
 
 # End-to-end pipeline, targets the .env DATABASE_URL currently set
-data-pipeline: deps lint test cluster-create cluster-restart probe migrate seed etl train deploy docker
+full-pipeline *args: deps lint test cluster-create probe migrate
+    just seed {{ args }}
+    just etl {{ args }}
+    just train {{ args }}
+    just deploy
+    just docker
 
 # Drop and recreate PostgreSQL schemas.
 db-reset:

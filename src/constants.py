@@ -14,9 +14,6 @@ def load_env() -> None:
 
 load_env()
 
-# --- Environment Variables -----
-IMAGE_NAME = os.getenv("IMAGE_NAME")
-
 
 # --- PostgreSQL connection contract (single DATABASE_URL) ---
 def get_database_url() -> str:
@@ -69,7 +66,8 @@ CHAMPION_ALIAS = "champion"
 # --- Prefect ---
 WORK_POOL_NAME = "tennis-pool"
 
-# --- Deployed production Bento endpoint ---
+# --- Deployed production Bento ---
+IMAGE_NAME = "tennis-bento"
 PRODUCTION_BENTO_URL = os.getenv("PRODUCTION_BENTO_URL", "http://127.0.0.1:8187")
 MODEL_INFO_ROUTE = "/api/model_info"
 PREDICT_BATCH_ROUTE = "/api/predict_from_ids_bulk"
@@ -82,12 +80,6 @@ STACK_ORDER = ("linear", "gbdt", "nn")
 
 
 # --- Champion lineage tags (single source of truth for the tag schema) ---
-# Model-prediction only: the flattened `base_*`/`aux_*` champion lineage tags
-# cover exactly the inputs that affect match predictions (base models, the
-# scaler, embeddings, and bio feature columns). MLflow/champion tags are never
-# used for navigation artifacts (similarity index, similarity metadata, player
-# directory) — those are rebuilt at deploy time, not pinned on the champion.
-# Shared by the tag builder here, promotion, and the deploy flow.
 LINEAGE_MODEL_NAME_KEY = "registered_model_name"
 LINEAGE_VERSION_KEY = "version"
 LINEAGE_RUN_ID_KEY = "run_id"
@@ -107,97 +99,8 @@ LINEAGE_AUX_KEYS = (
 )
 BASE_TAG_PREFIX = "base_"
 AUX_TAG_PREFIX = "aux_"
-
-# Training-data watermark pinned on the champion model version: the latest
-# match date present in the training splits at promotion time. Drift checks use
-# it as the cutoff for "new" matches instead of the model-registration time.
-TRAIN_DATA_MAX_DATE_KEY = "train_data_max_match_date"
-
-# Performance metrics pinned on the champion model version at promotion time.
-# Metric tag keys are METRIC_PREFIX + metric name (the 4 in METRIC_NAMES);
-# drift reads them with this uniform prefix.
-METRIC_PREFIX = "metric_"
-EVAL_SPLIT_SIZE_KEY = "metric_eval_split_size"
-EVAL_MAX_DATE_KEY = "metric_eval_max_date"
-
-# --- Promotion gate ---
-# The candidate's ROC-AUC may trail the incumbent's by up to this amount (a
-# strictly lower test log loss is still required) and still be promoted.
-PROMOTION_AUC_TOLERANCE = 0.05
-
-# --- Drift monitoring thresholds (single source of truth for the verdict) ---
-# Per-feature PSI bands: < DRIFT_PSI_MODERATE = no drift, moderate band between,
-# >= DRIFT_PSI_SIGNIFICANT = significant. Drift share is the fraction of
-# features with PSI >= DRIFT_PSI_SIGNIFICANT. Retrain gates are intentionally
-# loose; moderate changes recommend investigation instead.
-DRIFT_PSI_MODERATE = 0.1
-DRIFT_PSI_SIGNIFICANT = 0.3
-DRIFT_SHARE_THRESHOLD = 0.75
-DRIFT_PRED_PSI_THRESHOLD = 0.3
-DRIFT_CALIBRATION_DELTA = 0.1
-DRIFT_AUC_DROP = 0.1
-DRIFT_MIN_N_FOR_AUC = 30
-DRIFT_MIN_N_FOR_CHECK = 10
-
-# On-demand reference window bounds: size-matched to the current window,
-# floored at DRIFT_REF_MIN and capped at DRIFT_REF_MAX matches.
-DRIFT_REF_MIN = 30
-DRIFT_REF_MAX = 10000
-
-# --- Player playstyle clustering (archetypes for the similarity index) ---
-# The similarity index consumes cluster membership as a one-hot vector block
-# and bakes the archetype labels into player metadata. The pipeline refits
-# clusters from the fresh snapshot on every train run; the playstyle-cluster
-# EDA notebook reuses this config to review the same fit. Labels are the
-# reviewed archetype names keyed by fitted cluster id (KMeans ids are
-# data+seed dependent, so the mapping can move between fits — review in the
-# notebook after data changes). n_clusters is an explicit selection, never a
-# vector-shape contract.
-PLAYSTYLE_N_CLUSTERS = 5
-PLAYSTYLE_RANDOM_STATE = 42
-PLAYSTYLE_CLUSTER_LABELS: dict[str, str] = {
-    "0": "PLACEHOLDER - describe cluster 0",
-    "1": "PLACEHOLDER - describe cluster 1",
-    "2": "PLACEHOLDER - describe cluster 2",
-    "3": "PLACEHOLDER - describe cluster 3",
-    "4": "PLACEHOLDER - describe cluster 4",
-}
-
-# --- Player similarity block calibration (explicit, reviewed weights) ---
-# The similarity vector is a weighted concatenation of independently calibrated
-# blocks: identity (one-hot), lifetime playstyle stats, surface career
-# performance, reputation, a PCA-reduced bio block, and optional cluster
-# membership. Each numeric block is normalized or bounded-transformed, scaled
-# by its explicit weight, concatenated, and the row L2-normalized once — so a
-# block's influence is bounded by its weight, never by raw scale or
-# dimensionality.
-# Relative weights: identity 0.10, playstyle 0.35, surface 0.25,
-# reputation 0.25, bio 0.05 (minor auxiliary), cluster 0.10 (sums to 1.0
-# without cluster). The primary signals are playstyle, surface, and
-# reputation; bio is a tiny bonus on top.
-SIM_IDENTITY_WEIGHT = 0.10
-SIM_PLAYSTYLE_WEIGHT = 0.35
-SIM_SURFACE_WEIGHT = 0.25
-SIM_REPUTATION_WEIGHT = 0.25
-SIM_BIO_WEIGHT = 0.05
-SIM_CLUSTER_WEIGHT = 0.10
-# Bio block projection: raw summary-text embeddings are PCA-reduced to at most
-# SIM_BIO_PCA_DIM components inside build_playstyle_matrix (fit per build over
-# the batch), so the similarity index and KMeans clustering consume exactly the
-# same low-weight bio block. n_components = min(SIM_BIO_PCA_DIM, n_samples,
-# n_features); with fewer players or features the block simply shrinks. PCA is
-# fit at index/clustering build time only — no serving-time transformer
-# artifact is needed or produced.
-SIM_BIO_PCA_DIM = 10
-# Surface win-rate confidence: shrunk = 0.5 + (rate - 0.5) * n / (n + K) pulls
-# small-sample rates toward the neutral 0.5 prior; the same K bounds exposure
-# counts (n / (n + K)) inside the surface block.
-SIM_SURFACE_SHRINK_K = 30.0
-# Reputation bounded transforms: current_rank -> exp(-rank / scale) (0.0 when
-# the player has no rank), match_count -> n / (n + K) experience; career win
-# rate is already in [0, 1].
-SIM_RANK_SCALE = 200.0
-SIM_EXPERIENCE_K = 100.0
+FEATURE_COLS_TAG = "feature_cols"
+FEATURE_COLS_HASH_TAG = "feature_cols_hash"
 
 
 def build_lineage_tags(
@@ -221,6 +124,62 @@ def build_lineage_tags(
     for key in LINEAGE_AUX_KEYS:
         tags[f"{AUX_TAG_PREFIX}{key}"] = str(aux_pins[key])
     return tags
+
+
+# Training-data cutoff date: the latest match date present in the training splits at promotion time.
+TRAIN_DATA_MAX_DATE_KEY = "train_data_max_match_date"
+
+# Performance metrics pinned on the champion model version at promotion time.
+METRIC_PREFIX = "metric_"
+EVAL_SPLIT_SIZE_KEY = "metric_eval_split_size"
+EVAL_MAX_DATE_KEY = "metric_eval_max_date"
+
+# --- Promotion gate ---
+# The candidate's ROC-AUC may trail the incumbent's by up to this amount (a
+# strictly lower test log loss is still required) and still be promoted.
+PROMOTION_AUC_TOLERANCE = 0.05
+
+# --- Drift monitoring thresholds (single source of truth for the verdict) ---
+DRIFT_PSI_MODERATE = 0.1
+DRIFT_PSI_SIGNIFICANT = 0.3
+DRIFT_SHARE_THRESHOLD = 0.75
+DRIFT_PRED_PSI_THRESHOLD = 0.3
+DRIFT_CALIBRATION_DELTA = 0.1
+DRIFT_AUC_DROP = 0.1
+DRIFT_MIN_N_FOR_AUC = 30
+DRIFT_MIN_N_FOR_CHECK = 10
+
+# On-demand reference window bounds: size-matched to the current window,
+# floored at DRIFT_REF_MIN and capped at DRIFT_REF_MAX matches.
+DRIFT_REF_MIN = 30
+DRIFT_REF_MAX = 10000
+
+# --- Player playstyle clustering (archetypes for the similarity index) ---
+PLAYSTYLE_N_CLUSTERS = 5
+PLAYSTYLE_RANDOM_STATE = 42
+PLAYSTYLE_CLUSTER_LABELS: dict[str, str] = {
+    "0": "PLACEHOLDER - describe cluster 0",
+    "1": "PLACEHOLDER - describe cluster 1",
+    "2": "PLACEHOLDER - describe cluster 2",
+    "3": "PLACEHOLDER - describe cluster 3",
+    "4": "PLACEHOLDER - describe cluster 4",
+}
+
+# --- Player similarity block calibration (explicit, reviewed weights) ---
+# The similarity vector is a weighted concatenation of independently calibrated
+# blocks: identity (one-hot), lifetime playstyle stats, surface career
+# performance, reputation, a PCA-reduced bio block, and optional cluster
+# membership.
+SIM_IDENTITY_WEIGHT = 0.10
+SIM_PLAYSTYLE_WEIGHT = 0.35
+SIM_SURFACE_WEIGHT = 0.25
+SIM_REPUTATION_WEIGHT = 0.25
+SIM_BIO_WEIGHT = 0.05
+SIM_CLUSTER_WEIGHT = 0.10
+SIM_BIO_PCA_DIM = 10
+SIM_SURFACE_SHRINK_K = 30.0
+SIM_RANK_SCALE = 200.0
+SIM_EXPERIENCE_K = 100.0
 
 
 # --- Serving model metadata / manifest keys ---

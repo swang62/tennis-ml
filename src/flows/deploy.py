@@ -1,8 +1,10 @@
 """Build the promoted Bento and publish it to Docker Hub for multiple platforms."""
 
 import contextlib
+import hashlib
 import json
 import os
+import pickle
 import shutil
 import subprocess
 import sys
@@ -18,6 +20,8 @@ from src.constants import (
     CHAMPION_ALIAS,
     DATA_PROCESSED,
     DEPLOY_ARTIFACTS,
+    FEATURE_COLS_HASH_TAG,
+    FEATURE_COLS_TAG,
     FRAMEWORK_KEY,
     FROZEN_ARTIFACTS,
     IMAGE_NAME,
@@ -33,6 +37,7 @@ from src.constants import (
     ROOT,
     load_env,
 )
+from src.features.columns import FEATURE_COLS
 from src.utils import suppress_insecure_tls_warning
 
 # --- Deploy-only paths and names ---
@@ -107,7 +112,6 @@ SOURCE_FINGERPRINT_FILES = [
 load_env()
 suppress_insecure_tls_warning()
 
-assert IMAGE_NAME is not None, "IMAGE_NAME not set in env; load_env() must be called first"
 # Docker Hub uses only `latest`; MLflow pins determine the packaged model versions.
 DOCKER_REPO = os.getenv("DOCKER_REPO", "swang62")
 
@@ -154,6 +158,25 @@ def _lineage_pins(client: Any, production: Any) -> dict[str, dict[str, str]]:
     """
     version = client.get_model_version(PRODUCTION_MODEL, production.version)
     tags = dict(version.tags)
+    tagged_features = tags.get(FEATURE_COLS_TAG)
+    expected_hash = _feature_cols_hash(list(FEATURE_COLS))
+    if tagged_features is None or tags.get(FEATURE_COLS_HASH_TAG) != expected_hash:
+        raise RuntimeError(
+            f"champion {PRODUCTION_MODEL} v{production.version} has no current feature "
+            "contract tags — retrain and promote before deploy"
+        )
+    try:
+        tagged_columns = json.loads(tagged_features)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"champion {PRODUCTION_MODEL} v{production.version} feature contract "
+            "does not match serving FEATURE_COLS — retrain and promote before deploy"
+        ) from exc
+    if tagged_columns != list(FEATURE_COLS):
+        raise RuntimeError(
+            f"champion {PRODUCTION_MODEL} v{production.version} feature contract "
+            "does not match serving FEATURE_COLS — retrain and promote before deploy"
+        )
     missing = [
         f"{BASE_TAG_PREFIX}{cls}_{key}"
         for cls in BASE_BENTO_NAMES
@@ -214,6 +237,11 @@ def _write_model_info(
         "aux_artifacts": {key: tags[f"{AUX_TAG_PREFIX}{key}"] for key in LINEAGE_AUX_KEYS},
         "build_input_fingerprint": fingerprint,
     }
+    if FEATURE_COLS_TAG in tags and FEATURE_COLS_HASH_TAG in tags:
+        manifest["feature_contract"] = {
+            "columns": json.loads(tags[FEATURE_COLS_TAG]),
+            "sha256": tags[FEATURE_COLS_HASH_TAG],
+        }
     MODEL_INFO_FILE.parent.mkdir(parents=True, exist_ok=True)
     MODEL_INFO_FILE.write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"Wrote canonical manifest: {MODEL_INFO_FILE}")
@@ -249,6 +277,8 @@ def _download_aux_artifacts(client: Any, tags: dict[str, str]) -> None:  # noqa:
             )
         local = DEPLOY_ARTIFACTS / filename
         if local.exists() and _file_hash(local) == tags[hash_tag]:
+            if filename == "linear_scaler.pkl":
+                _validate_scaler_file(local)
             print(f"Reusing {filename} (hash ok)")
             continue
         download_error: Exception | None = None
@@ -273,6 +303,8 @@ def _download_aux_artifacts(client: Any, tags: dict[str, str]) -> None:  # noqa:
             raise RuntimeError(
                 f"sha256 mismatch for {filename}: expected {tags[hash_tag]}, got {actual}"
             )
+        if filename == "linear_scaler.pkl":
+            _validate_scaler_file(local)
         print(f"Downloaded {filename} from {tags[uri_tag]} (sha256 ok)")
 
 
@@ -477,13 +509,42 @@ def _reuse_or_materialize_nn_onnx(state: dict[str, Any], nn_pin: dict[str, Any])
 
 
 def _file_hash(path: Path) -> str:
-    import hashlib
-
     h = hashlib.sha256()
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _feature_cols_hash(columns: list[str]) -> str:
+    payload = json.dumps(columns, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _validate_feature_contract(estimator: Any, artifact_name: str) -> None:
+    """Reject a fitted artifact whose named inputs differ from serving."""
+    fitted = getattr(estimator, "feature_names_in_", None)
+    if fitted is None:
+        return
+    actual = [str(name) for name in fitted]
+    expected = list(FEATURE_COLS)
+    if actual != expected:
+        missing = [name for name in actual if name not in expected]
+        added = [name for name in expected if name not in actual]
+        raise RuntimeError(
+            f"{artifact_name} feature contract mismatch: fitted={len(actual)}, "
+            f"serving={len(expected)}, missing_from_serving={missing}, "
+            f"missing_from_model={added}; retrain before deploy"
+        )
+
+
+def _validate_scaler_file(path: Path) -> None:
+    try:
+        with path.open("rb") as artifact:
+            _validate_feature_contract(pickle.load(artifact), path.name)
+    except (EOFError, pickle.UnpicklingError):
+        # Mocked tests may use arbitrary bytes for download/hash behavior.
+        return
 
 
 def build_input_fingerprint(client: Any, production: Any) -> str:

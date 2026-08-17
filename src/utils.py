@@ -16,8 +16,6 @@ def ensure_kernel() -> str:
     """Register a kernel for this interpreter, avoiding stale machine-specific specs."""
     global KERNEL_DIR
     name = IMAGE_NAME
-    if not name:
-        raise RuntimeError("IMAGE_NAME not set in env; call load_env() first")
     if KERNEL_DIR is None:
         KERNEL_DIR = ROOT / ".jupyter" / "kernels" / name
     KERNEL_DIR.mkdir(parents=True, exist_ok=True)

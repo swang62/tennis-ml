@@ -244,7 +244,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="append only new rows (dbt build without --full-refresh)",
     )
-    return parser.parse_args(argv)
+    args, _ignored = parser.parse_known_args(argv)
+    return args
 
 
 def main(argv: list[str] | None = None) -> None:

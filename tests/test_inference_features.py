@@ -1065,7 +1065,7 @@ def test_train_inference_parity_on_historical_match():
         compared += 1
     # The fixture must actually compare the whole contract, so it cannot
     # silently degenerate to a handful of columns.
-    assert compared == len(FEATURE_COLS) == 32
+    assert compared == len(FEATURE_COLS)
 
     # The opposite perspective of the SAME physical match must also match its
     # gold row, and the two inference orientations must mirror each other.

@@ -22,7 +22,7 @@ SNAPSHOT_TABLES = (
     ("bronze", "player_profiles"),
 )
 
-# gold.match_features metadata columns preceding the 39 feature columns.
+# gold.match_features metadata columns preceding the model feature columns.
 META_COLS = (
     "match_id",
     "match_date",
