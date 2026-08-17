@@ -13,7 +13,7 @@ from psycopg.errors import DuplicateDatabase
 
 from src import constants
 from src.constants import ROOT, SCHEMA_SQL, get_database_url
-from src.db.client import connection
+from src.db.client import CONNECT_TIMEOUT_S, connection
 
 
 def migrate() -> None:
@@ -23,13 +23,22 @@ def migrate() -> None:
     if not database:
         raise RuntimeError("DATABASE_URL must include a database name")
 
+    # One bounded, sanitized progress line before the first network call (the
+    # maintenance connect) so a wedged server shows up instead of hanging
+    # silently. host/port/db only — never the URL, user, or password.
+    host = str(conninfo.get("host") or "localhost")
+    port = str(conninfo.get("port") or "5432")
+    print(f"Connecting to {host}:{port}/{database}...")
+
     # template1 always exists, unlike postgres when POSTGRES_DB names a
     # different initial database in the official container image.
     conninfo["dbname"] = "template1"
     maintenance_url = make_conninfo(
         **{key: str(value) for key, value in conninfo.items() if value is not None}
     )
-    with psycopg.connect(maintenance_url, autocommit=True).cursor() as cur:
+    with psycopg.connect(
+        maintenance_url, autocommit=True, connect_timeout=CONNECT_TIMEOUT_S
+    ).cursor() as cur:
         try:
             cur.execute(pg_sql.SQL("CREATE DATABASE {}").format(pg_sql.Identifier(database)))
             print(f"PostgreSQL database created: {database}")

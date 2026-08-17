@@ -5,13 +5,17 @@ psycopg's `%s` placeholders — request data is never concatenated into SQL —
 and results come back as pandas DataFrames.
 
 Each process shares a lazily-created `psycopg_pool.ConnectionPool`
-(min_size=1, max_size=2, autocommit)
-instead of one global connection, so concurrent Bento worker requests each
-run on their own connection. `execute_df()` checks out one connection per
-call; multi-step writes run inside an explicit `transaction()` context
-manager that holds one checked-out connection, commits on success and rolls
-back on error. A broken connection is discarded by the pool — statements are
-never replayed automatically.
+(min_size=0, max_size=1, autocommit, ~5s connection/checkout/readiness
+timeouts, 30s idle close) that starts with no connections and, across the two
+Bento workers, caps the app at two checked-out connections. A checked-out
+connection returns to the pool the moment its caller exits; surplus physical
+connections are closed after `MAX_IDLE_S` of disuse, so an idle app does not
+retain PostgreSQL connections (psycopg's default idle timeout is 10 minutes,
+far too long to hold server capacity). `execute_df()` checks out one
+connection per call; multi-step writes run inside an explicit
+`transaction()` context manager that holds one checked-out connection,
+commits on success and rolls back on error. A broken connection is discarded
+by the pool — statements are never replayed automatically.
 
 DuckDB remains installed solely for the training database snapshots; it is
 not part of the operational query path.
@@ -30,11 +34,26 @@ import psycopg
 from psycopg.rows import tuple_row
 from psycopg_pool import ConnectionPool
 
-# Pool bounds: four Bento workers x max 2 connections per process permit up
-# to 8 concurrent PostgreSQL queries; min 1 per process keeps 4 warm
-# connections. Subject to the database's capacity.
-MIN_POOL_SIZE = 1
-MAX_POOL_SIZE = 2
+# Pool bounds: two Bento workers x max 1 connection per process cap the app
+# at 2 concurrent PostgreSQL queries; min 0 starts with no connections.
+# Subject to the database's capacity.
+MIN_POOL_SIZE = 0
+MAX_POOL_SIZE = 1
+
+# Idle lifecycle: a returned connection that goes unused is closed after
+# MAX_IDLE_S (psycopg defaults to 10 minutes, which would let an idle app
+# retain server capacity). Checkouts return immediately; only the physical
+# connection is closed after the idle period.
+MAX_IDLE_S = 30.0
+
+# Connection bounds: every wait is capped so a wedged server fails a query
+# instead of hanging a worker forever. connect_timeout caps each TCP/SSL
+# handshake (libpq defaults wait indefinitely; integer seconds), pool timeout
+# caps checkout waits, and reconnect_timeout caps how long the pool keeps
+# retrying an unreachable server before giving up.
+CONNECT_TIMEOUT_S = 5
+POOL_TIMEOUT_S = 5.0
+RECONNECT_TIMEOUT_S = 5.0
 
 _pool: ConnectionPool | None = None
 _pool_lock = threading.Lock()
@@ -43,10 +62,13 @@ _pool_lock = threading.Lock()
 def get_pool() -> ConnectionPool:
     """Return the process-local connection pool, creating it on first use.
 
-    The pool is bounded (min_size=1, max_size=2) and autocommit. `wait()`
-    surfaces an unreachable DATABASE_URL at first use instead of failing on
-    the first query. Broken connections are discarded after their failed use
-    and replenished by psycopg_pool's background workers.
+    The pool is bounded (min_size=0, max_size=1) and autocommit, and closes
+    connections left idle for `MAX_IDLE_S`. `wait()` surfaces an unreachable
+    DATABASE_URL at first use instead of failing on the first query, with a
+    bounded readiness timeout. `check` runs a health probe on every checkout
+    so connections broken by the server (e.g. an SSL reset) are discarded
+    before reuse, and `reconnect_timeout` bounds how long the pool keeps
+    retrying after a failure.
     """
     global _pool
     pool = _pool
@@ -62,10 +84,14 @@ def get_pool() -> ConnectionPool:
                     url,
                     min_size=MIN_POOL_SIZE,
                     max_size=MAX_POOL_SIZE,
-                    kwargs={"autocommit": True},
+                    max_idle=MAX_IDLE_S,
+                    kwargs={"autocommit": True, "connect_timeout": CONNECT_TIMEOUT_S},
+                    check=ConnectionPool.check_connection,
+                    timeout=POOL_TIMEOUT_S,
+                    reconnect_timeout=RECONNECT_TIMEOUT_S,
                     name="tennis-pool",
                 )
-                _pool.wait()
+                _pool.wait(timeout=POOL_TIMEOUT_S)
             pool = _pool
     return pool
 

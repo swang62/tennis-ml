@@ -96,7 +96,8 @@ class FakePool:
     Mirrors psycopg-pool's observable contract: connections are health-checked
     at checkout, broken connections are discarded instead of reused, at most
     ``max_size`` connections are in use concurrently, and ``close()`` closes
-    the pool.
+    the pool. ``max_idle`` records the idle-lifecycle configuration passed at
+    construction (the fake never closes idle connections on a timer).
     """
 
     def __init__(
@@ -105,18 +106,25 @@ class FakePool:
         *,
         min_size: int = 1,
         max_size: int = 2,
+        max_idle: float | None = None,
         kwargs: dict[str, object] | None = None,
         check=None,
+        timeout: float | None = None,
+        reconnect_timeout: float | None = None,
         name: str | None = None,
         **_ignored,
     ):
         self.conninfo = conninfo
         self.min_size = min_size
         self.max_size = max_size
+        self.max_idle = max_idle
         self.kwargs = kwargs or {}
         self.check = check
+        self.timeout = timeout
+        self.reconnect_timeout = reconnect_timeout
         self.name = name
         self.waited = False
+        self.wait_timeout: float | None = None
         self.closed = False
         self._free: list[FakeConn] = [FakeConn() for _ in range(max_size)]
         self._in_use: set[FakeConn] = set()
@@ -130,8 +138,8 @@ class FakePool:
             raise psycopg.OperationalError("connection is broken")
 
     def wait(self, timeout: float | None = None) -> None:
-        del timeout  # fake: the pool is always ready
         self.waited = True
+        self.wait_timeout = timeout
 
     def close(self) -> None:
         with self._cv:
@@ -157,8 +165,6 @@ class FakePool:
                     if conn.broken:
                         self._free.remove(conn)
                         conn.close()
-                if not self._free:
-                    self._free.append(FakeConn())  # replacement, as AddConnection would
                 for conn in self._free:
                     if conn not in self._in_use:
                         if self.check is not None:
@@ -170,7 +176,10 @@ class FakePool:
                                 continue
                         self._in_use.add(conn)
                         return conn
-                self._cv.wait(0.05)
+                if len(self._in_use) < self.max_size:
+                    self._free.append(FakeConn())  # expand, never past max_size
+                    continue
+                self._cv.wait(0.05)  # wait for a checkout to be returned
             raise RuntimeError("pool is closed")
 
     def _release(self, conn: FakeConn) -> None:
@@ -181,7 +190,15 @@ class FakePool:
 
 @pytest.fixture
 def fake_pool(monkeypatch):
-    pool = FakePool("postgresql://test@localhost:5432/test", check=FakePool.check_connection)
+    # Mirrors production bounds (min 0 / max 1 per worker, 30s idle close) so
+    # checkout tests exercise the same caps the deployed Bento workers use.
+    pool = FakePool(
+        "postgresql://test@localhost:5432/test",
+        min_size=db_client.MIN_POOL_SIZE,
+        max_size=db_client.MAX_POOL_SIZE,
+        max_idle=db_client.MAX_IDLE_S,
+        check=FakePool.check_connection,
+    )
     monkeypatch.setattr(db_client, "_pool", pool)
     return pool
 
@@ -262,10 +279,19 @@ def test_get_pool_uses_passwordless_local_database_url(monkeypatch):
     pool = cast(FakePool, db_client.get_pool())
 
     assert pool.conninfo == "postgresql://steve@127.0.0.1:5432/postgres"
-    assert pool.min_size == 1
-    assert pool.max_size == 2
-    assert pool.kwargs == {"autocommit": True}
-    assert pool.check is None  # avoid a round trip on every checkout
+    # No initial connections, one per worker: the whole app never exceeds
+    # (two workers x 1) checked-out connections, and returned connections
+    # unused for MAX_IDLE_S are closed (psycopg's 10-minute default would
+    # otherwise retain server capacity while the app sits idle).
+    assert pool.min_size == db_client.MIN_POOL_SIZE == 0
+    assert pool.max_size == db_client.MAX_POOL_SIZE == 1
+    assert pool.max_idle == db_client.MAX_IDLE_S == 30.0
+    # Bounded, health-checked pool: no database wait path is unbounded.
+    assert pool.kwargs == {"autocommit": True, "connect_timeout": db_client.CONNECT_TIMEOUT_S}
+    assert pool.check is FakePool.check_connection  # health probe at every checkout
+    assert pool.timeout == db_client.POOL_TIMEOUT_S  # bounded connection() wait
+    assert pool.reconnect_timeout == db_client.RECONNECT_TIMEOUT_S  # bounded retry
+    assert pool.wait_timeout == db_client.POOL_TIMEOUT_S  # bounded readiness wait
     assert pool.waited  # wait() called: first use surfaces an unreachable DB
 
 
@@ -334,34 +360,39 @@ def test_transaction_holds_one_checked_out_connection(fake_pool):
     assert len(fake_pool._in_use) == 0  # returned on exit
 
 
-def test_concurrent_callers_obtain_separate_connections(fake_pool):
-    """Concurrent callers each check out their own pooled connection.
+def test_concurrent_callers_share_one_connection(fake_pool):
+    """Concurrent callers with the max-1 pool serialize on one connection.
 
-    All threads hold their connection simultaneously (barrier), so a shared
-    serial connection would surface as a single distinct id.
+    psycopg-pool never hands out more than ``max_size`` connections at once:
+    the second caller waits for the first to check its connection back in, so
+    checked-out concurrency stays capped at one per worker.
     """
     assert db_client.get_pool() is fake_pool
-    barrier = threading.Barrier(db_client.MAX_POOL_SIZE)
+    start = threading.Barrier(2)
     observed: list[int] = []
+    peak_in_use = 0
     errors: list[BaseException] = []
 
     def worker() -> None:
+        nonlocal peak_in_use
         try:
+            start.wait(timeout=5)
             with db_client.connection() as conn:
-                barrier.wait(timeout=5)
+                peak_in_use = max(peak_in_use, len(fake_pool._in_use))
                 observed.append(id(conn))
         except BaseException as exc:  # test thread reporter
             errors.append(exc)
 
-    threads = [threading.Thread(target=worker) for _ in range(db_client.MAX_POOL_SIZE)]
+    threads = [threading.Thread(target=worker) for _ in range(2)]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join(timeout=10)
 
     assert errors == []
-    assert len(observed) == db_client.MAX_POOL_SIZE
-    assert len(set(observed)) == db_client.MAX_POOL_SIZE  # distinct connections
+    assert len(observed) == 2  # both callers completed
+    assert len(set(observed)) == 1  # serialized on the single connection
+    assert peak_in_use <= db_client.MAX_POOL_SIZE  # never above the per-worker cap
 
 
 # --- Broken connection resilience (regression: severed/cached conn) ---

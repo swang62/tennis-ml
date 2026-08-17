@@ -32,10 +32,10 @@ def test_migrate_bootstraps_configured_database_from_template1(monkeypatch, tmp_
     target_cursor = _Cursor()
     maintenance_connection = SimpleNamespace(cursor=lambda: maintenance_cursor)
     target_connection = SimpleNamespace(cursor=lambda: target_cursor, transaction=lambda: _Cursor())
-    connections = []
+    connects = []
 
     def connect(conninfo, **_kwargs):
-        connections.append(conninfo)
+        connects.append((conninfo, _kwargs))
         return maintenance_connection
 
     monkeypatch.setenv(
@@ -47,10 +47,42 @@ def test_migrate_bootstraps_configured_database_from_template1(monkeypatch, tmp_
 
     migrate_db.migrate()
 
-    assert "dbname=template1" in connections[0]
-    assert "sslmode=require" in connections[0]
+    conninfo, kwargs = connects[0]
+    assert "dbname=template1" in conninfo
+    assert "sslmode=require" in conninfo
+    assert kwargs == {"autocommit": True, "connect_timeout": migrate_db.CONNECT_TIMEOUT_S}
     assert "CREATE DATABASE" in repr(maintenance_cursor.statements[0])
     assert target_cursor.statements == ["CREATE SCHEMA bronze;"]
+
+
+def test_migrate_prints_sanitized_progress_before_connecting(monkeypatch, capsys, tmp_path):
+    """A host:port/db progress line precedes the first network call, with no
+    URL, user, or password leaked."""
+    schema_sql = tmp_path / "schema.sql"
+    schema_sql.write_text("CREATE SCHEMA bronze;")
+    maintenance_connection = SimpleNamespace(cursor=lambda: _Cursor())
+    target_connection = SimpleNamespace(cursor=lambda: _Cursor(), transaction=lambda: _Cursor())
+    output_at_connect = []
+
+    def connect(_conninfo, **_kwargs):
+        # Snapshot the output as it is when the first network call happens.
+        output_at_connect.append(capsys.readouterr().out)
+        return maintenance_connection
+
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgresql://user:secret@localhost:6543/tennis?sslmode=require"
+    )
+    monkeypatch.setattr(migrate_db, "SCHEMA_SQL", schema_sql)
+    monkeypatch.setattr(migrate_db.psycopg, "connect", connect)
+    monkeypatch.setattr(migrate_db, "connection", lambda: nullcontext(target_connection))
+
+    migrate_db.migrate()
+
+    assert output_at_connect[0] == "Connecting to localhost:6543/tennis...\n"
+    out = capsys.readouterr().out
+    assert "user" not in out
+    assert "secret" not in out
+    assert "postgresql://" not in out
 
 
 # ── Schema access-path contracts (static, hermetic: read schema.sql / dbt config) ──

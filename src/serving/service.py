@@ -949,7 +949,9 @@ class _LGBMProbaAdapter:
     description=SERVICE_DESCRIPTION,
     traffic={"timeout": 120},
     resources={"cpu": "500m"},
-    workers=4,
+    # Two workers x one max pooled DB connection each: at most two app
+    # connections, none held while idle.
+    workers=2,
 )
 @bentoml.asgi_app(DATA_APP, path="/")
 class TennisPredictor:

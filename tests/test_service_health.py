@@ -59,6 +59,7 @@ def test_nginx_transparent_proxy_and_gated_routes():
     assert "location = /api/openapi.json" not in conf
 
 
-def test_service_declares_four_workers():
-    """Bento runs four worker processes; each holds model state and one lazy DB connection."""
-    assert TennisPredictor.config.get("workers") == 4
+def test_service_declares_two_workers():
+    """Bento runs two worker processes; one max pooled connection each caps
+    the app at two database connections, none held while idle."""
+    assert TennisPredictor.config.get("workers") == 2
