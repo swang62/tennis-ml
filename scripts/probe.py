@@ -1,4 +1,4 @@
-"""Host workflow probe for `just probe` / `just data-pipeline`.
+"""Host workflow probe for `just probe` / `just full-pipeline`.
 
 Fail-fast, non-mutating preflight: required commands, Docker daemon, root
 `.env` configuration, host PostgreSQL reachability, Prefect readiness, MLflow

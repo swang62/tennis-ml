@@ -874,8 +874,8 @@ def test_normal_flow_runs_evidently_and_logs_drift_check(monkeypatch, tmp_path):
         "drift_report_2025-01-10_v3.html",
         "drift_report_2025-01-10_v3.json",
     ]
-    assert (tmp_path / "drift_report_2025-01-10_v3.json").exists()
-    assert (tmp_path / "drift_report_2025-01-10_v3.html").exists()
+    assert (tmp_path / "drift" / "drift_report_2025-01-10_v3.json").exists()
+    assert (tmp_path / "drift" / "drift_report_2025-01-10_v3.html").exists()
 
 
 def test_cutoff_override_replaces_champion_watermark(monkeypatch, tmp_path, capsys):

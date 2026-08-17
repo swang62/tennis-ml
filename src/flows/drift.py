@@ -603,10 +603,11 @@ def _evidently_drift(
         ],
         include_tests=True,
     )
-    snapshot = report.run(
-        current_data=current_df[evidently_columns],
-        reference_data=reference_df[evidently_columns],
-    )
+    with np.errstate(divide="ignore", invalid="ignore"):
+        snapshot = report.run(
+            current_data=current_df[evidently_columns],
+            reference_data=reference_df[evidently_columns],
+        )
     payload = json.loads(snapshot.json())
     json_path.write_text(json.dumps(payload, indent=2, default=str))
     snapshot.save_html(str(html_path))
@@ -722,7 +723,11 @@ def drift_flow(cutoff: date | None = None) -> int:
         reference_df = _score_window(_expand_orientations(reference))
         print("Scoring complete.")
 
-        report_json = ARTIFACTS / f"drift_report_{cutoff_date.isoformat()}_v{champion.version}.json"
+        drift_artifacts = ARTIFACTS / "drift"
+        drift_artifacts.mkdir(parents=True, exist_ok=True)
+        report_json = (
+            drift_artifacts / f"drift_report_{cutoff_date.isoformat()}_v{champion.version}.json"
+        )
         per_feature_drift, drift_share, prediction_psi = _evidently_drift(
             current_df, reference_df, report_json, report_json.with_suffix(".html")
         )

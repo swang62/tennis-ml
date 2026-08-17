@@ -63,6 +63,7 @@ reportUnannotatedClassAttribute = "none"
 reportUnnecessaryIsInstance = "none"
 reportUnreachable = "none"
 reportPrivateUsage = "none"
+reportPrivateImportUsage = "none"
 reportMissingTypeStubs = "none"
 reportUntypedFunctionDecorator = "none"
 
@@ -100,6 +101,7 @@ training = [
   "torch>=2.12",
   "onnxscript>=0.1.0",
   "lightning>=2.6",
+  "lightning-sdk>=2026.8.14",
   "optuna>=4.9",
   "optuna-integration[pytorch-lightning]>=4.9.0",
   "papermill>=2.7",
@@ -140,6 +142,7 @@ dev = [
   "python-dotenv>=1.2.2",
   "basedpyright>=1.39",
   "pandas-stubs>=3.0",
+  "httpx2>=0.1",
   "tennis-ml",
 ]
 
@@ -149,9 +152,10 @@ filterwarnings = [
   # Upstream deprecations we can't fix: bentoml/prefect/dbt lag pydantic 2.11+
   # (PydanticDeprecatedSince211) and pathspec 1.0 (GitWildMatchPattern rename).
   "ignore:.*GitWildMatchPattern.*:DeprecationWarning",
+  "ignore:.*numpy\\.core is deprecated.*:DeprecationWarning",
   "ignore:.*__get_pydantic_core_schema__.*:DeprecationWarning",
-  # starlette.testclient deprecation (httpx2 migration) — test-only, upstream.
-  "ignore:.*starlette\\.testclient.*:UserWarning",
+  "ignore:.*deprecated function 'Dependency'.*:DeprecationWarning",
+  "ignore:.*deprecated class 'DependencyKwarg'.*:DeprecationWarning",
 ]
 
 [tool.pytest_env]

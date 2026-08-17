@@ -41,16 +41,27 @@ def migrate() -> None:
     print("[db] PostgreSQL migration: done")
 
 
-def actual_target() -> tuple[str | None, int, str]:
+def actual_target() -> tuple[str | None, int, str, str]:
     """Return the configured client-side connection endpoint."""
-    with connection() as conn:
+    with connection() as conn, conn.cursor() as cur:
         info = conn.info
-    return info.host, int(info.port), info.dbname
+        cur.execute("SELECT pg_size_pretty(pg_database_size(current_database()))")
+        row = cur.fetchone()
+        size = str(row[0]) if row else "unknown"
+    return info.host, int(info.port), info.dbname, size
 
 
 def reset() -> None:
     """Drop and recreate schemas."""
-    host, port, database = actual_target()
+    host, port, database, size = actual_target()
+    print(f"Database target: {host}:{port}/{database} (current size: {size})")
+    try:
+        answer = input("Reset this database? [y/N] ").strip().lower()
+    except EOFError:
+        answer = ""
+    if answer not in {"y", "yes"}:
+        print("Database reset cancelled.")
+        return
 
     with connection() as conn, conn.transaction(), conn.cursor() as cur:
         for schema in ("bronze", "silver", "gold"):

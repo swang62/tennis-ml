@@ -103,7 +103,9 @@ if __name__ == "__main__":
         action="store_true",
         help="always promote the candidate, bypassing the metric gate",
     )
-    args = parser.parse_args()
+    args, ignored = parser.parse_known_args()
+    if ignored:
+        print(f"Ignoring unsupported pipeline arguments: {' '.join(ignored)}")
 
     LOGS.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

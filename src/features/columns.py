@@ -107,13 +107,12 @@ SILVER_ROLLING_COLS: list[str] = [
 
 # ── Per-side feature columns of the directional match-level table ──
 
-# Current-match rates lack an as-of source, so they are never model features.
-MATCH_STATS_COLS: list[str] = []
-
-# Time-aware profile features; height remains profile-only.
+# Profile features; height remains profile-only.
 PROFILE_COLS: list[str] = [
-    "is_left_handed",
-    "years_pro",
+    "player_is_left_handed",
+    "opponent_is_left_handed",
+    "player_years_pro",
+    "opponent_years_pro",
 ]
 
 # Pair-level head-to-head history (no player_/opponent_ prefix). Both
@@ -134,6 +133,8 @@ H2H_COLS: list[str] = [
 # as exposure; no per-rate exposure columns are added. 0 for cold start (no
 # prior matches in the window). Paired features: exchange on side swap.
 RATE_EXPOSURE_COLS: list[str] = [
+    "player_weighted_form_10",
+    "opponent_weighted_form_10",
     "player_matches_10",
     "opponent_matches_10",
 ]
@@ -186,26 +187,16 @@ CONTEXT_COLS: list[str] = [
     "round_encoded",
 ]
 
-# ── Final model feature contract (39 numeric columns) ──
+# ── Final model feature contract ──
 #
 # Exact consumer contract: differentials, absolute state, H2H, then context.
 # Feature order is shared by training, snapshot validation, inference, and
 # serving (all derive from FEATURE_COLS).
 FEATURE_COLS: list[str] = [
-    # Matchup differences (rolling values are all 10-match values).
     *DIFF_COLS,
-    # Values where the absolute state of both players matters.
-    "player_weighted_form_10",
-    "opponent_weighted_form_10",
-    # Per-side exposure counts backing the smoothed 10-match rates.
     *RATE_EXPOSURE_COLS,
-    "player_is_left_handed",
-    "opponent_is_left_handed",
-    "player_years_pro",
-    "opponent_years_pro",
-    # Pair-level head-to-head: shared meeting count + signed smoothed advantage.
+    *PROFILE_COLS,
     *H2H_COLS,
-    # Numeric match context; keep one-hot surface for linear and neural models.
     *CONTEXT_COLS,
 ]
 

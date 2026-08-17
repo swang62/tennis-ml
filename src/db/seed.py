@@ -126,7 +126,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="overwrite existing rows and ignore idempotent skips (matches, rankings, profiles, bios)",
     )
-    return parser.parse_args(argv)
+    args, _ignored = parser.parse_known_args(argv)
+    return args
 
 
 def main(argv: list[str] | None = None) -> None:

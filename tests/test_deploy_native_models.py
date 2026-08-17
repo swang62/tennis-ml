@@ -150,6 +150,11 @@ def test_cached_gbdt_framework_is_keyed_by_mlflow_version(monkeypatch):
 
 
 def _lineage_tags():
+    import json
+
+    from src.constants import FEATURE_COLS_HASH_TAG, FEATURE_COLS_TAG
+    from src.features.columns import FEATURE_COLS
+
     return {
         "base_linear_registered_model_name": "linear_best",
         "base_linear_version": "3",
@@ -167,6 +172,8 @@ def _lineage_tags():
         "aux_embeddings_hash": "bbb",
         "aux_bio_feature_cols_uri": "runs:/run-aux/bio_feature_cols.json",
         "aux_bio_feature_cols_hash": "ccc",
+        FEATURE_COLS_TAG: json.dumps(FEATURE_COLS, separators=(",", ":")),
+        FEATURE_COLS_HASH_TAG: _deploy()._feature_cols_hash(FEATURE_COLS),
     }
 
 
