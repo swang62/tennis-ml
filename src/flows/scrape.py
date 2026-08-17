@@ -72,6 +72,10 @@ RANKINGS_URL = "https://www.atptour.com/en/rankings/singles?rankRange=0-200&date
 # hidden by the .non-live state — the element exists in the DOM immediately but
 # the row links only appear once the server-side data has rendered.
 RANKINGS_TABLE_SELECTOR = "table.mega-table tbody tr a[href*='/en/players/']"
+# #dateWeek-filter: the SELECT listing every published ranking week. Its
+# presence in the DOM marks the end of the Cloudflare/manual widget hand-off;
+# options are matched by text in _week_in_filter.
+FILTER_SELECTOR = "#dateWeek-filter"
 # Per-week page render budget. Reapplied fresh on every wait (one wait per
 # week), so a slow page never eats into the next week's budget. 30s per page is
 # ample for a normal rankings render.
@@ -81,6 +85,12 @@ RANKINGS_TABLE_TIMEOUT_MS = 30_000
 # than that is not going to resolve, and a genuine missing week has no rows to
 # render and is skipped immediately.
 CHALLENGE_RESOLVE_BUDGET_S = 30
+# Readiness budget for the #dateWeek-filter element after navigation: while a
+# Cloudflare/manual widget is up the filter is absent from the DOM, so element
+# presence is the readiness signal. Once it appears, the requested week's
+# option is checked exactly once — a missing option means the week was never
+# published, with no further waiting.
+FILTER_VERIFY_BUDGET_S = 15
 # Per-navigation page-load budget for the rankings URL (goto, not row render).
 PAGE_NAVIGATION_TIMEOUT_MS = 60_000
 
@@ -317,9 +327,16 @@ def _fetch_week_html(page, url: str, week: date) -> str:
     persistent profile's Cloudflare clearance are reused for every week. Random
     jitter before/after navigation keeps the moves human-like.
 
-    A week that was never published (the #dateWeek-filter has no option for it)
-    is rejected immediately — no point waiting for rows that cannot render. The
-    gate for real weeks is the captured HTML containing actual player links:
+    Verification is element-first, not option-first: the page may be sitting on
+    a Cloudflare or manual widget right after navigation, so the #dateWeek-filter
+    SELECT is absent while verification is still underway. The flow first waits
+    up to FILTER_VERIFY_BUDGET_S for the filter element itself to appear (a
+    page that renders it immediately proceeds at once), then checks the
+    requested week's option exactly once. A missing option means the week was
+    never published — rejected immediately. A filter that never appears within
+    the budget is an unverifiable page, distinct from a missing week.
+
+    The gate for real weeks is the captured HTML containing actual player links:
     the table element itself is hidden by the .non-live state, so "attached" on
     the table fires before the rows render, and "visible" never fires at all.
     The loop therefore waits until either the row links appear in
@@ -330,6 +347,15 @@ def _fetch_week_html(page, url: str, week: date) -> str:
     _jitter()
     page.goto(url, wait_until="domcontentloaded", timeout=PAGE_NAVIGATION_TIMEOUT_MS)
     _jitter()
+    try:
+        page.wait_for_selector(
+            FILTER_SELECTOR, state="attached", timeout=FILTER_VERIFY_BUDGET_S * 1000
+        )
+    except Exception as exc:
+        raise RankingsParseError(
+            f"week {week.isoformat()}: #dateWeek-filter unavailable "
+            "(Cloudflare or widget verification failed)"
+        ) from exc
     if not _week_in_filter(page, week):
         raise RankingsParseError(
             f"week {week.isoformat()} not present in #dateWeek-filter (never published)"

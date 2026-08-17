@@ -137,28 +137,111 @@ def test_fetch_week_navigates_the_shared_page(monkeypatch):
     assert scrape._fetch_week_html(
         Page(), "https://example.test/rankings", date(2026, 1, 5)
     ).endswith("</a>")
-    assert calls == ["goto", "evaluate", "wait"]
+    assert calls == ["goto", "wait", "evaluate", "wait"]
 
 
-def test_fetch_week_rejects_unpublished_week(monkeypatch):
-    """A week absent from #dateWeek-filter is rejected immediately, no waiting."""
+def test_fetch_week_missing_option_after_filter_appears_skips_immediately(monkeypatch):
+    """Filter element appears but lacks the week -> reject immediately.
+
+    The option check runs exactly once; a never-published week is rejected at
+    once instead of polling the filter for the rest of the verification budget,
+    and the row-render wait is never reached.
+    """
     monkeypatch.setattr(scrape, "_jitter", lambda: None)
-    waited = False
+    checks = 0
+    row_waits = 0
 
     class Page:
         def goto(self, _url, **_kwargs):
             pass
 
+        def wait_for_selector(self, selector, **_kwargs):
+            nonlocal row_waits
+            if selector == scrape.RANKINGS_TABLE_SELECTOR:
+                row_waits += 1
+
         def evaluate(self, _js, wanted):
+            nonlocal checks
+            checks += 1
             return wanted in ("2026.01.05",)
 
-        def wait_for_selector(self, _selector, **_kwargs):
-            nonlocal waited
-            waited = True
+        def content(self):
+            return ""
 
     with pytest.raises(scrape.RankingsParseError, match="never published"):
         scrape._fetch_week_html(Page(), "https://example.test/rankings", date(2026, 1, 12))
-    assert not waited
+    assert checks == 1
+    assert row_waits == 0
+
+
+def test_fetch_week_filter_absent_until_timeout_raises_unavailable(monkeypatch):
+    """Filter element never appears within the budget -> verification error.
+
+    Distinct from a missing week: the page is unverifiable (blocked or stuck
+    on a widget), not proof that the week was never published.
+    """
+    monkeypatch.setattr(scrape, "_jitter", lambda: None)
+
+    class Page:
+        def goto(self, _url, **_kwargs):
+            pass
+
+        def wait_for_selector(self, _selector, **_kwargs):
+            raise TimeoutError("selector timed out")
+
+    with pytest.raises(scrape.RankingsParseError, match="unavailable"):
+        scrape._fetch_week_html(Page(), "https://example.test/rankings", date(2026, 1, 12))
+
+
+def test_fetch_week_filter_with_option_proceeds(monkeypatch):
+    """Filter appears with the week as an option -> scrape proceeds."""
+    monkeypatch.setattr(scrape, "_jitter", lambda: None)
+    checks = 0
+
+    class Page:
+        def goto(self, _url, **_kwargs):
+            pass
+
+        def wait_for_selector(self, _selector, **_kwargs):
+            pass
+
+        def evaluate(self, _js, _wanted):
+            nonlocal checks
+            checks += 1
+            return True
+
+        def content(self):
+            return '<a href="/en/players/x/y/overview">x</a>'
+
+    html = scrape._fetch_week_html(Page(), "https://example.test/rankings", date(2026, 1, 5))
+    assert html.endswith("</a>")
+    assert checks == 1
+
+
+def test_fetch_week_existing_filter_incurs_no_fixed_delay(monkeypatch, capsys):
+    """A normal page with the week already in the filter proceeds on the first check."""
+    monkeypatch.setattr(scrape, "_jitter", lambda: None)
+    checks = 0
+
+    class Page:
+        def goto(self, _url, **_kwargs):
+            pass
+
+        def evaluate(self, _js, _wanted):
+            nonlocal checks
+            checks += 1
+            return True
+
+        def wait_for_selector(self, _selector, **_kwargs):
+            pass
+
+        def content(self):
+            return '<a href="/en/players/x/y/overview">x</a>'
+
+    html = scrape._fetch_week_html(Page(), "https://example.test/rankings", date(2026, 1, 5))
+    assert html.endswith("</a>")
+    assert checks == 1
+    assert "waiting..." not in capsys.readouterr().out
 
 
 def test_fetch_week_polls_until_rows_render_or_deadline(monkeypatch):
@@ -179,9 +262,10 @@ def test_fetch_week_polls_until_rows_render_or_deadline(monkeypatch):
         def evaluate(self, _js, wanted):
             return wanted in ("2026.01.05",)
 
-        def wait_for_selector(self, _selector, **_kwargs):
+        def wait_for_selector(self, selector, **_kwargs):
             nonlocal waits
-            waits += 1
+            if selector == scrape.RANKINGS_TABLE_SELECTOR:
+                waits += 1
 
         def content(self):
             return "<table></table>" if waits < 3 else '<a href="/en/players/x/y/overview">x</a>'

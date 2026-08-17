@@ -5,7 +5,7 @@ psycopg's `%s` placeholders — request data is never concatenated into SQL —
 and results come back as pandas DataFrames.
 
 Each process shares a lazily-created `psycopg_pool.ConnectionPool`
-(min_size=0, max_size=1, autocommit, ~5s connection/checkout/readiness
+(min_size=0, max_size=1, autocommit, ~30s connection/checkout/readiness
 timeouts, 30s idle close) that starts with no connections and, across the two
 Bento workers, caps the app at two checked-out connections. A checked-out
 connection returns to the pool the moment its caller exits; surplus physical
@@ -46,14 +46,15 @@ MAX_POOL_SIZE = 1
 # connection is closed after the idle period.
 MAX_IDLE_S = 30.0
 
-# Connection bounds: every wait is capped so a wedged server fails a query
-# instead of hanging a worker forever. connect_timeout caps each TCP/SSL
-# handshake (libpq defaults wait indefinitely; integer seconds), pool timeout
-# caps checkout waits, and reconnect_timeout caps how long the pool keeps
-# retrying an unreachable server before giving up.
-CONNECT_TIMEOUT_S = 5
-POOL_TIMEOUT_S = 5.0
-RECONNECT_TIMEOUT_S = 5.0
+# Connection bounds: every wait is capped at 30 seconds so a wedged or
+# high-latency server fails a query instead of hanging a worker forever.
+# connect_timeout caps each TCP/SSL handshake (libpq defaults wait
+# indefinitely; integer seconds), pool timeout caps checkout waits, and
+# reconnect_timeout caps how long the pool keeps retrying an unreachable
+# server before giving up.
+CONNECT_TIMEOUT_S = 30
+POOL_TIMEOUT_S = 30.0
+RECONNECT_TIMEOUT_S = 30.0
 
 _pool: ConnectionPool | None = None
 _pool_lock = threading.Lock()

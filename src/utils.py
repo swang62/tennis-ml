@@ -26,7 +26,6 @@ def ensure_kernel() -> str:
                 "display_name": name,
                 "language": "python",
                 "env": {
-                    "MLFLOW_TRACKING_INSECURE_TLS": "true",
                     "MLFLOW_TRACKING_URI": os.environ.get("MLFLOW_TRACKING_URI", ""),
                 },
             },

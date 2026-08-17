@@ -81,7 +81,7 @@ Training uses gold match features: each physical match produces both orientation
 
 ### Base models
 
-- **Linear family:** logistic regression, SVM, and Gaussian Naive Bayes.
+- **Linear family:** logistic regression and Gaussian Naive Bayes.
 - **Gradient boosting:** XGBoost and LightGBM, with early stopping.
 - **Neural network:** a tabular/bio-feature MLP trained with Adam and binary cross-entropy with logits (`BCEWithLogitsLoss`).
 

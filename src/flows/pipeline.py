@@ -8,6 +8,7 @@ tags without re-beating production.
 """
 
 import argparse
+import logging
 import sys
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
@@ -61,6 +62,7 @@ def run_notebook(name: str, parameters: dict | None = None) -> None:
         output_path=str(dst),
         kernel_name=ensure_kernel(),
         parameters=parameters,
+        log_output=True,  # stream cell stdout/stderr live (progress bar is default)
     )
     print(f"  Done: {name}")
 
@@ -116,6 +118,11 @@ if __name__ == "__main__":
         redirect_stdout(_Tee(sys.stdout, log)),
         redirect_stderr(_Tee(sys.stderr, log)),
     ):
+        # Route Papermill's log_output records (INFO/WARNING) through the
+        # tee'd stderr so cell output lands in both console and run log.
+        # The handler binds the tee because it is created inside the redirect.
+        logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(message)s")
+
         # Refresh first so training cannot read a stale snapshot.
         print("Refreshing training snapshot from PostgreSQL...")
         refresh_snapshot()
