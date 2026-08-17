@@ -118,9 +118,9 @@ The weekly drift flow scores new production data through the champion Bento and 
 
 | Service    | Image source                  | Host port | Purpose                  |
 | ---------- | ----------------------------- | --------- | ------------------------ |
-| `postgres` | `postgres:18.4`               | 6543      | Feature data |
-| `bento`    | `swang62/tennis-bento:latest` | internal  | Model API                |
-| `web`      | `swang62/tennis-web:latest`   | 8187      | Dashboard                |
+| `postgres` | `postgres:18.4`               | 6543      | Feature data             |
+| `bento`    | `swang62/tennis-bento`        | internal  | Model API                |
+| `web`      | `swang62/tennis-web`          | 8187      | Dashboard                |
 
 ### Standalone Compose deployment
 

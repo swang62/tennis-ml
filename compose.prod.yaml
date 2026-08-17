@@ -5,7 +5,7 @@
 
 services:
   web:
-    image: swang62/tennis-web:${DOCKER_TAG:-dev}
+    image: swang62/tennis-web:latest
     # build:
     #   context: ./web
     #   dockerfile: Dockerfile
@@ -47,7 +47,7 @@ services:
     entrypoint: [ "/mnt/tls/entrypoint.sh" ]
 
   bento:
-    image: swang62/tennis-bento:${DOCKER_TAG:-dev}
+    image: swang62/tennis-bento:latest
     restart: unless-stopped
     depends_on:
       postgres:

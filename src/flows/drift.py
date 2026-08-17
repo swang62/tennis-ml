@@ -78,7 +78,7 @@ from src.serving.service import (
 from src.utils import load_env, suppress_insecure_tls_warning
 
 LOCK_FILE = ARTIFACTS / ".check_drift.lock"
-EXPERIMENT_NAME = "drift_monitoring"
+EXPERIMENT_NAME = "drift-monitor"
 
 DRIFT_DEPLOYMENT_NAME = "drift"
 # 30 minutes after the scrape cron (Monday 06:00 UTC), so ETL has finished.
@@ -143,38 +143,29 @@ _BRONZE_WINDOW_COLUMNS: tuple[str, ...] = (
 @contextmanager
 def _file_lock() -> Any:
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
+    import fcntl
+
+    fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_RDWR)
+    fcntl.flock(fd, fcntl.LOCK_EX)
     try:
-        import fcntl
-
-        fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_RDWR)
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        try:
-            yield None
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
-    except ImportError:
-        try:
-            import portalocker  # type: ignore[import-untyped]
-
-            with portalocker.Lock(str(LOCK_FILE), timeout=300) as fh:
-                yield fh
-        except ImportError:
-            fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_RDWR)
-            try:
-                yield None
-            finally:
-                os.close(fd)
+        yield None
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def _ensure_experiment(client: MlflowClient) -> str:
     experiment = client.get_experiment_by_name(EXPERIMENT_NAME)
-    if experiment is not None:
-        return experiment.experiment_id
-    return client.create_experiment(EXPERIMENT_NAME)
+    experiment_id = (
+        experiment.experiment_id
+        if experiment is not None
+        else client.create_experiment(EXPERIMENT_NAME)
+    )
+    client.set_experiment_tag(experiment_id, "pipeline", "drift")
+    return experiment_id
 
 
-def _champion_cutoff_date(client: MlflowClient) -> date | None:
+def _champion_cutoff_date(client: Any) -> date | None:
     """Latest training-data match date pinned on the champion, from MLflow.
 
     Falls back to the model-registration timestamp for champions promoted
@@ -190,7 +181,7 @@ def _champion_cutoff_date(client: MlflowClient) -> date | None:
     return datetime.fromtimestamp(champion.creation_timestamp / 1000, tz=UTC).date()
 
 
-def _pinned_metrics(client: MlflowClient, champion: Any) -> dict[str, Any]:
+def _pinned_metrics(client: Any, champion: Any) -> dict[str, Any]:
     """Champion metric tags pinned at promotion: the 4 gate metrics + eval notes.
 
     Returns only the tags that exist; the 4 metrics are floats, eval_max_date is
@@ -212,22 +203,22 @@ def _pinned_metrics(client: MlflowClient, champion: Any) -> dict[str, Any]:
     return pinned
 
 
-def _post_batch(contexts: list[dict[str, object]]) -> list[dict[str, object]]:
+def _post_batch(contexts: list[dict[str, str | int | None]]) -> list[dict[str, object]]:
     url = f"{PRODUCTION_BENTO_URL}{PREDICT_BATCH_ROUTE}"
     headers = {"Content-Type": "application/json"}
     if BENTO_API_KEY:
         headers[BENTO_API_KEY_HEADER] = BENTO_API_KEY
     # The bulk endpoint's Pydantic schema wraps the list under `rows`; a bare
     # array is rejected with a 400 "Input should be an object".
-    resp = requests.post(url, json={"rows": contexts}, headers=headers, timeout=120)  # type: ignore[arg-type]
+    resp = requests.post(url, json={"rows": contexts}, headers=headers, timeout=120)
     resp.raise_for_status()
     body: object = resp.json()
     if not isinstance(body, list):
         raise TypeError(f"{PREDICT_BATCH_ROUTE} returned {type(body).__name__}, expected list")
-    return body  # type: ignore[return-value]
+    return [dict(record) for record in body if isinstance(record, dict)]
 
 
-def _score_batches(contexts: list[dict[str, object]]) -> list[float]:
+def _score_batches(contexts: list[dict[str, str | int | None]]) -> list[float]:
     probas: list[float] = []
     for start in range(0, len(contexts), BATCH_MAX_SIZE_ROWS):
         chunk = contexts[start : start + BATCH_MAX_SIZE_ROWS]
@@ -258,7 +249,7 @@ def _score_batches(contexts: list[dict[str, object]]) -> list[float]:
     return probas
 
 
-def _validate_production(client: MlflowClient) -> Any:
+def _validate_production(client: Any) -> Any:
     """Resolve the champion and ensure the configured Bento frontend responds.
 
     Drift measures whatever frontend is configured, including development
@@ -449,7 +440,7 @@ def _observation_contexts(window: pd.DataFrame) -> list[dict[str, object]]:
     return contexts
 
 
-def _validated_contexts(contexts: list[dict[str, object]]) -> list[dict[str, object]]:
+def _validated_contexts(contexts: list[dict[str, object]]) -> list[dict[str, str | int | None]]:
     """Validation boundary between bronze and the Bento public schema.
 
     Every context must pass the real bulk request model before anything is
@@ -465,7 +456,7 @@ def _validated_contexts(contexts: list[dict[str, object]]) -> list[dict[str, obj
     accepted_rounds = {r.value for r in Round}
     accepted_tournaments = {t.value for t in TournamentLevel}
     accepted_surfaces = {s.value for s in Surface}
-    validated: list[dict[str, object]] = []
+    validated: list[dict[str, str | int | None]] = []
     for context in contexts:
         normalized = dict(context)
         if normalized.get("round") is not None and normalized["round"] not in accepted_rounds:
@@ -477,7 +468,18 @@ def _validated_contexts(contexts: list[dict[str, object]]) -> list[dict[str, obj
             normalized["tournament"] = None
         if normalized.get("surface") is not None and normalized["surface"] not in accepted_surfaces:
             normalized["surface"] = Surface.UNKNOWN.value
-        validated.append(PredictFromIdsRow.model_validate(normalized).model_dump(mode="json"))
+        row = PredictFromIdsRow.model_validate(normalized)
+        validated.append(
+            {
+                "player_id": row.player_id,
+                "opponent_id": row.opponent_id,
+                "surface": row.surface.value,
+                "tournament": row.tournament.value if row.tournament else None,
+                "round": row.round.value if row.round else None,
+                "as_of_date": row.as_of_date.isoformat(),
+                "is_indoor": row.is_indoor,
+            }
+        )
     return validated
 
 
@@ -566,8 +568,10 @@ def _window_metrics(current_df: pd.DataFrame) -> dict[str, float]:
 
 
 def _as_float(value: object) -> float:
+    if not isinstance(value, (str, int, float)):
+        return 0.0
     try:
-        return float(value)  # type: ignore[arg-type]
+        return float(value)
     except (TypeError, ValueError):
         return 0.0
 
@@ -696,8 +700,12 @@ def drift_flow(cutoff: date | None = None) -> int:
             )
             with mlflow.start_run(
                 experiment_id=experiment_id,
-                run_name="drift_insufficient_data",
-                tags={"status": "insufficient_data", "timestamp": start_ts},
+                run_name="skip-insufficient-data",
+                tags={
+                    "pipeline": "drift",
+                    "status": "insufficient_data",
+                    "timestamp": start_ts,
+                },
                 log_system_metrics=False,
             ) as run:
                 rid = run.info.run_id
@@ -778,8 +786,9 @@ def drift_flow(cutoff: date | None = None) -> int:
 
         with mlflow.start_run(
             experiment_id=experiment_id,
-            run_name="drift_check",
+            run_name="drift-check",
             tags={
+                "pipeline": "drift",
                 "stage": "check",
                 "timestamp": start_ts,
                 "recommendation": recommendation,

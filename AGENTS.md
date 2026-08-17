@@ -57,7 +57,7 @@ web/             — React + TanStack dashboard (pages, lib, components)
 
 **Ranking identity map** — a reviewed CSV maps ranking-source player id to canonical player id; the name field is audit-only, never a match key. Ingestion validates the map before any write; unmapped rows are skipped and reported, auto name-matched with normalization.
 
-**Tests are self-contained — no live data, ever.** Use `just lint` for all lint/typechecks. Tests must never open DB connections or depend on external state — the suite must pass with no PostgreSQL server and no pre-built tables. External DB behavior is asserted hermetically via mocks or an in-memory DuckDB fixture.
+**Tests are self-contained — no live data, no external calls, ever.** Use `just lint` for all lint/typechecks. Tests must never open DB connections or depend on external state — the suite must pass with no PostgreSQL server and no pre-built tables. Tests must also never make external API or network calls, including to MLflow, DagsHub, or Prefect. Any such behavior is asserted hermetically via mocks/fakes or local fixtures (e.g. an in-memory DuckDB fixture, mocked MLflow/Prefect clients).
 
 ## Data manipulation
 

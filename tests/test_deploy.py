@@ -5,6 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 
 def _deploy():
@@ -119,6 +120,42 @@ def _stub_subprocess(monkeypatch):
     monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
 
 
+class _FakeMlflowRun:
+    """Context manager standing in for mlflow.start_run's returned run."""
+
+    info = SimpleNamespace(run_id="deploy-run-id")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+def _stub_deploy_mlflow_tracking(monkeypatch):
+    """Stub deploy_bento's post-build MLflow tracking block.
+
+    After the Buildx push, deploy_bento records the deployment in MLflow
+    (experiment + run + the two pipeline_last_deploy_* version tags). Without
+    this stub the tracking calls reach the DagsHub tracking server from tests.
+    """
+    fake_mlflow = SimpleNamespace(
+        set_experiment=lambda _name: None,
+        set_experiment_tag=lambda _key, _value: None,
+        start_run=lambda **_kwargs: _FakeMlflowRun(),
+        log_param=lambda *_args: None,
+        log_artifact=lambda *_args: None,
+    )
+    monkeypatch.setitem(sys.modules, "mlflow", fake_mlflow)
+    monkeypatch.setitem(
+        sys.modules,
+        "mlflow.tracking.client",
+        SimpleNamespace(
+            MlflowClient=lambda: SimpleNamespace(set_model_version_tag=lambda *_a: None)
+        ),
+    )
+
+
 def test_deploy_bento_logs_in_before_build(monkeypatch, tmp_path):
     d = _deploy()
     monkeypatch.setattr(d, "DOCKER_REPO", "acme")
@@ -132,8 +169,9 @@ def test_deploy_bento_logs_in_before_build(monkeypatch, tmp_path):
     monkeypatch.setattr(
         d,
         "build_bento_image",
-        lambda: order.append("build") or ("acme/tennis-bento:latest", 5),
+        lambda: order.append("build") or ("acme/tennis-bento:dev", 5),
     )
+    _stub_deploy_mlflow_tracking(monkeypatch)
 
     d.deploy_bento()
 
@@ -142,9 +180,10 @@ def test_deploy_bento_logs_in_before_build(monkeypatch, tmp_path):
 
 def test_deploy_bento_logs_in_before_build_then_writes_state(monkeypatch, tmp_path):
     """Login happens before the build (whose Buildx `--push` is the push); deploy
-    itself runs no docker tag/push and only ever targets the Docker Hub latest image."""
+    itself runs no docker tag/push and only ever targets the Docker Hub DOCKER_TAG image."""
     d = _deploy()
     monkeypatch.setattr(d, "DOCKER_REPO", "acme")
+    monkeypatch.setattr(d, "DOCKER_TAG", "dev")
     monkeypatch.setattr(d, "IMAGE_NAME", "tennis-bento")
     monkeypatch.setattr(d, "LOGS", tmp_path)
     monkeypatch.setattr(d, "_read_state", lambda: {})
@@ -164,8 +203,9 @@ def test_deploy_bento_logs_in_before_build_then_writes_state(monkeypatch, tmp_pa
     monkeypatch.setattr(
         d,
         "build_bento_image",
-        lambda: order.append("build") or ("acme/tennis-bento:latest", 5),
+        lambda: order.append("build") or ("acme/tennis-bento:dev", 5),
     )
+    _stub_deploy_mlflow_tracking(monkeypatch)
 
     d.deploy_bento()
 
@@ -174,7 +214,7 @@ def test_deploy_bento_logs_in_before_build_then_writes_state(monkeypatch, tmp_pa
     # Deploy itself performs no separate docker tag/push — Buildx pushed already.
     assert docker_calls == []
     assert written["deployed_version"] == 5
-    assert written["deployed_image"] == "acme/tennis-bento:latest"
+    assert written["deployed_image"] == "acme/tennis-bento:dev"
 
 
 def test_deploy_bento_does_not_require_postgres_password(monkeypatch, tmp_path):
@@ -183,7 +223,7 @@ def test_deploy_bento_does_not_require_postgres_password(monkeypatch, tmp_path):
     monkeypatch.setattr(d, "DOCKER_REPO", "acme")
     monkeypatch.setattr(d, "IMAGE_NAME", "tennis-bento")
     monkeypatch.setattr(d, "LOGS", tmp_path)
-    monkeypatch.setattr(d, "build_bento_image", lambda **_kwargs: ("acme/tennis-bento:latest", 5))
+    monkeypatch.setattr(d, "build_bento_image", lambda **_kwargs: ("acme/tennis-bento:dev", 5))
     monkeypatch.setattr(d, "generate_navigation_artifacts", lambda: None)
     monkeypatch.setattr(d, "_docker_login", lambda: None)
     monkeypatch.setattr(d, "_read_state", lambda: {})
@@ -192,6 +232,7 @@ def test_deploy_bento_does_not_require_postgres_password(monkeypatch, tmp_path):
     teed = []
     monkeypatch.setattr(d, "_run_teed", lambda cmd, _log=None: teed.append(list(cmd)))
     _stub_subprocess(monkeypatch)
+    _stub_deploy_mlflow_tracking(monkeypatch)
 
     d.deploy_bento()  # must not raise
 
@@ -247,9 +288,10 @@ def test_deploy_bento_logs_build_and_buildx_to_single_file(monkeypatch, tmp_path
         print("building bento image")
         # The Buildx build streams its output through _run_teed into the open log.
         d._run_teed(["docker", "buildx", "build", "--push"])
-        return "acme/tennis-bento:latest", 5
+        return "acme/tennis-bento:dev", 5
 
     monkeypatch.setattr(d, "build_bento_image", fake_build)
+    _stub_deploy_mlflow_tracking(monkeypatch)
 
     d.deploy_bento()
 
@@ -322,6 +364,7 @@ def _stub_bento_build(monkeypatch):
 
     monkeypatch.setattr(d, "IMAGE_NAME", "tennis-bento")
     monkeypatch.setattr(d, "DOCKER_REPO", "acme")
+    monkeypatch.setattr(d, "DOCKER_TAG", "dev")
     monkeypatch.setattr(d, "BENTO_TAG_FILE", _Path("/tmp/bento_tag.txt"))
     monkeypatch.setattr(d, "STATE_FILE", _Path("/tmp/state.json"))
     monkeypatch.setattr(d, "MODEL_INFO_FILE", _Path("/tmp/model_info.json"))
@@ -363,7 +406,11 @@ def _stub_bento_build(monkeypatch):
     teed_calls = []
     monkeypatch.setattr(d, "_run_teed", lambda cmd, _log=None: teed_calls.append(list(cmd)))
 
-    built = {"bento": 0, "teed_calls": teed_calls, "docker_calls": docker_calls}
+    built: dict[str, Any] = {
+        "bento": 0,
+        "teed_calls": teed_calls,
+        "docker_calls": docker_calls,
+    }
     bentoml = {
         "bentoml": SimpleNamespace(
             bentos=SimpleNamespace(get=lambda _tag: (_ for _ in ()).throw(Exception()))
@@ -395,20 +442,20 @@ def _stub_bento_build(monkeypatch):
 
 def test_build_bento_image_publishes_multiarch_via_buildx(monkeypatch):
     """build_bento_image runs one `docker buildx build` that targets the remote
-    latest tag, both platforms, the generated Containerfile, and the Bento
+    DOCKER_TAG image, both platforms, the generated Containerfile, and the Bento
     build context — with `--push` as part of the build."""
     d, built = _stub_bento_build(monkeypatch)
 
     image, version = d.build_bento_image()
     assert built["bento"] == 1
-    assert image == "acme/tennis-bento:latest"
+    assert image == "acme/tennis-bento:dev"
     assert version == 7
     (cmd,) = built["teed_calls"]
     assert cmd[:3] == ["docker", "buildx", "build"]
     assert cmd[cmd.index("--builder") + 1] == "tennis-multiarch"
     assert cmd[cmd.index("--file") + 1] == "/tmp/Containerfile.bento"
     assert cmd[cmd.index("--platform") + 1] == "linux/amd64,linux/arm64"
-    assert cmd[cmd.index("--tag") + 1] == "acme/tennis-bento:latest"
+    assert cmd[cmd.index("--tag") + 1] == "acme/tennis-bento:dev"
     assert "--push" in cmd
     # The build context that actually contains the Bento is the last argument.
     assert cmd[-1] == "/ctx"
@@ -999,16 +1046,21 @@ def test_deploy_module_is_not_a_prefect_flow():
     assert "@flow" not in src
 
 
-def test_deploy_source_never_mutates_mlflow_or_resolves_base_aliases():
-    """Deploy only reads MLflow: the sole alias lookup is ensemble @champion, and
-    no tag/alias/version mutation API appears anywhere in deploy."""
+def test_deploy_source_reads_champion_and_writes_only_deploy_bookkeeping_tags():
+    """Deploy reads MLflow — the sole alias lookup is ensemble @champion — and
+    its only registry mutation is the two pipeline_last_deploy_* bookkeeping
+    tags on the champion version. It never re-aliases, re-stages, updates, or
+    deletes model versions."""
     src = (_deploy().ROOT / "src" / "flows" / "deploy.py").read_text()
     assert src.count("get_model_version_by_alias") == 1  # champion resolution only
     import re
 
     assert re.search(r"models:/[^\"']*@", src) is None  # no alias URIs
+    # Post-build bookkeeping: exactly the two deploy tags, nothing else.
+    assert src.count("set_model_version_tag") == 2
+    assert src.count("pipeline_last_deploy_run_id") == 1
+    assert src.count("pipeline_last_deploy_image") == 1
     for api in (
-        "set_model_version_tag",
         "set_registered_model_alias",
         "set_model_tag",
         "update_model_version",

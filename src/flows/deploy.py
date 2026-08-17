@@ -112,8 +112,11 @@ SOURCE_FINGERPRINT_FILES = [
 load_env()
 suppress_insecure_tls_warning()
 
-# Docker Hub uses only `latest`; MLflow pins determine the packaged model versions.
+# Application image tag comes from root .env (same DOCKER_TAG the compose
+# stack and `just deploy` web build use); MLflow pins determine the packaged
+# model versions.
 DOCKER_REPO = os.getenv("DOCKER_REPO", "swang62")
+DOCKER_TAG = os.getenv("DOCKER_TAG", "dev")
 
 
 def _log(category: str, message: str) -> None:
@@ -643,7 +646,7 @@ class _Tee:
 
 def _run_teed(
     cmd: list[str], log: TextIO | None = None, env: dict[str, str] | None = None
-) -> subprocess.CompletedProcess:
+) -> subprocess.CompletedProcess[bytes]:
     """Run a deploy subprocess, streaming its output to the console AND a log file.
 
     With `log` None the output still reaches the console — and, inside
@@ -673,9 +676,9 @@ def _run_teed(
 def _buildx_build_cmd(*, builder: str, containerfile: Path, context: Path, image: str) -> list[str]:
     """The exact `docker buildx build` invocation publishing the image.
 
-    `--push` is part of the build: Buildx writes each per-platform image to
-    the builder's local cache and pushes one `latest` manifest list, so the
-    image is never separately tagged or pushed afterwards.
+    The Buildx image is tagged with DOCKER_TAG (default dev) and pushed via
+    `--push` as part of the build, so the image is never separately tagged or
+    pushed afterwards.
     """
     return [
         "docker",
@@ -794,7 +797,7 @@ def build_bento_image() -> tuple[str, int]:
     )
     print(f"Built {tag} from {pinned}")
 
-    image = f"{DOCKER_REPO}/{IMAGE_NAME}:latest"
+    image = f"{DOCKER_REPO}/{IMAGE_NAME}:{DOCKER_TAG}"
     containerfile = _write_bento_containerfile(bento)
     builder = _ensure_buildx_builder()
     print(f"Containerizing {tag} -> {image} with Docker Buildx...")
@@ -877,14 +880,37 @@ def deploy_bento() -> None:
     except subprocess.CalledProcessError as exc:
         print(
             f"Deploy step failed ({exc}); image was not published: "
-            f"{DOCKER_REPO}/{IMAGE_NAME}:latest"
+            f"{DOCKER_REPO}/{IMAGE_NAME}:{DOCKER_TAG}"
         )
         raise
 
-    latest = f"{DOCKER_REPO}/{IMAGE_NAME}:latest"
+    image = f"{DOCKER_REPO}/{IMAGE_NAME}:{DOCKER_TAG}"
     state = _read_state()
-    _write_state({**state, "deployed_version": production_version, "deployed_image": latest})
-    print(f"Published {latest} to Docker Hub")
+    _write_state({**state, "deployed_version": production_version, "deployed_image": image})
+    import mlflow
+    from mlflow.tracking.client import MlflowClient
+
+    mlflow.set_experiment("model-deployment")
+    mlflow.set_experiment_tag("pipeline", "deploy")
+    with mlflow.start_run(
+        run_name="deploy-champion-model",
+        tags={"pipeline": "deploy"},
+    ) as run:
+        mlflow.log_param("production_model", PRODUCTION_MODEL)
+        mlflow.log_param("production_version", production_version)
+        mlflow.log_param("image", image)
+        mlflow.log_artifact(str(deploy_log))
+        client = MlflowClient()
+        client.set_model_version_tag(
+            PRODUCTION_MODEL,
+            str(production_version),
+            "pipeline_last_deploy_run_id",
+            run.info.run_id,
+        )
+        client.set_model_version_tag(
+            PRODUCTION_MODEL, str(production_version), "pipeline_last_deploy_image", image
+        )
+    print(f"Published {image} to Docker Hub")
 
 
 if __name__ == "__main__":

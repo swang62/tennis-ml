@@ -37,6 +37,7 @@ class _FakeMlflowClient:
         self.logged_metrics: dict[str, dict[str, float]] = {}
         self.logged_texts: list[tuple[str, str, str]] = []
         self.logged_artifacts: list[tuple[str, str]] = []
+        self.experiment_tags: dict[str, str] = {}
 
     def get_model_version_by_alias(self, name, alias):
         assert name == "ensemble_lr_model"
@@ -53,6 +54,9 @@ class _FakeMlflowClient:
 
     def get_experiment_by_name(self, _name):
         return _FakeExperiment()
+
+    def set_experiment_tag(self, _experiment_id, key, value):
+        self.experiment_tags[key] = value
 
     def log_param(self, run_id, key, value):
         self.logged_params.setdefault(run_id, {})[key] = value
@@ -175,6 +179,7 @@ def test_empty_population_insufficient_data(monkeypatch, tmp_path):
     assert any(
         r.get("tags") and r["tags"].get("status") == "insufficient_data" for r in mlflow_runs
     )
+    assert client.experiment_tags == {"pipeline": "drift"}
 
 
 def test_small_population_insufficient_data(monkeypatch, tmp_path, capsys):
@@ -840,7 +845,7 @@ def test_normal_flow_runs_evidently_and_logs_drift_check(monkeypatch, tmp_path):
     result = drift.drift_flow.fn()
     assert result == 0
 
-    assert [r["name"] for r in mlflow_runs] == ["drift_check"]
+    assert [r["name"] for r in mlflow_runs] == ["drift-check"]
     check_run = mlflow_runs[0]
     recommendation = check_run["tags"]["recommendation"]
     assert recommendation in {"healthy", "investigate", "retrain"}
@@ -940,7 +945,7 @@ def test_cutoff_override_replaces_champion_watermark(monkeypatch, tmp_path, caps
     override = date(2024, 12, 1)
     result = drift.drift_flow.fn(cutoff=override)
     assert result == 0
-    assert mlflow_runs[0]["name"] == "drift_check"
+    assert mlflow_runs[0]["name"] == "drift-check"
 
     # The override — not the 2025-01-10 watermark tag — selects both windows.
     current_sql, reference_sql = sql_calls
@@ -952,7 +957,7 @@ def test_cutoff_override_replaces_champion_watermark(monkeypatch, tmp_path, caps
         "drift_report_2024-12-01_v3.html",
         "drift_report_2024-12-01_v3.json",
     ]
-    assert client.logged_params["run-0-drift_check"]["cutoff_date"] == "2024-12-01"
+    assert client.logged_params["run-0-drift-check"]["cutoff_date"] == "2024-12-01"
     summary = json.loads(
         next(text for _, text, name in client.logged_texts if name == "drift_summary.json")
     )
@@ -1018,7 +1023,7 @@ def test_match_stat_drift_triggers_retrain_verdict(monkeypatch, tmp_path):
     assert result == 0
 
     check_run = mlflow_runs[0]
-    assert check_run["name"] == "drift_check"
+    assert check_run["name"] == "drift-check"
     assert check_run["tags"]["recommendation"] == "retrain"
     assert check_run["tags"]["retrain_required"] == "True"
 

@@ -3,6 +3,10 @@
 # still overrides via env_var_or_default.
 set dotenv-filename := "web/.env"
 
+# Tag for published application images. Shell env wins, then root .env
+# (not covered by the web/.env dotenv above); default dev.
+DOCKER_TAG := env_var_or_default('DOCKER_TAG', shell('grep -q "^DOCKER_TAG=" .env 2>/dev/null && sed -n "s/^DOCKER_TAG=//p" .env | head -n1 || printf dev'))
+
 # Create the local k3d cluster.
 cluster-create:
     ./infra/k3d/start.sh
@@ -34,7 +38,7 @@ deploy *args:
     docker buildx build --builder tennis-multiarch --platform linux/amd64,linux/arm64 \
         --build-arg VITE_SITE_URL={{ env_var_or_default('VITE_SITE_URL', '') }} \
         --build-arg VITE_SITE_ID={{ env_var_or_default('VITE_SITE_ID', '') }} \
-        --tag swang62/tennis-web:latest --push web/
+        --tag swang62/tennis-web:{{ DOCKER_TAG }} --push web/
 
 # Install Python dependencies.
 deps:
