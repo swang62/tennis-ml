@@ -22,6 +22,8 @@ def _decide(
     champion_run_id: object | None = None,
     candidate_run_id: object = "cand",
     force: bool = False,
+    champion_feature_hash: object = "contract",
+    candidate_feature_hash: object = "contract",
 ) -> int:
     return promotion.decide_promotion(
         cand_metrics=cand,
@@ -29,6 +31,8 @@ def _decide(
         champion_run_id=champion_run_id,
         candidate_run_id=candidate_run_id,
         force=force,
+        champion_feature_hash=champion_feature_hash,
+        candidate_feature_hash=candidate_feature_hash,
     )
 
 
@@ -121,3 +125,56 @@ def test_rejects_auc_decline_beyond_tolerance():
     )
     prod = _metrics()
     assert _decide(cand, prod) == 0
+
+
+# ── FEATURE_COLS is the sole compatibility contract ──
+
+
+def test_changed_feature_contract_promotes_despite_bad_metrics():
+    # A candidate trained on a different FEATURE_COLS is incompatible with the
+    # incumbent: promote to refresh the contract even when metrics are worse.
+    cand = _metrics(log_loss=0.9, roc_auc=0.1)
+    prod = _metrics()
+    assert (
+        _decide(
+            cand,
+            prod,
+            champion_feature_hash="old-contract",
+            candidate_feature_hash="new-contract",
+        )
+        == 1
+    )
+
+
+def test_matching_contract_still_rejects_bad_metrics():
+    # Same FEATURE_COLS: the metric gate is unchanged, so worse log loss skips
+    # even when every lineage pin (base models, scaler, embeddings) changed.
+    cand = _metrics(log_loss=0.6, roc_auc=0.9)
+    prod = _metrics()
+    assert _decide(cand, prod) == 0
+
+
+def test_lineage_only_changes_do_not_force_promotion():
+    # Base-model/scaler/embeddings pins are lineage only; with an unchanged
+    # contract the candidate must still beat the metric gate.
+    cand = _metrics(log_loss=0.9)
+    prod = _metrics()
+    assert _decide(cand, prod) == 0
+
+
+def test_missing_champion_contract_promotes():
+    # A legacy champion without contract tags is incompatible; the next
+    # candidate refreshes it regardless of metrics and even of run-id match.
+    cand = _metrics(log_loss=0.9)
+    prod = _metrics()
+    assert (
+        _decide(
+            cand,
+            prod,
+            champion_run_id="run1",
+            candidate_run_id="run1",
+            champion_feature_hash=None,
+            candidate_feature_hash="new-contract",
+        )
+        == 1
+    )

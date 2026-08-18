@@ -916,6 +916,85 @@ def test_lineage_pins_missing_tags_fail_fast():
         d._lineage_pins(client, SimpleNamespace(version="7", run_id="run-prod"))
 
 
+def _resolve_with_warning(monkeypatch, tags):
+    """Run _lineage_pins capturing _log output; return (pins, warnings)."""
+    d = _deploy()
+    monkeypatch.setattr(d, "_gbdt_framework", lambda _uri: "xgboost")
+    warnings: list[str] = []
+    monkeypatch.setattr(d, "_log", lambda _category, message: warnings.append(message))
+    pins = d._lineage_pins(
+        _FakeMlflowClient(_FakeModelVersion(tags)),
+        SimpleNamespace(version="7", run_id="run-prod"),
+    )
+    return pins, warnings
+
+
+def test_lineage_pins_stale_feature_hash_warns_and_resolves_pins(monkeypatch):
+    """A stale feature-contract hash warns but the lineage pins still resolve."""
+    from src.features.columns import FEATURE_COLS
+
+    tags = _lineage_tags()
+    tags["feature_cols_hash"] = "deadbeef"
+    pins, warnings = _resolve_with_warning(monkeypatch, tags)
+
+    assert pins["nn"]["version"] == "1"
+    assert len(warnings) == 1
+    assert "ensemble_lr_model v7" in warnings[0]
+    assert "stale" in warnings[0]
+    expected = _deploy()._feature_cols_hash(list(FEATURE_COLS))
+    assert f"expected contract hash {expected}" in warnings[0]
+    assert "tagged deadbeef" in warnings[0]
+
+
+def test_lineage_pins_old_feature_columns_warn_and_resolve_pins(monkeypatch):
+    """A champion trained on different FEATURE_COLS warns and still deploys."""
+    import json as _json
+
+    old_columns = ["rank_diff", "age_diff"]
+    tags = _lineage_tags()
+    tags["feature_cols"] = _json.dumps(old_columns, separators=(",", ":"))
+    tags["feature_cols_hash"] = _deploy()._feature_cols_hash(old_columns)
+    pins, warnings = _resolve_with_warning(monkeypatch, tags)
+
+    assert pins["gbdt"]["run_id"] == "run-gbdt"
+    assert len(warnings) == 1
+    assert "packaging its pinned feature columns" in warnings[0]
+
+
+def test_lineage_pins_malformed_feature_contract_warns_and_resolves_pins(monkeypatch):
+    """Malformed feature-contract JSON warns and the lineage pins still resolve."""
+    tags = _lineage_tags()
+    tags["feature_cols"] = "{not json"
+    pins, warnings = _resolve_with_warning(monkeypatch, tags)
+
+    assert pins["linear"]["version"] == "3"
+    assert len(warnings) == 1
+    assert "malformed" in warnings[0]
+
+
+def test_lineage_pins_missing_feature_contract_warns_and_resolves_pins(monkeypatch):
+    """A champion tagged before feature contracts existed warns and still deploys."""
+    tags = _lineage_tags()
+    del tags["feature_cols"]
+    del tags["feature_cols_hash"]
+    pins, warnings = _resolve_with_warning(monkeypatch, tags)
+
+    assert pins["production"]["version"] == "7"
+    assert len(warnings) == 1
+    assert "missing" in warnings[0]
+
+
+def test_lineage_pins_stale_contract_still_fails_on_missing_lineage(monkeypatch):
+    """The stale-contract warning never bypasses exact lineage-tag safety."""
+    import pytest
+
+    tags = _lineage_tags()
+    tags["feature_cols_hash"] = "deadbeef"
+    del tags["base_nn_run_id"]
+    with pytest.raises(RuntimeError, match="base_nn_run_id"):
+        _resolve_with_warning(monkeypatch, tags)
+
+
 def test_build_input_fingerprint_includes_lineage_and_sources(monkeypatch, tmp_path):
     """The fingerprint covers canonical lineage and source/artifact hashes but
     excludes the generated manifest and all post-build Bento/Docker identities."""

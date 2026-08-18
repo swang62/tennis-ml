@@ -205,6 +205,8 @@ def decide_promotion(
     champion_run_id: object,
     candidate_run_id: object,
     force: bool = False,
+    champion_feature_hash: object = None,
+    candidate_feature_hash: object = None,
 ) -> int:
     """1 promote / 0 skip; probability-first, idempotent, first-promotion aware.
 
@@ -214,9 +216,18 @@ def decide_promotion(
     idempotency and first-promotion checks both yield 1 — so a manual
     ``--force-promote`` always registers a fresh version (refreshing lineage
     tags).
+
+    FEATURE_COLS is the sole compatibility contract: base-model pins and
+    scaler/embeddings/bio-feature-column URIs and hashes are lineage only and
+    never gate promotion. A candidate whose feature-column hash differs from
+    the champion's — or a legacy champion carrying no contract tags — promotes
+    regardless of the metric gate, refreshing the champion's contract. A
+    matching contract keeps the metric gate and idempotency unchanged.
     """
     if force:
         return 1
+    if champion_feature_hash is None or str(champion_feature_hash) != str(candidate_feature_hash):
+        return 1  # feature contract changed or legacy champion: refresh the contract
     if champion_run_id is not None and str(champion_run_id) == str(candidate_run_id):
         return 0  # already promoted
     if prod_metrics is None:
