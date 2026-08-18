@@ -19,8 +19,13 @@ models:
       history and rebuilds every row of each player whose (player_id, match_id)
       perspective set changed — so historical bronze inserts replace all stale
       snapshots for the affected players instead of appending only their new
-      matches' snapshots. The relation is expensive and reused by both
-      training and inference.
+      matches' snapshots. The grain is enforced by the DB primary key
+      pk_rolling_features that the model's post-hook creates (dbt's incremental
+      unique_key alone is not a constraint). player_id, match_id,
+      snapshot_date, player_match_number, and matches_10 are non-null by
+      construction (player_matches pass-through or window COUNT/ROW_NUMBER)
+      and DB-enforced via the model's ensure_not_null_sql post-hook. The
+      relation is expensive and reused by both training and inference.
 
       Cold start: rates are computed over however many completed matches fall
       in the window. Every [0,1] probability rate is smoothed with the fixed
@@ -46,30 +51,18 @@ models:
       outputs not consumed downstream are removed. days_since_last_match,
       matches_30d, and current-match serve/break rates are derived on demand
       (not stored here); raw serve/break counts remain in silver.
-    tests:
-      - unique:
-          arguments:
-            column_name: "player_id || '_' || match_id"
     columns:
       - name: player_id
         description: Player this post-match snapshot describes.
-        tests:
-          - not_null
       - name: match_id
         description: Match that produced this snapshot. One snapshot per (player_id, match_id).
-        tests:
-          - not_null
       - name: snapshot_date
         description: Date of the completed match this snapshot was taken after.
-        tests:
-          - not_null
       - name: player_match_number
         description: >
           1-based ordinal of the player's matches (from silver.player_matches);
           the snapshot's position in the player's history. Snapshot N is the
           post-match state of the player's Nth match.
-        tests:
-          - not_null
       - name: surface
         description: Surface of the snapshot match (clay, grass, hard, carpet); blank or unknown source values are normalized to hard at ingest.
       - name: latest_player_ranking
@@ -137,8 +130,6 @@ models:
           rates: 1 for the first match, up to 10. This is the rate-exposure
           column carried to gold (player_matches_10 / opponent_matches_10); 0
           for a cold start with no prior match.
-        tests:
-          - not_null
 
       - name: avg_player_rank_10
         description: >

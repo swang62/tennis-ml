@@ -24,19 +24,78 @@ AGGREGATE_MODELS = {
     "tour_averages": "models/gold/tour_averages.sql",
     "player_profiles": "models/gold/player_profiles.sql",
 }
-YML_UNIQUE_TESTS = {
+# Model name -> yml path. These model ymls must carry no schema tests
+# (unique/not_null/accepted_values): the DB primary keys and NOT NULL
+# post-hooks own those contracts.
+SCHEMA_TEST_YMLS = {
     "player_matches": "models/silver/player_matches.yml",
     "rolling_features": "models/silver/rolling_features.yml",
     "match_features": "models/gold/match_features.yml",
 }
 
+# Model name -> DB primary key the model's dbt_project.yml post-hook creates
+# for the (player_id, match_id) grain.
+GRAIN_PKS = {
+    "player_matches": "pk_player_matches",
+    "rolling_features": "pk_rolling_features",
+    "match_features": "pk_match_features",
+}
+
+# Model name -> columns the model's dbt_project.yml post-hook enforces NOT
+# NULL on (guaranteed non-null by bronze NOT NULL pass-through, window
+# COUNT/ROW_NUMBER, or literal construction).
+NOT_NULL_COLUMNS = {
+    "player_matches": ["match_id", "match_date", "player_id", "opponent_id"],
+    "rolling_features": [
+        "player_id",
+        "match_id",
+        "snapshot_date",
+        "player_match_number",
+        "matches_10",
+    ],
+    "match_features": [
+        "match_id",
+        "match_date",
+        "player_id",
+        "opponent_id",
+        "surface",
+        "match_won",
+    ],
+    "player_profiles": ["player_id"],
+    "tour_averages": ["singleton_id"],
+}
+
+# Model name -> (PK constraint name, PK columns) for the NOT NULL ordering
+# check: the PK is applied before the NOT NULL post-hook.
+MODEL_PKS = {
+    "player_matches": ("pk_player_matches", "player_id, match_id"),
+    "rolling_features": ("pk_rolling_features", "player_id, match_id"),
+    "match_features": ("pk_match_features", "player_id, match_id"),
+    "player_profiles": ("pk_player_profiles", "player_id"),
+    "tour_averages": ("pk_tour_averages", "singleton_id"),
+}
+
 # dbt singular tests that pin the per-match expansion factors the demo
 # arithmetic relies on.
 EXPANSION_TESTS = (
-    "dbt/tests/gold/player_matches_two_rows_per_match.sql",
     "dbt/tests/silver/player_matches_keeps_all_bronze_matches.sql",
     "dbt/tests/gold/rolling_features_one_per_player_match.sql",
     "dbt/tests/gold/match_features_keeps_all_bronze_matches.sql",
+)
+
+# Redundant grain tests removed once DB constraints and the removed yml tests
+# no longer need them.
+REMOVED_REDUNDANT_TESTS = (
+    "dbt/tests/gold/player_matches_two_rows_per_match.sql",
+    "dbt/tests/silver/rolling_features_unique_per_player_match.sql",
+)
+
+# dbt singular tests restored because PostgreSQL cannot enforce their
+# contracts: the singleton exactly-one-row cardinality, NaN/Infinity
+# rejection, and per-column rate bounds are semantic, not DB constraints.
+TOUR_AVERAGE_SEMANTIC_TESTS = (
+    "dbt/tests/gold/tour_averages_contract.sql",
+    "dbt/tests/gold/tour_averages_rate_bounds.sql",
 )
 
 
@@ -82,11 +141,52 @@ def test_aggregate_models_recompute_globally():
         assert "is_incremental" not in _read(sql_path), name
 
 
-def test_unique_keys_enforced_by_yml():
-    """Every incremental model keeps its composite unique test in its yml."""
-    for name, yml_path in YML_UNIQUE_TESTS.items():
-        yml = _read(yml_path)
-        assert "unique:" in yml, name
+def test_unique_keys_enforced_by_db_post_hooks():
+    """The (player_id, match_id) grains are enforced by DB primary keys created
+    by each model's post-hook in dbt_project.yml (dbt unique_key alone is not
+    a DB constraint)."""
+    project = _read("dbt_project.yml")
+    for name, conname in GRAIN_PKS.items():
+        assert f"ensure_primary_key_sql(this, '{conname}', 'player_id, match_id')" in project, name
+
+
+def test_no_schema_tests_in_model_ymls():
+    """No model yml carries a tests: block — the schema-wide unique, not_null,
+    and accepted_values tests are removed; DB primary keys and NOT NULL
+    post-hooks enforce the grain and non-nullity contracts instead."""
+    for name, yml_path in SCHEMA_TEST_YMLS.items():
+        assert "tests:" not in _read(yml_path), name
+
+
+def test_not_null_enforced_by_db_post_hooks():
+    """Guaranteed-non-null columns are DB-enforced by each model's
+    ensure_not_null_sql post-hook in dbt_project.yml (ALTER COLUMN SET NOT
+    NULL is a no-op on reruns, so the hook is idempotent). The removed yml
+    not_null tests are not re-added: the DB owns the contract now. The PK is
+    applied before the NOT NULL hook, after the table is populated."""
+    project = _read("dbt_project.yml")
+    for name, columns in NOT_NULL_COLUMNS.items():
+        cols_literal = "[" + ", ".join(f"'{c}'" for c in columns) + "]"
+        nn_hook = f"ensure_not_null_sql(this, {cols_literal})"
+        assert nn_hook in project, name
+        conname, pk_columns = MODEL_PKS[name]
+        pk_hook = f"ensure_primary_key_sql(this, '{conname}', '{pk_columns}')"
+        assert project.index(pk_hook) < project.index(nn_hook), name
+
+
+def test_redundant_tests_removed():
+    """Duplicate-row tests are gone; DB primary keys cover their grain
+    contracts and the retained semantic tests cover the rest."""
+    for rel in REMOVED_REDUNDANT_TESTS:
+        assert not (ROOT / rel).exists(), rel
+
+
+def test_tour_average_semantic_tests_exist():
+    """The two tour-average semantic tests are intentionally present: dbt
+    enforces the singleton exactly-one-row contract, NaN/Infinity rejection,
+    and rate bounds that PostgreSQL constraints cannot express."""
+    for rel_path in TOUR_AVERAGE_SEMANTIC_TESTS:
+        assert (ROOT / rel_path).is_file(), rel_path
 
 
 def test_expansion_factor_tests_exist():

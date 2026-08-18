@@ -10,37 +10,29 @@ models:
       activity fields (player_match_number, matches_30d_before). No canonical
       player/opponent orientation and no rolling or differential features —
       downstream models build those from this expansion. Composite grain
-      (match_id, player_id) is unique; the composite uniqueness test below
-      mirrors the (player_id, match_id) PK enforced by the model's post-hook.
+      (player_id, match_id) is unique, enforced by the DB primary key
+      pk_player_matches that the model's post-hook creates (dbt's incremental
+      unique_key alone is not a constraint). match_id, match_date, player_id,
+      and opponent_id are non-null by construction (they pass through bronze
+      NOT NULL columns unchanged) and are DB-enforced via the model's
+      ensure_not_null_sql post-hook.
 
       Task 6 reductions: tournament and round are removed (joined from bronze
       by match_id where needed); is_indoor is removed (joined from bronze);
       winner_id, opponent_rank_points, opponent_age, the ATP-provided
       wins_last_10/matches_last_10, and previous_match_date are removed.
       Surface stays because rolling surface form needs it.
-    tests:
-      - unique:
-          arguments:
-            column_name: "player_id || '_' || match_id"
     columns:
       - name: match_id
         description: Match identifier. Each match appears exactly twice, once per player.
-        tests:
-          - not_null
       - name: match_date
         description: Match date.
-        tests:
-          - not_null
       - name: surface
         description: Court surface (clay, grass, hard, carpet); blank or unknown source values are normalized to hard at ingest.
       - name: player_id
         description: The player this row represents (raw player1_id or player2_id from bronze).
-        tests:
-          - not_null
       - name: opponent_id
         description: The opposing player (the other bronze side).
-        tests:
-          - not_null
       - name: player_ranking
         description: This player's ATP ranking at match time.
       - name: opponent_ranking

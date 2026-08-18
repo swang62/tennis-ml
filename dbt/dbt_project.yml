@@ -23,12 +23,14 @@ models:
       player_matches:
         +post-hook:
            - "{{ ensure_primary_key_sql(this, 'pk_player_matches', 'player_id, match_id') }}"
+           - "{{ ensure_not_null_sql(this, ['match_id', 'match_date', 'player_id', 'opponent_id']) }}"
            - "{{ ensure_index_sql(this, 'idx_player_matches_pid_date', 'player_id, match_date') }}"
            - "{{ ensure_index_sql(this, 'idx_player_matches_pid_date_match', 'player_id, match_date DESC, match_id DESC') }}"
 
       rolling_features:
         +post-hook:
           - "{{ ensure_primary_key_sql(this, 'pk_rolling_features', 'player_id, match_id') }}"
+          - "{{ ensure_not_null_sql(this, ['player_id', 'match_id', 'snapshot_date', 'player_match_number', 'matches_10']) }}"
           - "{{ ensure_index_sql(this, 'idx_rolling_pid_date', 'player_id, snapshot_date') }}"
 
     gold:
@@ -39,13 +41,16 @@ models:
       tour_averages:
         +post-hook:
           - "{{ ensure_primary_key_sql(this, 'pk_tour_averages', 'singleton_id') }}"
+          - "{{ ensure_not_null_sql(this, ['singleton_id']) }}"
 
       match_features:
         +post-hook:
           - "{{ ensure_primary_key_sql(this, 'pk_match_features', 'player_id, match_id') }}"
+          - "{{ ensure_not_null_sql(this, ['match_id', 'match_date', 'player_id', 'opponent_id', 'surface', 'match_won']) }}"
           - "{{ ensure_index_sql(this, 'idx_match_features_player_id', 'player_id') }}"
           - "{{ ensure_index_sql(this, 'idx_match_features_opponent_id', 'opponent_id') }}"
 
       player_profiles:
         +post-hook:
           - "{{ ensure_primary_key_sql(this, 'pk_player_profiles', 'player_id') }}"
+          - "{{ ensure_not_null_sql(this, ['player_id']) }}"

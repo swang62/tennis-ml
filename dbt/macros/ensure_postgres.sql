@@ -29,6 +29,17 @@ END
 $$;
 {%- endmacro %}
 
+{% macro ensure_not_null_sql(relation, columns) -%}
+{# NOT NULL is a per-column attribute, so there is no schema-global name to
+collide with during dbt's table swap; re-setting it on a column that is already
+NOT NULL is a no-op, which makes this idempotent without a catalog check.
+Fails loudly when the model ever emits NULLs in a guaranteed column. #}
+ALTER TABLE {{ relation.schema }}.{{ relation.identifier }}
+{% for col in columns %}
+    ALTER COLUMN {{ col }} SET NOT NULL{{ "," if not loop.last else ";" }}
+{% endfor %}
+{%- endmacro %}
+
 {% macro ensure_index_sql(relation, idxname, columns) -%}
 DO $$
 DECLARE

@@ -22,46 +22,34 @@ models:
       player_matches_10/opponent_matches_10 carry the prior snapshot's
       matches_10 count (0 for cold start).
       Current-match serve/break analysis rates are intentionally
-      absent (derived on demand from bronze).
-    tests:
-      - unique:
-          arguments:
-            column_name: "player_id || '_' || match_id"
+      absent (derived on demand from bronze). The composite grain
+      (player_id, match_id) is unique, enforced by the DB primary key
+      pk_match_features that the model's post-hook creates (dbt's incremental
+      unique_key alone is not a constraint). match_id, match_date, player_id,
+      opponent_id, surface, and match_won are non-null by construction
+      (player_matches pass-through, bronze NOT NULL surface, CASE on the
+      NOT NULL winner_id) and DB-enforced via the model's
+      ensure_not_null_sql post-hook. Surface values are enforced at
+      the bronze boundary (CHECK + normalization at ingest); match_won,
+      tournament_level, and round_encoded are guaranteed by the model's own
+      CASE derivations, so no accepted_values tests are needed.
     columns:
       - name: match_id
         description: Immutable group key for one physical match; exactly two directional rows (one per player) share it.
-        tests:
-          - not_null
       - name: match_date
         description: Match date.
-        tests:
-          - not_null
       - name: player_id
         description: The player whose perspective this directional row represents; player_* features and match_won belong to this side.
-        tests:
-          - not_null
       - name: opponent_id
         description: The opposing player, from the row player's perspective.
-        tests:
-          - not_null
       - name: tournament
         description: Tournament name (joined from bronze).
       - name: round
         description: Draw round (r128, r64, r32, r16, qf, sf, f); non-draw stages such as "rr" pass through and encode as round_encoded 0.
       - name: surface
         description: Court surface (clay, grass, hard, carpet); blank or unknown source values are normalized to hard at ingest, so formerly-blank Davis Cup surfaces are hard.
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: [clay, grass, hard, carpet]
       - name: match_won
         description: 1 if the row's player side won this match, else 0 (the label); the two directional rows of a match carry complementary values.
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: [0, 1]
 
       # Matchup differences: row player side minus opponent side (imputed).
       - name: rank_diff
@@ -148,8 +136,8 @@ models:
         description: Smoothed directional advantage (row player's prior wins + 1) / (prior meetings + 2) - 0.5 from those strictly-prior meetings; negates on side swap and is 0.0 when never met.
 
       # Numeric match context (one-hot surface for linear and neural models).
-      # is_clay/is_grass/is_hard derive directly from the surface
-      # domain (guarded above) and are covered non-null/finite by
+      # is_clay/is_grass/is_hard derive directly from the surface domain
+      # (enforced at bronze ingest) and are covered non-null/finite by
       # match_features_no_null_model_features; no per-flag tests.
       - name: is_clay
         description: 1 if surface = clay, else 0.
@@ -160,17 +148,9 @@ models:
       - name: is_indoor
         description: 1 if indoor, 0 if outdoor, 0 when unknown (joined from bronze).
       - name: tournament_level
-        description: Tournament tier ordinal (grand_slam=4, masters=3, atp_500=2, atp_250=1, else 0).
-        tests:
-          - accepted_values:
-              arguments:
-                values: [0, 1, 2, 3, 4]
+        description: Tournament tier ordinal (grand_slam=4, masters=3, atp_500=2, atp_250=1, else 0); the CASE-ELSE derivation guarantees the 0-4 domain.
       - name: round_encoded
-        description: Round ordinal (r128=1 ... f=7, else 0).
-        tests:
-          - accepted_values:
-              arguments:
-                values: [0, 1, 2, 3, 4, 5, 6, 7]
+        description: Round ordinal (r128=1 ... f=7, else 0); the CASE-ELSE derivation guarantees the 0-7 domain.
 
       # Similarity-only serve/return style signals. NOT FEATURE_COLS model
       # features: they are appended for PlayerSimilarity and are excluded from

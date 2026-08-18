@@ -131,12 +131,9 @@ sources:
           through data/ranking_player_map.csv to canonical ATP ids. One row
           per (ranking_date, player_id): that composite identity is the
           upsert target of both ingestion paths (seed/ingest and the weekly
-          scrape catch-up), and the uniqueness test below mirrors the bronze
-          PK.
-        tests:
-          - unique:
-              arguments:
-                column_name: "ranking_date::text || '_' || player_id"
+          scrape catch-up) and is enforced by the bronze.rankings DB primary
+          key in infra/postgres/schema.sql; rank is NOT NULL with a 1-200
+          CHECK there.
         columns:
           - name: player_id
             description: Canonical ATP player id (mapped via ranking_player_map.csv).
@@ -144,7 +141,5 @@ sources:
             description: Monday of the rankings week.
           - name: rank
             description: Official ATP singles rank (1-200).
-            tests:
-              - not_null
           - name: points
             description: ATP ranking points; NULL in early eras.

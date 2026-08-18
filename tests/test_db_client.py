@@ -190,7 +190,7 @@ class FakePool:
 
 @pytest.fixture
 def fake_pool(monkeypatch):
-    # Mirrors production bounds (min 0 / max 4 per worker, 30s idle close) so
+    # Mirrors production bounds (min 0 / max 4 per worker, 10s idle close) so
     # checkout tests exercise the same caps the deployed Bento workers use.
     pool = FakePool(
         "postgresql://test@localhost:5432/test",
@@ -286,7 +286,7 @@ def test_get_pool_uses_passwordless_local_database_url(monkeypatch):
     # idle).
     assert pool.min_size == db_client.MIN_POOL_SIZE == 0
     assert pool.max_size == db_client.MAX_POOL_SIZE == 4
-    assert pool.max_idle == db_client.MAX_IDLE_S == 30.0
+    assert pool.max_idle == db_client.MAX_IDLE_S == 10.0
     # Bounded, health-checked pool: no database wait path is unbounded.
     assert pool.kwargs == {"autocommit": True, "connect_timeout": db_client.CONNECT_TIMEOUT_S}
     assert pool.check is FakePool.check_connection  # health probe at every checkout

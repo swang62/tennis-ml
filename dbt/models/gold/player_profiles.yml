@@ -14,10 +14,7 @@ models:
       and null rates.
     columns:
       - name: player_id
-        description: Canonical ATP id (primary key).
-        tests:
-          - unique
-          - not_null
+        description: Canonical ATP id; the DB primary key pk_player_profiles created by the model's post-hook enforces uniqueness and non-nullity, and ensure_not_null_sql re-applies NOT NULL explicitly.
       - name: match_count
         description: Total career matches in bronze (derived COUNT(*), never NULL).
       - name: latest_match_date

@@ -6,7 +6,7 @@ and results come back as pandas DataFrames.
 
 Each process shares a lazily-created `psycopg_pool.ConnectionPool`
 (min_size=0, max_size=4, autocommit, ~30s connection/checkout/readiness
-timeouts, 30s idle close) that starts with no connections and, across the two
+timeouts, 10s idle close) that starts with no connections and, across the two
 Bento workers, caps the app at eight checked-out connections. A checked-out
 connection returns to the pool the moment its caller exits; surplus physical
 connections are closed after `MAX_IDLE_S` of disuse, so an idle app does not
@@ -44,7 +44,7 @@ MAX_POOL_SIZE = 4
 # MAX_IDLE_S (psycopg defaults to 10 minutes, which would let an idle app
 # retain server capacity). Checkouts return immediately; only the physical
 # connection is closed after the idle period.
-MAX_IDLE_S = 30.0
+MAX_IDLE_S = 10.0
 
 # Connection bounds: every wait is capped at 30 seconds so a wedged or
 # high-latency server fails a query instead of hanging a worker forever.
