@@ -61,6 +61,7 @@ _S0AG = (
     0.42,
     0.05,
     0.4,
+    2.0,
     3,
     3.0,
     20.0,
@@ -83,6 +84,7 @@ _Z355 = (
     0.4,
     0.03,
     0.3,
+    -1.0,
     1,
     5.0,
     25.0,
@@ -105,6 +107,7 @@ _MINOR = (
     0.42,
     0.04,
     0.35,
+    1.5,
     2,
     2.0,
     30.0,
@@ -128,6 +131,7 @@ _SNAP_COLS = (
     "return_points_won_pct_10",
     "df_rate_10",
     "aces_per_svc_game_10",
+    "game_margin_10",
     "streak",
     "avg_player_rank_10",
     "avg_rank_faced_10",
@@ -187,7 +191,7 @@ _PARITY_GOLD = (
     "S0AG",
     "Z355",
     "hard",
-    # 16 matchup diffs (S0AG side minus Z355)
+    # 19 matchup diffs (S0AG side minus Z355)
     -2.0,
     6945.0,
     -4.42,
@@ -204,6 +208,10 @@ _PARITY_GOLD = (
     0.0,
     -5.0,
     2.0,
+    0.2,  # surface_form_diff (hard): 0.8 - 0.6
+    math.log(1.0 + 53.0)
+    - math.log(1.0 + 137.0),  # ln(1+53) - ln(1+137) (s5 2026-05-20, z3 2026-02-25)
+    3.0,  # recent_game_margin_diff: 2.0 - (-1.0)
     # 8 absolute state values (incl. matches_10 exposure pair)
     0.8,
     0.4,
@@ -233,7 +241,7 @@ _PARITY_GOLD_BA = (
     "Z355",
     "S0AG",
     "hard",
-    # 16 matchup diffs (Z355 side minus S0AG = negated)
+    # 19 matchup diffs (Z355 side minus S0AG = negated)
     2.0,
     -6945.0,
     4.42,
@@ -250,6 +258,9 @@ _PARITY_GOLD_BA = (
     0.0,
     5.0,
     -2.0,
+    -0.2,  # surface_form_diff (hard): 0.6 - 0.8
+    math.log(1.0 + 137.0) - math.log(1.0 + 53.0),  # ln(1+137) - ln(1+53)
+    -3.0,  # recent_game_margin_diff: -1.0 - 2.0
     # 8 absolute state values (Z355 first; matches_10 pair exchanged)
     0.4,
     0.8,
@@ -325,7 +336,7 @@ def _seed(con: duckdb.DuckDBPyConnection) -> None:
     )
 
     con.executemany(
-        f"INSERT INTO silver.rolling_features VALUES ({', '.join(['?'] * 26)})",
+        f"INSERT INTO silver.rolling_features VALUES ({', '.join(['?'] * 27)})",
         _snap_rows(),
     )
     # The only seeded pair meeting is pm-s6 (S0AG beat Z355 on 2026-07-12),
@@ -1098,6 +1109,38 @@ def test_new_contract_features_present_and_finite():
     assert row["return_points_won_pct_diff"] == pytest.approx(0.42 - 0.40)
     assert row["player_matches_10"] == 6
     assert row["opponent_matches_10"] == 4
+
+
+def test_surface_form_days_since_and_game_margin_diffs():
+    """The three new contract diffs carry exact training-parity semantics.
+
+    surface_form_diff picks the CURRENT surface's carried per-surface rate
+    (clay/grass query their own columns; carpet uses the neutral 0.5 on both
+    sides); days_since_last_match_diff is ln(1 + as_of-minus-prior) per side,
+    differenced; recent_game_margin_diff is the prior game_margin_10 delta.
+    """
+    # Strictly-prior snapshots at 2026-07-12: S0AG s5 (05-20), Z355 z3 (02-25);
+    # ln(1+53) - ln(1+137); hard surface rates 0.8 - 0.6; margins 2.0 - (-1.0).
+    out = build_inference_features("S0AG", "Z355", "hard", as_of_date=date(2026, 7, 12))
+    row = out.iloc[0]
+    assert row["surface_form_diff"] == pytest.approx(0.8 - 0.6)
+    assert row["days_since_last_match_diff"] == pytest.approx(
+        math.log(1.0 + 53.0) - math.log(1.0 + 137.0)
+    )
+    assert row["recent_game_margin_diff"] == pytest.approx(3.0)
+    # Surface-specific selection: clay and grass read their own carried rates
+    # (same player rates for all surfaces in the fixture, so both give 0.2).
+    for surface in ("clay", "grass"):
+        diff = build_inference_features("S0AG", "Z355", surface, as_of_date=date(2026, 7, 12))
+        assert diff.iloc[0]["surface_form_diff"] == pytest.approx(0.8 - 0.6), surface
+    # Carpet has no per-surface rate: both sides use the neutral rate_default.
+    carpet = build_inference_features("S0AG", "Z355", "carpet", as_of_date=date(2026, 7, 12))
+    assert carpet.iloc[0]["surface_form_diff"] == 0.0
+    # Cold start: unknown players fall back to the pool median days-since and
+    # neutral 0.0 margin on both sides, so both diffs stay neutral.
+    cold = build_inference_features("ZZZZ", "YYYY", "hard", as_of_date=date(2026, 9, 1))
+    assert cold.iloc[0]["days_since_last_match_diff"] == 0.0
+    assert cold.iloc[0]["recent_game_margin_diff"] == 0.0
 
 
 # ── is_indoor context feature ────────────────────────────────────

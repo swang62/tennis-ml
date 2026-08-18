@@ -1,9 +1,9 @@
 """Canonical player-directory query and normalization.
 
 Single source of truth for the directory data contract used by the deploy-time
-static directory artifact written under web/public/. The raw SQL and the IOC ->
-(iso2, country) mapping live here only, so the artifact can never drift from
-the source.
+raw directory artifact written under data/deploy/ (see src/flows/deploy.py).
+The raw SQL and the IOC -> (iso2, country) mapping live here only, so the
+artifact can never drift from the source.
 """
 
 from __future__ import annotations

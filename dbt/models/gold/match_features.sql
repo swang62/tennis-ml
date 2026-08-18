@@ -116,6 +116,30 @@ player_match_enriched AS (
 
         COALESCE(pr.streak, fd.streak) AS streak,
 
+        -- Surface form on the CURRENT match's surface: the prior snapshot's
+        -- carried per-surface win rate (last 10 on that surface, Beta(1,1)
+        -- smoothed), imputed from its pool mean when the player has never
+        -- played the surface; carpet has no per-surface pool rate, so the
+        -- neutral 0.5 rate_default applies.
+        CASE pm.surface
+            WHEN 'clay'  THEN COALESCE(pr.clay_win_rate_10,  fd.clay_win_rate_10)
+            WHEN 'grass' THEN COALESCE(pr.grass_win_rate_10, fd.grass_win_rate_10)
+            WHEN 'hard'  THEN COALESCE(pr.hard_win_rate_10,  fd.hard_win_rate_10)
+            ELSE fd.rate_default
+        END AS surface_form,
+
+        -- Rest: days since the player's immediately preceding match (the
+        -- prior snapshot's date is that match); pool median days-since
+        -- fallback on cold start. Same-date matches cannot supply the prior
+        -- snapshot (strict <), so a same-week back-to-back is at least 1 day.
+        CASE WHEN pr.player_id IS NULL THEN fd.days_since_default
+             ELSE pm.match_date - pr.snapshot_date
+        END AS days_since_last_match,
+
+        -- Rolling average per-match game margin from the prior snapshot;
+        -- neutral 0.0 (even games) when no prior scored match exists.
+        COALESCE(pr.game_margin_10, 0.0) AS game_margin_10,
+
         -- Missing or non-L/R handedness uses the pool left-handed rate.
         COALESCE(
             CAST(CASE WHEN prof.handedness = 'L' THEN 1
@@ -211,6 +235,11 @@ SELECT
     p.rank_trend_10 - o.rank_trend_10 AS rank_trend_diff,
     p.avg_rank_faced_10 - o.avg_rank_faced_10 AS avg_rank_faced_diff,
     p.streak - o.streak AS streak_diff,
+    p.surface_form - o.surface_form AS surface_form_diff,
+    -- Log-transformed directional rest: ln(1 + player) - ln(1 + opponent).
+    LN(1.0 + p.days_since_last_match) - LN(1.0 + o.days_since_last_match)
+        AS days_since_last_match_diff,
+    p.game_margin_10 - o.game_margin_10 AS recent_game_margin_diff,
 
     -- ── Absolute state values where both sides matter ──
     p.weighted_form_10      AS player_weighted_form_10,

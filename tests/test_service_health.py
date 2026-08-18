@@ -57,6 +57,10 @@ def test_nginx_transparent_proxy_and_gated_routes():
     assert "proxy_pass ${BENTO_API_URL}/health;" not in conf
     # No bespoke OpenAPI location (the transparent proxy exposes /api/docs.json).
     assert "location = /api/openapi.json" not in conf
+    # Vite is the only cache policy for player assets: no browser manifest or
+    # root-level hashed player payload rules survive.
+    assert "/player-index.manifest.json" not in conf
+    assert "player-(?:directory|search)" not in conf
 
 
 def test_service_declares_two_workers():

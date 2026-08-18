@@ -141,14 +141,15 @@ command -v uv >/dev/null 2>&1 || { echo "[dev] error: 'uv' not found (install it
 command -v pnpm >/dev/null 2>&1 || { echo "[dev] error: 'pnpm' not found (install it; see package.json)" >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || { echo "[dev] error: 'curl' not found" >&2; exit 1; }
 
-# --- Rebuild the static player index from the local training snapshot -------
+# --- Stage navigation artifacts and generate the Vite-directory inputs -------
 # Vite must never serve a stale or fixture directory (e.g. the old Player
-# A/B/C test data): regenerate web/public/player-directory.json from the
-# DuckDB training snapshot, then serialize it with the web index builder into
-# the content-hashed payload + manifest. Both steps fail fast, so Vite starts
-# only after the index reflects the snapshot players (run `just snapshot`
-# after changing DATABASE_URL).
-log minisearch "rebuilding static player index from training snapshot..."
+# A/B/C test data): stage data/deploy/player-directory.json and the similarity
+# index from the DuckDB training snapshot, then run the same node builder as
+# `just deploy` (input data/deploy/player-directory.json, manifest
+# data/deploy/player-index.manifest.json, output web/src/assets/generated/).
+# Both steps fail fast, so Vite starts only after the inputs reflect the
+# snapshot players (run `just snapshot` after changing DATABASE_URL).
+log minisearch "staging navigation artifacts and generating Vite inputs from training snapshot..."
 uv run python -c '
 from src.flows.deploy import generate_navigation_artifacts
 generate_navigation_artifacts()

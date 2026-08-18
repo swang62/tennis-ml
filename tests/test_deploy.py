@@ -1090,3 +1090,27 @@ def test_promotion_tags_lineage_before_champion_alias():
     for name in ("02_tune_linear", "02_tune_gbdt", "02_tune_nn"):
         nb = (root / "notebooks" / "parameters" / f"{name}.ipynb").read_text()
         assert "set_registered_model_alias" not in nb
+
+
+# --- Web image build consumes host-generated Vite inputs ---
+
+
+def test_just_deploy_runs_staging_then_node_builder_then_web_build():
+    """`just deploy` order is: deploy.py stages snapshot navigation artifacts ->
+    the node generator verifies/reuses or rebuilds web/src/assets/generated/* ->
+    the Docker build, so the web image never reads data/deploy/ itself."""
+    justfile = (_deploy().ROOT / "justfile").read_text()
+    staging = justfile.index("uv run python src/flows/deploy.py")
+    generator = justfile.index("node web/scripts/build-player-index.mjs")
+    web_build = justfile.index("docker buildx build")
+    assert staging < generator < web_build
+    assert "--push web/" in justfile[web_build:]
+
+
+def test_web_dockerfile_has_no_in_container_index_builder():
+    """The node builder runs host-side only; the Docker image build just
+    consumes the pre-generated inputs via `COPY . .` in its web/ context."""
+    dockerfile = (_deploy().ROOT / "web" / "Dockerfile").read_text()
+    assert "build-player-index" not in dockerfile
+    assert "RUN node" not in dockerfile
+    assert "COPY . ." in dockerfile

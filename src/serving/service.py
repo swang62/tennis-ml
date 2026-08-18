@@ -260,11 +260,25 @@ ort.set_default_logger_severity(3)  # ERROR: suppress virtual-CPU warnings from 
 
 load_env()
 
-# Set LOG_LEVEL=DEBUG to enable per-request observability prints.
-# Suppress BentoML's noisy service lifecycle INFO (initialized/cleanup spam).
+
+def _effective_log_level() -> int:
+    """Map the LOG_LEVEL env var (case-insensitive) to a logging level; unknown -> INFO."""
+    return getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
+
+
+# LOG_LEVEL is the effective level for the app logger and BentoML's native
+# access log. Suppress BentoML's noisy lifecycle INFO (initialized/cleanup
+# spam) by pinning "bentoml", but leave its child "bentoml.access" at
+# LOG_LEVEL: the AccessLogMiddleware (api_server.logging.access, enabled by
+# default) wraps the whole HTTP app — the mounted Starlette GET routes and the
+# Bento API POST routes — and emits one concise line per request (client,
+# scheme, method, path, status, latency; never headers, bodies, or query
+# strings) only while that logger sits at INFO or below.
+_log_level = _effective_log_level()
 logging.getLogger("bentoml").setLevel(logging.WARNING)
+logging.getLogger("bentoml.access").setLevel(_log_level)
 _log = logging.getLogger("tennis_ml.serving")
-_log.setLevel(getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO))
+_log.setLevel(_log_level)
 if not _log.handlers:
     _log.addHandler(logging.StreamHandler())
 

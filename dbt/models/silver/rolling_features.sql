@@ -10,9 +10,13 @@
 -- is never NULL; `matches_10` exposes how many matches actually back the
 -- 10-match rates (1 for the first match, up to 10). Surface rates are smoothed
 -- the same way; they remain NULL for unseen surfaces (no surface match yet).
--- aces_per_svc_game_10, weighted_form_10, streak, and the rank averages are
--- NOT probabilities and are deliberately left unsmoothed. The training source
--- never silently zero-fills.
+-- aces_per_svc_game_10, weighted_form_10, streak, game_margin_10, and the
+-- rank averages are NOT probabilities and are deliberately left unsmoothed.
+-- game_margin_10 is the rolling average per-match game margin (games won minus
+-- games lost) parsed from the winner-first bronze score: each completed-set
+-- token "a-b" contributes a - b, so walkover/retirement tokens and missing
+-- scores contribute nothing (a retired match counts only its completed sets).
+-- The training source never silently zero-fills.
 --
 -- Per-surface windows are carried forward with conditional MAX because
 -- PostgreSQL lacks LAST_VALUE IGNORE NULLS.
@@ -100,6 +104,28 @@ surface_carry AS (
         ) AS hard_last_match_number
     FROM {{ ref('player_matches') }}
 ),
+-- Winner-perspective per-match game margin parsed from the bronze score.
+-- Tiebreak digits were stripped at ingest; every completed-set token "6-4"
+-- contributes a - b, non-set tokens (W/O, RET) and missing scores are skipped.
+-- The winner-first orientation is the ingest contract, so the sign follows
+-- the row's match_won in snapshots below.
+match_game_margins AS (
+    SELECT
+        sets.match_id,
+        SUM(sets.winner_games - sets.loser_games) AS winner_game_margin
+    FROM (
+        SELECT
+            m.match_id,
+            split_part(t.token, '-', 1)::INT AS winner_games,
+            split_part(t.token, '-', 2)::INT AS loser_games
+        FROM {{ source('bronze', 'match_events') }} m
+        CROSS JOIN LATERAL regexp_split_to_table(m.score, '\s+') AS t(token)
+        WHERE m.score IS NOT NULL
+          AND m.score <> ''
+          AND t.token ~ '^[0-9]+-[0-9]+$'
+    ) sets
+    GROUP BY sets.match_id
+),
 -- Every snapshot is computed here over the FULL player_matches history:
 -- window values and surface carries for a row depend on all of a player's
 -- matches up to that row, so filtering earlier would silently corrupt the
@@ -135,11 +161,17 @@ snapshots AS (
         pm.return_points_available,
         sc.clay_last_match_number,
         sc.grass_last_match_number,
-        sc.hard_last_match_number
+        sc.hard_last_match_number,
+        -- Game margin in this match's player perspective: winner-first score
+        -- signed by the perspective's result (winner +, loser -).
+        CASE WHEN pm.match_won = 1 THEN mgm.winner_game_margin
+             ELSE -mgm.winner_game_margin END AS game_margin
     FROM {{ ref('player_matches') }} pm
     LEFT JOIN surface_carry sc
         ON sc.player_id = pm.player_id
        AND sc.match_id = pm.match_id
+    LEFT JOIN match_game_margins mgm
+        ON mgm.match_id = pm.match_id
 ),
 computed AS (
 SELECT
@@ -206,6 +238,11 @@ SELECT
     -- Aces per service game, 10
     CAST(SUM(s.aces) OVER w10 AS DOUBLE PRECISION)
         / NULLIF(SUM(s.service_games) OVER w10, 0) AS aces_per_svc_game_10,
+
+    -- Rolling average per-match game margin over the last 10 incl. this one.
+    -- AVG skips matches without a parseable score (NULL game_margin); NULL
+    -- until the player's first match with a completed-set score.
+    AVG(s.game_margin) OVER w10 AS game_margin_10,
 
     -- Rolling average player rank over the last 10 (rank_trend derived
     -- downstream in match_features, not here)

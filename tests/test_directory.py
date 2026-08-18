@@ -231,7 +231,7 @@ def test_generate_navigation_artifacts_builds_from_snapshot(monkeypatch, tmp_pat
     """Deploy builds matching directory and similarity metadata from one snapshot read."""
     d = _deploy()
     out = tmp_path / "web" / "public" / "player-directory.json"
-    monkeypatch.setattr(d, "WEB_DIRECTORY_ARTIFACT", out)
+    monkeypatch.setattr(d, "RAW_DIRECTORY_ARTIFACT", out)
     monkeypatch.setattr(d, "SIMILARITY_INDEX", tmp_path / "player_similarity.index")
     monkeypatch.setattr(d, "SIMILARITY_METADATA", tmp_path / "player_metadata.json")
     monkeypatch.setattr(d, "NAVIGATION_STATE_FILE", tmp_path / "nav_state.json")
@@ -330,7 +330,7 @@ def test_generate_navigation_artifacts_requires_snapshot(monkeypatch, tmp_path):
     snapshot-missing error and stages nothing."""
     d = _deploy()
     out = tmp_path / "web" / "public" / "player-directory.json"
-    monkeypatch.setattr(d, "WEB_DIRECTORY_ARTIFACT", out)
+    monkeypatch.setattr(d, "RAW_DIRECTORY_ARTIFACT", out)
 
     def no_snapshot(_sql):
         raise FileNotFoundError(
@@ -376,7 +376,7 @@ def test_generate_navigation_artifacts_raises_when_write_fails(monkeypatch, tmp_
     monkeypatch.setattr("src.models.similarity.PlayerSimilarity.build", no_build)
     blocked = tmp_path / "blocked"
     blocked.write_text("not a directory")
-    monkeypatch.setattr(d, "WEB_DIRECTORY_ARTIFACT", blocked / "player-directory.json")
+    monkeypatch.setattr(d, "RAW_DIRECTORY_ARTIFACT", blocked / "player-directory.json")
 
     import pytest
 
@@ -458,7 +458,7 @@ def _stage_nav_build(
     sim_index = tmp_path / "player_similarity.index"
     sim_meta = tmp_path / "player_metadata.json"
     state = tmp_path / "nav_state.json"
-    monkeypatch.setattr(d, "WEB_DIRECTORY_ARTIFACT", out)
+    monkeypatch.setattr(d, "RAW_DIRECTORY_ARTIFACT", out)
     monkeypatch.setattr(d, "SIMILARITY_INDEX", sim_index)
     monkeypatch.setattr(d, "SIMILARITY_METADATA", sim_meta)
     monkeypatch.setattr(d, "NAVIGATION_STATE_FILE", state)

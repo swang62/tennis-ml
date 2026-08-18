@@ -103,6 +103,7 @@ SILVER_ROLLING_COLS: list[str] = [
     "return_points_won_pct_10",
     "df_rate_10",
     "aces_per_svc_game_10",
+    "game_margin_10",
     "streak",
     "avg_rank_faced_10",
 ]
@@ -179,6 +180,9 @@ DIFF_COLS: list[str] = [
     "rank_trend_diff",
     "avg_rank_faced_diff",
     "streak_diff",
+    "surface_form_diff",
+    "days_since_last_match_diff",
+    "recent_game_margin_diff",
 ]
 
 CONTEXT_COLS: list[str] = [

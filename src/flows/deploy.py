@@ -87,10 +87,12 @@ NAVIGATION_SOURCE_FILES = [
     ROOT / "src" / "countries.py",
 ]
 
-# Raw player directory baked into the web image, generated from the local
-# DuckDB training snapshot at deploy time (see generate_navigation_artifacts).
-# Git-ignored after the web build consumes it. Never champion-pinned.
-WEB_DIRECTORY_ARTIFACT = ROOT / "web" / "public" / "player-directory.json"
+# Raw player directory the host-side web index builder consumes, generated
+# from the local DuckDB training snapshot at deploy time (see
+# generate_navigation_artifacts). Retained under data/deploy/ as the builder's
+# input — never served or champion-pinned; git-ignored via **/data/deploy/*
+# at the repo root.
+RAW_DIRECTORY_ARTIFACT = DEPLOY_ARTIFACTS / "player-directory.json"
 
 # Multi-architecture publishing: one Docker Hub manifest list for both platforms.
 MULTIARCH_PLATFORMS = ("linux/amd64", "linux/arm64")
@@ -937,19 +939,19 @@ def build_bento_image() -> tuple[str, int]:
 
 def _write_raw_directory(players: list[dict[str, object]]) -> None:
     """Write the raw player-directory artifact the web index builder consumes."""
-    WEB_DIRECTORY_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
-    WEB_DIRECTORY_ARTIFACT.write_text(json.dumps({"players": players}, indent=2) + "\n")
+    RAW_DIRECTORY_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
+    RAW_DIRECTORY_ARTIFACT.write_text(json.dumps({"players": players}, indent=2) + "\n")
 
 
 def generate_navigation_artifacts() -> Path:
     """Build and stage all navigation assets from the local DuckDB snapshot.
 
-    The web image build consumes ``web/public/player-directory.json`` and
-    serializes it into the content-hashed MiniSearch payload + manifest (see
-    web/scripts/build-player-index.mjs). Navigation artifacts are rebuilt at
-    deploy time from the snapshot — never downloaded from MLflow or pinned on
-    the champion. A missing snapshot aborts the deploy with the snapshot
-    helper's actionable error.
+    The host-side web index builder (web/scripts/build-player-index.mjs)
+    consumes ``data/deploy/player-directory.json`` and serializes it into the
+    content-hashed MiniSearch payload + manifest. Navigation artifacts are
+    rebuilt at deploy time from the snapshot — never downloaded from MLflow
+    or pinned on the champion. A missing snapshot aborts the deploy with the
+    snapshot helper's actionable error.
 
     When every snapshot input that shapes the directory and similarity outputs
     (profiles, gold lifetime stats, cluster assignments/labels) and every
@@ -957,10 +959,10 @@ def generate_navigation_artifacts() -> Path:
     similarity vector/embedding/PCA/weights, country mapping, cluster-label
     derivation) is unchanged since the last staging and the staged similarity
     artifacts still exist, the similarity artifacts are reused and the
-    deterministic raw directory is restaged — the web index builder deletes it
-    after serializing, so its absence on an unchanged rerun is expected, and
-    restaging identical bytes lets that builder reuse its hashed payloads. Any
-    input change, source/config change, missing similarity artifact, or
+    deterministic raw directory is restaged byte-identically. The raw input is
+    retained under data/deploy/ (never deleted) as the builder's staging input,
+    so restaging identical bytes lets the builder reuse its hashed payloads.
+    Any input change, source/config change, missing similarity artifact, or
     missing/legacy state rebuilds everything.
     """
     from src.db import training
@@ -988,15 +990,15 @@ def generate_navigation_artifacts() -> Path:
         and source_hash == _read_navigation_source_hash()
         and all(path.exists() for path in (SIMILARITY_INDEX, SIMILARITY_METADATA))
     ):
-        # The web index builder consumes (deletes) the raw directory, so only
-        # the similarity artifacts gate reuse; the deterministic directory is
-        # restaged byte-identically from the hashed profiles + cluster labels.
+        # Only the similarity artifacts gate reuse; the deterministic raw
+        # directory is retained byte-identically as the builder's input,
+        # restaged from the hashed profiles + cluster labels.
         _write_raw_directory(directory_players(profiles, cluster_labels))
         _log(
             "minisearch",
             "snapshot inputs and shaping sources unchanged; reusing staged navigation artifacts",
         )
-        return WEB_DIRECTORY_ARTIFACT
+        return RAW_DIRECTORY_ARTIFACT
     similarity = PlayerSimilarity()
     similarity.build(
         query=training.to_dataframe,
@@ -1019,9 +1021,9 @@ def generate_navigation_artifacts() -> Path:
     _write_navigation_state(inputs_hash, source_hash)
     _log(
         "minisearch",
-        f"staged snapshot-backed navigation artifacts: {SIMILARITY_INDEX}, {WEB_DIRECTORY_ARTIFACT}",
+        f"staged snapshot-backed navigation artifacts: {SIMILARITY_INDEX}, {RAW_DIRECTORY_ARTIFACT}",
     )
-    return WEB_DIRECTORY_ARTIFACT
+    return RAW_DIRECTORY_ARTIFACT
 
 
 def deploy_bento() -> None:

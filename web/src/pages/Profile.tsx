@@ -9,6 +9,7 @@ import type {
   SimilarPlayersResponse,
 } from "../api";
 import { Card, Empty, Kicker, Loading, PlayerFlag } from "../components";
+import { atpOverviewUrl } from "../lib/atpProfile";
 import {
   axisOption,
   baseChartOption,
@@ -504,7 +505,31 @@ export default function ProfileContent({
               iso2={profile.iso2}
               countryName={profile.country_name}
             />
-            {profile.display_name}
+            <a
+              className="atp-name-link"
+              href={atpOverviewUrl(profile.display_name, profile.player_id)}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label={`${profile.display_name} official ATP Tour profile, opens in a new tab`}
+            >
+              {profile.display_name}
+              <svg
+                className="atp-name-icon"
+                aria-hidden="true"
+                width="0.65em"
+                height="0.65em"
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M6 3H3.5A1.5 1.5 0 0 0 2 4.5v8A1.5 1.5 0 0 0 3.5 14h8a1.5 1.5 0 0 0 1.5-1.5V10" />
+                <path d="M9 2h5v5" />
+                <path d="M14 2 8 8" />
+              </svg>
+            </a>
           </h1>
           <div className="profile-head-stats">
             <div className="stat">

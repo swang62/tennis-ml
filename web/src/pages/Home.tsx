@@ -8,13 +8,13 @@ import {
   useEffect,
 } from "react";
 import {
-  getDirectoryInfo,
   getMatchHistory,
   getPlayerProfile,
   getRankHistory,
   getSimilarPlayers,
 } from "../api";
 import { ErrorBox, Kicker, Loading, PlayerPicker } from "../components";
+import { useDirectoryInfo } from "../lib/directoryInfo";
 import { usePlayerDirectory } from "../lib/playerIndex";
 import { homeRoute } from "../routes";
 import { useTheme } from "../theme";
@@ -32,14 +32,9 @@ export default function Home() {
   const directoryQ = usePlayerDirectory();
   const players = directoryQ.data?.players ?? [];
   // True physical match total (distinct match_id), so a match is counted once
-  // rather than once per participant.
-  const directoryInfoQ = useQuery({
-    queryKey: ["directory-info"],
-    queryFn: getDirectoryInfo,
-    staleTime: Infinity,
-    gcTime: Infinity,
-  });
-  const totalMatches = directoryInfoQ.data?.total_matches ?? 0;
+  // rather than once per participant. Shared with the Layout footer via one
+  // idle-gated query; the match stat stays absent until the data resolves.
+  const directoryInfoQ = useDirectoryInfo();
   // Directory rank backs the profile's current-rank label while the profile
   // query loads; the profile response is authoritative once it lands.
   const selectedPlayer =
@@ -165,12 +160,14 @@ export default function Home() {
               <span className="stat-label">Players</span>
               <span className="stat-num num">{players.length}</span>
             </div>
-            <div className="stat">
-              <span className="stat-label">Matches</span>
-              <span className="stat-num num">
-                {totalMatches.toLocaleString("en-US")}
-              </span>
-            </div>
+            {directoryInfoQ.data && (
+              <div className="stat">
+                <span className="stat-label">Matches</span>
+                <span className="stat-num num">
+                  {directoryInfoQ.data.total_matches.toLocaleString("en-US")}
+                </span>
+              </div>
+            )}
           </div>
         )}
       </section>

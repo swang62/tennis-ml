@@ -1,6 +1,8 @@
 // Hermetic tests for the shared static player-index loader: the deploy-built
 // search payload deserializes only through MiniSearch.loadJSON (never
-// browser-side addAll) after the picker asks for it. No
+// browser-side addAll) after the picker asks for it, and the search asset is
+// fetched once and memoized. Requires the generated
+// web/src/assets/generated/* inputs (dev.sh/deploy generate them). No
 // network, no DOM, no database.
 
 import assert from "node:assert";
@@ -8,6 +10,7 @@ import { test } from "node:test";
 import MiniSearch from "minisearch";
 import {
   deserializePlayerSearch,
+  loadPlayerSearch,
   MINISEARCH_OPTS,
 } from "../src/lib/playerIndex.ts";
 
@@ -64,4 +67,28 @@ test("search is fuzzy/prefix over display names with empty-query short circuit",
   assert.strictEqual(search("federer")[0].player_id, "1");
   assert.strictEqual(search("").length, 0);
   assert.strictEqual(search("   ").length, 0);
+});
+
+test("loadPlayerSearch fetches the search asset once and memoizes", async () => {
+  const fetches = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    fetches.push(url);
+    return {
+      ok: true,
+      json: async () => ({ index: makeSearchPayload([]) }),
+    };
+  };
+  try {
+    const first = loadPlayerSearch();
+    const second = loadPlayerSearch();
+    assert.strictEqual(first, second, "same memoized promise");
+    const search = await first;
+    await second;
+    assert.strictEqual(fetches.length, 1, "search asset fetched exactly once");
+    // The resolved in-memory function short-circuits empty queries.
+    assert.strictEqual(search("   ").length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

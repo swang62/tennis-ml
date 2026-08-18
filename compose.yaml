@@ -16,7 +16,7 @@ services:
     ports:
       - "8187:80"
     environment:
-      BENTO_API_URL: ${BENTO_API_URL:-http://bento:3000}
+      BENTO_API_URL: http://bento:3000
       BENTO_API_KEY: ${BENTO_API_KEY:?BENTO_API_KEY is required}
     healthcheck:
       test: wget -q -O /dev/null http://127.0.0.1/ || exit 1

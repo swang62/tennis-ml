@@ -34,7 +34,9 @@
 -- current-match raw stats).
 --
 -- Covered snapshot-backed fields:
---   diff form:      win_rate_diff, streak_diff, surface (via per-side)
+--   diff form:      win_rate_diff, streak_diff, surface_form_diff, surface
+--                    (via per-side), days_since_last_match_diff,
+--                    recent_game_margin_diff (via per-side)
 --   diff serve/bk:  ace_rate_diff, first_serve_pct_diff,
 --                    break_points_saved_pct_diff, first_serve_win_pct_diff,
 --                    second_serve_win_pct_diff, serve_win_pct_diff,
@@ -80,6 +82,8 @@ WITH prior_snapshot AS (
         mf.df_rate_diff, mf.aces_per_svc_game_diff,
         mf.avg_rank_faced_diff, mf.rank_trend_diff,
         mf.rank_diff, mf.rank_points_diff, mf.age_diff,
+        mf.surface_form_diff, mf.days_since_last_match_diff,
+        mf.recent_game_margin_diff,
         -- Stored per-side absolute values
         mf.player_weighted_form_10, mf.opponent_weighted_form_10,
         -- Prior snapshot inputs (N-1), COALESCE'd to the singleton defaults so
@@ -136,7 +140,45 @@ WITH prior_snapshot AS (
         prp.matches_10 AS player_raw_matches_10,
         pro.matches_10 AS opponent_raw_matches_10,
         COALESCE(prp.matches_10, 0) AS player_prior_matches_10,
-        COALESCE(pro.matches_10, 0) AS opponent_prior_matches_10
+        COALESCE(pro.matches_10, 0) AS opponent_prior_matches_10,
+        -- Surface form: prior snapshot's carried per-surface win rate chosen by
+        -- the match surface (pool mean when unseen; carpet has no rate, so the
+        -- fixed 0.5 rate_default applies, never a pool value).
+        prp.game_margin_10 AS player_raw_game_margin_10,
+        pro.game_margin_10 AS opponent_raw_game_margin_10,
+        COALESCE(prp.game_margin_10, 0.0) AS player_prior_game_margin_10,
+        COALESCE(pro.game_margin_10, 0.0) AS opponent_prior_game_margin_10,
+        CASE pm.surface
+            WHEN 'clay'  THEN prp.clay_win_rate_10
+            WHEN 'grass' THEN prp.grass_win_rate_10
+            WHEN 'hard'  THEN prp.hard_win_rate_10
+            ELSE NULL
+        END AS player_raw_surface_form,
+        CASE pm.surface
+            WHEN 'clay'  THEN pro.clay_win_rate_10
+            WHEN 'grass' THEN pro.grass_win_rate_10
+            WHEN 'hard'  THEN pro.hard_win_rate_10
+            ELSE NULL
+        END AS opponent_raw_surface_form,
+        CASE pm.surface
+            WHEN 'clay'  THEN COALESCE(prp.clay_win_rate_10,  fd.clay_win_rate_10)
+            WHEN 'grass' THEN COALESCE(prp.grass_win_rate_10, fd.grass_win_rate_10)
+            WHEN 'hard'  THEN COALESCE(prp.hard_win_rate_10,  fd.hard_win_rate_10)
+            ELSE fd.rate_default
+        END AS player_prior_surface_form,
+        CASE pm.surface
+            WHEN 'clay'  THEN COALESCE(pro.clay_win_rate_10,  fd.clay_win_rate_10)
+            WHEN 'grass' THEN COALESCE(pro.grass_win_rate_10, fd.grass_win_rate_10)
+            WHEN 'hard'  THEN COALESCE(pro.hard_win_rate_10,  fd.hard_win_rate_10)
+            ELSE fd.rate_default
+        END AS opponent_prior_surface_form,
+        -- Rest: days since the prior snapshot's match; pool median on cold start.
+        pm.match_date - prp.snapshot_date AS player_raw_days_since,
+        po.match_date - pro.snapshot_date AS opponent_raw_days_since,
+        CASE WHEN prp.player_id IS NULL THEN fd.days_since_default
+             ELSE pm.match_date - prp.snapshot_date END AS player_prior_days_since,
+        CASE WHEN pro.player_id IS NULL THEN fd.days_since_default
+             ELSE po.match_date - pro.snapshot_date END AS opponent_prior_days_since
     FROM {{ ref('match_features') }} mf
     JOIN {{ ref('player_matches') }} pm
       ON pm.match_id = mf.match_id AND pm.player_id = mf.player_id
@@ -169,6 +211,21 @@ comparisons AS (
     SELECT match_id, 'streak_diff' AS feature, streak_diff AS mf_val,
            player_prior_streak - opponent_prior_streak AS prior_val,
            player_raw_streak IS NOT NULL AND opponent_raw_streak IS NOT NULL AS guard
+    FROM prior_snapshot
+    UNION ALL
+    SELECT match_id, 'surface_form_diff' AS feature, surface_form_diff AS mf_val,
+           player_prior_surface_form - opponent_prior_surface_form AS prior_val,
+           player_raw_surface_form IS NOT NULL AND opponent_raw_surface_form IS NOT NULL AS guard
+    FROM prior_snapshot
+    UNION ALL
+    SELECT match_id, 'days_since_last_match_diff' AS feature, days_since_last_match_diff AS mf_val,
+           LN(1.0 + player_prior_days_since) - LN(1.0 + opponent_prior_days_since) AS prior_val,
+           player_raw_days_since IS NOT NULL AND opponent_raw_days_since IS NOT NULL AS guard
+    FROM prior_snapshot
+    UNION ALL
+    SELECT match_id, 'recent_game_margin_diff' AS feature, recent_game_margin_diff AS mf_val,
+           player_prior_game_margin_10 - opponent_prior_game_margin_10 AS prior_val,
+           player_raw_game_margin_10 IS NOT NULL AND opponent_raw_game_margin_10 IS NOT NULL AS guard
     FROM prior_snapshot
     UNION ALL
     SELECT match_id, 'rank_trend_diff' AS feature, rank_trend_diff AS mf_val,

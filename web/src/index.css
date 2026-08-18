@@ -223,6 +223,29 @@ html.light {
     margin-top: 0.35rem;
   }
 
+  /* Profile name links to the official ATP Tour overview page; the icon is
+     visually secondary to the name (dimmed, smaller, aria-hidden). Keyboard
+     focus comes from the global a:focus-visible rule. */
+  .atp-name-link {
+    transition: color 0.15s var(--ease);
+  }
+
+  .atp-name-link:hover {
+    color: var(--clay);
+  }
+
+  .atp-name-icon {
+    display: inline-block;
+    margin-left: 0.35rem;
+    vertical-align: 0.1em;
+    color: var(--text-dim);
+    transition: color 0.15s var(--ease);
+  }
+
+  .atp-name-link:hover .atp-name-icon {
+    color: var(--clay);
+  }
+
   /* Inline country flag (flagcdn w20); the span variant carries the
      white-flag fallback glyph at a similar size. */
   .player-flag {

@@ -126,24 +126,6 @@ server {
         try_files $uri =404;
     }
 
-    # The generated directory/search payloads are content-hashed, so each gets
-    # the same immutable year-long cache as Vite bundles. The manifest name is
-    # deliberately not a hex hash, so this regex never matches it with a stale
-    # forever cache. Quoted: an unquoted {64} quantifier would be parsed as a
-    # config block.
-    location ~ "^/player-(?:directory|search)\.[0-9a-f]{64}\.json$" {
-        expires 1y;
-        add_header Cache-Control "public, immutable";
-        try_files $uri =404;
-    }
-
-    # Tiny mutable pointer to the current hashed payload: the browser
-    # revalidates it on every load, so a new deploy is discovered as soon as
-    # its index.html is.
-    location = /player-index.manifest.json {
-        add_header Cache-Control "no-cache";
-    }
-
     location = /index.html {
         add_header Cache-Control "no-store";
     }

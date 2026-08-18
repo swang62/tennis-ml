@@ -35,9 +35,11 @@ models:
       second_serve_win_pct_10, serve_win_pct_10, return_points_won_pct_10,
       df_rate_10, and clay/grass/hard_win_rate_10. NOT probabilities, so
       deliberately left unsmoothed: aces_per_svc_game_10 (per-game count, no
-      upper bound), weighted_form_10 (decay-weighted index), streak, and the
-      rank averages. clay/grass/hard_win_rate_10 remain NULL until the player
-      has played on that surface.
+      upper bound), weighted_form_10 (decay-weighted index), streak,
+      game_margin_10 (signed, no upper bound), and the rank averages.
+      clay/grass/hard_win_rate_10 remain NULL until the player has played on
+      that surface, and game_margin_10 NULL until the player has a match with
+      a parseable completed-set score.
 
       Task 6: every `_5`/`_20` output, the separate win/loss streaks (replaced
       by a single signed `streak`), last_match_date, and intermediate/source
@@ -116,6 +118,17 @@ models:
           model feature).
       - name: aces_per_svc_game_10
         description: Sum(aces) / sum(service_games) over the last 10 matches including this one; NULL when the window has no service games. Per-game count, not smoothed.
+      - name: game_margin_10
+        description: >
+          Average per-match game margin (games won minus games lost) over the
+          last 10 matches including this one, parsed from the winner-first
+          bronze score: each completed-set token "a-b" contributes a - b, so
+          W/O, RET, and missing scores contribute nothing (a retired match
+          counts only its completed sets). Signed per the snapshot's own
+          match_won (winner +, loser -), so the two perspectives of a match
+          negate. AVG skips matches without a parseable score; NULL until the
+          player's first scored match. Unsmoothed; match_features imputes a
+          neutral 0.0 (even games) on cold start.
       - name: df_rate_10
         description: (double_faults + 1) / (total_serve_points + 2) over the last 10 matches including this one; smoothed, never NULL.
       - name: matches_10

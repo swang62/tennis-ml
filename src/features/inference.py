@@ -15,6 +15,7 @@ to the caller-supplied id (requested order preserved).
 from __future__ import annotations
 
 import builtins
+import math
 from datetime import date, datetime
 from decimal import Decimal
 from numbers import Real
@@ -154,6 +155,9 @@ def _to_date(value: object) -> date:
 def _side_values(
     row: dict[str, object] | None,
     defaults: dict[str, float],
+    *,
+    surface: str,
+    as_of_date: date,
 ) -> dict[str, int | float]:
     """Build one side's values from its latest snapshot or the tour-averages
     singleton fallbacks.
@@ -161,18 +165,39 @@ def _side_values(
     Rolling snapshot values are used only for the retained model features.
     """
 
-    def cell(snapshot_col: str, default_col: str) -> float:
+    def cell_lit(snapshot_col: str, fallback: float) -> float:
         if row is not None:
             value = row.get(snapshot_col)
             # NaN is the only supported numeric value that is not self-equal.
             if value is not None and isinstance(value, (Real, Decimal)) and value == value:
                 return float(value)
-        return float(defaults[default_col])
+        return fallback
+
+    def cell(snapshot_col: str, default_col: str) -> float:
+        return cell_lit(snapshot_col, float(defaults[default_col]))
 
     ranking = cell("latest_player_ranking", "latest_player_ranking")
     rank_points = cell("latest_player_rank_points", "latest_player_rank_points")
     age = cell("latest_player_age", "latest_player_age")
     avg_rank_10 = cell("avg_player_rank_10", "avg_player_rank_10")
+
+    # Surface form on the requested surface: the prior snapshot's carried
+    # per-surface 10-match win rate, its pool mean when the surface was never
+    # played; carpet has no per-surface pool rate, so the neutral rate_default
+    # applies (parity with match_features.sql).
+    surface_form = (
+        cell_lit(f"{surface}_win_rate_10", float(defaults[f"{surface}_win_rate_10"]))
+        if surface != "carpet"
+        else float(defaults["rate_default"])
+    )
+    # Rest: as-of date minus the strictly-prior snapshot's date (snapshot_date
+    # is that match's date); the pool median days-since on cold start (parity
+    # with gold's days_since_last_match).
+    days_since_last_match = (
+        float((as_of_date - _to_date(row["snapshot_date"])).days)
+        if row is not None
+        else float(defaults["days_since_default"])
+    )
 
     return {
         "ranking": ranking,
@@ -194,6 +219,11 @@ def _side_values(
         "streak": int(cell("streak", "streak")),
         # Matches observed in the 10-match rolling window; cold start is literal 0.
         "matches_10": int(float(cast(Real, row["matches_10"]))) if row is not None else 0,
+        "surface_form": surface_form,
+        "days_since_last_match": days_since_last_match,
+        # Rolling average per-match game margin; cold start is neutral 0.0
+        # (parity with gold's COALESCE(pr.game_margin_10, 0.0)).
+        "game_margin_10": cell_lit("game_margin_10", 0.0),
     }
 
 
@@ -381,6 +411,12 @@ def _assemble_row(
         player_side["avg_rank_faced_10"] - opponent_side["avg_rank_faced_10"]
     )
     row["streak_diff"] = player_side["streak"] - opponent_side["streak"]
+    row["surface_form_diff"] = player_side["surface_form"] - opponent_side["surface_form"]
+    # Log-transformed directional rest (parity with gold's LN(1 + days)).
+    row["days_since_last_match_diff"] = math.log(
+        1.0 + player_side["days_since_last_match"]
+    ) - math.log(1.0 + opponent_side["days_since_last_match"])
+    row["recent_game_margin_diff"] = player_side["game_margin_10"] - opponent_side["game_margin_10"]
 
     # Absolute state values (both sides matter).
     for name in (
@@ -452,8 +488,18 @@ def _build_inference_features_with_meta(
     player_snapshot = _latest_snapshot(ctx.player_id)
     opponent_snapshot = _latest_snapshot(ctx.opponent_id)
 
-    player_side = _side_values(player_snapshot, defaults)
-    opponent_side = _side_values(opponent_snapshot, defaults)
+    player_side = _side_values(
+        player_snapshot,
+        defaults,
+        surface=ctx.surface,
+        as_of_date=ctx.as_of_date,
+    )
+    opponent_side = _side_values(
+        opponent_snapshot,
+        defaults,
+        surface=ctx.surface,
+        as_of_date=ctx.as_of_date,
+    )
     player_side.update(_profile_values(ctx.player_id, ctx.as_of_date, defaults))
     opponent_side.update(_profile_values(ctx.opponent_id, ctx.as_of_date, defaults))
 
@@ -606,10 +652,14 @@ def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame
         player_side = _side_values(
             player_snapshot,
             defaults,
+            surface=ctx.surface,
+            as_of_date=ctx.as_of_date,
         )
         opponent_side = _side_values(
             opponent_snapshot,
             defaults,
+            surface=ctx.surface,
+            as_of_date=ctx.as_of_date,
         )
         player_side.update(
             _profile_values_from_row(profiles.get(ctx.player_id), ctx.as_of_date, defaults)

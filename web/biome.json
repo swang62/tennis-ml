@@ -22,7 +22,8 @@
       "**/*.html",
       "!**/dist",
       "!**/public",
-      "!**/node_modules"
+      "!**/node_modules",
+      "!**/src/assets/generated"
     ]
   },
   "formatter": {

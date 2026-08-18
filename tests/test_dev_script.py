@@ -1,16 +1,19 @@
-"""Static guard: `just dev` rebuilds the player index before serving.
+"""Static guard: `just dev` stages navigation artifacts and generates the
+Vite-directory inputs before serving.
 
 dev.sh is a monolithic script with database and server side effects, so it
-cannot run hermetically. This guard statically asserts the Task-5 wiring: the
-player-directory generator and the Node index builder run after the
+cannot run hermetically. This guard statically asserts the Task-3 wiring: the
+snapshot artifact staging and the node index builder run after the
 database/tool preflight and before any server starts, and each step fails the
-script on error — so Vite can never serve a stale or fixture directory.
+script on error — so Vite can never serve a stale or fixture directory, and
+dev consumes the same generated inputs as a deployment.
 """
 
 import re
 from pathlib import Path
 
 DEV_SH = Path(__file__).resolve().parent.parent / "scripts" / "dev.sh"
+JUSTFILE = Path(__file__).resolve().parent.parent / "justfile"
 
 _GENERATOR = "generate_navigation_artifacts"
 _NODE_BUILDER = "web/scripts/build-player-index.mjs"
@@ -61,3 +64,12 @@ def test_index_rebuild_steps_fail_fast():
     assert any(re.match(r"^\s*exit 1", line) for line in lines[node_build:server_start]), (
         "player index build failure must exit 1"
     )
+
+
+def test_dev_uses_same_node_builder_invocation_as_deploy():
+    """Dev must not diverge from production: both invoke the generator the same
+    way (no repo-relative locations, no extra flags), so both consume the
+    identical data/deploy input -> web/src/assets/generated outputs."""
+    dev_call = next(line for line in _lines() if _NODE_BUILDER in line).rsplit(" || ", 1)[0]
+    deploy_call = next(line for line in JUSTFILE.read_text().splitlines() if _NODE_BUILDER in line)
+    assert dev_call.strip() == deploy_call.strip()

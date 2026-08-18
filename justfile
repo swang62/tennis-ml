@@ -34,7 +34,11 @@ db-reset:
 
 # Build and push all production docker images, bento and web images.
 deploy *args:
+    # Stage snapshot navigation artifacts, then generate the Vite inputs
+    # host-side: data/deploy/player-directory.json is outside the web/ build
+    # context, so the node builder must run before the Docker build.
     uv run python src/flows/deploy.py
+    node web/scripts/build-player-index.mjs
     docker buildx build --builder tennis-multiarch --platform linux/amd64,linux/arm64 \
         --build-arg VITE_SITE_URL={{ env_var_or_default('VITE_SITE_URL', '') }} \
         --build-arg VITE_SITE_ID={{ env_var_or_default('VITE_SITE_ID', '') }} \

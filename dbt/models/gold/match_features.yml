@@ -16,7 +16,7 @@ models:
       contract is violated (match_features_no_null_model_features). Ranking,
       rank points, and age come from the PRIOR snapshot (strictly before
       match_date), never a same-day one. `match_won` = 1 iff the row's player
-      side won. Output columns are all 39 FEATURE_COLS preceded by the metadata
+      side won. Output columns are all 35 FEATURE_COLS preceded by the metadata
       block (match_id, match_date, player_id, opponent_id, tournament, round,
       surface, match_won); the per-side rate-exposure columns
       player_matches_10/opponent_matches_10 carry the prior snapshot's
@@ -96,6 +96,27 @@ models:
         description: player_avg_rank_faced_10 - opponent_avg_rank_faced_10.
       - name: streak_diff
         description: player_streak - opponent_streak (signed current run).
+      - name: surface_form_diff
+        description: >
+          player_surface_form - opponent_surface_form, where the per-side
+          surface form is the prior snapshot's carried win rate on the CURRENT
+          match's surface (last 10 matches on that surface, Beta(1,1)
+          smoothed, pool-mean imputed when the surface is unseen); carpet
+          matches use the neutral 0.5 rate_default on both sides.
+      - name: days_since_last_match_diff
+        description: >
+          LN(1 + player_days_since_last_match) - LN(1 + opponent_days_since_last_match):
+          each side's days between the match date and its immediately preceding
+          match (the prior snapshot's date; pool median days-since
+          (days_since_default) on cold start), log-transformed to compress the
+          long rest tail. Per-side raw days-since is unchanged.
+      - name: recent_game_margin_diff
+        description: >
+          player_game_margin_10 - opponent_game_margin_10: each side's prior
+          snapshot's average per-match game margin (games won minus games lost
+          over the last 10, from the winner-first score, completed sets only);
+          neutral 0.0 (even games) when no prior scored match exists. Negates
+          across the match's two directional rows.
 
       # Absolute state values where both sides matter.
       - name: player_weighted_form_10

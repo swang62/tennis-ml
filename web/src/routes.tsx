@@ -1,4 +1,3 @@
-import { useQuery } from "@tanstack/react-query";
 import {
   createRootRoute,
   createRoute,
@@ -9,7 +8,7 @@ import {
   useLocation,
 } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
-import { getDirectoryInfo } from "./api";
+import { useDirectoryInfo } from "./lib/directoryInfo";
 import { formatLongDate } from "./lib/format";
 import Home from "./pages/Home";
 import { type ThemeName, useTheme } from "./theme";
@@ -114,24 +113,10 @@ function Layout() {
   const { theme, toggle } = useTheme();
   const [menuOpen, setMenuOpen] = useState(false);
   const headerRef = useRef<HTMLElement>(null);
-  // The footer "last updated" date is not on the critical path: hold the Bento
-  // round-trip until the browser is idle so it never blocks first paint.
-  const [idle, setIdle] = useState(false);
-  useEffect(() => {
-    if (typeof requestIdleCallback === "undefined") {
-      setIdle(true); // older engines: no idle callback, just fetch immediately
-      return;
-    }
-    const handle = requestIdleCallback(() => setIdle(true), { timeout: 2000 });
-    return () => cancelIdleCallback(handle);
-  }, []);
-  const directoryInfoQ = useQuery({
-    queryKey: ["directory_info"],
-    queryFn: getDirectoryInfo,
-    staleTime: Infinity,
-    gcTime: Infinity,
-    enabled: idle,
-  });
+  // The footer "last updated" date is not on the critical path: the shared
+  // hook holds the Bento round-trip until the browser is idle so it never
+  // blocks first paint.
+  const directoryInfoQ = useDirectoryInfo();
   const { pathname } = useLocation();
   useEffect(() => {
     document.title =
