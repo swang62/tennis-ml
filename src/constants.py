@@ -154,28 +154,15 @@ DRIFT_MIN_N_FOR_CHECK = 10
 DRIFT_REF_MIN = 30
 DRIFT_REF_MAX = 10000
 
-# --- Player playstyle clustering (archetypes for the similarity index) ---
-PLAYSTYLE_N_CLUSTERS = 5
-PLAYSTYLE_RANDOM_STATE = 42
-PLAYSTYLE_CLUSTER_LABELS: dict[str, str] = {
-    "0": "PLACEHOLDER - describe cluster 0",
-    "1": "PLACEHOLDER - describe cluster 1",
-    "2": "PLACEHOLDER - describe cluster 2",
-    "3": "PLACEHOLDER - describe cluster 3",
-    "4": "PLACEHOLDER - describe cluster 4",
-}
-
 # --- Player similarity block calibration (explicit, reviewed weights) ---
 # The similarity vector is a weighted concatenation of independently calibrated
 # blocks: identity (one-hot), lifetime playstyle stats, surface career
-# performance, reputation, a PCA-reduced bio block, and optional cluster
-# membership.
+# performance, reputation, and a PCA-reduced bio block.
 SIM_IDENTITY_WEIGHT = 0.10
 SIM_PLAYSTYLE_WEIGHT = 0.35
 SIM_SURFACE_WEIGHT = 0.25
 SIM_REPUTATION_WEIGHT = 0.25
 SIM_BIO_WEIGHT = 0.05
-SIM_CLUSTER_WEIGHT = 0.10
 SIM_BIO_PCA_DIM = 10
 SIM_SURFACE_SHRINK_K = 30.0
 SIM_RANK_SCALE = 200.0

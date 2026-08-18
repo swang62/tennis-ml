@@ -51,15 +51,6 @@ def _patch_embedding(monkeypatch: pytest.MonkeyPatch) -> FakeTextEmbedding:
     return fake
 
 
-@pytest.fixture(autouse=True)
-def _hermetic_cluster_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Point cluster artifacts at non-existent tmp files so no test ever reads
-    the repo's real data/processed artifacts. Tests that need clusters override
-    the paths with their own fixture files in the test body."""
-    monkeypatch.setattr(similarity, "DEFAULT_CLUSTERS", tmp_path / "no_clusters.parquet")
-    monkeypatch.setattr(similarity, "DEFAULT_CLUSTER_LABELS", tmp_path / "no_cluster_labels.json")
-
-
 # Included career aggregates (gold.player_profiles): lifetime playstyle stats,
 # surface win rates + exposure counts, and the reputation signals, plus the
 # excluded recent-form field that must never enter a vector.
@@ -291,9 +282,8 @@ def _build_with_fixture(tmp_path: Path, monkeypatch) -> PlayerSimilarity:
 # Vector layout: one-hot identity descriptors precede the lifetime playstyle
 # stats, then the surface and reputation blocks, then the PCA-reduced bio
 # block (min(SIM_BIO_PCA_DIM, n_samples, n_features) — 4 dims for the
-# 4-player fixture), then the optional cluster one-hot. block_slices exposes
-# the exact columns, so tests read blocks by name instead of hard-coded
-# offsets.
+# 4-player fixture). block_slices exposes the exact columns, so tests read
+# blocks by name instead of hard-coded offsets.
 ONE_HOT = 4
 STYLE = LIFETIME_PLAYSTYLE_COLS
 SURFACE = SURFACE_BLOCK_COLS
@@ -307,10 +297,10 @@ def _style_block(vector: object) -> np.ndarray:
     return arr[block_slices(BIO_WIDTH)["playstyle"]]
 
 
-def _block(vector: object, name: str, num_cluster: int = 0) -> np.ndarray:
+def _block(vector: object, name: str) -> np.ndarray:
     """Slice one calibrated block out of a vector (see block_slices)."""
     arr: np.ndarray = np.asarray(vector)
-    return arr[block_slices(BIO_WIDTH, num_cluster)[name]]
+    return arr[block_slices(BIO_WIDTH)[name]]
 
 
 def _style_values(vector: object) -> dict[str, float]:
@@ -762,7 +752,7 @@ def test_block_weights_calibrate_bio_never_dominates(monkeypatch):
     v = matrix.to_numpy(np.float32)[0]
     num_bio = len([c for c in matrix.columns if c.startswith("bio_")])
     assert num_bio == similarity.SIM_BIO_PCA_DIM  # 10 players, 16 dims -> 10
-    total = np.sqrt(sum(w * w for name, w in BLOCK_WEIGHTS.items() if name != "cluster"))
+    total = np.sqrt(sum(w * w for name, w in BLOCK_WEIGHTS.items()))
     expected = {
         name: BLOCK_WEIGHTS[name] / total
         for name in ("identity", "playstyle", "surface", "reputation", "bio")
@@ -815,62 +805,6 @@ def test_bio_block_width_capped_by_samples_features_and_config(monkeypatch):
     matrix = similarity.build_playstyle_matrix(_synthetic_profiles(one), query=_flat_query(one))
     assert sum(c.startswith("bio_") for c in matrix.columns) == 1
     assert np.all(np.isfinite(matrix.to_numpy(np.float32)))
-
-
-def _cluster_query(player_ids: list[str]):
-    """Query helper dispatching on SQL, like the live PostgreSQL client: the
-    bronze.profiles fetch returns profile fields, the lifetime-state fetch
-    returns career aggregates that diverge per player so KMeans separates
-    cleanly (identical rows would be degenerate for cluster dispersal)."""
-
-    def query(sql: str) -> pd.DataFrame:
-        if "bronze" in sql:
-            return _synthetic_profiles(player_ids)
-        n = len(player_ids)
-        ramp = [0.3 + 0.5 * i / max(n - 1, 1) for i in range(n)]
-        return pd.DataFrame(
-            {
-                "player_id": player_ids,
-                **dict.fromkeys(LIFETIME_PLAYSTYLE_COLS, ramp),
-                **dict.fromkeys(SURFACE_BLOCK_COLS, 0.5),
-                "current_rank": [1 + i for i in range(n)],
-                "match_count": 200.0,
-                "career_win_rate": 0.6,
-            }
-        )
-
-    return query
-
-
-def test_pca_bio_block_shared_by_matrix_and_clustering(monkeypatch):
-    """KMeans clustering fits exactly the same PCA-reduced matrix as the
-    similarity index: build_cluster_artifacts routes through the shared
-    build_playstyle_matrix (a single call, no prior cluster assignment), and
-    the fitted model's feature width matches the shared matrix width."""
-    _patch_embedding(monkeypatch)
-    player_ids = [f"P{i}" for i in range(12)]
-    profiles = _synthetic_profiles(player_ids)
-    monkeypatch.setattr(similarity, "embed_bio_summaries", _wide_embed_factory(20))
-    query = _cluster_query(player_ids)
-    original = similarity.build_playstyle_matrix
-    calls = []
-
-    def spy(df, query=None, cluster_assignments=None):
-        calls.append((len(df), cluster_assignments))
-        return original(df, query=query, cluster_assignments=cluster_assignments)
-
-    monkeypatch.setattr(similarity, "build_playstyle_matrix", spy)
-    assignments, model = similarity.build_cluster_artifacts(
-        n_clusters=2, labels={"0": "Clay", "1": "Hard"}, query=query
-    )
-
-    assert len(calls) == 1  # exactly one shared matrix build for clustering
-    assert calls[0] == (12, None)  # discovery, no prior archetype skew
-    assert model is not None
-    shared = original(profiles, query=query)
-    assert model.n_features_in_ == shared.shape[1]
-    assert sum(c.startswith("bio_") for c in shared.columns) == similarity.SIM_BIO_PCA_DIM
-    assert set(assignments["player_id"]) == set(player_ids)
 
 
 def _surface_query(player_ids: list[str]):
@@ -1197,28 +1131,6 @@ def test_duck_and_snapshot_fixtures_produce_identical_vectors(
         assert np.array_equal(direct.index.reconstruct(i), offline.index.reconstruct(i))
 
 
-# ── Playstyle-cluster integration ───────────────────────────────────────────
-
-
-def _four_identical_profiles() -> pd.DataFrame:
-    """Four profiled players whose every non-cluster signal is identical."""
-    return pd.DataFrame(
-        {
-            "player_id": ["A", "B", "C", "D"],
-            "display_name": ["A", "B", "C", "D"],
-            "backhand": ["1H", "1H", "1H", "1H"],
-            "handedness": ["R", "R", "R", "R"],
-            "summary": ["", "", "", ""],
-        }
-    )
-
-
-def _flat_lifetime_query(_sql: str) -> pd.DataFrame:
-    """Gold aggregate stub: identical rows for all four players (all career
-    cells non-zero so every block is active)."""
-    return _flat_query(["A", "B", "C", "D"])(_sql)
-
-
 def _flat_query(player_ids: list[str]):
     """Gold aggregate stub: identical career rows for every player (all career
     cells non-zero so every block is active)."""
@@ -1257,185 +1169,3 @@ def _wide_embed_factory(
         return out
 
     return _embed
-
-
-def test_build_playstyle_matrix_without_assignments_has_no_cluster_block(monkeypatch):
-    """The notebook's call (no assignments) yields exactly the base layout."""
-    _patch_embedding(monkeypatch)
-    matrix = similarity.build_playstyle_matrix(
-        _four_identical_profiles(), query=_flat_lifetime_query
-    )
-    assert matrix.shape[0] == 4
-    assert not any(c.startswith("cluster_") for c in matrix.columns)
-
-
-def test_cluster_one_hot_makes_same_archetype_players_more_similar(monkeypatch):
-    """The appended cluster block is deterministic and skews similarity toward
-    same-archetype players, even when every other signal is identical."""
-    _patch_embedding(monkeypatch)
-    assignments = pd.DataFrame(
-        {"player_id": ["A", "B", "C", "D"], "cluster_id": ["0", "0", "1", "1"]}
-    )
-    matrix = similarity.build_playstyle_matrix(
-        _four_identical_profiles(), query=_flat_lifetime_query, cluster_assignments=assignments
-    )
-    assert matrix.shape[0] == 4
-    assert any(c.startswith("cluster_") for c in matrix.columns)
-
-    index = faiss.IndexFlatIP(matrix.shape[1])
-    index.add(np.ascontiguousarray(matrix.to_numpy(np.float32)))
-    cos_ab = float(index.reconstruct(0) @ index.reconstruct(1))
-    cos_ac = float(index.reconstruct(0) @ index.reconstruct(2))
-    assert cos_ab > cos_ac  # same cluster strictly more similar
-    _scores, ids = index.search(matrix.to_numpy(np.float32)[0:1], 4)
-    row = ids[0].tolist()
-    assert row.index(1) < row.index(2)  # B (same cluster) ahead of C
-    assert row.index(1) < row.index(3)  # and ahead of D
-
-
-def test_build_with_cluster_artifacts_appends_block_and_labels(tmp_path, monkeypatch):
-    """build() reads data/processed cluster artifacts: one-hot block in the
-    vector, archetype labels baked into players, metadata, and search results."""
-    assignments = pd.DataFrame(
-        {"player_id": ["P1", "P2", "P3", "P4"], "cluster_id": ["0", "0", "1", "1"]}
-    )
-    assignments.to_parquet(tmp_path / "cluster_assignments.parquet")
-    (tmp_path / "cluster_descriptions.json").write_text(
-        json.dumps({"0": "Big Server", "1": "Counterpuncher"})
-    )
-    monkeypatch.setattr(similarity, "DEFAULT_CLUSTERS", tmp_path / "cluster_assignments.parquet")
-    monkeypatch.setattr(
-        similarity, "DEFAULT_CLUSTER_LABELS", tmp_path / "cluster_descriptions.json"
-    )
-
-    finder = _build_with_fixture(tmp_path, monkeypatch)
-
-    assert finder.index is not None
-    # The cluster one-hot block trails the bio block (dynamic width: 2 here).
-    p1 = finder.index.reconstruct(finder.player_ids.index("P1"))
-    cluster_block = _block(p1, "cluster", num_cluster=2)
-    assert cluster_block[0] > 0.0 and cluster_block[1] == 0.0  # P1 in cluster "0"
-    p3 = finder.index.reconstruct(finder.player_ids.index("P3"))
-    assert _block(p3, "cluster", num_cluster=2)[0] == 0.0  # P3 not in cluster "0"
-
-    assert finder.players[0].get("cluster_label") == "Big Server"  # P1
-    assert finder.players[2].get("cluster_label") == "Counterpuncher"  # P3
-    meta = json.loads((tmp_path / "meta.json").read_text())
-    assert meta[0]["cluster_label"] == "Big Server"  # persisted in player_metadata.json
-    results = finder.search("P1", top_k=3)
-    assert all("cluster_label" in r for r in results)
-    assert results[0]["cluster_label"] == "Big Server"  # P2, same archetype
-
-
-def test_build_without_cluster_artifacts_preserves_base_behavior(tmp_path, monkeypatch):
-    """Absent artifacts: labels default to None."""
-    finder = _build_with_fixture(tmp_path, monkeypatch)
-    assert finder.index is not None
-    assert all(p.get("cluster_label") is None for p in finder.players)
-    results = finder.search("P1", top_k=3)
-    assert all(r["cluster_label"] is None for r in results)
-
-
-def test_load_keeps_labels_baked_into_serving_metadata(tmp_path, monkeypatch):
-    """Serving load() preserves the labels baked into player_metadata.json at
-    build time — no cluster files are staged into the deploy folder."""
-    assignments = pd.DataFrame(
-        {"player_id": ["P1", "P2", "P3", "P4"], "cluster_id": ["0", "0", "1", "1"]}
-    )
-    assignments.to_parquet(tmp_path / "cluster_assignments.parquet")
-    (tmp_path / "cluster_descriptions.json").write_text(
-        json.dumps({"0": "Big Server", "1": "Counterpuncher"})
-    )
-    monkeypatch.setattr(similarity, "DEFAULT_CLUSTERS", tmp_path / "cluster_assignments.parquet")
-    monkeypatch.setattr(
-        similarity, "DEFAULT_CLUSTER_LABELS", tmp_path / "cluster_descriptions.json"
-    )
-    monkeypatch.setattr(similarity, "SERVING_INDEX", tmp_path / "idx")
-    monkeypatch.setattr(similarity, "SERVING_METADATA", tmp_path / "meta.json")
-
-    finder = _build_with_fixture(tmp_path, monkeypatch)  # writes tmp/meta.json with labels
-    loaded = PlayerSimilarity()
-    loaded.load()
-
-    assert loaded.players == finder.players  # labels survive the round trip
-    assert loaded.players[0].get("cluster_label") == "Big Server"
-
-
-# ── Cluster-artifact generation (pipeline-owned) ────────────────────────────
-
-
-def test_build_cluster_artifacts_writes_parquet_and_json(tmp_path, monkeypatch):
-    """Generation fits deterministic clusters and writes both artifacts, with
-    the reviewed label keys validated to cover the fitted cluster ids."""
-    _patch_embedding(monkeypatch)
-    monkeypatch.setattr(similarity, "DEFAULT_CLUSTERS", tmp_path / "cluster_assignments.parquet")
-    monkeypatch.setattr(
-        similarity, "DEFAULT_CLUSTER_LABELS", tmp_path / "cluster_descriptions.json"
-    )
-    con = duckdb.connect()
-    try:
-        _create_two_table_fixture(con)
-        query = _duck_query(con)
-        labels = {"0": "Big Server", "1": "Counterpuncher"}
-        similarity.build_cluster_artifacts(n_clusters=2, labels=labels, query=query)
-        first = pd.read_parquet(tmp_path / "cluster_assignments.parquet")
-        # Re-generation after a re-run is deterministic: same data + seed.
-        similarity.build_cluster_artifacts(n_clusters=2, labels=labels, query=query)
-        second = pd.read_parquet(tmp_path / "cluster_assignments.parquet")
-    finally:
-        con.close()
-
-    assert first.equals(second)
-    assert first.columns.tolist() == ["player_id", "cluster_id"]
-    assert first["player_id"].tolist() == ["P1", "P2", "P3", "P4"]
-    assert set(first["cluster_id"]) == {0, 1}
-    assert json.loads((tmp_path / "cluster_descriptions.json").read_text()) == labels
-
-
-def test_build_cluster_artifacts_rejects_labels_not_covering_fitted_ids(tmp_path, monkeypatch):
-    """A label map that misses a fitted cluster id aborts before any write."""
-    _patch_embedding(monkeypatch)
-    monkeypatch.setattr(similarity, "DEFAULT_CLUSTERS", tmp_path / "cluster_assignments.parquet")
-    monkeypatch.setattr(
-        similarity, "DEFAULT_CLUSTER_LABELS", tmp_path / "cluster_descriptions.json"
-    )
-    con = duckdb.connect()
-    try:
-        _create_two_table_fixture(con)
-        with pytest.raises(AssertionError):
-            similarity.build_cluster_artifacts(
-                n_clusters=2, labels={"0": "only one label"}, query=_duck_query(con)
-            )
-    finally:
-        con.close()
-    assert not (tmp_path / "cluster_assignments.parquet").exists()
-    assert not (tmp_path / "cluster_descriptions.json").exists()
-
-
-def test_generate_then_similarity_build_consumes_fresh_artifacts(tmp_path, monkeypatch):
-    """Ordering contract: artifacts generated by build_cluster_artifacts feed
-    the immediately-following PlayerSimilarity.build as one-hot memberships
-    and baked labels."""
-    _patch_embedding(monkeypatch)
-    monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
-    monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
-    monkeypatch.setattr(similarity, "DEFAULT_CLUSTERS", tmp_path / "cluster_assignments.parquet")
-    monkeypatch.setattr(
-        similarity, "DEFAULT_CLUSTER_LABELS", tmp_path / "cluster_descriptions.json"
-    )
-    con = duckdb.connect()
-    try:
-        _create_two_table_fixture(con)
-        query = _duck_query(con)
-        labels = {"0": "Big Server", "1": "Counterpuncher"}
-        similarity.build_cluster_artifacts(n_clusters=2, labels=labels, query=query)
-        finder = PlayerSimilarity()
-        finder.build(query=query)
-    finally:
-        con.close()
-
-    assert finder.index is not None
-    # Every profiled player is assigned to one of the two archetypes.
-    assert all(p.get("cluster_label") in ("Big Server", "Counterpuncher") for p in finder.players)
-    meta = json.loads((tmp_path / "meta.json").read_text())
-    assert all(p["cluster_label"] in ("Big Server", "Counterpuncher") for p in meta)

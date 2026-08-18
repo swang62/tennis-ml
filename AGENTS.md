@@ -49,7 +49,7 @@ web/             — React + TanStack dashboard (pages, lib, components)
 
 **Exact lineage, one alias.** Base models carry no aliases — each registers a numbered version and records exact name, version, run ID, model URI, and immutable artifact URIs/hashes in the handoffs. Promotion tags the ensemble with those pins, then assigns `@champion`; deploy resolves `@champion` and reads every pin from those tags.
 
-**Artifact boundary.** Champion pins cover only artifacts that affect match probabilities. After an operator refreshes the DuckDB snapshot for the selected `DATABASE_URL`, deploy rebuilds the directory/MiniSearch payload and FAISS similarity assets from that snapshot; it consumes the cluster assignments fitted by `just train`. These navigation artifacts are never MLflow/champion lineage and are packaged only into the web/Bento outputs.
+**Artifact boundary.** Champion pins cover only artifacts that affect match probabilities. After an operator refreshes the DuckDB snapshot for the selected `DATABASE_URL`, deploy rebuilds the directory/MiniSearch payload and FAISS similarity assets from that snapshot. These navigation artifacts are never MLflow/champion lineage and are packaged only into the web/Bento outputs.
 
 **NN servers via ONNX Runtime, not torch.** Deploy exports the pinned PyTorch model to single-file ONNX at deploy time; torch isn't a serving dependency. GBDT may pick XGBoost or LightGBM at Optuna time — the image pins both so whichever wins loads.
 

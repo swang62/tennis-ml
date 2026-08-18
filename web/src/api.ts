@@ -10,7 +10,6 @@ export interface Player {
   current_rank?: number | null;
   ioc: string;
   iso2: string;
-  cluster_label?: string | null;
 }
 
 export interface CareerStats {
@@ -202,7 +201,6 @@ export interface SimilarPlayer {
   player_id: string;
   display_name: string;
   score: string;
-  cluster_label?: string | null;
 }
 
 export interface SimilarPlayersResponse {

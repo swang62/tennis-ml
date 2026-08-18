@@ -39,7 +39,6 @@ from src.constants import (
     ROOT,
     SIM_BIO_PCA_DIM,
     SIM_BIO_WEIGHT,
-    SIM_CLUSTER_WEIGHT,
     SIM_EXPERIENCE_K,
     SIM_IDENTITY_WEIGHT,
     SIM_PLAYSTYLE_WEIGHT,
@@ -67,19 +66,13 @@ NAVIGATION_STATE_FILE = DATA_PROCESSED / "navigation_artifacts_state.json"
 # Repository-controlled sources whose exact contents shape the navigation
 # outputs without changing snapshot data: the directory SQL/shaping
 # (serving/directory.py), the similarity vector construction, embedding/PCA,
-# weights, and cluster artifact interpretation (models/similarity.py), the
-# canonical country/player mapping (countries.py), and the deploy-side
-# cluster-label derivation in this module (its similarity metadata is reused
-# on unchanged inputs while the directory is regenerated, so a drift here
-# would silently diverge them). The similarity-tuning constants live in
-# constants.py next to unrelated settings, so only their exact values are
-# fingerprinted, not the whole file. The web MiniSearch builder
-# (web/scripts/build-player-index.mjs) is not a deploy-time input: it
-# consumes the staged raw directory after this function returns and its
-# options can never change the directory bytes, so deploy cannot (and need
-# not) force its content-hash cache to miss. PLAYSTYLE_* constants only shape
-# cluster artifacts at pipeline time; their output is the assignments/labels
-# data already fingerprinted as inputs.
+# weights (models/similarity.py), and the canonical country/player mapping
+# (countries.py). The similarity-tuning constants live in constants.py next
+# to unrelated settings, so only their exact values are fingerprinted, not
+# the whole file. The web MiniSearch builder (web/scripts/build-player-index.mjs)
+# is not a deploy-time input: it consumes the staged raw directory after this
+# function returns and its options can never change the directory bytes, so
+# deploy cannot (and need not) force its content-hash cache to miss.
 NAVIGATION_SOURCE_FILES = [
     ROOT / "src" / "flows" / "deploy.py",
     ROOT / "src" / "serving" / "directory.py",
@@ -196,19 +189,15 @@ def _write_state(state: dict[str, Any]) -> None:
 def _navigation_inputs_hash(
     profiles: pd.DataFrame,
     lifetime: pd.DataFrame,
-    assignments: pd.DataFrame,
-    labels: dict[str, str],
 ) -> str:
     """SHA-256 over every snapshot input the directory and similarity builds read."""
     payload = {
         # Row order of profiles shapes the artifacts (index row order, JSON row
-        # order) and is preserved; lifetime/assignment rows only feed player-keyed
-        # merges, so they are sorted for a canonical hash regardless of snapshot
-        # row order.
+        # order) and is preserved; lifetime rows only feed player-keyed merges,
+        # so they are sorted for a canonical hash regardless of snapshot row
+        # order.
         "profiles": json.loads(profiles.to_json(orient="records")),
         "lifetime": _frame_records(lifetime),
-        "assignments": _frame_records(assignments),
-        "labels": {str(k): str(v) for k, v in labels.items()},
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -249,7 +238,6 @@ def _navigation_source_hash() -> str:
             "surface_weight": SIM_SURFACE_WEIGHT,
             "reputation_weight": SIM_REPUTATION_WEIGHT,
             "bio_weight": SIM_BIO_WEIGHT,
-            "cluster_weight": SIM_CLUSTER_WEIGHT,
             "bio_pca_dim": SIM_BIO_PCA_DIM,
             "surface_shrink_k": SIM_SURFACE_SHRINK_K,
             "rank_scale": SIM_RANK_SCALE,
@@ -956,37 +944,25 @@ def generate_navigation_artifacts() -> Path:
     snapshot helper's actionable error.
 
     When every snapshot input that shapes the directory and similarity outputs
-    (profiles, gold lifetime stats, cluster assignments/labels) and every
-    repository-controlled source that shapes them (directory SQL/shaping,
-    similarity vector/embedding/PCA/weights, country mapping, cluster-label
-    derivation) is unchanged since the last staging and the staged similarity
-    artifacts still exist, the similarity artifacts are reused and the
-    deterministic raw directory is restaged byte-identically. The raw input is
-    retained under data/deploy/ (never deleted) as the builder's staging input,
-    so restaging identical bytes lets the builder reuse its hashed payloads.
-    Any input change, source/config change, missing similarity artifact, or
-    missing/legacy state rebuilds everything.
+    (profiles, gold lifetime stats) and every repository-controlled source
+    that shapes them (directory SQL/shaping, similarity vector/embedding/PCA/
+    weights, country mapping) is unchanged since the last staging and the
+    staged similarity artifacts still exist, the similarity artifacts are
+    reused and the deterministic raw directory is restaged byte-identically.
+    The raw input is retained under data/deploy/ (never deleted) as the
+    builder's staging input, so restaging identical bytes lets the builder
+    reuse its hashed payloads. Any input change, source/config change, missing
+    similarity artifact, or missing/legacy state rebuilds everything.
     """
     from src.db import training
-    from src.models.similarity import (
-        PLAYER_LIFETIME_SQL,
-        PlayerSimilarity,
-        load_cluster_artifacts,
-    )
+    from src.models.similarity import PLAYER_LIFETIME_SQL, PlayerSimilarity
     from src.serving.directory import PLAYERS_SQL, directory_players
 
     profiles = training.to_dataframe(PLAYERS_SQL)
     if profiles.empty:
         raise RuntimeError("training snapshot has no player profiles; refresh it before deploy")
-    assignments, labels = load_cluster_artifacts()
-    inputs_hash = _navigation_inputs_hash(
-        profiles, training.to_dataframe(PLAYER_LIFETIME_SQL), assignments, labels
-    )
+    inputs_hash = _navigation_inputs_hash(profiles, training.to_dataframe(PLAYER_LIFETIME_SQL))
     source_hash = _navigation_source_hash()
-    cluster_labels = {
-        str(row["player_id"]): labels.get(str(row["cluster_id"]), f"cluster_{row['cluster_id']}")
-        for _, row in assignments.iterrows()
-    }
     if (
         inputs_hash == _read_navigation_inputs_hash()
         and source_hash == _read_navigation_source_hash()
@@ -994,8 +970,8 @@ def generate_navigation_artifacts() -> Path:
     ):
         # Only the similarity artifacts gate reuse; the deterministic raw
         # directory is retained byte-identically as the builder's input,
-        # restaged from the hashed profiles + cluster labels.
-        _write_raw_directory(directory_players(profiles, cluster_labels))
+        # restaged from the hashed profiles.
+        _write_raw_directory(directory_players(profiles))
         _log(
             "minisearch",
             "snapshot inputs and shaping sources unchanged; reusing staged navigation artifacts",
@@ -1005,20 +981,13 @@ def generate_navigation_artifacts() -> Path:
     similarity.build(
         query=training.to_dataframe,
         profiles=profiles,
-        cluster_assignments=assignments,
-        cluster_labels=labels,
         index_path=SIMILARITY_INDEX,
         metadata_path=SIMILARITY_METADATA,
     )
-    players = directory_players(profiles, cluster_labels)
+    players = directory_players(profiles)
     metadata = {str(player["player_id"]): player for player in similarity.players}
     if set(metadata) != {str(player["player_id"]) for player in players}:
         raise RuntimeError("directory and similarity player IDs differ in the training snapshot")
-    if any(
-        metadata[str(player["player_id"])].get("cluster_label") != player["cluster_label"]
-        for player in players
-    ):
-        raise RuntimeError("directory and similarity cluster labels differ")
     _write_raw_directory(players)
     _write_navigation_state(inputs_hash, source_hash)
     _log(

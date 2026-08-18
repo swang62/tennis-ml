@@ -141,7 +141,6 @@ const returnRates = new Set(["break_point_opportunities_per_return_game"]);
 export default function ProfileContent({
   profile,
   directoryRank,
-  directoryCluster,
   rankHistory,
   rankLoading,
   matchHistory,
@@ -152,7 +151,6 @@ export default function ProfileContent({
 }: {
   profile: PlayerProfile;
   directoryRank?: number | null;
-  directoryCluster?: string | null;
   rankHistory: RankHistory | undefined;
   rankLoading: boolean;
   matchHistory: MatchHistory | undefined;
@@ -182,7 +180,6 @@ export default function ProfileContent({
     ["Height", profile.height ? `${(profile.height / 100).toFixed(2)} m` : "-"],
     ["Handedness", handednessLabel],
     ["Backhand", profile.backhand ?? "-"],
-    ["Playstyle", directoryCluster ?? "-"],
   ];
 
   const rankPoints = (rankHistory?.rank_history ?? []).filter(

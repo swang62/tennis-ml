@@ -21,9 +21,6 @@ from src.constants import (
     LOGS,
     OUTPUTS,
     PARAMS,
-    PLAYSTYLE_CLUSTER_LABELS,
-    PLAYSTYLE_N_CLUSTERS,
-    PLAYSTYLE_RANDOM_STATE,
 )
 from src.db import training
 from src.db.snapshot import SNAPSHOT_PATH, refresh_snapshot
@@ -65,21 +62,6 @@ def run_notebook(name: str, parameters: dict | None = None) -> None:
         log_output=True,  # stream cell stdout/stderr live (progress bar is default)
     )
     print(f"  Done: {name}")
-
-
-def generate_cluster_artifacts() -> None:
-    """Fit player-archetype clusters from the fresh DuckDB snapshot and write
-    the deploy-time similarity build consumes (one-hot memberships + archetype
-    labels). Runs after the snapshot refresh so assignments stay current.
-    """
-    from src.models.similarity import build_cluster_artifacts
-
-    build_cluster_artifacts(
-        n_clusters=PLAYSTYLE_N_CLUSTERS,
-        labels=PLAYSTYLE_CLUSTER_LABELS,
-        query=training.to_dataframe,
-        random_state=PLAYSTYLE_RANDOM_STATE,
-    )
 
 
 class _Tee:
@@ -127,12 +109,6 @@ if __name__ == "__main__":
         print("Refreshing training snapshot from PostgreSQL...")
         refresh_snapshot()
         print(f"  Snapshot refreshed: {SNAPSHOT_PATH}")
-
-        # Fit player-archetype clusters from the fresh snapshot. Deploy later
-        # consumes these snapshot artifacts to build navigation assets.
-        print("\nGenerating playstyle clusters...")
-        generate_cluster_artifacts()
-        print("  Cluster artifacts written.")
 
         print("Pipeline starting...")
         for name in NB_ORDER:

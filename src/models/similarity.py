@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, NotRequired, TypedDict
+from typing import NotRequired, TypedDict
 
 import faiss
 import numpy as np
@@ -16,10 +16,8 @@ from src.constants import (
     DATA_PROCESSED,
     DEPLOY_ARTIFACTS,
     GOLD_PROFILES_TABLE,
-    PLAYSTYLE_RANDOM_STATE,
     SIM_BIO_PCA_DIM,
     SIM_BIO_WEIGHT,
-    SIM_CLUSTER_WEIGHT,
     SIM_EXPERIENCE_K,
     SIM_IDENTITY_WEIGHT,
     SIM_PLAYSTYLE_WEIGHT,
@@ -39,15 +37,6 @@ DEFAULT_INDEX = DATA_PROCESSED / "player_similarity.index"
 DEFAULT_METADATA = DATA_PROCESSED / "player_metadata.json"
 SERVING_INDEX = DEPLOY_ARTIFACTS / "player_similarity.index"
 SERVING_METADATA = DEPLOY_ARTIFACTS / "player_metadata.json"
-
-# Player-style cluster membership (written by the pipeline after every snapshot
-# refresh via build_cluster_artifacts), optional. When the artifacts exist,
-# build() appends a deterministic one-hot cluster block to the FAISS vector so
-# membership influences similarity, and bakes each player's archetype label
-# into the metadata. Labels travel to serving inside player_metadata.json — no
-# cluster files are staged by deploy.
-DEFAULT_CLUSTERS = DATA_PROCESSED / "cluster_assignments.parquet"
-DEFAULT_CLUSTER_LABELS = DATA_PROCESSED / "cluster_descriptions.json"
 
 BIO_COL_PREFIX = "bio_"
 
@@ -144,7 +133,7 @@ def embed_bio_summaries(profiles: pd.DataFrame, model_name: str = MODEL_NAME) ->
 def reduce_bio_embeddings(embeddings: np.ndarray) -> np.ndarray:
     """PCA-reduce a batch of bio embeddings to at most SIM_BIO_PCA_DIM columns.
 
-    Shared by the matrix and clustering paths: this runs once inside
+    Shared by the matrix and bio paths: this runs once inside
     ``build_playstyle_matrix``, so both consume exactly the same transformed
     base vector. n_components = min(SIM_BIO_PCA_DIM, n_samples, n_features),
     so tiny batches or narrow embeddings never force a wider block than the
@@ -169,7 +158,6 @@ class PlayerData(TypedDict):
     player_id: str
     display_name: str
     score: NotRequired[str]
-    cluster_label: NotRequired[str | None]
 
 
 # Explicit calibrated block weights (single source of truth; mirrors the SIM_*
@@ -184,17 +172,15 @@ BLOCK_WEIGHTS: dict[str, float] = {
     "surface": SIM_SURFACE_WEIGHT,
     "reputation": SIM_REPUTATION_WEIGHT,
     "bio": SIM_BIO_WEIGHT,
-    "cluster": SIM_CLUSTER_WEIGHT,
 }
 
 
-def block_slices(num_bio: int, num_cluster: int = 0) -> dict[str, slice]:
+def block_slices(num_bio: int) -> dict[str, slice]:
     """Map each calibrated block to its column slice in the final vector.
 
-    Fixed-width blocks lead (identity, playstyle, surface, reputation), the
-    bio block follows with PCA-reduced width (at most SIM_BIO_PCA_DIM), and the
-    optional cluster one-hot always trails (dynamic width). Tests and tooling
-    use this to attribute vector components to blocks.
+    Fixed-width blocks lead (identity, playstyle, surface, reputation), then
+    the bio block follows with PCA-reduced width (at most SIM_BIO_PCA_DIM).
+    Tests and tooling use this to attribute vector components to blocks.
     """
     widths: list[tuple[str, int]] = [
         ("identity", len(IDENTITY_BLOCK_COLS)),
@@ -202,7 +188,6 @@ def block_slices(num_bio: int, num_cluster: int = 0) -> dict[str, slice]:
         ("surface", len(SURFACE_BLOCK_COLS)),
         ("reputation", len(REPUTATION_BLOCK_COLS)),
         ("bio", num_bio),
-        ("cluster", num_cluster),
     ]
     slices: dict[str, slice] = {}
     start = 0
@@ -212,7 +197,7 @@ def block_slices(num_bio: int, num_cluster: int = 0) -> dict[str, slice]:
     return slices
 
 
-def vector_block_norms(vector: object, num_bio: int, num_cluster: int = 0) -> dict[str, float]:
+def vector_block_norms(vector: object, num_bio: int) -> dict[str, float]:
     """Per-block L2 norms of one row vector.
 
     Because each block is unit-normalized and scaled by its calibrated weight
@@ -223,10 +208,7 @@ def vector_block_norms(vector: object, num_bio: int, num_cluster: int = 0) -> di
     num_bio is the PCA-reduced bio width of the vector being inspected.
     """
     arr = np.asarray(vector).astype(np.float32).reshape(-1)
-    return {
-        name: float(np.linalg.norm(arr[sl]))
-        for name, sl in block_slices(num_bio, num_cluster).items()
-    }
+    return {name: float(np.linalg.norm(arr[sl])) for name, sl in block_slices(num_bio).items()}
 
 
 def _weighted_block(values: np.ndarray, weight: float) -> np.ndarray:
@@ -243,9 +225,8 @@ def _weighted_block(values: np.ndarray, weight: float) -> np.ndarray:
 def build_playstyle_matrix(
     df: pd.DataFrame,
     query: Callable[[str], pd.DataFrame] | None = None,
-    cluster_assignments: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Assemble the per-player playstyle vector used by similarity and clustering.
+    """Assemble the per-player playstyle vector used by the similarity index.
 
     The vector is a weighted concatenation of independently calibrated blocks,
     each unit-normalized (or bounded-transformed) before scaling:
@@ -259,7 +240,6 @@ def build_playstyle_matrix(
       (SIM_REPUTATION_WEIGHT)
     - bio: summary-text embeddings PCA-reduced to at most SIM_BIO_PCA_DIM
       components, a minor auxiliary block (SIM_BIO_WEIGHT = 0.05)
-    - cluster: optional one-hot membership (SIM_CLUSTER_WEIGHT)
 
     The primary signals are playstyle, surface, and reputation; the bio block
     is a deliberate tiny bonus. Each block's influence is capped by its explicit
@@ -268,10 +248,7 @@ def build_playstyle_matrix(
     n_features)), so raw embedding dimensionality can never dominate the
     vector. Blocks are concatenated and each row L2-normalized once, so FAISS
     inner-product search is cosine similarity. Returns one row per ``df`` row
-    (row order preserved). Cluster-absent builds yield the fixed base layout;
-    the cluster block trails only when ``cluster_assignments`` is supplied.
-    Shared by ``PlayerSimilarity.build``, ``build_cluster_artifacts``, and the
-    playstyle-cluster exploration notebook so all consume identical vectors.
+    (row order preserved).
     """
     df = df.reset_index(drop=True)
     query = query or to_dataframe
@@ -315,31 +292,6 @@ def build_playstyle_matrix(
     career_rate = merged["career_win_rate"].to_numpy(np.float32)
     reputation_block = np.column_stack([rank_signal, experience, career_rate])
 
-    cluster_cols: list[str] = []
-    cluster_frame: pd.DataFrame | None = None
-    if cluster_assignments is not None and not cluster_assignments.empty:
-        # One-hot the cluster id (fixed categories from the full assignment set)
-        # so the cluster group is a real similarity feature.
-        cluster_ids = sorted(cluster_assignments["cluster_id"].astype(str).unique())
-        cluster_cols = [f"cluster_{cid}" for cid in cluster_ids]
-        id_to_cluster = dict(
-            zip(
-                cluster_assignments["player_id"].astype(str),
-                cluster_assignments["cluster_id"].astype(str),
-                strict=True,
-            )
-        )
-        cluster_frame = pd.DataFrame(
-            0.0,
-            index=df.index,
-            columns=cluster_cols,
-            dtype=np.float32,
-        )
-        for idx, pid in zip(df.index, df["player_id"].astype(str), strict=True):
-            cid = id_to_cluster.get(pid)  # a profiled player may lack an assignment
-            if cid is not None:
-                cluster_frame.loc[idx, f"cluster_{cid}"] = 1.0
-
     blocks = [
         _weighted_block(encoded.to_numpy(np.float32), SIM_IDENTITY_WEIGHT),
         _weighted_block(merged[LIFETIME_PLAYSTYLE_COLS].to_numpy(np.float32), SIM_PLAYSTYLE_WEIGHT),
@@ -347,8 +299,6 @@ def build_playstyle_matrix(
         _weighted_block(reputation_block, SIM_REPUTATION_WEIGHT),
         _weighted_block(bio_values, SIM_BIO_WEIGHT),
     ]
-    if cluster_frame is not None:
-        blocks.append(_weighted_block(cluster_frame.to_numpy(np.float32), SIM_CLUSTER_WEIGHT))
 
     features = np.ascontiguousarray(np.concatenate(blocks, axis=1))
     faiss.normalize_L2(features)
@@ -359,94 +309,8 @@ def build_playstyle_matrix(
         *SURFACE_BLOCK_COLS,
         *REPUTATION_BLOCK_COLS,
         *bio_cols,
-        *cluster_cols,
     ]
     return out
-
-
-def _read_cluster_assignments() -> pd.DataFrame | None:
-    """Load the (player_id, cluster_id) artifact from data/processed, if present.
-
-    Absent or malformed artifacts return None so the index build never fails
-    on a missing cluster file — clustering is an optional feature.
-    """
-    if not DEFAULT_CLUSTERS.exists():
-        return None
-    try:
-        assignments = pd.read_parquet(DEFAULT_CLUSTERS)
-    except (FileNotFoundError, ValueError, KeyError):
-        return None
-    if not {"player_id", "cluster_id"}.issubset(assignments.columns):
-        return None
-    return assignments
-
-
-def load_cluster_artifacts() -> tuple[pd.DataFrame, dict[str, str]]:
-    """Load the pipeline-generated cluster assignments and labels for deploy."""
-    assignments = _read_cluster_assignments()
-    if assignments is None or not DEFAULT_CLUSTER_LABELS.exists():
-        raise RuntimeError(
-            "playstyle cluster artifacts are missing; run `just train` before deploy"
-        )
-    try:
-        labels = json.loads(DEFAULT_CLUSTER_LABELS.read_text())
-    except (FileNotFoundError, ValueError) as exc:
-        raise RuntimeError(
-            "playstyle cluster labels are invalid; run `just train` before deploy"
-        ) from exc
-    return assignments, {str(cluster_id): str(label) for cluster_id, label in labels.items()}
-
-
-def build_cluster_artifacts(
-    n_clusters: int,
-    labels: dict[str, str],
-    query: Callable[[str], pd.DataFrame] | None = None,
-    *,
-    random_state: int = PLAYSTYLE_RANDOM_STATE,
-) -> tuple[pd.DataFrame, Any]:
-    """Fit player-archetype clusters and write the two runtime artifacts.
-
-    Shared by the pipeline (after every snapshot refresh) and the playstyle-
-    cluster EDA notebook. Uses the
-    exact playstyle vectors of ``PlayerSimilarity.build`` — without any prior
-    cluster assignment, so discovery is never skewed by a previous archetype —
-    fits deterministic KMeans, validates that ``labels`` covers exactly the
-    fitted cluster ids, then writes ``cluster_assignments.parquet`` plus
-    ``cluster_descriptions.json``. Returns ``(assignments, model)`` so the
-    notebook can review the very fit that was written.
-    """
-    from sklearn.cluster import KMeans
-
-    query = query or to_dataframe
-    profiles = query(
-        f"SELECT player_id, display_name, backhand, handedness, summary "
-        f"FROM {BRONZE_PROFILES_TABLE}"
-    )
-    profiles = profiles[profiles["player_id"] != ""].reset_index(drop=True)
-    if profiles.empty:
-        return pd.DataFrame(), None
-
-    features = build_playstyle_matrix(profiles, query, cluster_assignments=None).to_numpy(
-        np.float32
-    )
-    model = KMeans(n_clusters=n_clusters, n_init="auto", random_state=random_state).fit(features)
-    assignments = pd.DataFrame({"player_id": profiles["player_id"], "cluster_id": model.labels_})
-
-    fitted_ids = {str(c) for c in sorted(assignments["cluster_id"].unique())}
-    label_ids = {str(k) for k in labels}
-    assert label_ids == fitted_ids, (
-        f"cluster_labels keys {sorted(label_ids)} must exactly equal fitted "
-        f"cluster ids {sorted(fitted_ids)}"
-    )
-
-    DEFAULT_CLUSTERS.parent.mkdir(parents=True, exist_ok=True)
-    assignments.to_parquet(DEFAULT_CLUSTERS, index=False)
-    DEFAULT_CLUSTER_LABELS.write_text(
-        json.dumps({str(k): v for k, v in labels.items()}, indent=2, sort_keys=True)
-    )
-    print(f"Wrote {DEFAULT_CLUSTERS} ({len(assignments)} players, {len(fitted_ids)} clusters)")
-    print(f"Wrote {DEFAULT_CLUSTER_LABELS}")
-    return assignments, model
 
 
 class PlayerSimilarity:
@@ -463,7 +327,6 @@ class PlayerSimilarity:
         self.index: faiss.Index | None = None
         self.players: list[PlayerData] = []
         self.player_ids: list[str] = []
-        self.cluster_labels: dict[str, str] = {}
 
     # ── Build ───────────────────────────────────────
 
@@ -472,8 +335,6 @@ class PlayerSimilarity:
         query: Callable[[str], pd.DataFrame] | None = None,
         *,
         profiles: pd.DataFrame | None = None,
-        cluster_assignments: pd.DataFrame | None = None,
-        cluster_labels: dict[str, str] | None = None,
         index_path: Path | None = None,
         metadata_path: Path | None = None,
     ) -> None:
@@ -492,12 +353,8 @@ class PlayerSimilarity:
         # the calibrated block vector (identity, lifetime playstyle stats,
         # exposure-shrunk surface performance, reputation, bio embeddings).
         # Recent rolling match performance and identity/bio metadata are
-        # excluded. Cluster membership is an optional one-hot block appended
-        # when the artifact exists.
-        assignments = (
-            cluster_assignments if cluster_assignments is not None else _read_cluster_assignments()
-        )
-        features = build_playstyle_matrix(profiles, query, assignments)
+        # excluded.
+        features = build_playstyle_matrix(profiles, query)
 
         self.index = faiss.IndexFlatIP(features.shape[1])
         self.index.add(np.ascontiguousarray(features.to_numpy(np.float32)))
@@ -508,10 +365,6 @@ class PlayerSimilarity:
             )
         ]
         self.player_ids = profiles["player_id"].tolist()
-        self.cluster_labels = self._load_cluster_labels(
-            profiles["player_id"], assignments, cluster_labels
-        )
-        self._attach_cluster_labels()
 
         index_path = index_path or DEFAULT_INDEX
         metadata_path = metadata_path or DEFAULT_METADATA
@@ -534,50 +387,8 @@ class PlayerSimilarity:
         with open(SERVING_METADATA) as f:
             self.players = json.load(f)
         self.player_ids = [p["player_id"] for p in self.players]
-        # cluster labels were baked into SERVING_METADATA at build time; no
-        # cluster files are staged into the deploy folder, so keep those.
-        self.cluster_labels = {}
-        self._attach_cluster_labels()
 
     # ── Query ───────────────────────────────────────
-
-    @staticmethod
-    def _load_cluster_labels(
-        player_ids: Iterable[str],
-        assignments: pd.DataFrame | None,
-        labels: dict[str, str] | None = None,
-    ) -> dict[str, str]:
-        """Map player_id -> cluster label from the clustering artifacts, if present.
-
-        Returns {} when the cluster-description JSON is absent (e.g. the
-        notebook has not produced clusters yet), so similarity never breaks on
-        a missing cluster file.
-        """
-        if assignments is None:
-            return {}
-        if labels is None:
-            try:
-                labels = json.loads(DEFAULT_CLUSTER_LABELS.read_text())
-            except (FileNotFoundError, ValueError, KeyError):
-                return {}
-        assert labels is not None
-        id_to_cluster = {
-            str(row["player_id"]): str(row["cluster_id"]) for _, row in assignments.iterrows()
-        }
-        return {
-            pid: labels.get(cid, f"cluster_{cid}")
-            for pid, cid in id_to_cluster.items()
-            if pid in set(player_ids)
-        }
-
-    def _attach_cluster_labels(self) -> None:
-        """Stamp each player entry with its archetype label.
-
-        A label from the current artifacts wins; otherwise a label already
-        baked into loaded metadata is kept; otherwise the entry has no label.
-        """
-        for p in self.players:
-            p["cluster_label"] = self.cluster_labels.get(p["player_id"]) or p.get("cluster_label")
 
     def find_by_name(self, display_name: str) -> str | None:
         """Look up a player_id by display name (case-insensitive partial match)."""

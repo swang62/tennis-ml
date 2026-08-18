@@ -53,15 +53,11 @@ def _json_safe(value: object) -> object:
     return value
 
 
-def directory_players(
-    df: pd.DataFrame, cluster_labels: dict[str, str] | None = None
-) -> list[dict[str, object]]:
+def directory_players(df: pd.DataFrame) -> list[dict[str, object]]:
     """Map raw directory rows to the deploy artifact's player shape.
 
     Each entry carries only the static-picker fields, preserving SQL row order.
-    Cluster labels are supplied by deploy from the pipeline-generated artifacts.
     """
-    cluster_labels = cluster_labels or {}
     players: list[dict[str, object]] = []
     for row in df.to_dict("records"):
         record = {str(k): _json_safe(v) for k, v in row.items()}
@@ -75,7 +71,6 @@ def directory_players(
                 "current_rank": record["current_rank"],
                 "ioc": ioc,
                 "iso2": iso2,
-                "cluster_label": cluster_labels.get(str(record["player_id"])),
             }
         )
     return players

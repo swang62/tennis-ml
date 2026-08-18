@@ -132,7 +132,6 @@ def test_directory_players_matches_players_contract():
         "ioc": "ESP",
         "iso2": "ES",
         "current_rank": 1,
-        "cluster_label": None,  # no clustering artifacts: no archetype yet
     }
     # unranked players keep the entry with null rank data and UNK country
     assert players[1]["current_rank"] is None
@@ -154,20 +153,6 @@ def test_directory_players_preserves_sql_row_order():
 
 def test_directory_players_deterministic():
     assert directory_players(_directory_df()) == directory_players(_directory_df())
-
-
-def test_directory_players_use_supplied_cluster_labels():
-    players = directory_players(_directory_df(), {"p2": "Big Server", "p1": "Big Server"})
-
-    assert players[0]["cluster_label"] == "Big Server"  # p2
-    assert players[1]["cluster_label"] == "Big Server"  # p1
-    assert players[2]["cluster_label"] is None  # p3 has no assignment
-    assert [p["player_id"] for p in players] == ["p2", "p1", "p3"]  # row order kept
-
-
-def test_directory_players_without_cluster_labels_use_null():
-    players = directory_players(_directory_df())
-    assert all(p["cluster_label"] is None for p in players)
 
 
 def test_directory_players_empty_df():
@@ -241,11 +226,6 @@ def test_generate_navigation_artifacts_builds_from_snapshot(monkeypatch, tmp_pat
     monkeypatch.setattr(
         "src.db.training.to_dataframe", lambda sql: calls.append(sql) or _directory_df()
     )
-    assignments = pd.DataFrame({"player_id": ["p1", "p2"], "cluster_id": ["0", "1"]})
-    monkeypatch.setattr(
-        "src.models.similarity.load_cluster_artifacts",
-        lambda: (assignments, {"0": "Big Server", "1": "Counterpuncher"}),
-    )
 
     class FakeSimilarity:
         def __init__(self):
@@ -253,16 +233,16 @@ def test_generate_navigation_artifacts_builds_from_snapshot(monkeypatch, tmp_pat
 
         def build(self, **kwargs):
             self.players = [
-                {"player_id": "p2", "cluster_label": "Counterpuncher"},
-                {"player_id": "p1", "cluster_label": "Big Server"},
-                {"player_id": "p3", "cluster_label": None},
+                {"player_id": "p2"},
+                {"player_id": "p1"},
+                {"player_id": "p3"},
             ]
             kwargs["index_path"].write_bytes(b"index")
             kwargs["metadata_path"].write_text(
                 json.dumps(
                     [
-                        {"player_id": "p2", "cluster_label": "Counterpuncher"},
-                        {"player_id": "p1", "cluster_label": "Big Server"},
+                        {"player_id": "p2"},
+                        {"player_id": "p1"},
                     ]
                 )
             )
@@ -274,7 +254,6 @@ def test_generate_navigation_artifacts_builds_from_snapshot(monkeypatch, tmp_pat
     assert path == out
     artifact = json.loads(out.read_text())
     assert [p["player_id"] for p in artifact["players"]] == ["p2", "p1", "p3"]
-    assert artifact["players"][0]["cluster_label"] == "Counterpuncher"
     # The full navigation input set is read from the snapshot: directory
     # profiles plus the gold lifetime stats the similarity vector consumes.
     assert calls == [PLAYERS_SQL, PLAYER_LIFETIME_SQL]
@@ -286,7 +265,6 @@ def test_generate_navigation_artifacts_builds_from_snapshot(monkeypatch, tmp_pat
         "current_rank",
         "ioc",
         "iso2",
-        "cluster_label",
     ):
         assert all(field in player for player in artifact["players"])
     assert [p["player_id"] for p in artifact["players"]] == ["p2", "p1", "p3"]
@@ -307,21 +285,12 @@ def test_generate_navigation_artifacts_includes_zero_match_players(monkeypatch, 
             {"player_id": "p5", "first_serve_in_pct": np.float64(0.63)},
         ]
     )
-    assignments = pd.DataFrame(
-        {
-            "player_id": ["p1", "p2", "p3", "p4", "p5"],
-            "cluster_id": ["0", "1", "0", "1", "0"],
-        }
-    )
-    labels = {"0": "Big Server", "1": "Counterpuncher"}
     out, _sim_index, _sim_meta, _state, builds = _stage_nav_build(
         monkeypatch,
         tmp_path,
         d,
         profiles,
         lifetime,
-        assignments,
-        labels,
         state_hash=None,
     )
 
@@ -331,7 +300,6 @@ def test_generate_navigation_artifacts_includes_zero_match_players(monkeypatch, 
     artifact = json.loads(out.read_text())
     assert [p["player_id"] for p in artifact["players"]] == ["p1", "p2", "p3", "p4", "p5"]
     assert [p["matches_played"] for p in artifact["players"]] == [1, 0, 30, 0, 5]
-    assert artifact["players"][0]["cluster_label"] == "Big Server"
 
 
 def test_generate_navigation_artifacts_requires_snapshot(monkeypatch, tmp_path):
@@ -372,14 +340,9 @@ def test_generate_navigation_artifacts_raises_when_write_fails(monkeypatch, tmp_
     """A staging failure also aborts the artifact (and therefore the deploy)."""
     d = _deploy()
     monkeypatch.setattr("src.db.training.to_dataframe", lambda _sql: _directory_df())
-    monkeypatch.setattr(
-        "src.models.similarity.load_cluster_artifacts", lambda: (pd.DataFrame(), {})
-    )
 
     def no_build(self, *_args, **_kwargs):
-        self.players = [
-            {"player_id": player_id, "cluster_label": None} for player_id in ("p2", "p1", "p3")
-        ]
+        self.players = [{"player_id": player_id} for player_id in ("p2", "p1", "p3")]
         return None
 
     monkeypatch.setattr("src.models.similarity.PlayerSimilarity.build", no_build)
@@ -397,7 +360,7 @@ def test_generate_navigation_artifacts_raises_when_write_fails(monkeypatch, tmp_
 
 
 def _nav_fixtures():
-    """One snapshot input set: profiles, gold lifetime stats, cluster artifacts."""
+    """One snapshot input set: profiles and gold lifetime stats."""
     profiles = pd.DataFrame(
         [
             {
@@ -424,25 +387,18 @@ def _nav_fixtures():
             {"player_id": "p2", "first_serve_in_pct": np.float64(0.64)},
         ]
     )
-    assignments = pd.DataFrame({"player_id": ["p1", "p2"], "cluster_id": ["0", "1"]})
-    labels = {"0": "Big Server", "1": "Counterpuncher"}
-    return profiles, lifetime, assignments, labels
+    return profiles, lifetime
 
 
-def _mutated(kind, profiles, lifetime, assignments, labels):
+def _mutated(kind, profiles, lifetime):
     """Return a copy of the fixtures with exactly one input changed."""
     if kind == "profiles":
         profiles = profiles.copy()
         profiles.loc[0, "display_name"] = "A Player v2"
-    elif kind == "lifetime":
+    else:
         lifetime = lifetime.copy()
         lifetime.loc[0, "first_serve_in_pct"] = np.float64(0.99)
-    elif kind == "assignments":
-        assignments = assignments.copy()
-        assignments.loc[0, "cluster_id"] = "2"
-    else:
-        labels = dict(labels, **{"0": "Renamed Archetype"})
-    return profiles, lifetime, assignments, labels
+    return profiles, lifetime
 
 
 def _stage_nav_build(
@@ -451,8 +407,6 @@ def _stage_nav_build(
     d,
     profiles,
     lifetime,
-    assignments,
-    labels,
     *,
     state_hash,
     state_source_hash=None,
@@ -483,9 +437,6 @@ def _stage_nav_build(
 
     queries = {PLAYERS_SQL: profiles, PLAYER_LIFETIME_SQL: lifetime}
     monkeypatch.setattr("src.db.training.to_dataframe", lambda sql: queries[sql])
-    monkeypatch.setattr(
-        "src.models.similarity.load_cluster_artifacts", lambda: (assignments, labels)
-    )
 
     builds = []
 
@@ -495,23 +446,7 @@ def _stage_nav_build(
 
         def build(self, **kwargs):
             builds.append(1)
-            # Mirror production label derivation so the cross-check in
-            # generate_navigation_artifacts sees agreeing labels.
-            assignments = kwargs.get("cluster_assignments")
-            if assignments is None:
-                assignments = pd.DataFrame()
-            labels = kwargs.get("cluster_labels")
-            if labels is None:
-                labels = {}
-            self.players = [
-                {
-                    "player_id": str(row["player_id"]),
-                    "cluster_label": labels.get(
-                        str(row["cluster_id"]), f"cluster_{row['cluster_id']}"
-                    ),
-                }
-                for _, row in assignments.iterrows()
-            ]
+            self.players = [{"player_id": str(row["player_id"])} for _, row in profiles.iterrows()]
             kwargs["index_path"].write_bytes(b"fresh-index")
             kwargs["metadata_path"].write_text(json.dumps(self.players))
 
@@ -523,16 +458,14 @@ def test_navigation_inputs_hash_deterministic_and_row_semantics():
     """The hash is stable across calls; lifetime rows sort canonically but the
     profile row order is preserved because it shapes the artifacts."""
     d = _deploy()
-    profiles, lifetime, assignments, labels = _nav_fixtures()
-    first = d._navigation_inputs_hash(profiles, lifetime, assignments, labels)
-    assert first == d._navigation_inputs_hash(profiles, lifetime, assignments, labels)
+    profiles, lifetime = _nav_fixtures()
+    first = d._navigation_inputs_hash(profiles, lifetime)
+    assert first == d._navigation_inputs_hash(profiles, lifetime)
     # Lifetime rows feed only a player-keyed merge: shuffled rows hash the same.
     shuffled = lifetime.iloc[::-1].reset_index(drop=True)
-    assert first == d._navigation_inputs_hash(profiles, shuffled, assignments, labels)
+    assert first == d._navigation_inputs_hash(profiles, shuffled)
     # Profile row order is part of the artifact contract (index/JSON row order).
-    assert first != d._navigation_inputs_hash(
-        profiles.iloc[::-1].reset_index(drop=True), lifetime, assignments, labels
-    )
+    assert first != d._navigation_inputs_hash(profiles.iloc[::-1].reset_index(drop=True), lifetime)
 
 
 def test_generate_navigation_artifacts_reuses_unchanged_inputs(monkeypatch, tmp_path):
@@ -540,16 +473,14 @@ def test_generate_navigation_artifacts_reuses_unchanged_inputs(monkeypatch, tmp_
     similarity artifacts and restage the raw directory — the web builder
     deletes it, so its presence is not required for reuse."""
     d = _deploy()
-    profiles, lifetime, assignments, labels = _nav_fixtures()
-    state_hash = d._navigation_inputs_hash(profiles, lifetime, assignments, labels)
+    profiles, lifetime = _nav_fixtures()
+    state_hash = d._navigation_inputs_hash(profiles, lifetime)
     out, sim_index, sim_meta, _state, builds = _stage_nav_build(
         monkeypatch,
         tmp_path,
         d,
         profiles,
         lifetime,
-        assignments,
-        labels,
         state_hash=state_hash,
         state_source_hash=d._navigation_source_hash(),
     )
@@ -561,8 +492,6 @@ def test_generate_navigation_artifacts_reuses_unchanged_inputs(monkeypatch, tmp_
     # The raw directory is deterministically restaged (was stale-directory).
     players = json.loads(out.read_text())["players"]
     assert [p["player_id"] for p in players] == ["p1", "p2"]
-    assert players[0]["cluster_label"] == "Big Server"
-    assert players[1]["cluster_label"] == "Counterpuncher"
 
 
 def test_generate_navigation_artifacts_restages_directory_after_web_delete(monkeypatch, tmp_path):
@@ -571,9 +500,9 @@ def test_generate_navigation_artifacts_restages_directory_after_web_delete(monke
     raw without a similarity rebuild, so the builder's sourceHash cache
     reuses its hashed payloads."""
     d = _deploy()
-    profiles, lifetime, assignments, labels = _nav_fixtures()
+    profiles, lifetime = _nav_fixtures()
     out, sim_index, _sim_meta, state, builds = _stage_nav_build(
-        monkeypatch, tmp_path, d, profiles, lifetime, assignments, labels, state_hash=None
+        monkeypatch, tmp_path, d, profiles, lifetime, state_hash=None
     )
 
     # First generation: full build stages similarity + raw directory.
@@ -598,15 +527,15 @@ def test_generate_navigation_artifacts_restages_directory_after_web_delete(monke
     )
 
 
-@pytest.mark.parametrize("mutate", ["profiles", "lifetime", "assignments", "labels"])
+@pytest.mark.parametrize("mutate", ["profiles", "lifetime"])
 def test_generate_navigation_artifacts_rebuilds_when_dependency_changes(
     monkeypatch, tmp_path, mutate
 ):
-    """A change to any one of the four hash inputs forces a full rebuild."""
+    """A change to any one of the hash inputs forces a full rebuild."""
     d = _deploy()
-    profiles, lifetime, assignments, labels = _nav_fixtures()
-    stale_hash = d._navigation_inputs_hash(profiles, lifetime, assignments, labels)
-    changed = _mutated(mutate, profiles, lifetime, assignments, labels)
+    profiles, lifetime = _nav_fixtures()
+    stale_hash = d._navigation_inputs_hash(profiles, lifetime)
+    changed = _mutated(mutate, profiles, lifetime)
     out, sim_index, _sim_meta, state, builds = _stage_nav_build(
         monkeypatch, tmp_path, d, *changed, state_hash=stale_hash
     )
@@ -624,16 +553,14 @@ def test_generate_navigation_artifacts_rebuilds_when_output_missing(monkeypatch,
     """A matching hash and source fingerprint but a deleted staged output still
     rebuilds it."""
     d = _deploy()
-    profiles, lifetime, assignments, labels = _nav_fixtures()
-    state_hash = d._navigation_inputs_hash(profiles, lifetime, assignments, labels)
+    profiles, lifetime = _nav_fixtures()
+    state_hash = d._navigation_inputs_hash(profiles, lifetime)
     _out, sim_index, _sim_meta, _state, builds = _stage_nav_build(
         monkeypatch,
         tmp_path,
         d,
         profiles,
         lifetime,
-        assignments,
-        labels,
         state_hash=state_hash,
         state_source_hash=d._navigation_source_hash(),
     )
@@ -651,9 +578,9 @@ def test_generate_navigation_artifacts_rebuilds_on_invalid_state(
 ):
     """Missing or corrupt persisted state never reuses stale artifacts."""
     d = _deploy()
-    profiles, lifetime, assignments, labels = _nav_fixtures()
+    profiles, lifetime = _nav_fixtures()
     out, sim_index, _sim_meta, state, builds = _stage_nav_build(
-        monkeypatch, tmp_path, d, profiles, lifetime, assignments, labels, state_hash=None
+        monkeypatch, tmp_path, d, profiles, lifetime, state_hash=None
     )
     if state_content is not None:
         state.write_text(state_content)
@@ -692,7 +619,6 @@ _SOURCE_MUTATIONS = [
             "SIM_SURFACE_WEIGHT",
             "SIM_REPUTATION_WEIGHT",
             "SIM_BIO_WEIGHT",
-            "SIM_CLUSTER_WEIGHT",
             "SIM_BIO_PCA_DIM",
             "SIM_SURFACE_SHRINK_K",
             "SIM_RANK_SCALE",
@@ -709,8 +635,8 @@ def test_generate_navigation_artifacts_rebuilds_when_source_changes(
     """A change to any allowlisted source/config fingerprint input forces a
     full rebuild even when every snapshot input is unchanged."""
     d = _deploy()
-    profiles, lifetime, assignments, labels = _nav_fixtures()
-    data_hash = d._navigation_inputs_hash(profiles, lifetime, assignments, labels)
+    profiles, lifetime = _nav_fixtures()
+    data_hash = d._navigation_inputs_hash(profiles, lifetime)
     # Old staged state carries the current data hash but an older source
     # fingerprint, computed with a per-file stub so no repo file is touched.
     file_hashes = {path.name: "old" for path in d.NAVIGATION_SOURCE_FILES}
@@ -729,8 +655,6 @@ def test_generate_navigation_artifacts_rebuilds_when_source_changes(
         d,
         profiles,
         lifetime,
-        assignments,
-        labels,
         state_hash=data_hash,
         state_source_hash=old_source,
     )
@@ -747,16 +671,14 @@ def test_generate_navigation_artifacts_rebuilds_when_source_changes(
 def test_navigation_source_hash_legacy_state_without_fingerprint_rebuilds(monkeypatch, tmp_path):
     """A pre-fingerprint state (inputs_hash only) never reuses staged assets."""
     d = _deploy()
-    profiles, lifetime, assignments, labels = _nav_fixtures()
-    data_hash = d._navigation_inputs_hash(profiles, lifetime, assignments, labels)
+    profiles, lifetime = _nav_fixtures()
+    data_hash = d._navigation_inputs_hash(profiles, lifetime)
     _out, sim_index, _sim_meta, state, builds = _stage_nav_build(
         monkeypatch,
         tmp_path,
         d,
         profiles,
         lifetime,
-        assignments,
-        labels,
         state_hash=data_hash,
     )
     state.write_text(json.dumps({"inputs_hash": data_hash}))  # legacy shape, no source_hash

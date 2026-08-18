@@ -263,7 +263,6 @@ export default function Home() {
               <ProfileContent
                 profile={profileQ.data}
                 directoryRank={selectedPlayer?.current_rank ?? null}
-                directoryCluster={selectedPlayer?.cluster_label ?? null}
                 rankHistory={rankQ.data}
                 rankLoading={rankQ.isLoading}
                 matchHistory={matchesQ.data}
