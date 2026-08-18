@@ -7,6 +7,12 @@
 //                                                fetched only after search input)
 //         public/player-index.manifest.json     (paths to both immutable assets)
 //
+// The manifest records a sha256 of the raw input, so when the exact directory
+// JSON is unchanged and both hashed payloads still exist and match their names
+// (a cheap corruption check), the expensive MiniSearch indexing is skipped and
+// the cached payloads are reused as-is. Any input change, missing/corrupt
+// payload, or missing/old manifest rebuilds from scratch.
+//
 // Runs inside the web image build (`node scripts/build-player-index.mjs`)
 // before `vite build`, so Vite copies both generated files into dist/. The raw
 // input is consumed (deleted) after serialization so it never ships. Failures
@@ -20,7 +26,7 @@ import MiniSearch from "minisearch";
 
 export const MANIFEST_NAME = "player-index.manifest.json";
 const HASHED_PAYLOAD_RE =
-  /^(?:player-index|player-directory|player-search)\.[0-9a-f]{64}\.json$/;
+  /^(?:player-index|player-directory|player-search)\.([0-9a-f]{64})\.json$/;
 const color =
   process.stdout.isTTY || process.env.COURTSIDE_COLOR === "1" ? "\x1b[35m" : "";
 const reset = color ? "\x1b[0m" : "";
@@ -33,11 +39,61 @@ export const MINISEARCH_OPTS = Object.freeze({
   searchOptions: { fuzzy: 0.2, prefix: true, boost: { display_name: 2 } },
 });
 
+/** Byte length of `filePath` when its content matches the sha256 embedded in
+ * its file name, else null (missing, replaced, or corrupt). Validates a cached
+ * payload before reuse cheaply — no MiniSearch construction needed. */
+async function readVerifiedPayload(outDir, filePath) {
+  const match = filePath && HASHED_PAYLOAD_RE.exec(path.basename(filePath));
+  if (!match) return null;
+  try {
+    const bytes = await readFile(path.join(outDir, filePath));
+    return createHash("sha256").update(bytes).digest("hex") === match[1]
+      ? bytes.length
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Build the hashed payload + manifest into `outDir` from `inputPath`.
- * Deletes the raw input afterwards (consumed, never shipped). Returns the
- * payload file name. */
+ * Reuses the existing payloads when the input is unchanged (same sha256 as the
+ * manifest) and both payload files verify; rebuilds otherwise. Deletes the raw
+ * input afterwards (consumed, never shipped). Returns the payload file names. */
 export async function buildPlayerIndex(inputPath, outDir) {
-  const directory = JSON.parse(await readFile(inputPath, "utf8"));
+  const inputBytes = await readFile(inputPath);
+  const sourceHash = createHash("sha256").update(inputBytes).digest("hex");
+
+  let manifest = null;
+  try {
+    manifest = JSON.parse(
+      await readFile(path.join(outDir, MANIFEST_NAME), "utf8"),
+    );
+  } catch {
+    manifest = null;
+  }
+  const reuse =
+    manifest &&
+    manifest.sourceHash === sourceHash &&
+    typeof manifest.directoryPath === "string" &&
+    typeof manifest.searchPath === "string";
+  if (reuse) {
+    const directoryBytes = await readVerifiedPayload(
+      outDir,
+      manifest.directoryPath,
+    );
+    const searchBytes = await readVerifiedPayload(outDir, manifest.searchPath);
+    if (directoryBytes !== null && searchBytes !== null) {
+      await rm(inputPath, { force: true });
+      return {
+        directoryFileName: path.basename(manifest.directoryPath),
+        searchFileName: path.basename(manifest.searchPath),
+        payloadBytes: directoryBytes + searchBytes,
+        reused: true,
+      };
+    }
+  }
+
+  const directory = JSON.parse(inputBytes.toString("utf8"));
   const players = directory.players;
   if (!Array.isArray(players)) {
     throw new Error(
@@ -71,6 +127,7 @@ export async function buildPlayerIndex(inputPath, outDir) {
       `${JSON.stringify({
         directoryPath: `/${directoryFileName}`,
         searchPath: `/${searchFileName}`,
+        sourceHash,
       })}\n`,
     ),
   ]);
@@ -81,6 +138,7 @@ export async function buildPlayerIndex(inputPath, outDir) {
     directoryFileName,
     searchFileName,
     payloadBytes: directoryBytes.length + searchBytes.length,
+    reused: false,
   };
 }
 
@@ -94,13 +152,13 @@ if (isMain) {
     "public",
   );
   try {
-    const { directoryFileName, searchFileName, payloadBytes } =
+    const { directoryFileName, searchFileName, payloadBytes, reused } =
       await buildPlayerIndex(
         path.join(publicDir, "player-directory.json"),
         publicDir,
       );
     console.log(
-      `${color}[minisearch]${reset} built ${directoryFileName} + ${searchFileName} (${payloadBytes} bytes) + ${MANIFEST_NAME} in ${publicDir}`,
+      `${color}[minisearch]${reset} ${reused ? "reused" : "built"} ${directoryFileName} + ${searchFileName} (${payloadBytes} bytes) + ${MANIFEST_NAME} in ${publicDir}`,
     );
   } catch (err) {
     console.error(

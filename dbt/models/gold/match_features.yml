@@ -49,12 +49,12 @@ models:
       - name: round
         description: Draw round (r128, r64, r32, r16, qf, sf, f); non-draw stages such as "rr" pass through and encode as round_encoded 0.
       - name: surface
-        description: Court surface (clay, grass, hard, carpet); "0" when the raw CSV left it blank (Davis Cup), which encodes to all-zero surface flags like round_encoded 0.
+        description: Court surface (clay, grass, hard, carpet); blank or unknown source values are normalized to hard at ingest, so formerly-blank Davis Cup surfaces are hard.
         tests:
           - not_null
           - accepted_values:
               arguments:
-                values: [clay, grass, hard, carpet, "0"]
+                values: [clay, grass, hard, carpet]
       - name: match_won
         description: 1 if the row's player side won this match, else 0 (the label); the two directional rows of a match carry complementary values.
         tests:

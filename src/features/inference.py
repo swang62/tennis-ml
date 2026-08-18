@@ -31,12 +31,12 @@ from src.constants import (
     TOUR_AVERAGES_TABLE,
 )
 from src.db.client import execute_df, first_row_dict
-from src.features.columns import FEATURE_COLS, TOUR_AVERAGES_FALLBACK_COLS
+from src.features.columns import CANONICAL_SURFACES, FEATURE_COLS, TOUR_AVERAGES_FALLBACK_COLS
 from src.features.tour_averages import load_tour_averages
 
-# "0" is the explicit unknown surface marker used by gold; it maps to all-zero
-# surface indicator columns and the fixed rate default, matching match_features.
-VALID_SURFACES = {"clay", "grass", "hard", "carpet", "0"}
+# The four canonical surfaces only; unknown source values are normalized to
+# hard at ingest, and inference accepts exactly what bronze/gold can hold.
+VALID_SURFACES = CANONICAL_SURFACES
 VALID_TOURNAMENT_LEVELS = {0, 1, 2, 3, 4}
 VALID_ROUND_ENCODINGS = {0, 1, 2, 3, 4, 5, 6, 7}
 

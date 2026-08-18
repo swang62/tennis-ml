@@ -22,7 +22,7 @@ from src.constants import (
 )
 from src.countries import UNK, valid_ioc
 from src.db.client import connection, to_dataframe
-from src.features.columns import BRONZE_COLUMNS
+from src.features.columns import BRONZE_COLUMNS, CANONICAL_SURFACES
 from src.features.validate import run_ingestion_checks
 from src.utils import load_env
 
@@ -172,6 +172,17 @@ def _normalize_indoor(value: Any) -> int | None:
     return None
 
 
+def _canonical_surface(value: Any) -> str:
+    """Map a raw source surface to one of the four canonicals; unknown -> 'hard'."""
+    if isinstance(value, str):
+        text = value.strip().lower()
+    elif isinstance(value, int | float) and not pd.isna(value):
+        text = str(int(value))
+    else:
+        text = ""
+    return text if text in CANONICAL_SURFACES else "hard"
+
+
 def _score(m: dict[str, Any]) -> str | None:
     """Winner-perspective set score with tiebreak digits stripped.
 
@@ -237,7 +248,7 @@ def atp_rows_to_bronze(
                 "tournament": level,
                 "tournament_name": str(m["tourney_name"]),
                 "round": str(m["round"]).lower(),
-                "surface": str(m["surface"]).lower(),
+                "surface": _canonical_surface(m["surface"]),
                 "score": _score(m),
                 "is_indoor": _normalize_indoor(m.get("indoor")),
                 "player1_ranking": _rank(m, "winner_rank"),
@@ -357,6 +368,10 @@ def insert_bronze_rows(df: pd.DataFrame, *, overwrite: bool = False) -> int:
     (DO NOTHING), while the seed passes overwrite=True so re-seeding replaces
     its own selected rows (DO UPDATE) — repeat identical sources converge.
     """
+    df = df.copy()
+    # Canonical surface boundary: absent/0/unmapped source values become hard
+    # before validation and insertion, so no non-canonical value reaches bronze.
+    df["surface"] = df["surface"].map(_canonical_surface)
     report = run_ingestion_checks(df)
     valid_df = cast(pd.DataFrame, report["valid_df"])
 

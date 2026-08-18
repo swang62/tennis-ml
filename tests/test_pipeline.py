@@ -92,6 +92,23 @@ def test_pipeline_source_has_no_navigation_build_or_mlflow_pins():
     assert "similarity_pins.json" not in notebook
 
 
+def test_parameter_notebooks_declare_a_validating_nbformat():
+    """Every parameter notebook must validate under the runtime nbformat
+    schema. Cell ids are an nbformat 4.5+ field, so any notebook carrying them
+    must declare nbformat_minor >= 5 — a notebook declared as 4.4 with ids
+    previously failed papermill with 'Additional properties are not allowed
+    (\"id\" was unexpected)'."""
+    import nbformat
+
+    for path in sorted(Path("notebooks/parameters").glob("*.ipynb")):
+        nb = nbformat.read(path, as_version=4)
+        if any("id" in cell for cell in nb.cells):
+            assert nb.nbformat_minor >= 5, (
+                f"{path.name} carries cell ids but declares nbformat_minor={nb.nbformat_minor}"
+            )
+        nbformat.validate(nb)  # raises NotebookValidationError on the original mismatch
+
+
 def test_02_linear_notebook_selects_no_svm_candidate():
     """The linear tuner offers only LogisticRegression and GaussianNB. SVC was
     removed: it is superquadratic on the current data scale and needs internal

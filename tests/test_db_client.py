@@ -190,7 +190,7 @@ class FakePool:
 
 @pytest.fixture
 def fake_pool(monkeypatch):
-    # Mirrors production bounds (min 0 / max 1 per worker, 30s idle close) so
+    # Mirrors production bounds (min 0 / max 4 per worker, 30s idle close) so
     # checkout tests exercise the same caps the deployed Bento workers use.
     pool = FakePool(
         "postgresql://test@localhost:5432/test",
@@ -279,12 +279,13 @@ def test_get_pool_uses_passwordless_local_database_url(monkeypatch):
     pool = cast(FakePool, db_client.get_pool())
 
     assert pool.conninfo == "postgresql://steve@127.0.0.1:5432/postgres"
-    # No initial connections, one per worker: the whole app never exceeds
-    # (two workers x 1) checked-out connections, and returned connections
-    # unused for MAX_IDLE_S are closed (psycopg's 10-minute default would
-    # otherwise retain server capacity while the app sits idle).
+    # No initial connections, up to four per worker: the whole app never
+    # exceeds (two workers x 4) checked-out connections, and returned
+    # connections unused for MAX_IDLE_S are closed (psycopg's 10-minute
+    # default would otherwise retain server capacity while the app sits
+    # idle).
     assert pool.min_size == db_client.MIN_POOL_SIZE == 0
-    assert pool.max_size == db_client.MAX_POOL_SIZE == 1
+    assert pool.max_size == db_client.MAX_POOL_SIZE == 4
     assert pool.max_idle == db_client.MAX_IDLE_S == 30.0
     # Bounded, health-checked pool: no database wait path is unbounded.
     assert pool.kwargs == {"autocommit": True, "connect_timeout": db_client.CONNECT_TIMEOUT_S}
@@ -360,15 +361,15 @@ def test_transaction_holds_one_checked_out_connection(fake_pool):
     assert len(fake_pool._in_use) == 0  # returned on exit
 
 
-def test_concurrent_callers_share_one_connection(fake_pool):
-    """Concurrent callers with the max-1 pool serialize on one connection.
+def test_concurrent_callers_acquire_parallel_connections(fake_pool):
+    """Three concurrent callers (like H2H) each get their own connection.
 
-    psycopg-pool never hands out more than ``max_size`` connections at once:
-    the second caller waits for the first to check its connection back in, so
-    checked-out concurrency stays capped at one per worker.
+    psycopg-pool hands out up to ``max_size`` connections at once: with four
+    per worker, the three H2H requests never queue on a shared connection.
     """
     assert db_client.get_pool() is fake_pool
-    start = threading.Barrier(2)
+    start = threading.Barrier(3)
+    hold = threading.Barrier(3)  # hold every connection until all are checked out
     observed: list[int] = []
     peak_in_use = 0
     errors: list[BaseException] = []
@@ -380,19 +381,56 @@ def test_concurrent_callers_share_one_connection(fake_pool):
             with db_client.connection() as conn:
                 peak_in_use = max(peak_in_use, len(fake_pool._in_use))
                 observed.append(id(conn))
+                hold.wait(timeout=5)
         except BaseException as exc:  # test thread reporter
             errors.append(exc)
 
-    threads = [threading.Thread(target=worker) for _ in range(2)]
+    threads = [threading.Thread(target=worker) for _ in range(3)]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join(timeout=10)
 
     assert errors == []
-    assert len(observed) == 2  # both callers completed
-    assert len(set(observed)) == 1  # serialized on the single connection
-    assert peak_in_use <= db_client.MAX_POOL_SIZE  # never above the per-worker cap
+    assert len(observed) == 3  # all callers completed
+    assert len(set(observed)) == 3  # parallel: no queueing on one connection
+    assert peak_in_use == 3  # all three held simultaneously, below the cap
+
+
+def test_concurrent_callers_expand_to_the_pool_cap(fake_pool):
+    """Up to max_size (4) concurrent callers each get a distinct connection.
+
+    The pool expands on demand to its per-worker cap and never hands out more.
+    """
+    assert db_client.get_pool() is fake_pool
+    n = db_client.MAX_POOL_SIZE  # 4
+    start = threading.Barrier(n)
+    hold = threading.Barrier(n)
+    observed: list[int] = []
+    peak_in_use = 0
+    errors: list[BaseException] = []
+
+    def worker() -> None:
+        nonlocal peak_in_use
+        try:
+            start.wait(timeout=5)
+            with db_client.connection() as conn:
+                peak_in_use = max(peak_in_use, len(fake_pool._in_use))
+                observed.append(id(conn))
+                hold.wait(timeout=5)
+        except BaseException as exc:  # test thread reporter
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(n)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert errors == []
+    assert len(observed) == n  # every caller completed
+    assert len(set(observed)) == n  # each got its own connection
+    assert peak_in_use == db_client.MAX_POOL_SIZE  # expanded to the cap
 
 
 # --- Broken connection resilience (regression: severed/cached conn) ---

@@ -29,7 +29,7 @@ import {
   scoreSegments,
   TIER_LABEL,
 } from "../lib/format";
-import { preferenceEdge } from "../lib/h2hOrientation";
+import { orientedProbability } from "../lib/h2hOrientation";
 import { usePlayerDirectory } from "../lib/playerIndex";
 import { h2hRoute } from "../routes";
 import { useTheme } from "../theme";
@@ -223,9 +223,11 @@ export default function H2H() {
               axisValue?: unknown;
               value?: unknown;
             };
-            const edge = Number(value);
-            const favored = edge <= 0 ? name(playerA) : name(playerB);
-            return `${String(axisValue ?? "")}<br/>${favored} +${Math.round(Math.abs(edge) * 100)} pts`;
+            // value is the predicted player's probability percent; invert
+            // back to Player A's probability for the tooltip text.
+            const predictedPct = Number(value);
+            const pA = winnerIsA ? predictedPct / 100 : 1 - predictedPct / 100;
+            return `${String(axisValue ?? "")}<br/>${name(playerA)} ${Math.round(pA * 100)}% · ${name(playerB)} ${Math.round((1 - pA) * 100)}%`;
           },
         },
         grid: {
@@ -237,28 +239,33 @@ export default function H2H() {
         },
         xAxis: {
           type: "value",
-          min: -1,
-          max: 1,
+          min: 0,
+          max: 100,
+          inverse: winnerIsA,
           axisLine: ax.axisLine,
           axisTick: {
             show: true,
             length: 4,
-            customValues: [
-              1, 0.8, 0.6, 0.4, 0.2, 0, -0.2, -0.4, -0.6, -0.8, -1,
-            ],
+            customValues: [0, 20, 40, 50, 60, 80, 100],
             lineStyle: { color: t.line },
           },
           axisLabel: {
             ...ax.axisLabel,
-            customValues: [0.8, 0.4, 0, -0.4, -0.8],
+            customValues: [0, 20, 40, 50, 60, 80, 100],
             formatter: (v: number) => {
-              const edge = v as number;
-              const sign = Math.round(Math.abs(edge) * 100);
-              if (edge === 0) return "Even";
-              if (compactLabels) return `+${sign}`;
-              return edge < 0
-                ? `${name(playerA)} +${sign}`
-                : `${name(playerB)} +${sign}`;
+              const pct = Math.round(v);
+              if (pct === 50) return "Even";
+              if (pct === 100)
+                return compactLabels
+                  ? "100%"
+                  : `100% ${name(pred.predicted_winner)}`;
+              if (pct === 0)
+                return compactLabels
+                  ? "0%"
+                  : `0% ${name(
+                      pred.predicted_winner === playerA ? playerB : playerA,
+                    )}`;
+              return `${pct}%`;
             },
           },
           splitLine: ax.splitLine,
@@ -277,17 +284,18 @@ export default function H2H() {
               show: false,
               color: t.text,
               fontSize: 11,
-              formatter: (params) =>
-                `${Math.round(Number(params.value) * 100)}`,
+              formatter: (params) => `${Math.round(Number(params.value))}%`,
               position: "inside",
             },
             type: "bar",
             barWidth: "44%",
             data: [pred.p_linear, pred.p_gbdt, pred.p_nn].map((probability) => {
-              const edge = preferenceEdge(probability);
+              const pct = orientedProbability(probability, winnerIsA);
               return {
-                value: edge * 2,
-                label: { position: edge <= 0 ? "left" : "right" },
+                value: pct,
+                label: {
+                  position: winnerIsA === pct >= 50 ? "left" : "right",
+                },
               };
             }),
             itemStyle: {
@@ -306,14 +314,14 @@ export default function H2H() {
                 rotate: 0,
               },
               data: [
-                { xAxis: preferenceEdge(pred.p_win) * 2 },
+                { xAxis: orientedProbability(pred.p_win, winnerIsA) },
                 {
-                  xAxis: 0.2,
+                  xAxis: 60,
                   lineStyle: { color: t.line, type: "dotted", width: 1 },
                   label: { show: false },
                 },
                 {
-                  xAxis: 0.6,
+                  xAxis: 80,
                   lineStyle: { color: t.line, type: "dotted", width: 1 },
                   label: { show: false },
                 },
@@ -486,6 +494,7 @@ export default function H2H() {
             <div className="pred-actions">
               <button
                 type="button"
+                data-umami-event="predict"
                 onClick={() =>
                   predict.mutate({
                     player_id: requireId(playerA),
@@ -581,8 +590,8 @@ export default function H2H() {
                   />
                 </div>
                 <p className="mt-2 text-center text-[0.65rem] text-(--text-faint)">
-                  Relative preference: left favors {name(playerA)}, right favors{" "}
-                  {name(playerB)}
+                  Bars point toward the predicted winner; the axis shows win
+                  probability, with 50% as Even.
                 </p>
               </div>
             )}

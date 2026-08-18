@@ -14,6 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
 
+import pandas as pd
+
 from src.constants import (
     AUX_TAG_PREFIX,
     BASE_TAG_PREFIX,
@@ -35,6 +37,16 @@ from src.constants import (
     LOGS,
     PRODUCTION_MODEL,
     ROOT,
+    SIM_BIO_PCA_DIM,
+    SIM_BIO_WEIGHT,
+    SIM_CLUSTER_WEIGHT,
+    SIM_EXPERIENCE_K,
+    SIM_IDENTITY_WEIGHT,
+    SIM_PLAYSTYLE_WEIGHT,
+    SIM_RANK_SCALE,
+    SIM_REPUTATION_WEIGHT,
+    SIM_SURFACE_SHRINK_K,
+    SIM_SURFACE_WEIGHT,
     load_env,
 )
 from src.features.columns import FEATURE_COLS
@@ -46,6 +58,34 @@ SERVICE_FILE = ROOT / "src" / "serving" / "service.py"
 PINNED_BENTOFILE = DATA_PROCESSED / "bentofile.pinned.yaml"
 BENTO_TAG_FILE = DATA_PROCESSED / "bento_tag.txt"
 STATE_FILE = DATA_PROCESSED / "bento_build_state.json"
+# Snapshot-input hash and source/config fingerprint of the last staged
+# navigation build (directory + similarity artifacts). Kept separate from the
+# bento state so navigation reuse never mixes with model lineage. Missing,
+# invalid, or legacy (no source fingerprint) -> treated as a rebuild.
+NAVIGATION_STATE_FILE = DATA_PROCESSED / "navigation_artifacts_state.json"
+
+# Repository-controlled sources whose exact contents shape the navigation
+# outputs without changing snapshot data: the directory SQL/shaping
+# (serving/directory.py), the similarity vector construction, embedding/PCA,
+# weights, and cluster artifact interpretation (models/similarity.py), the
+# canonical country/player mapping (countries.py), and the deploy-side
+# cluster-label derivation in this module (its similarity metadata is reused
+# on unchanged inputs while the directory is regenerated, so a drift here
+# would silently diverge them). The similarity-tuning constants live in
+# constants.py next to unrelated settings, so only their exact values are
+# fingerprinted, not the whole file. The web MiniSearch builder
+# (web/scripts/build-player-index.mjs) is not a deploy-time input: it
+# consumes the staged raw directory after this function returns and its
+# options can never change the directory bytes, so deploy cannot (and need
+# not) force its content-hash cache to miss. PLAYSTYLE_* constants only shape
+# cluster artifacts at pipeline time; their output is the assignments/labels
+# data already fingerprinted as inputs.
+NAVIGATION_SOURCE_FILES = [
+    ROOT / "src" / "flows" / "deploy.py",
+    ROOT / "src" / "serving" / "directory.py",
+    ROOT / "src" / "models" / "similarity.py",
+    ROOT / "src" / "countries.py",
+]
 
 # Raw player directory baked into the web image, generated from the local
 # DuckDB training snapshot at deploy time (see generate_navigation_artifacts).
@@ -149,6 +189,91 @@ def _read_state() -> dict[str, Any]:
 
 def _write_state(state: dict[str, Any]) -> None:
     STATE_FILE.write_text(json.dumps(state) + "\n")
+
+
+def _navigation_inputs_hash(
+    profiles: pd.DataFrame,
+    lifetime: pd.DataFrame,
+    assignments: pd.DataFrame,
+    labels: dict[str, str],
+) -> str:
+    """SHA-256 over every snapshot input the directory and similarity builds read."""
+    payload = {
+        # Row order of profiles shapes the artifacts (index row order, JSON row
+        # order) and is preserved; lifetime/assignment rows only feed player-keyed
+        # merges, so they are sorted for a canonical hash regardless of snapshot
+        # row order.
+        "profiles": json.loads(profiles.to_json(orient="records")),
+        "lifetime": _frame_records(lifetime),
+        "assignments": _frame_records(assignments),
+        "labels": {str(k): str(v) for k, v in labels.items()},
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _frame_records(frame: pd.DataFrame) -> list[dict[str, Any]]:
+    """Canonical JSON records of a frame, sorted by player_id when present."""
+    if "player_id" in frame.columns:
+        frame = frame.sort_values("player_id")
+    return json.loads(frame.to_json(orient="records"))
+
+
+def _read_navigation_inputs_hash() -> str | None:
+    """The persisted inputs hash of the last staged navigation build, else None."""
+    try:
+        return json.loads(NAVIGATION_STATE_FILE.read_text())["inputs_hash"]
+    except (FileNotFoundError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _navigation_source_hash() -> str:
+    """SHA-256 over every repository-controlled source/config input that can
+    change the directory or similarity outputs without changing snapshot data.
+
+    Hashes the exact contents of NAVIGATION_SOURCE_FILES (relative path + SHA-256
+    per file, mirroring the bento source fingerprint) plus the exact values of
+    the similarity-tuning constants. A missing allowlisted file aborts loudly
+    rather than silently weakening the fingerprint.
+    """
+    hasher = hashlib.sha256()
+    for path in NAVIGATION_SOURCE_FILES:
+        hasher.update(f"{path.relative_to(ROOT)}:{_file_hash(path)}\n".encode())
+    constants = {
+        "sim": {
+            "identity_weight": SIM_IDENTITY_WEIGHT,
+            "playstyle_weight": SIM_PLAYSTYLE_WEIGHT,
+            "surface_weight": SIM_SURFACE_WEIGHT,
+            "reputation_weight": SIM_REPUTATION_WEIGHT,
+            "bio_weight": SIM_BIO_WEIGHT,
+            "cluster_weight": SIM_CLUSTER_WEIGHT,
+            "bio_pca_dim": SIM_BIO_PCA_DIM,
+            "surface_shrink_k": SIM_SURFACE_SHRINK_K,
+            "rank_scale": SIM_RANK_SCALE,
+            "experience_k": SIM_EXPERIENCE_K,
+        }
+    }
+    hasher.update(json.dumps(constants, sort_keys=True, separators=(",", ":")).encode())
+    return hasher.hexdigest()
+
+
+def _read_navigation_source_hash() -> str | None:
+    """The persisted source fingerprint of the last staged build, else None.
+
+    A state written before the source fingerprint existed has no
+    ``source_hash`` key and so reads as None, forcing a rebuild.
+    """
+    try:
+        return json.loads(NAVIGATION_STATE_FILE.read_text())["source_hash"]
+    except (FileNotFoundError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _write_navigation_state(inputs_hash: str, source_hash: str) -> None:
+    NAVIGATION_STATE_FILE.write_text(
+        json.dumps({"inputs_hash": inputs_hash, "source_hash": source_hash}) + "\n"
+    )
 
 
 def _lineage_pins(client: Any, production: Any) -> dict[str, dict[str, str]]:
@@ -810,6 +935,12 @@ def build_bento_image() -> tuple[str, int]:
     return image, int(production.version)
 
 
+def _write_raw_directory(players: list[dict[str, object]]) -> None:
+    """Write the raw player-directory artifact the web index builder consumes."""
+    WEB_DIRECTORY_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
+    WEB_DIRECTORY_ARTIFACT.write_text(json.dumps({"players": players}, indent=2) + "\n")
+
+
 def generate_navigation_artifacts() -> Path:
     """Build and stage all navigation assets from the local DuckDB snapshot.
 
@@ -819,19 +950,53 @@ def generate_navigation_artifacts() -> Path:
     deploy time from the snapshot — never downloaded from MLflow or pinned on
     the champion. A missing snapshot aborts the deploy with the snapshot
     helper's actionable error.
+
+    When every snapshot input that shapes the directory and similarity outputs
+    (profiles, gold lifetime stats, cluster assignments/labels) and every
+    repository-controlled source that shapes them (directory SQL/shaping,
+    similarity vector/embedding/PCA/weights, country mapping, cluster-label
+    derivation) is unchanged since the last staging and the staged similarity
+    artifacts still exist, the similarity artifacts are reused and the
+    deterministic raw directory is restaged — the web index builder deletes it
+    after serializing, so its absence on an unchanged rerun is expected, and
+    restaging identical bytes lets that builder reuse its hashed payloads. Any
+    input change, source/config change, missing similarity artifact, or
+    missing/legacy state rebuilds everything.
     """
     from src.db import training
-    from src.models.similarity import PlayerSimilarity, load_cluster_artifacts
+    from src.models.similarity import (
+        PLAYER_LIFETIME_SQL,
+        PlayerSimilarity,
+        load_cluster_artifacts,
+    )
     from src.serving.directory import PLAYERS_SQL, directory_players
 
     profiles = training.to_dataframe(PLAYERS_SQL)
     if profiles.empty:
         raise RuntimeError("training snapshot has no player profiles; refresh it before deploy")
     assignments, labels = load_cluster_artifacts()
+    inputs_hash = _navigation_inputs_hash(
+        profiles, training.to_dataframe(PLAYER_LIFETIME_SQL), assignments, labels
+    )
+    source_hash = _navigation_source_hash()
     cluster_labels = {
         str(row["player_id"]): labels.get(str(row["cluster_id"]), f"cluster_{row['cluster_id']}")
         for _, row in assignments.iterrows()
     }
+    if (
+        inputs_hash == _read_navigation_inputs_hash()
+        and source_hash == _read_navigation_source_hash()
+        and all(path.exists() for path in (SIMILARITY_INDEX, SIMILARITY_METADATA))
+    ):
+        # The web index builder consumes (deletes) the raw directory, so only
+        # the similarity artifacts gate reuse; the deterministic directory is
+        # restaged byte-identically from the hashed profiles + cluster labels.
+        _write_raw_directory(directory_players(profiles, cluster_labels))
+        _log(
+            "minisearch",
+            "snapshot inputs and shaping sources unchanged; reusing staged navigation artifacts",
+        )
+        return WEB_DIRECTORY_ARTIFACT
     similarity = PlayerSimilarity()
     similarity.build(
         query=training.to_dataframe,
@@ -850,8 +1015,8 @@ def generate_navigation_artifacts() -> Path:
         for player in players
     ):
         raise RuntimeError("directory and similarity cluster labels differ")
-    WEB_DIRECTORY_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
-    WEB_DIRECTORY_ARTIFACT.write_text(json.dumps({"players": players}, indent=2) + "\n")
+    _write_raw_directory(players)
+    _write_navigation_state(inputs_hash, source_hash)
     _log(
         "minisearch",
         f"staged snapshot-backed navigation artifacts: {SIMILARITY_INDEX}, {WEB_DIRECTORY_ARTIFACT}",

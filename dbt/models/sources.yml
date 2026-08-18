@@ -25,7 +25,7 @@ sources:
           - name: round
             description: Draw round (r128, r64, r32, r16, qf, sf, f).
           - name: surface
-            description: Court surface (clay, grass, hard, carpet); "0" when the raw CSV left it blank.
+            description: Court surface (clay, grass, hard, carpet); blank or unknown source values are normalized to hard at ingest.
           - name: is_indoor
             description: 1 if indoor, 0 if outdoor, NULL when unknown.
           - name: player1_ranking

@@ -107,7 +107,9 @@ IDENTITY_BLOCK_COLS = [f"handedness_{category}" for category in HANDEDNESS_CATEG
     f"backhand_{category}" for category in BACKHAND_CATEGORIES
 ]
 
-_PLAYER_LIFETIME_SQL = f"""
+# Public so deploy can hash exactly the gold lifetime inputs the playstyle
+# matrix consumes (its reuse check for the navigation artifacts).
+PLAYER_LIFETIME_SQL = f"""
 SELECT player_id, {", ".join(LIFETIME_PLAYSTYLE_COLS + SURFACE_BLOCK_COLS + REPUTATION_BLOCK_COLS)}
 FROM {GOLD_PROFILES_TABLE}
 """
@@ -273,7 +275,7 @@ def build_playstyle_matrix(
     """
     df = df.reset_index(drop=True)
     query = query or to_dataframe
-    state = query(_PLAYER_LIFETIME_SQL)
+    state = query(PLAYER_LIFETIME_SQL)
     merged = df[["player_id"]].merge(state, on="player_id", how="left")
     # Career cells are NULL for players without a match: playstyle, surface
     # rates/counts, rank, and experience impute 0.0 (no signal); career win

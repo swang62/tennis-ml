@@ -29,8 +29,8 @@ FROM nginx:alpine
 ENV NGINX_ENVSUBST_FILTER='^(BENTO_API_KEY|BENTO_API_URL)$'
 EXPOSE 80
 
-RUN sed -i 's/^worker_processes.*/worker_processes  4;/' /etc/nginx/nginx.conf \
-  && grep -q '^worker_processes  4;' /etc/nginx/nginx.conf
+RUN sed -i 's/^worker_processes.*/worker_processes  2;/' /etc/nginx/nginx.conf \
+  && grep -q '^worker_processes  2;' /etc/nginx/nginx.conf
 
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf.template /etc/nginx/templates/default.conf.template

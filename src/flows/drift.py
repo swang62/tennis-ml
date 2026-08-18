@@ -448,7 +448,8 @@ def _validated_contexts(contexts: list[dict[str, object]]) -> list[dict[str, str
     accept — the round-robin round ``rr`` most notably — and those carry no
     information the model was trained on: dbt maps unsupported rounds and
     tournaments to ordinal 0, which the public schema expresses as an omitted
-    field, and the schema's own ``"0"`` member is the unknown-surface marker.
+    field, and unknown/absent bronze surfaces are normalized to ``hard`` (the
+    canonical default) since ingest guarantees only the four canonicals.
     Unsupported enum values are dropped to those documented defaults; anything
     still invalid raises here, before any HTTP request. The request model is
     the only schema — no enum lists are duplicated.
@@ -467,7 +468,7 @@ def _validated_contexts(contexts: list[dict[str, object]]) -> list[dict[str, str
         ):
             normalized["tournament"] = None
         if normalized.get("surface") is not None and normalized["surface"] not in accepted_surfaces:
-            normalized["surface"] = Surface.UNKNOWN.value
+            normalized["surface"] = "hard"
         row = PredictFromIdsRow.model_validate(normalized)
         validated.append(
             {

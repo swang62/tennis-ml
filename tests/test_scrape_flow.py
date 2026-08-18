@@ -58,21 +58,28 @@ def test_missing_weeks_default_is_only_previous_week(monkeypatch):
 
 def test_missing_weeks_backfill_to_end_date(monkeypatch):
     monkeypatch.setattr(scrape, "stored_ranking_mondays", lambda: {date(2026, 1, 5)})
+    monkeypatch.setattr(scrape, "stored_ranking_monday_counts", lambda _start, _end: {})
     watermark, weeks = scrape.missing_ranking_mondays.fn(end_date=date(2026, 1, 26))
     assert watermark == date(2026, 1, 5)
     assert weeks == [date(2026, 1, 12), date(2026, 1, 19), date(2026, 1, 26)]
 
 
 def test_missing_weeks_backfill_skips_stored_weeks(monkeypatch):
-    # 2026-01-12 already stored -> skipped even though it is in range.
+    # end_date-only: the stored week 2026-01-19 holds >= 100 rows (complete),
+    # so it is skipped; 2026-01-26 is absent and still fetched.
     monkeypatch.setattr(
         scrape,
         "stored_ranking_mondays",
         lambda: {date(2026, 1, 5), date(2026, 1, 12)},
     )
+    monkeypatch.setattr(
+        scrape,
+        "stored_ranking_monday_counts",
+        lambda _start, _end: {date(2026, 1, 19): 200, date(2026, 1, 26): 0},
+    )
     watermark, weeks = scrape.missing_ranking_mondays.fn(end_date=date(2026, 1, 26))
     assert watermark == date(2026, 1, 12)
-    assert weeks == [date(2026, 1, 19), date(2026, 1, 26)]
+    assert weeks == [date(2026, 1, 26)]
 
 
 def test_missing_weeks_quits_when_end_date_at_watermark(monkeypatch):
@@ -81,10 +88,13 @@ def test_missing_weeks_quits_when_end_date_at_watermark(monkeypatch):
     assert weeks == []
 
 
-def test_missing_weeks_explicit_range_snaps_start_and_skips_stored(monkeypatch):
+def test_missing_weeks_explicit_range_snaps_start_and_skips_complete_stored(monkeypatch):
     # start_date 2026-01-06 (Tue) snaps forward to 2026-01-12; stored 2026-01-19
-    # is skipped; end_date 2026-02-02 is inclusive.
+    # is complete (>= 100 rows) so it is skipped; end_date 2026-02-02 is inclusive.
     monkeypatch.setattr(scrape, "stored_ranking_mondays", lambda: {date(2026, 1, 19)})
+    monkeypatch.setattr(
+        scrape, "stored_ranking_monday_counts", lambda _start, _end: {date(2026, 1, 19): 200}
+    )
     watermark, weeks = scrape.missing_ranking_mondays.fn(
         start_date=date(2026, 1, 6), end_date=date(2026, 2, 2)
     )
@@ -94,13 +104,97 @@ def test_missing_weeks_explicit_range_snaps_start_and_skips_stored(monkeypatch):
 
 def test_missing_weeks_explicit_range_backfills_before_watermark(monkeypatch):
     # Watermark 2026-01-26; an explicit historical range before it still yields
-    # the missing Mondays in that window (interior-gap backfill).
+    # the missing Mondays in that window (interior-gap backfill). No week in
+    # the range is complete, so all are retained.
     monkeypatch.setattr(scrape, "stored_ranking_mondays", lambda: {date(2026, 1, 26)})
+    monkeypatch.setattr(scrape, "stored_ranking_monday_counts", lambda _start, _end: {})
     watermark, weeks = scrape.missing_ranking_mondays.fn(
         start_date=date(2026, 1, 5), end_date=date(2026, 1, 19)
     )
     assert watermark == date(2026, 1, 26)
     assert weeks == [date(2026, 1, 5), date(2026, 1, 12), date(2026, 1, 19)]
+
+
+def test_missing_weeks_explicit_range_skips_complete_weeks(monkeypatch):
+    # Explicit range: weeks with >= 100 stored rows (boundary inclusive) are
+    # complete and need no browser work.
+    monkeypatch.setattr(scrape, "stored_ranking_mondays", lambda: {date(2026, 1, 26)})
+    monkeypatch.setattr(
+        scrape,
+        "stored_ranking_monday_counts",
+        lambda _start, _end: {date(2026, 1, 5): 200, date(2026, 1, 12): 100},
+    )
+    watermark, weeks = scrape.missing_ranking_mondays.fn(
+        start_date=date(2026, 1, 5), end_date=date(2026, 1, 19)
+    )
+    assert watermark == date(2026, 1, 26)
+    assert weeks == [date(2026, 1, 19)]
+
+
+def test_missing_weeks_explicit_range_retries_partial_weeks(monkeypatch):
+    # Explicit range: weeks with fewer than 100 rows (a partial prior ingest,
+    # or no rows at all) are still fetched for repair.
+    monkeypatch.setattr(scrape, "stored_ranking_mondays", lambda: {date(2026, 1, 5)})
+    monkeypatch.setattr(
+        scrape,
+        "stored_ranking_monday_counts",
+        lambda _start, _end: {
+            date(2026, 1, 5): 99,
+            date(2026, 1, 12): 50,
+            date(2026, 1, 19): 200,
+        },
+    )
+    watermark, weeks = scrape.missing_ranking_mondays.fn(
+        start_date=date(2026, 1, 5), end_date=date(2026, 1, 19)
+    )
+    assert watermark == date(2026, 1, 5)
+    assert weeks == [date(2026, 1, 5), date(2026, 1, 12)]
+
+
+def test_missing_weeks_no_args_does_not_use_completeness(monkeypatch):
+    # The default scheduled run must never touch the count helper (presence
+    # only), so a mocked helper that fails on call proves it is not used.
+    monkeypatch.setattr(scrape, "stored_ranking_mondays", lambda: {date(2026, 1, 5)})
+    monkeypatch.setattr(
+        scrape,
+        "stored_ranking_monday_counts",
+        lambda _start, _end: pytest.fail("count helper used by no-arg flow"),
+    )
+    _FrozenToday._today = date(2026, 1, 20)
+    monkeypatch.setattr(scrape, "date", _FrozenToday)
+    watermark, weeks = scrape.missing_ranking_mondays.fn()
+    assert watermark == date(2026, 1, 5)
+    assert weeks == [date(2026, 1, 12), date(2026, 1, 19)]
+
+
+def test_missing_weeks_end_only_uses_completeness(monkeypatch):
+    # end_date-only runs check DB coverage: a complete stored week (>= 100
+    # rows) is skipped, a partial week is re-fetched.
+    monkeypatch.setattr(scrape, "stored_ranking_mondays", lambda: {date(2026, 1, 5)})
+    monkeypatch.setattr(
+        scrape,
+        "stored_ranking_monday_counts",
+        lambda _start, _end: {date(2026, 1, 12): 200, date(2026, 1, 19): 50},
+    )
+    watermark, weeks = scrape.missing_ranking_mondays.fn(end_date=date(2026, 1, 19))
+    assert watermark == date(2026, 1, 5)
+    assert weeks == [date(2026, 1, 19)]
+
+
+def test_missing_weeks_start_only_uses_completeness(monkeypatch):
+    # start_date-only runs (upper bound = most recent completed Monday) also
+    # check DB coverage: 2026-01-12 is complete so only 2026-01-19 is fetched.
+    monkeypatch.setattr(scrape, "stored_ranking_mondays", lambda: {date(2026, 1, 5)})
+    monkeypatch.setattr(
+        scrape,
+        "stored_ranking_monday_counts",
+        lambda _start, _end: {date(2026, 1, 12): 200},
+    )
+    _FrozenToday._today = date(2026, 1, 26)
+    monkeypatch.setattr(scrape, "date", _FrozenToday)
+    watermark, weeks = scrape.missing_ranking_mondays.fn(start_date=date(2026, 1, 12))
+    assert watermark == date(2026, 1, 5)
+    assert weeks == [date(2026, 1, 19)]
 
 
 def test_fetch_week_skips_on_failure(monkeypatch, capsys):

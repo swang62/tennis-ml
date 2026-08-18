@@ -565,6 +565,22 @@ def test_validation_traceback_filter_drops_pydantic_errors(caplog):
     )
 
 
+def test_surface_accepts_exactly_the_four_canonicals():
+    from pydantic import ValidationError
+
+    assert {s.value for s in Surface} == {"clay", "grass", "hard", "carpet"}
+    for surface in ("clay", "grass", "hard", "carpet"):
+        PredictFromIdsRow.model_validate(
+            {"player_id": "S0AG", "opponent_id": "Z355", "surface": surface}
+        )
+    # The legacy "0" unknown-surface marker is no longer accepted.
+    for surface in ("0", 0, None):
+        with pytest.raises(ValidationError):
+            PredictFromIdsRow.model_validate(
+                {"player_id": "S0AG", "opponent_id": "Z355", "surface": surface}
+            )
+
+
 def test_validation_traceback_filter_keeps_server_errors():
     f = _SuppressRequestValidationTraceback()
     assert f.filter(_error_record(RuntimeError("boom"))) is True

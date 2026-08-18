@@ -60,6 +60,6 @@ def test_nginx_transparent_proxy_and_gated_routes():
 
 
 def test_service_declares_two_workers():
-    """Bento runs two worker processes; one max pooled connection each caps
-    the app at two database connections, none held while idle."""
+    """Bento runs two worker processes; four max pooled connections each cap
+    the app at eight database connections, none held while idle."""
     assert TennisPredictor.config.get("workers") == 2

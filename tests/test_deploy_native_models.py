@@ -199,16 +199,22 @@ def test_lineage_pins_and_manifest_record_gbdt_framework(monkeypatch, tmp_path):
     d = _deploy()
     manifest_file = tmp_path / "model_info.json"
     monkeypatch.setattr(d, "MODEL_INFO_FILE", manifest_file)
+    # Framework resolution is the only non-hermetic step: the cached Bento
+    # store lookup and the live MLflow load fall back to _gbdt_framework
+    # (mlflow.pyfunc.load_model). Pin both seams so no external store is hit;
+    # the real resolution paths stay covered by their own dedicated tests.
+    monkeypatch.setattr(d, "_cached_gbdt_framework", lambda _version: None)
+    monkeypatch.setattr(d, "_gbdt_framework", lambda _model_uri: "xgboost")
 
     client = _FakeMlflowClient(_FakeModelVersion(_lineage_tags()))
     production = SimpleNamespace(version="7", run_id="run-prod")
     pins = d._lineage_pins(client, production)
-    # The GBDT framework is artifact-dependent (cached Bento store or live
-    # detection); only the stable lineage pins are asserted here.
     assert pins["gbdt"]["model_uri"] == "runs:/run-gbdt/gbdt_model"
+    assert pins["gbdt"]["framework"] == "xgboost"
 
     d._write_model_info(client, production, pins, "fp")
     manifest = json.loads(manifest_file.read_text())
+    assert manifest["bases"]["gbdt"]["framework"] == "xgboost"
     # Existing lineage contract preserved.
     assert manifest["bases"]["gbdt"]["registered_model_name"] == "gbdt_best"
     assert manifest["bases"]["gbdt"]["version"] == "2"

@@ -433,7 +433,6 @@ class Surface(StrEnum):
     GRASS = "grass"
     HARD = "hard"
     CARPET = "carpet"
-    UNKNOWN = "0"
 
 
 class PredictFromIdsRow(BaseModel):
@@ -949,7 +948,7 @@ class _LGBMProbaAdapter:
     description=SERVICE_DESCRIPTION,
     traffic={"timeout": 120},
     resources={"cpu": "500m"},
-    # Two workers x one max pooled DB connection each: at most two app
+    # Two workers x four max pooled DB connections each: at most eight app
     # connections, none held while idle.
     workers=2,
 )

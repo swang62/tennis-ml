@@ -241,6 +241,28 @@ def test_atp_rows_to_bronze_maps_raw_columns():
     assert row["player2_age"] == 28.75
 
 
+def test_atp_rows_to_bronze_surface_canonicalizes():
+    """Exactly the four canonical surfaces pass through; absent/0/unmapped
+    source values default to hard."""
+    cases = [
+        ("Clay", "clay"),
+        ("GRASS", "grass"),
+        ("Hard", "hard"),
+        ("carpet", "carpet"),
+        ("", "hard"),
+        ("0", "hard"),
+        (0, "hard"),
+        (0.0, "hard"),
+        (None, "hard"),
+        ("nan", "hard"),
+        ("turf", "hard"),
+    ]
+    for raw, expected in cases:
+        row = _raw_row()
+        row["surface"] = raw
+        assert ingest.atp_rows_to_bronze([row]).iloc[0]["surface"] == expected
+
+
 def test_atp_rows_to_bronze_score_strips_tiebreak_and_null_for_missing():
     def scored(value):
         row = _raw_row()
@@ -413,6 +435,19 @@ def test_insert_bronze_rows_copies_valid_rows_with_do_nothing(fake_ingest_conn):
     assert insert_sql.startswith(f"INSERT INTO {ingest.BRONZE_MATCHES_TABLE}")
     assert "ON CONFLICT (match_id) DO NOTHING" in insert_sql
     assert "DO UPDATE" not in insert_sql
+
+
+def test_insert_bronze_rows_normalizes_surface_at_boundary(fake_ingest_conn):
+    """The write boundary normalizes non-canonical surfaces to hard before
+    validation/insertion, so a non-canonical value never reaches bronze."""
+    df = ingest.atp_rows_to_bronze([_raw_row()])
+    df["surface"] = ["0"]
+
+    assert ingest.insert_bronze_rows(df) == 1
+
+    copied = fake_ingest_conn.copied_rows[0]
+    surface_idx = BRONZE_COLUMNS.index("surface")
+    assert copied[surface_idx] == "hard"
 
 
 def test_insert_bronze_rows_returns_zero_when_all_invalid(fake_ingest_conn):

@@ -5,7 +5,8 @@ Runs with no params fetch every missing Monday from the watermark through the
 most recent completed Monday. Manual backfills pass ``--param end_date=YYYY-MM-DD``
 to fetch missing Mondays after the watermark through that date, or both
 ``--param start_date`` and ``--param end_date`` to fetch every Monday in that
-explicit range regardless of the watermark. Weeks are fetched from
+explicit range regardless of the watermark, skipping weeks already complete
+(>= 100 stored rows) but retrying partial ones. Weeks are fetched from
 the ATP Tour site with the CloakBrowser Python library (an interactive
 stealth-Chromium Playwright wrapper) — never the CloakBrowser MCP server.
 
@@ -158,6 +159,23 @@ def stored_ranking_mondays() -> set[date]:
         return {row[0] for row in cur.fetchall()}
 
 
+# A full weekly ranking (top-200 page) holds ~200 rows; treat >= 100 as a
+# complete week so an explicit-range backfill skips finished weeks but retries
+# partial prior ingests.
+COMPLETE_RANKING_MIN_ROWS = 100
+
+
+def stored_ranking_monday_counts(start: date, end: date) -> dict[date, int]:
+    """Row counts per ranking Monday in [start, end], from one batched query."""
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"SELECT ranking_date, COUNT(*) FROM {BRONZE_RANKINGS_TABLE} "
+            "WHERE ranking_date BETWEEN %s AND %s GROUP BY ranking_date",
+            (start, end),
+        )
+        return {row[0]: row[1] for row in cur.fetchall()}
+
+
 @task
 def missing_ranking_mondays(
     start_date: date | None = None,
@@ -173,8 +191,15 @@ def missing_ranking_mondays(
     max stored Monday); with an explicit ``start_date`` it starts there (snapped
     forward to the next Monday), so a manual backfill covers an arbitrary
     historical window regardless of the watermark. The upper bound is
-    ``end_date`` when given, else the most recent completed Monday. Already-
-    stored Mondays in the window are skipped; weeks come back oldest first.
+    ``end_date`` when given, else the most recent completed Monday. Weeks come
+    back oldest first.
+
+    Any explicit range (``start_date`` and/or ``end_date``) checks DB coverage
+    with one batched ``stored_ranking_monday_counts`` query and treats a week as
+    complete only when it holds at least ``COMPLETE_RANKING_MIN_ROWS`` rows, so
+    partial prior ingests are re-fetched. The default scheduled run (no
+    arguments) skips the coverage count entirely: it uses watermark-driven
+    presence checks only (``stored_ranking_mondays``).
     """
     stored = stored_ranking_mondays()
     if not stored:
@@ -185,10 +210,17 @@ def missing_ranking_mondays(
         start = watermark + timedelta(days=7)
     else:
         start = start_date + timedelta(days=(7 - start_date.weekday()) % 7)
+    counts: dict[date, int] | None = None
+    if (start_date is not None or end_date is not None) and start <= end:
+        counts = stored_ranking_monday_counts(start, end)
     weeks: list[date] = []
     monday = start
     while monday <= end:
-        if monday not in stored:
+        if counts is not None:
+            complete = counts.get(monday, 0) >= COMPLETE_RANKING_MIN_ROWS
+        else:
+            complete = monday in stored
+        if not complete:
             weeks.append(monday)
         monday += timedelta(days=7)
     return watermark, weeks
@@ -428,10 +460,11 @@ def scrape_flow(start_date: date | None = None, end_date: date | None = None):
     ``prefect deployment run`` without params, and direct local calls, so a
     bare run never silently backfills far history. With only ``end_date`` every
     missing Monday from the watermark through that date is fetched oldest
-    first; with both ``start_date`` and ``end_date`` every Monday in that
-    explicit range is fetched regardless of the watermark (for historical
-    backfills). An ``end_date`` at or before the watermark naturally fetches
-    nothing. Launches exactly one CloakBrowser session, processes every missing
+    first; any explicit ``start_date`` and/or ``end_date`` — both together
+    fetch every Monday in that range regardless of the watermark (for
+    historical backfills) — skips weeks already complete (>= 100 stored rows)
+    but retries partial prior ingests. An ``end_date`` at or before the
+    watermark naturally fetches nothing. Launches exactly one CloakBrowser session, processes every missing
     week inside a try block, and closes the browser in finally — even when a
     week fails, the session is always released before the flow returns/raises.
     A run that had weeks to fetch but could not access or parse the rankings

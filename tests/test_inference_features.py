@@ -678,7 +678,7 @@ def test_both_unknowns_neutral_diffs():
     assert [row["is_clay"], row["is_grass"], row["is_hard"]] == [0, 0, 1]
 
 
-@pytest.mark.parametrize("surface", ["Clay", "CLAY", "", None])
+@pytest.mark.parametrize("surface", ["Clay", "CLAY", "", None, "0", 0])
 def test_invalid_surface_raises(surface):
     with pytest.raises((ValueError, TypeError)):
         build_inference_features("S0AG", "Z355", surface, as_of_date=AS_OF_AFTER_ALL_MATCHES)

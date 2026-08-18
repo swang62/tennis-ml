@@ -631,16 +631,19 @@ def test_unsupported_bronze_values_resolved_at_boundary(monkeypatch):
     """Round ``rr`` (and other out-of-schema bronze values) become omitted fields.
 
     dbt maps unsupported rounds/tournaments to ordinal 0 and the public schema
-    expresses that as an omitted field; unknown surfaces use the schema's own
-    ``"0"`` marker. The raw bronze value is preserved in the observation
-    contexts while the posted payload carries the resolved public value; the
-    analysis frame carries only numeric match-stat rates, never the context.
+    expresses that as an omitted field; unknown surfaces (including the legacy
+    ``"0"`` marker) are normalized to the canonical ``hard`` default. The raw
+    bronze value is preserved in the observation contexts while the posted
+    payload carries the resolved public value; the analysis frame carries only
+    numeric match-stat rates, never the context.
     """
     frame = _fake_bronze_window(5, seed=2, round_="rr", tournament="masters")
     frame.loc[1::2, "winner_id"] = frame.loc[1::2, "player2_id"].to_numpy()
-    # One match with an unknown-tier tournament and an out-of-schema surface.
+    # One match with an unknown-tier tournament and an out-of-schema surface,
+    # one match with the legacy "0" surface marker.
     frame.loc[0, "tournament"] = "hopman_cup"
     frame.loc[0, "surface"] = "turf"
+    frame.loc[1, "surface"] = "0"
 
     expanded = drift._expand_orientations(frame)
     contexts = drift._observation_contexts(expanded)
@@ -650,18 +653,18 @@ def test_unsupported_bronze_values_resolved_at_boundary(monkeypatch):
     assert any(c["round"] == "rr" for c in contexts)
     assert any(c["tournament"] == "hopman_cup" for c in contexts)
     assert any(c["surface"] == "turf" for c in contexts)
+    assert any(c["surface"] == "0" for c in contexts)
 
     boundary = drift._validated_contexts(contexts)
     assert len(boundary) == 10
     assert all(c["round"] is None for c in boundary)
-    # Match 0's two orientations carry the out-of-schema values; the others
-    # keep their valid bronze values.
+    # Matches 0/1 carry the out-of-schema values; the others keep their valid
+    # bronze values. Both unresolvable surfaces normalize to hard.
     assert boundary[0]["tournament"] is None
     assert boundary[1]["tournament"] is None
     assert all(c["tournament"] == "masters" for c in boundary[2:])
-    assert boundary[0]["surface"] == "0"
-    assert boundary[1]["surface"] == "0"
-    assert all(c["surface"] == "hard" for c in boundary[2:])
+    assert all(c["surface"] == "hard" for c in boundary[:4])
+    assert all(c["surface"] == "hard" for c in boundary[4:])
 
     # The resolved payload round-trips the real request model unchanged.
     validated = [PredictFromIdsRow.model_validate(context) for context in boundary]

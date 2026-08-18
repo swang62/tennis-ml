@@ -96,7 +96,8 @@ CREATE TABLE IF NOT EXISTS bronze.match_events (
         AND player2_service_games BETWEEN 0 AND 20000
         AND player2_break_points_saved BETWEEN 0 AND 20000 AND player2_break_points_faced BETWEEN 0 AND 20000
     ),
-    CONSTRAINT match_events_check_indoor CHECK (is_indoor IS NULL OR is_indoor IN (0, 1))
+    CONSTRAINT match_events_check_indoor CHECK (is_indoor IS NULL OR is_indoor IN (0, 1)),
+    CONSTRAINT match_events_check_surface CHECK (surface IN ('clay', 'grass', 'hard', 'carpet'))
 );
 
 -- Upgrade existing local databases created before match score was ingested.
@@ -155,6 +156,17 @@ ALTER TABLE bronze.match_events ADD CONSTRAINT match_events_check_ranking CHECK 
     (player1_ranking IS NULL OR player1_ranking >= 1)
     AND (player2_ranking IS NULL OR player2_ranking >= 1)
     AND player1_rank_points BETWEEN 0 AND 20000 AND player2_rank_points BETWEEN 0 AND 20000
+);
+
+-- Surface invariant: exactly the four canonicals. Absent/unknown source values
+-- normalize to hard at ingest and this idempotent backfill (e.g. the "0" / "nan"
+-- / blank markers legacy ingestion wrote for blank Davis Cup cells), and the
+-- CHECK rejects anything else at the DB boundary.
+UPDATE bronze.match_events SET surface = 'hard'
+    WHERE surface NOT IN ('clay', 'grass', 'hard', 'carpet');
+ALTER TABLE bronze.match_events DROP CONSTRAINT IF EXISTS match_events_check_surface;
+ALTER TABLE bronze.match_events ADD CONSTRAINT match_events_check_surface CHECK (
+    surface IN ('clay', 'grass', 'hard', 'carpet')
 );
 
 -- Secondary indexes for the common gold-layer expansion/rolling query

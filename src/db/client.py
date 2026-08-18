@@ -5,9 +5,9 @@ psycopg's `%s` placeholders — request data is never concatenated into SQL —
 and results come back as pandas DataFrames.
 
 Each process shares a lazily-created `psycopg_pool.ConnectionPool`
-(min_size=0, max_size=1, autocommit, ~30s connection/checkout/readiness
+(min_size=0, max_size=4, autocommit, ~30s connection/checkout/readiness
 timeouts, 30s idle close) that starts with no connections and, across the two
-Bento workers, caps the app at two checked-out connections. A checked-out
+Bento workers, caps the app at eight checked-out connections. A checked-out
 connection returns to the pool the moment its caller exits; surplus physical
 connections are closed after `MAX_IDLE_S` of disuse, so an idle app does not
 retain PostgreSQL connections (psycopg's default idle timeout is 10 minutes,
@@ -34,11 +34,11 @@ import psycopg
 from psycopg.rows import tuple_row
 from psycopg_pool import ConnectionPool
 
-# Pool bounds: two Bento workers x max 1 connection per process cap the app
-# at 2 concurrent PostgreSQL queries; min 0 starts with no connections.
-# Subject to the database's capacity.
+# Pool bounds: two Bento workers x max 4 connections per process cap the app
+# at 8 concurrent PostgreSQL queries (H2H fires three in parallel); min 0
+# starts with no connections. Subject to the database's capacity.
 MIN_POOL_SIZE = 0
-MAX_POOL_SIZE = 1
+MAX_POOL_SIZE = 4
 
 # Idle lifecycle: a returned connection that goes unused is closed after
 # MAX_IDLE_S (psycopg defaults to 10 minutes, which would let an idle app
@@ -63,7 +63,7 @@ _pool_lock = threading.Lock()
 def get_pool() -> ConnectionPool:
     """Return the process-local connection pool, creating it on first use.
 
-    The pool is bounded (min_size=0, max_size=1) and autocommit, and closes
+    The pool is bounded (min_size=0, max_size=4) and autocommit, and closes
     connections left idle for `MAX_IDLE_S`. `wait()` surfaces an unreachable
     DATABASE_URL at first use instead of failing on the first query, with a
     bounded readiness timeout. `check` runs a health probe on every checkout

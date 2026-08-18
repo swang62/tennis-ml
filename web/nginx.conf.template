@@ -1,16 +1,11 @@
 # Production SPA config; Bento is reachable through a transparent /api proxy
-# (mirrors the local Vite proxy: the /api prefix is stripped) plus two
-# API-key-gated operational routes.
-# Rendered at container start by the official nginx image's envsubst template
-# mechanism (/etc/nginx/templates/*.template). Substitution is allowlisted to
-# BENTO_API_KEY and BENTO_API_URL via NGINX_ENVSUBST_FILTER in the Dockerfile,
-# so all native nginx $variables below are preserved verbatim.
-# BENTO_API_URL defaults to http://bento:3000 (see compose.yaml).
 
 # Per-IP rate limit: 30 req/s burstable to 10.
 limit_req_zone $binary_remote_addr zone=api_req:10m rate=30r/s;
+
 # Per-IP connection limit: 10 concurrent connections.
 limit_conn_zone $binary_remote_addr zone=api_conn:10m;
+
 # Authenticated operational routes: at most one active batch per client.
 limit_conn_zone $binary_remote_addr zone=op_conn:10m;
 
@@ -20,6 +15,7 @@ limit_conn_zone $binary_remote_addr zone=op_conn:10m;
 gzip on;
 gzip_comp_level 5;
 gzip_min_length 1024;
+
 # Vary advertises the encoding so proxies/CDNs cache gzip and identity separately.
 gzip_vary on;
 gzip_types text/plain text/css application/json application/javascript text/javascript application/xml image/svg+xml;
@@ -34,7 +30,7 @@ server {
     # Global timeouts for all proxy requests. The upstream read window is sized
     # for bulk predictions (up to 1,000 rows per request); the internal batch
     # location scopes its own explicit 120s read timeout.
-    proxy_connect_timeout 5s;
+    proxy_connect_timeout 10s;
     proxy_read_timeout 120s;
     proxy_send_timeout 10s;
 

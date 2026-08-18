@@ -22,6 +22,9 @@ from __future__ import annotations
 
 # ── Bronze ingestion schema (raw rows, validated before insert) ──
 
+# Exactly four canonical court surfaces; unknown source values default to hard.
+CANONICAL_SURFACES: frozenset[str] = frozenset({"clay", "grass", "hard", "carpet"})
+
 BRONZE_COLUMNS_INT: tuple[str, ...] = (
     "player1_aces",
     "player1_double_faults",

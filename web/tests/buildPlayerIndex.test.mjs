@@ -2,7 +2,8 @@
 // fixture directory only: no network, no database, no repo state.
 
 import assert from "node:assert";
-import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -57,12 +58,18 @@ test("builds a content-hashed payload plus manifest and consumes the raw input",
   assert.match(directoryFileName, /^player-directory\.[0-9a-f]{64}\.json$/);
   assert.match(searchFileName, /^player-search\.[0-9a-f]{64}\.json$/);
 
-  // Manifest points at the hashed payload.
+  // Manifest points at the hashed payload and records the input hash.
   const manifest = JSON.parse(
     await readFile(path.join(dir, MANIFEST_NAME), "utf8"),
   );
   assert.strictEqual(manifest.directoryPath, `/${directoryFileName}`);
   assert.strictEqual(manifest.searchPath, `/${searchFileName}`);
+  assert.strictEqual(
+    manifest.sourceHash,
+    createHash("sha256")
+      .update(JSON.stringify({ players: PLAYERS_FIXTURE }))
+      .digest("hex"),
+  );
 
   // Payload carries all three contract fields.
   const payload = JSON.parse(
@@ -127,6 +134,125 @@ test("cleans stale payloads from earlier builds and rewrites the manifest", asyn
   );
   assert.strictEqual(manifest.directoryPath, `/${directoryFileName}`);
   assert.strictEqual(manifest.searchPath, `/${searchFileName}`);
+});
+
+test("reuses the existing payload when the input is unchanged", async () => {
+  const dir = await fixtureDir({ players: PLAYERS_FIXTURE });
+  const first = await buildPlayerIndex(
+    path.join(dir, "player-directory.json"),
+    dir,
+  );
+  const manifestBefore = await readFile(path.join(dir, MANIFEST_NAME), "utf8");
+  const searchBefore = await readFile(
+    path.join(dir, first.searchFileName),
+    "utf8",
+  );
+
+  // Rewrite the identical raw input (the first build consumed it), then build
+  // again: the exact same bytes must skip MiniSearch indexing entirely.
+  await writeFile(
+    path.join(dir, "player-directory.json"),
+    JSON.stringify({ players: PLAYERS_FIXTURE }),
+  );
+  const second = await buildPlayerIndex(
+    path.join(dir, "player-directory.json"),
+    dir,
+  );
+
+  assert.strictEqual(second.reused, true);
+  assert.strictEqual(second.directoryFileName, first.directoryFileName);
+  assert.strictEqual(second.searchFileName, first.searchFileName);
+  // Reuse leaves the manifest and payloads untouched.
+  assert.strictEqual(
+    await readFile(path.join(dir, MANIFEST_NAME), "utf8"),
+    manifestBefore,
+  );
+  assert.strictEqual(
+    await readFile(path.join(dir, first.searchFileName), "utf8"),
+    searchBefore,
+  );
+  // The raw input is still consumed so it never ships.
+  assert.deepEqual(
+    (await readdir(dir)).sort(),
+    [MANIFEST_NAME, first.directoryFileName, first.searchFileName].sort(),
+  );
+});
+
+test("rebuilds when the input changes", async () => {
+  const dir = await fixtureDir({ players: PLAYERS_FIXTURE });
+  const first = await buildPlayerIndex(
+    path.join(dir, "player-directory.json"),
+    dir,
+  );
+
+  await writeFile(
+    path.join(dir, "player-directory.json"),
+    JSON.stringify({
+      players: [
+        ...PLAYERS_FIXTURE,
+        {
+          player_id: "3",
+          display_name: "Novak Djokovic",
+          matches_played: 30,
+          current_rank: 1,
+          ioc: "SRB",
+          iso2: "rs",
+        },
+      ],
+    }),
+  );
+  const second = await buildPlayerIndex(
+    path.join(dir, "player-directory.json"),
+    dir,
+  );
+
+  assert.strictEqual(second.reused, false);
+  assert.notStrictEqual(second.directoryFileName, first.directoryFileName);
+  assert.notStrictEqual(second.searchFileName, first.searchFileName);
+  const manifest = JSON.parse(
+    await readFile(path.join(dir, MANIFEST_NAME), "utf8"),
+  );
+  assert.match(manifest.sourceHash, /^[0-9a-f]{64}$/);
+  assert.strictEqual(manifest.directoryPath, `/${second.directoryFileName}`);
+});
+
+test("rebuilds when a payload is missing or corrupt", async () => {
+  const dir = await fixtureDir({ players: PLAYERS_FIXTURE });
+  const first = await buildPlayerIndex(
+    path.join(dir, "player-directory.json"),
+    dir,
+  );
+
+  // Missing payload -> rebuild restores it.
+  await rm(path.join(dir, first.searchFileName));
+  await writeFile(
+    path.join(dir, "player-directory.json"),
+    JSON.stringify({ players: PLAYERS_FIXTURE }),
+  );
+  const second = await buildPlayerIndex(
+    path.join(dir, "player-directory.json"),
+    dir,
+  );
+  assert.strictEqual(second.reused, false);
+  assert.ok((await readdir(dir)).includes(second.searchFileName));
+
+  // Corrupt payload (same name, wrong content) -> rebuild replaces it in place.
+  await writeFile(path.join(dir, second.searchFileName), "garbage");
+  await writeFile(
+    path.join(dir, "player-directory.json"),
+    JSON.stringify({ players: PLAYERS_FIXTURE }),
+  );
+  const third = await buildPlayerIndex(
+    path.join(dir, "player-directory.json"),
+    dir,
+  );
+  assert.strictEqual(third.reused, false);
+  assert.strictEqual(third.searchFileName, second.searchFileName);
+  const searchPayload = JSON.parse(
+    await readFile(path.join(dir, third.searchFileName), "utf8"),
+  );
+  const index = MiniSearch.loadJSON(searchPayload.index, MINISEARCH_OPTS);
+  assert.strictEqual(index.search("nadal", { prefix: true }).length, 1);
 });
 
 test("rejects a missing or malformed directory artifact", async () => {
