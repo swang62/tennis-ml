@@ -20,21 +20,19 @@ from src.countries import resolve_ioc, valid_ioc
 
 # Directory read: bronze metadata (name/IOC) joined to the dbt-derived gold
 # current_rank, with matches_played equal to gold.player_profiles.match_count
-# (the player's explicit distinct physical-match count). current_rank is the
-# player's latest official weekly rank (bronze.rankings), falling back to
-# match-time rank from the most recent match when no ranking row exists — both
-# materialized by dbt in gold. Navigation-only: players without at least one
-# career match (null or zero match_count) are excluded so the directory,
-# similarity, and MiniSearch build over match-experienced players only.
-# Training never reads this query — it consumes gold.match_features via
-# training/to_dataframe.
+# (the player's explicit distinct physical-match count, 0 for zero-match
+# players). current_rank is the player's latest official weekly rank
+# (bronze.rankings), falling back to match-time rank from the most recent match
+# when no ranking row exists — both materialized by dbt in gold. Every bronze
+# profile is retained: the directory, similarity, and MiniSearch build over all
+# players regardless of match count. Training never reads this query — it
+# consumes gold.match_features via training/to_dataframe.
 PLAYERS_SQL = f"""
 SELECT bp.player_id, bp.display_name, bp.ioc, bp.backhand, bp.handedness, bp.summary,
-       gp.match_count AS matches_played,
+       COALESCE(gp.match_count, 0) AS matches_played,
        gp.current_rank
 FROM {BRONZE_PROFILES_TABLE} bp
 LEFT JOIN {GOLD_PROFILES_TABLE} gp ON gp.player_id = bp.player_id
-WHERE gp.match_count IS NOT NULL AND gp.match_count >= 1
 ORDER BY gp.current_rank NULLS LAST, bp.display_name, bp.player_id
 """
 

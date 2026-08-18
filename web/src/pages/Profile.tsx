@@ -516,12 +516,12 @@ export default function ProfileContent({
               <svg
                 className="atp-name-icon"
                 aria-hidden="true"
-                width="0.65em"
-                height="0.65em"
+                width="0.42em"
+                height="0.42em"
                 viewBox="0 0 16 16"
                 fill="none"
                 stroke="currentColor"
-                strokeWidth="1.6"
+                strokeWidth="1.4"
                 strokeLinecap="round"
                 strokeLinejoin="round"
               >

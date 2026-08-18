@@ -55,9 +55,9 @@ def _directory_df() -> pd.DataFrame:
 
 def _directory_sql_df() -> pd.DataFrame:
     """In-memory DuckDB stand-in for the bronze+gold player tables, run through
-    the real PLAYERS_SQL: zero-match and null-match players are excluded, SQL
-    row order preserved, and matches_played equals the gold per-player physical
-    match count directly."""
+    the real PLAYERS_SQL: every bronze profile is retained (zero-match players
+    included, no-gold-row players report 0), SQL row order preserved, and
+    matches_played equals the gold per-player physical match count directly."""
     con = duckdb.connect()
     con.execute("CREATE SCHEMA bronze")
     con.execute("CREATE SCHEMA gold")
@@ -86,7 +86,7 @@ def _directory_sql_df() -> pd.DataFrame:
         "INSERT INTO gold.player_profiles VALUES (?, ?, ?)",
         [
             ("p1", 1, 5),  # 1 physical match
-            ("p2", 0, 10),  # zero-match gold row: excluded
+            ("p2", 0, 10),  # zero-match gold row: retained
             ("p3", 30, None),  # 30 physical matches: unranked but retained
             ("p5", 5, None),  # 5 physical matches: retained as-is
         ],
@@ -94,30 +94,32 @@ def _directory_sql_df() -> pd.DataFrame:
     return con.execute(PLAYERS_SQL).df()
 
 
-def test_players_sql_returns_only_players_with_career_matches():
-    """The real query, run hermetically: gold zero-match rows and bronze
-    players with no gold row are excluded; players with at least one match are
-    retained in SQL row order, and the directory mapping carries only those
-    players."""
+def test_players_sql_returns_every_bronze_profile():
+    """The real query, run hermetically: all bronze profiles are retained in
+    SQL row order — zero-match gold rows and players with no gold row included
+    (reporting 0 matches) — and the directory mapping carries all of them."""
     df = _directory_sql_df()
-    assert list(df["player_id"]) == ["p1", "p3", "p5"]
-    assert list(df["matches_played"]) == [1, 30, 5]
-    assert pd.isna(df["current_rank"].iloc[1])  # p3 unranked sorts last
+    assert list(df["player_id"]) == ["p1", "p2", "p3", "p4", "p5"]
+    assert list(df["matches_played"]) == [1, 0, 30, 0, 5]
+    assert pd.isna(df["current_rank"].iloc[2])  # p3 unranked sorts after ranked
 
     players = directory_players(df)
-    assert [p["player_id"] for p in players] == ["p1", "p3", "p5"]
-    assert [p["matches_played"] for p in players] == [1, 30, 5]
+    assert [p["player_id"] for p in players] == ["p1", "p2", "p3", "p4", "p5"]
+    assert [p["matches_played"] for p in players] == [1, 0, 30, 0, 5]
     assert players[0]["matches_played"] == 1
 
 
 def test_players_sql_reports_gold_physical_count_directly():
     """matches_played is the gold per-player count directly, with no halving or
     flooring: p1 has 1 physical match (reports 1), p3 has 30 (reports 30), and
-    an odd count is preserved (p5: 5, reports 5)."""
+    an odd count is preserved (p5: 5, reports 5). Zero-match players and
+    players without a gold row report 0."""
     df = _directory_sql_df()
     by_id = {row["player_id"]: row for _, row in df.iterrows()}
     assert by_id["p1"]["matches_played"] == 1
+    assert by_id["p2"]["matches_played"] == 0
     assert by_id["p3"]["matches_played"] == 30
+    assert by_id["p4"]["matches_played"] == 0  # no gold row: COALESCE 0
     assert by_id["p5"]["matches_played"] == 5
 
 
@@ -201,11 +203,11 @@ def test_players_sql_is_the_single_directory_source():
     assert "ORDER BY gp.current_rank NULLS LAST, bp.display_name, bp.player_id" in PLAYERS_SQL
 
 
-def test_players_sql_excludes_zero_match_players():
-    """Navigation-only filter: every returned directory player has at least
-    one career match (gold match_count is not null and >= 1), and the query
-    never reads the training feature rows."""
-    assert "WHERE gp.match_count IS NOT NULL AND gp.match_count >= 1" in PLAYERS_SQL
+def test_players_sql_includes_zero_match_players():
+    """No navigation-only filter: every bronze profile is a directory player
+    (zero match_count and missing gold rows included, reporting 0), and the
+    query never reads the training feature rows."""
+    assert "WHERE gp.match_count" not in PLAYERS_SQL
     assert "gold.match_features" not in PLAYERS_SQL
 
 
@@ -290,20 +292,27 @@ def test_generate_navigation_artifacts_builds_from_snapshot(monkeypatch, tmp_pat
     assert [p["player_id"] for p in artifact["players"]] == ["p2", "p1", "p3"]
 
 
-def test_generate_navigation_artifacts_excludes_zero_match_players(monkeypatch, tmp_path):
-    """The SQL-filtered directory rows drive the stage: zero-match players
-    never appear in the staged directory artifact, and the same set cross-checks
-    with the similarity metadata."""
+def test_generate_navigation_artifacts_includes_zero_match_players(monkeypatch, tmp_path):
+    """Every bronze profile drives the stage: zero-match players appear in the
+    staged directory artifact (reporting 0 matches), and the same set
+    cross-checks with the similarity metadata."""
     d = _deploy()
     profiles = _directory_sql_df()
     lifetime = pd.DataFrame(
         [
             {"player_id": "p1", "first_serve_in_pct": np.float64(0.62)},
-            {"player_id": "p3", "first_serve_in_pct": np.float64(0.64)},
+            {"player_id": "p2", "first_serve_in_pct": np.float64(0.64)},
+            {"player_id": "p3", "first_serve_in_pct": np.float64(0.66)},
+            {"player_id": "p4", "first_serve_in_pct": np.float64(0.68)},
             {"player_id": "p5", "first_serve_in_pct": np.float64(0.63)},
         ]
     )
-    assignments = pd.DataFrame({"player_id": ["p1", "p3", "p5"], "cluster_id": ["0", "1", "0"]})
+    assignments = pd.DataFrame(
+        {
+            "player_id": ["p1", "p2", "p3", "p4", "p5"],
+            "cluster_id": ["0", "1", "0", "1", "0"],
+        }
+    )
     labels = {"0": "Big Server", "1": "Counterpuncher"}
     out, _sim_index, _sim_meta, _state, builds = _stage_nav_build(
         monkeypatch,
@@ -320,8 +329,8 @@ def test_generate_navigation_artifacts_excludes_zero_match_players(monkeypatch, 
 
     assert builds == [1]
     artifact = json.loads(out.read_text())
-    assert [p["player_id"] for p in artifact["players"]] == ["p1", "p3", "p5"]
-    assert [p["matches_played"] for p in artifact["players"]] == [1, 30, 5]
+    assert [p["player_id"] for p in artifact["players"]] == ["p1", "p2", "p3", "p4", "p5"]
+    assert [p["matches_played"] for p in artifact["players"]] == [1, 0, 30, 0, 5]
     assert artifact["players"][0]["cluster_label"] == "Big Server"
 
 

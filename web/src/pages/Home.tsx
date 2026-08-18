@@ -6,6 +6,8 @@ import {
   type SyntheticEvent,
   useCallback,
   useEffect,
+  useRef,
+  useState,
 } from "react";
 import {
   getMatchHistory,
@@ -23,6 +25,31 @@ import { useTheme } from "../theme";
 // selected, keeping the index chunk free of chart code.
 const ProfileContent = lazy(() => import("./Profile"));
 
+// One-shot count-up: starts at 0 and animates to `target` with an ease-out
+// curve when `animate` first becomes true. Subsequent target changes land
+// instantly (the animation is only for the initial cold load). On a warm
+// in-memory cache (`cold` false) the target renders directly, no animation.
+function useCountUp(target: number, animate: boolean, cold: boolean): number {
+  const [value, setValue] = useState(cold ? 0 : target);
+  const animated = useRef(false);
+  useEffect(() => {
+    if (!animate || animated.current) return;
+    animated.current = true;
+    let raf = 0;
+    const start = performance.now();
+    const DURATION_MS = 700;
+    const tick = (now: number) => {
+      const t = Math.min(1, (now - start) / DURATION_MS);
+      const eased = 1 - (1 - t) ** 3; // ease-out cubic
+      setValue(Math.round(target * eased));
+      if (t < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [animate, target]);
+  return value;
+}
+
 export default function Home() {
   const { theme } = useTheme();
   const queryClient = useQueryClient();
@@ -33,8 +60,19 @@ export default function Home() {
   const players = directoryQ.data?.players ?? [];
   // True physical match total (distinct match_id), so a match is counted once
   // rather than once per participant. Shared with the Layout footer via one
-  // idle-gated query; the match stat stays absent until the data resolves.
+  // idle-gated query. On a cold load both stats start at 0 and count up when
+  // the payload lands; a warm in-memory cache renders the final values
+  // directly with no animation.
   const directoryInfoQ = useDirectoryInfo();
+  const coldCache = useRef(directoryInfoQ.dataUpdatedAt === 0).current;
+  const infoLoaded = directoryInfoQ.data !== undefined;
+  const animate = coldCache && infoLoaded;
+  const playersShown = useCountUp(players.length, animate, coldCache);
+  const matchesShown = useCountUp(
+    directoryInfoQ.data?.total_matches ?? 0,
+    animate,
+    coldCache,
+  );
   // Directory rank backs the profile's current-rank label while the profile
   // query loads; the profile response is authoritative once it lands.
   const selectedPlayer =
@@ -158,16 +196,16 @@ export default function Home() {
           <div className="mt-5 flex flex-wrap gap-x-10 gap-y-4">
             <div className="stat">
               <span className="stat-label">Players</span>
-              <span className="stat-num num">{players.length}</span>
+              <span className="stat-num num">
+                {playersShown.toLocaleString("en-US")}
+              </span>
             </div>
-            {directoryInfoQ.data && (
-              <div className="stat">
-                <span className="stat-label">Matches</span>
-                <span className="stat-num num">
-                  {directoryInfoQ.data.total_matches.toLocaleString("en-US")}
-                </span>
-              </div>
-            )}
+            <div className="stat">
+              <span className="stat-label">Matches</span>
+              <span className="stat-num num">
+                {matchesShown.toLocaleString("en-US")}
+              </span>
+            </div>
           </div>
         )}
       </section>

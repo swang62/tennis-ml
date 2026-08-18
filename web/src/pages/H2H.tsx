@@ -102,9 +102,6 @@ const SURFACE_COLORS: Record<string, string> = {
 export default function H2H() {
   const { theme } = useTheme();
   const narrow = useIsNarrow();
-  // Player names in the ensemble axis labels overlap through phone landscape
-  // and tablet widths, so compact them at a wider breakpoint than the layout.
-  const compactLabels = useIsNarrow("(max-width: 1024px)");
   const { playerA: searchPlayerA, playerB: searchPlayerB } =
     h2hRoute.useSearch();
   const navigate = h2hRoute.useNavigate();
@@ -209,23 +206,30 @@ export default function H2H() {
   // Winner takes the player color: grass if player A wins, clay otherwise.
   const winnerIsA = pred ? pred.predicted_winner === playerA : false;
   const winnerColor = winnerIsA ? t.grass : t.clay;
+  const winnerName = winnerIsA ? name(playerA) : name(playerB);
 
   const compOption: EChartsOption | null = pred
     ? {
         ...baseChartOption(t),
         tooltip: {
-          ...baseChartOption(t).tooltip,
+          renderMode: "html",
+          backgroundColor: "transparent",
+          borderWidth: 0,
+          padding: 0,
+          extraCssText: "box-shadow: none; white-space: pre-line;",
+          textStyle: { fontSize: 12 },
           trigger: "item",
           formatter: (params: unknown) => {
-            const item = Array.isArray(params) ? params[0] : undefined;
+            const item = Array.isArray(params) ? params[0] : params;
             if (!item || typeof item !== "object") return "";
-            const { axisValue, value } = item as {
-              axisValue?: unknown;
+            const { value } = item as {
+              componentType?: string;
               value?: unknown;
             };
             const edge = Number(value);
-            const favored = edge <= 0 ? name(playerA) : name(playerB);
-            return `${String(axisValue ?? "")}<br/>${favored} +${Math.round(Math.abs(edge) * 100)} pts`;
+            const pA = ((1 - edge) / 2) * 100;
+            const pB = 100 - pA;
+            return `<span style="color:${t.grass};font-weight:700">${format.encodeHTML(name(playerA))}</span>: <span style="color:${t.grass};font-weight:700">${pA.toFixed(1)}%</span>\n<span style="color:${t.clay};font-weight:700">${format.encodeHTML(name(playerB))}</span>: <span style="color:${t.clay};font-weight:700">${pB.toFixed(1)}%</span>`;
           },
         },
         grid: {
@@ -254,18 +258,14 @@ export default function H2H() {
             formatter: (v: number) => {
               const edge = v as number;
               const sign = Math.round(Math.abs(edge) * 100);
-              if (edge === 0) return "Even";
-              if (compactLabels) return `+${sign}`;
-              return edge < 0
-                ? `${name(playerA)} +${sign}`
-                : `${name(playerB)} +${sign}`;
+              return edge === 0 ? "Even" : `+${sign}`;
             },
           },
           splitLine: ax.splitLine,
         },
         yAxis: {
           type: "category",
-          data: ["Linear", "GBDT", "NN"],
+          data: ["Linear", "GBDT", "Neural Net"],
           axisLine: ax.axisLine,
           axisTick: { show: false },
           axisLabel: ax.axisLabel,
@@ -276,7 +276,7 @@ export default function H2H() {
             label: {
               show: false,
               color: t.text,
-              fontSize: 11,
+              fontSize: 12,
               formatter: (params) =>
                 `${Math.round(Number(params.value) * 100)}`,
               position: "inside",
@@ -295,13 +295,12 @@ export default function H2H() {
               borderRadius: 0,
             },
             markLine: {
-              silent: true,
               symbol: "none",
               lineStyle: { color: winnerColor, type: "solid", width: 2 },
               label: {
                 color: winnerColor,
-                fontSize: 11,
-                formatter: `Ensemble`,
+                fontSize: 12,
+                formatter: winnerName,
                 position: "end",
                 rotate: 0,
               },
@@ -581,7 +580,7 @@ export default function H2H() {
                   />
                 </div>
                 <p className="mt-2 text-center text-[0.65rem] text-(--text-faint)">
-                  Relative preference: left favors {name(playerA)}, right favors{" "}
+                  Relative edge: left favors {name(playerA)}, right favors{" "}
                   {name(playerB)}
                 </p>
               </div>
@@ -713,7 +712,7 @@ export default function H2H() {
                       backgroundColor: "transparent",
                       borderWidth: 0,
                       padding: 0,
-                      extraCssText: "box-shadow: none;",
+                      extraCssText: "box-shadow: none; white-space: pre-line;",
                       textStyle: { fontSize: 12 },
                     },
                     legend: {

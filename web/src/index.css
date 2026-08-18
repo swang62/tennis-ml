@@ -236,14 +236,18 @@ html.light {
 
   .atp-name-icon {
     display: inline-block;
-    margin-left: 0.35rem;
-    vertical-align: 0.1em;
-    color: var(--text-dim);
-    transition: color 0.15s var(--ease);
+    margin-left: 0.6rem;
+    vertical-align: 0.08em;
+    color: var(--text-faint);
+    opacity: 0.75;
+    transition:
+      color 0.15s var(--ease),
+      opacity 0.15s var(--ease);
   }
 
   .atp-name-link:hover .atp-name-icon {
     color: var(--clay);
+    opacity: 1;
   }
 
   /* Inline country flag (flagcdn w20); the span variant carries the
