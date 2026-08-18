@@ -127,6 +127,25 @@ def test_rejects_auc_decline_beyond_tolerance():
     assert _decide(cand, prod) == 0
 
 
+# ── the gate is metric-agnostic: it consumes whatever (calibrated) dict is fed ──
+
+
+def test_promotes_on_calibrated_log_loss_improvement():
+    # The 04 notebook feeds CALIBRATED test metrics in; a lower calibrated log
+    # loss with AUC within tolerance promotes, exactly as for raw metrics.
+    cand = _metrics(log_loss=0.37)
+    prod = _metrics(log_loss=0.42)
+    assert _decide(cand, prod) == 1
+
+
+def test_rejects_plateau_calibrated_log_loss():
+    # Equal calibrated log loss is not an improvement; a higher AUC cannot
+    # compensate. Documents that calibration cannot force a tie into a win.
+    cand = _metrics(log_loss=0.42, roc_auc=0.9)
+    prod = _metrics(log_loss=0.42)
+    assert _decide(cand, prod) == 0
+
+
 # ── FEATURE_COLS is the sole compatibility contract ──
 
 

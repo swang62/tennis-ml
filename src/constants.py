@@ -102,6 +102,16 @@ AUX_TAG_PREFIX = "aux_"
 FEATURE_COLS_TAG = "feature_cols"
 FEATURE_COLS_HASH_TAG = "feature_cols_hash"
 
+# Probability-calibration artifact. The fitted temperature changes the served
+# p_win, so it is pinned on the champion by URI+hash lineage tags at promotion
+# time (CALIBRATION_URI_TAG/CALIBRATION_HASH_TAG). Legacy champions lacking
+# those tags serve an explicit no-op t=1.0.
+CALIBRATION_ARTIFACT = "calibration_t.json"
+CALIBRATION_URI_TAG = "calibration_uri"
+CALIBRATION_HASH_TAG = "calibration_hash"
+CALIBRATION_STATE = DATA_PROCESSED / CALIBRATION_ARTIFACT
+PLOTS = ARTIFACTS / "plots"
+
 
 def build_lineage_tags(
     base_pins: dict[str, dict[str, str]], aux_pins: dict[str, str]

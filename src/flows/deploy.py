@@ -3,6 +3,7 @@
 import contextlib
 import hashlib
 import json
+import math
 import os
 import pickle
 import shutil
@@ -19,6 +20,9 @@ import pandas as pd
 from src.constants import (
     AUX_TAG_PREFIX,
     BASE_TAG_PREFIX,
+    CALIBRATION_ARTIFACT,
+    CALIBRATION_HASH_TAG,
+    CALIBRATION_URI_TAG,
     CHAMPION_ALIAS,
     DATA_PROCESSED,
     DEPLOY_ARTIFACTS,
@@ -332,7 +336,11 @@ def _lineage_pins(client: Any, production: Any) -> dict[str, dict[str, str]]:
 
 
 def _write_model_info(
-    client: Any, production: Any, pins: dict[str, dict[str, str]], fingerprint: str
+    client: Any,
+    production: Any,
+    pins: dict[str, dict[str, str]],
+    fingerprint: str,
+    calibration_temperature: float = 1.0,
 ) -> Path:
     """Write the immutable canonical champion manifest baked into the Bento.
 
@@ -340,7 +348,8 @@ def _write_model_info(
     non-circular build-input fingerprint: champion identity and creation time,
     exact base and auxiliary-artifact pins, and the fingerprint. It never
     contains the Bento tag, Docker identity, or any hash that includes the
-    generated manifest itself.
+    generated manifest itself. The calibrated temperature is embedded (1.0 for
+    legacy champions) so serving reads it straight from the manifest.
     """
     version = client.get_model_version(PRODUCTION_MODEL, production.version)
     tags = version.tags
@@ -356,6 +365,12 @@ def _write_model_info(
         "aux_artifacts": {key: tags[f"{AUX_TAG_PREFIX}{key}"] for key in LINEAGE_AUX_KEYS},
         "build_input_fingerprint": fingerprint,
     }
+    if CALIBRATION_URI_TAG in tags and CALIBRATION_HASH_TAG in tags:
+        manifest["calibration"] = {
+            "uri": tags.get(CALIBRATION_URI_TAG),
+            "sha256": tags.get(CALIBRATION_HASH_TAG),
+            "temperature": calibration_temperature,
+        }
     if FEATURE_COLS_TAG in tags and FEATURE_COLS_HASH_TAG in tags:
         manifest["feature_contract"] = {
             "columns": json.loads(tags[FEATURE_COLS_TAG]),
@@ -367,8 +382,12 @@ def _write_model_info(
     return MODEL_INFO_FILE
 
 
-def _download_aux_artifacts(client: Any, tags: dict[str, str]) -> None:  # noqa: ARG001 — tags carry everything; client kept for the caller contract
+def _download_aux_artifacts(client: Any, tags: dict[str, str]) -> float:
     """Download the champion's lineage-pinned aux artifacts into DEPLOY_ARTIFACTS.
+
+    Returns the resolved calibration temperature (pinned value for a tagged
+    champion, 1.0 for a legacy champion) so the caller can embed it in
+    model_info.json.
 
     Three model-affecting artifacts are pinned on the champion model version via
     URI+hash lineage tags. A local copy is reused when its content hash
@@ -376,7 +395,9 @@ def _download_aux_artifacts(client: Any, tags: dict[str, str]) -> None:  # noqa:
     exact URI (one retry on a transient download failure) and verified
     against its content hash before the build proceeds. A champion missing
     any required tag is not deployable and must be re-promoted from a full
-    training run. Navigation artifacts are rebuilt from the DuckDB snapshot at
+    training run. The temperature-scaling calibration artifact is materialized
+    separately by _materialize_calibration (optional for legacy champions).
+    Navigation artifacts are rebuilt from the DuckDB snapshot at
     deploy time and are never champion-pinned.
     """
     import mlflow
@@ -425,6 +446,81 @@ def _download_aux_artifacts(client: Any, tags: dict[str, str]) -> None:  # noqa:
         if filename == "linear_scaler.pkl":
             _validate_scaler_file(local)
         print(f"Downloaded {filename} from {tags[uri_tag]} (sha256 ok)")
+    return _materialize_calibration(client, tags)
+
+
+def _validate_calibration_file(path: Path) -> float:
+    """Parse calibration_t.json and return the temperature, raising on invalid content."""
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"invalid calibration file {path}: {exc}") from exc
+    temperature = payload.get("temperature") if isinstance(payload, dict) else None
+    if (
+        isinstance(temperature, bool)
+        or not isinstance(temperature, (int, float))
+        or not math.isfinite(temperature)
+        or temperature <= 0
+    ):
+        raise RuntimeError(
+            f"invalid calibration file {path}: expected a JSON object with a strictly "
+            "positive, finite numeric 'temperature'"
+        )
+    return float(temperature)
+
+
+def _materialize_calibration(client: Any, tags: dict[str, str]) -> float:  # noqa: ARG001 — client kept for caller contract
+    """Resolve and verify the calibration temperature from the champion's tags.
+
+    New champions carry CALIBRATION_URI_TAG/CALIBRATION_HASH_TAG lineage tags
+    pinning the temperature-scaling artifact; it is downloaded and hash-verified
+    like the aux artifacts, and its temperature is returned for embedding in
+    model_info.json. Legacy champions carry no tags: return the explicit no-op
+    1.0 — never a failure, never an invented champion pin.
+    """
+    import mlflow
+
+    uri = tags.get(CALIBRATION_URI_TAG)
+    hash_tag = tags.get(CALIBRATION_HASH_TAG)
+    if uri is None or hash_tag is None:
+        # A legacy champion cannot pin calibration; any stale local file from a
+        # previous champion's deploy must not leak, so remove it and use 1.0.
+        DEPLOY_ARTIFACTS.mkdir(parents=True, exist_ok=True)
+        stale = DEPLOY_ARTIFACTS / CALIBRATION_ARTIFACT
+        if stale.exists():
+            stale.unlink()
+        _log("bento", "champion lineage has no calibration tag — serving no-op calibration (t=1.0)")
+        return 1.0
+    local = DEPLOY_ARTIFACTS / CALIBRATION_ARTIFACT
+    DEPLOY_ARTIFACTS.mkdir(parents=True, exist_ok=True)
+    if local.exists() and _file_hash(local) == hash_tag:
+        temperature = _validate_calibration_file(local)
+        print("Reusing calibration_t.json (hash ok)")
+        return temperature
+    download_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            local = Path(
+                mlflow.artifacts.download_artifacts(  # type: ignore[reportPrivateImportUsage]  # conditional export
+                    uri, dst_path=str(DEPLOY_ARTIFACTS)
+                )
+            )
+            break
+        except Exception as exc:
+            download_error = exc
+            if attempt == 0:
+                print(f"Download of {CALIBRATION_ARTIFACT} from {uri} failed; retrying once")
+    else:
+        raise RuntimeError(
+            f"failed to download {CALIBRATION_ARTIFACT} from {uri}: {download_error}"
+        ) from download_error
+    if _file_hash(local) != hash_tag:
+        raise RuntimeError(
+            f"sha256 mismatch for {CALIBRATION_ARTIFACT}: expected {hash_tag}, got {_file_hash(local)}"
+        )
+    temperature = _validate_calibration_file(local)
+    print(f"Downloaded {CALIBRATION_ARTIFACT} from {uri} (sha256 ok)")
+    return temperature
 
 
 def _detect_gbdt_framework(raw: Any) -> str:
@@ -893,10 +989,10 @@ def build_bento_image() -> tuple[str, int]:
     pins = _lineage_pins(client, production)
     _reuse_or_materialize_nn_onnx(state, pins["nn"])
     version_tags = client.get_model_version(PRODUCTION_MODEL, production.version).tags
-    _download_aux_artifacts(client, version_tags)
+    calibration_temperature = _download_aux_artifacts(client, version_tags)
     generate_navigation_artifacts()
     fingerprint = build_input_fingerprint(client, production)
-    _write_model_info(client, production, pins, fingerprint)
+    _write_model_info(client, production, pins, fingerprint, calibration_temperature)
 
     tags = _import_models(pins)
     pinned = _write_pinned_bentofile(tags)

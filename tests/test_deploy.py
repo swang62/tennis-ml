@@ -663,9 +663,10 @@ def test_download_aux_artifacts_reuses_matching_local_files(monkeypatch, tmp_pat
     )
     monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", artifacts_dir)
 
-    d._download_aux_artifacts(None, tags)
+    temp = d._download_aux_artifacts(None, tags)
 
     assert downloaded == []  # all model artifacts reused
+    assert temp == 1.0  # no calibration tags -> no-op temperature
     assert sorted(p.name for p in artifacts_dir.iterdir()) == sorted(name for _, _, name in _specs)
 
 
@@ -784,9 +785,205 @@ def test_download_aux_artifacts_raises_after_retry_fails(monkeypatch, tmp_path):
 
     import pytest
 
-    with pytest.raises(RuntimeError, match=r"bio_embeddings.npz"):
+    with pytest.raises(RuntimeError, match=r"bio_embeddings\.npz"):
         d._download_aux_artifacts(None, tags)
     assert len(calls) == 2  # initial attempt + one retry, then no more
+
+
+# --- Calibration artifact materialization (CALIBRATION_URI_TAG/HASH_TAG) ---
+
+
+def _calibration_source(tmp_path, temperature=1.7):
+    """Write a valid calibration file into the fake remote dir and return it."""
+    import json
+
+    import src.constants as c
+
+    src = tmp_path / "remote" / c.CALIBRATION_ARTIFACT
+    src.write_text(json.dumps({"temperature": temperature}) + "\n")
+    return src
+
+
+def _pin_calibration(tmp_path, tags, temperature=1.7):
+    """Add both calibration lineage tags pinning a real source file."""
+    import src.constants as c
+
+    src = _calibration_source(tmp_path, temperature)
+    tags[c.CALIBRATION_URI_TAG] = f"runs:/run-aux/{c.CALIBRATION_ARTIFACT}"
+    tags[c.CALIBRATION_HASH_TAG] = _deploy()._file_hash(src)
+    return src
+
+
+def test_download_aux_artifacts_legacy_champion_writes_noop_calibration(monkeypatch, tmp_path):
+    """A legacy champion with no calibration tags resolves to the explicit no-op
+    temperature (1.0) — never a failure, never a stale temperature, and no
+    separate calibration file is written."""
+    import json
+
+    import src.constants as c
+
+    d = _deploy()
+    _specs, tags, _downloaded, artifacts_dir = _aux_tags_and_files(
+        monkeypatch, tmp_path, d, pre_populate=True
+    )
+    monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", artifacts_dir)
+    assert c.CALIBRATION_URI_TAG not in tags
+    assert c.CALIBRATION_HASH_TAG not in tags
+
+    temperature = d._download_aux_artifacts(None, tags)
+
+    assert temperature == 1.0
+    # the temp value is embedded in model_info at build time, not shipped as a file
+    assert not (artifacts_dir / c.CALIBRATION_ARTIFACT).exists()
+
+
+def test_download_aux_artifacts_untagged_champion_overwrites_stale_calibration(
+    monkeypatch, tmp_path
+):
+    """A stale local calibration file (a previous champion's temperature) is not
+    reused by a legacy champion with no tags: it resolves to 1.0 and the stale
+    file is removed since it is no longer shipped."""
+    import json
+
+    import src.constants as c
+
+    d = _deploy()
+    _specs, tags, _downloaded, artifacts_dir = _aux_tags_and_files(
+        monkeypatch, tmp_path, d, pre_populate=True
+    )
+    monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", artifacts_dir)
+    stale = artifacts_dir / c.CALIBRATION_ARTIFACT
+    stale.write_text(json.dumps({"temperature": 2.0}) + "\n")
+
+    temperature = d._download_aux_artifacts(None, tags)
+
+    assert temperature == 1.0
+    assert not stale.exists()
+
+
+def test_calibration_reuses_matching_local_file(monkeypatch, tmp_path):
+    """A tagged champion with a matching local calibration file reuses it: no download."""
+    import json
+
+    import src.constants as c
+
+    d = _deploy()
+    _specs, tags, downloaded, artifacts_dir = _aux_tags_and_files(
+        monkeypatch, tmp_path, d, pre_populate=True
+    )
+    _pin_calibration(tmp_path, tags, temperature=1.7)
+    (artifacts_dir / c.CALIBRATION_ARTIFACT).write_text(
+        (tmp_path / "remote" / c.CALIBRATION_ARTIFACT).read_text()
+    )
+    monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", artifacts_dir)
+
+    temperature = d._download_aux_artifacts(None, tags)
+
+    assert downloaded == []  # model files AND calibration file reused
+    assert temperature == 1.7
+    payload = json.loads((artifacts_dir / c.CALIBRATION_ARTIFACT).read_text())
+    assert payload == {"temperature": 1.7}
+
+
+def test_calibration_downloads_and_places_pinned_file(monkeypatch, tmp_path):
+    """A tagged champion's calibration file is downloaded, hash-verified, and
+    placed at DEPLOY_ARTIFACTS/calibration_t.json."""
+    import json
+
+    import src.constants as c
+
+    d = _deploy()
+    _specs, tags, downloaded, artifacts_dir = _aux_tags_and_files(
+        monkeypatch, tmp_path, d, pre_populate=False
+    )
+    _pin_calibration(tmp_path, tags, temperature=0.8)
+    monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", artifacts_dir)
+
+    temperature = d._download_aux_artifacts(None, tags)
+
+    assert tags[c.CALIBRATION_URI_TAG] in downloaded
+    assert temperature == 0.8
+    local = artifacts_dir / c.CALIBRATION_ARTIFACT
+    assert local.exists()
+    assert d._file_hash(local) == tags[c.CALIBRATION_HASH_TAG]
+    assert json.loads(local.read_text()) == {"temperature": 0.8}
+
+
+def test_calibration_rejects_malformed_verified_artifact(monkeypatch, tmp_path):
+    """A hash-verified calibration file with malformed JSON is rejected."""
+    import src.constants as c
+
+    d = _deploy()
+    _specs, tags, _downloaded, artifacts_dir = _aux_tags_and_files(
+        monkeypatch, tmp_path, d, pre_populate=True
+    )
+    _pin_calibration(tmp_path, tags)
+    src = tmp_path / "remote" / c.CALIBRATION_ARTIFACT
+    src.write_text("{not json")
+    tags[c.CALIBRATION_HASH_TAG] = d._file_hash(src)
+    (artifacts_dir / c.CALIBRATION_ARTIFACT).write_text("{not json")
+    monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", artifacts_dir)
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="invalid calibration file"):
+        d._download_aux_artifacts(None, tags)
+
+
+def test_calibration_rejects_non_positive_verified_temperature(monkeypatch, tmp_path):
+    """A hash-verified calibration file with a non-positive temperature is rejected."""
+    import json
+
+    import src.constants as c
+
+    d = _deploy()
+    _specs, tags, _downloaded, artifacts_dir = _aux_tags_and_files(
+        monkeypatch, tmp_path, d, pre_populate=True
+    )
+    _pin_calibration(tmp_path, tags)
+    src = tmp_path / "remote" / c.CALIBRATION_ARTIFACT
+    src.write_text(json.dumps({"temperature": 0.0}))
+    tags[c.CALIBRATION_HASH_TAG] = d._file_hash(src)
+    (artifacts_dir / c.CALIBRATION_ARTIFACT).write_text(json.dumps({"temperature": 0.0}))
+    monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", artifacts_dir)
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="invalid calibration file"):
+        d._download_aux_artifacts(None, tags)
+
+
+def test_write_model_info_records_calibration_only_with_both_tags(monkeypatch, tmp_path):
+    """The canonical manifest carries the calibration pin only when the champion
+    has both calibration lineage tags; a legacy champion gets no key at all."""
+    import json
+
+    import src.constants as c
+
+    d = _deploy()
+    manifest_file = tmp_path / "model_info.json"
+    monkeypatch.setattr(d, "MODEL_INFO_FILE", manifest_file)
+    monkeypatch.setattr(d, "_cached_gbdt_framework", lambda _version: None)
+    monkeypatch.setattr(d, "_gbdt_framework", lambda _model_uri: "xgboost")
+    production = SimpleNamespace(version="7", run_id="run-prod")
+
+    tags = _lineage_tags()
+    tags[c.CALIBRATION_URI_TAG] = "runs:/run-aux/calibration_t.json"
+    tags[c.CALIBRATION_HASH_TAG] = "abc"
+    tagged = _FakeMlflowClient(_FakeModelVersion(tags))
+    pins = d._lineage_pins(tagged, production)
+    manifest = json.loads(
+        d._write_model_info(tagged, production, pins, "fp", calibration_temperature=1.7).read_text()
+    )
+    assert manifest["calibration"] == {
+        "uri": "runs:/run-aux/calibration_t.json",
+        "sha256": "abc",
+        "temperature": 1.7,
+    }
+
+    legacy = _FakeMlflowClient(_FakeModelVersion(_lineage_tags()))
+    legacy_manifest = json.loads(d._write_model_info(legacy, production, pins, "fp").read_text())
+    assert "calibration" not in legacy_manifest
 
 
 # --- Task 2: exact champion lineage; base models carry no aliases ---
@@ -859,6 +1056,7 @@ class _FakeModelVersion:
         self.tags = dict(tags)
         self.version = version
         self.run_id = run_id
+        self.creation_timestamp = 123
 
 
 class _FakeMlflowClient:

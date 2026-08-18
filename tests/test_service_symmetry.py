@@ -5,13 +5,15 @@ Pure numpy/sklearn — no Bento, database, or MLflow. Verifies that the pure
 when the paired orientation is reversed.
 """
 
+import json
 import warnings
 
 import numpy as np
 import pandas as pd
+import pytest
 from sklearn.linear_model import LogisticRegression
 
-from src.serving.service import _stack_evidence
+from src.serving.service import _load_serving_temperature, _stack_evidence
 
 
 def _toy_stacker() -> LogisticRegression:
@@ -76,3 +78,80 @@ def test_stack_evidence_rejects_wrong_key_order():
         assert "stack order" in str(exc)
     else:
         raise AssertionError("wrong key order must be rejected")
+
+
+def test_stack_evidence_temperature_default_is_noop():
+    stacker = _toy_stacker()
+    pairs = {"linear": (0.7, 0.3), "gbdt": (0.6, 0.4), "nn": (0.55, 0.45)}
+    assert _stack_evidence(pairs, stacker) == _stack_evidence(pairs, stacker, temperature=1.0)
+
+
+def test_stack_evidence_temperature_preserves_complements():
+    stacker = _toy_stacker()
+    pairs = {"linear": (0.7, 0.3), "gbdt": (0.6, 0.4), "nn": (0.55, 0.45)}
+    rev_pairs = {"linear": (0.3, 0.7), "gbdt": (0.4, 0.6), "nn": (0.45, 0.55)}
+
+    for t in (0.5, 2.0):
+        out = _stack_evidence(pairs, stacker, temperature=t)
+        rev = _stack_evidence(rev_pairs, stacker, temperature=t)
+        assert abs(out["p_win"] + rev["p_win"] - 1.0) < 1e-6, t
+        # Base probabilities are not calibrated, so they complement under the
+        # raw transform regardless of t.
+        for name in ("linear", "gbdt", "nn"):
+            assert abs(out[name] + rev[name] - 1.0) < 1e-6, (t, name)
+
+
+def test_stack_evidence_temperature_calibrates_only_p_win():
+    stacker = _toy_stacker()
+    pairs = {"linear": (0.7, 0.3), "gbdt": (0.6, 0.4), "nn": (0.55, 0.45)}
+
+    raw = _stack_evidence(pairs, stacker)
+    cal = _stack_evidence(pairs, stacker, temperature=2.0)
+
+    # Base probs unchanged under temperature (raw transform each equals 1.0).
+    for name in ("linear", "gbdt", "nn"):
+        assert raw[name] == cal[name]
+    # p_win does change (temperature != 1.0) and stays a valid probability.
+    assert raw["p_win"] != cal["p_win"] or abs(raw["p_win"] - 0.5) < 1e-9
+    assert 0.0 < cal["p_win"] < 1.0
+
+
+def test_load_serving_temperature_reads_manifest(monkeypatch, tmp_path):
+    """The calibration temperature is read from the packaged model_info.json."""
+    import src.serving.service as s
+
+    manifest = tmp_path / "model_info.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "calibration": {
+                    "uri": "runs:/run/calibration_t.json",
+                    "sha256": "abc",
+                    "temperature": 1.7,
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(s, "MODEL_INFO_FILE", manifest)
+    assert s._load_serving_temperature() == 1.7
+
+
+def test_load_serving_temperature_defaults_to_1_when_absent(monkeypatch, tmp_path):
+    """Legacy or malformed calibration falls back to the no-op 1.0, never 0.5."""
+    import src.serving.service as s
+
+    for payload in (
+        None,  # missing file
+        json.dumps({}),
+        json.dumps({"calibration": {}}),
+        json.dumps({"calibration": {"temperature": 0}}),
+        json.dumps({"calibration": {"temperature": -1.0}}),
+        json.dumps({"calibration": {"temperature": "hot"}}),
+    ):
+        manifest = tmp_path / "model_info.json"
+        if payload is None:
+            manifest.unlink(missing_ok=True)
+        else:
+            manifest.write_text(payload)
+        monkeypatch.setattr(s, "MODEL_INFO_FILE", manifest)
+        assert s._load_serving_temperature() == 1.0, payload

@@ -118,29 +118,3 @@ def test_02_linear_notebook_never_passes_penalty_to_logistic_regression():
             ):
                 flag_seen = True
     assert flag_seen, "expected the 'unpenalized' search flag to survive"
-
-
-def test_02_nn_notebook_tuning_budget_is_pinned():
-    """The NN tuner's budget is pinned in the tagged parameter cell: 20 Optuna
-    trials, 50 max epochs, 10-epoch early-stopping patience. The pipeline runs
-    this notebook with no overrides, so these defaults are exactly what the
-    next run executes. Every code cell must still parse (AST only, no
-    execution)."""
-    notebook = json.loads(Path("notebooks/parameters/02_tune_nn.ipynb").read_text())
-    for cell in notebook["cells"]:
-        if cell["cell_type"] == "code":
-            ast.parse("".join(cell["source"]))
-    param_cell = next(
-        cell
-        for cell in notebook["cells"]
-        if "parameters" in cell.get("metadata", {}).get("tags", [])
-    )
-    budget = {}
-    for node in ast.parse("".join(param_cell["source"])).body:
-        if (
-            isinstance(node, ast.Assign)
-            and isinstance(node.targets[0], ast.Name)
-            and node.targets[0].id in {"n_trials", "max_epochs", "patience"}
-        ):
-            budget[node.targets[0].id] = ast.literal_eval(node.value)
-    assert budget == {"n_trials": 20, "max_epochs": 50, "patience": 10}

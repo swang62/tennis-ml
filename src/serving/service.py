@@ -46,6 +46,7 @@ from src.constants import (
 )
 from src.countries import resolve_ioc, valid_ioc
 from src.db.client import execute_df, first_row_dict
+from src.evaluate.calibration import apply_temperature
 from src.evaluate.symmetry import antisymmetric_evidence, evidence_to_probability
 from src.features.columns import FEATURE_COLS
 from src.features.inference import (
@@ -399,6 +400,8 @@ def _stack_evidence(
     pairs: dict[str, tuple[float, float]],
     stacker: Any,
     stack_order: list[str] | None = None,
+    *,
+    temperature: float = 1.0,
 ) -> dict[str, float]:
     """Per-base antisymmetric evidence -> stacked p_win + symmetric base probs.
 
@@ -406,8 +409,10 @@ def _stack_evidence(
     p_ba) in the requested orientation. Each base's paired scores are projected
     to antisymmetric evidence, the three evidence values are stacked in fixed
     order and run through the no-intercept logistic stacker, and the symmetric
-    base probabilities are returned alongside p_win. Pure numpy/sklearn — no
-    Bento/DB state — so it is unit-testable in isolation.
+    base probabilities are returned alongside p_win. `temperature` calibrates
+    only p_win (default 1.0 = no-op); base probabilities stay uncalibrated.
+    Pure numpy/sklearn — no Bento/DB state — so it is unit-testable in
+    isolation.
     """
     order = list(stack_order) if stack_order is not None else list(STACK_ORDER)
     if list(pairs.keys()) != order:
@@ -417,6 +422,8 @@ def _stack_evidence(
     evidence = {name: antisymmetric_evidence(ab, ba) for name, (ab, ba) in pairs.items()}
     stack = pd.DataFrame([[evidence[name] for name in order]], columns=order, dtype=float)
     p_win = float(_positive_class_probability(stacker, stack)[0])
+    if temperature != 1.0:
+        p_win = float(apply_temperature(p_win, temperature))
     probs = {name: float(evidence_to_probability(evidence[name])) for name in order}
     probs["p_win"] = p_win
     return probs
@@ -892,6 +899,30 @@ def _model_info(_request: Request) -> JSONResponse:
     )
 
 
+def _load_serving_temperature() -> float:
+    """Load the calibration temperature from the packaged model_info manifest.
+
+    Reads ``calibration.temperature`` (deploy embeds the pinned value; 1.0 for
+    legacy champions). A missing/invalid/non-positive/non-finite value falls
+    back to 1.0 (no-op) so serving never crashes on a broken calibration and
+    never silently collapses to 0.5.
+    """
+    try:
+        manifest = json.loads(MODEL_INFO_FILE.read_text())
+        value = manifest["calibration"]["temperature"]
+    except (FileNotFoundError, OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        _log.warning("calibration missing from model_info (%s); serving temperature=1.0", exc)
+        return 1.0
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        _log.warning("calibration temperature is not numeric; serving temperature=1.0")
+        return 1.0
+    temperature = float(value)
+    if not temperature > 0 or not math.isfinite(temperature):
+        _log.warning("calibration temperature %r is invalid; serving temperature=1.0", temperature)
+        return 1.0
+    return temperature
+
+
 def _health(_request: Request) -> JSONResponse:
     """Liveness plus PostgreSQL reachability via an authenticated SELECT 1.
 
@@ -982,6 +1013,8 @@ class TennisPredictor:
     # NN is not a BentoModel here — served from data/processed/nn_best.onnx
     # (materialized at deploy time from the pinned nn_best MLflow version).
     bento_production = bentoml.models.BentoModel(f"{PRODUCTION_MODEL}:latest")
+    # Calibration temperature; __init__ overrides from the packaged artifact.
+    temperature: float = 1.0
 
     def __init__(self):
         self.linear: Any = bentoml.sklearn.load_model(self.bento_linear)
@@ -1021,6 +1054,7 @@ class TennisPredictor:
         # player_ids is a string array (object dtype, requires pickle); vectors is float32.
         self.bio_by_player = {pid: i for i, pid in enumerate(bio_data["player_ids"])}
         self.bio_array = bio_data["vectors"].astype(np.float32)
+        self.temperature = _load_serving_temperature()
 
     def _predict_proba(self, row_ab: pd.DataFrame, row_ba: pd.DataFrame) -> pd.DataFrame:
         """Run the stacked ensemble without recursively calling the HTTP endpoint.
@@ -1088,6 +1122,7 @@ class TennisPredictor:
                 },
                 self.production,
                 self._stack_order,
+                temperature=self.temperature,
             )
             p_linear[i] = probs["linear"]
             p_gbdt[i] = probs["gbdt"]
