@@ -74,7 +74,6 @@ NAVIGATION_STATE_FILE = DATA_PROCESSED / "navigation_artifacts_state.json"
 # function returns and its options can never change the directory bytes, so
 # deploy cannot (and need not) force its content-hash cache to miss.
 NAVIGATION_SOURCE_FILES = [
-    ROOT / "src" / "flows" / "deploy.py",
     ROOT / "src" / "serving" / "directory.py",
     ROOT / "src" / "models" / "similarity.py",
     ROOT / "src" / "countries.py",

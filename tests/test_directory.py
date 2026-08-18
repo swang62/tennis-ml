@@ -607,10 +607,10 @@ def test_navigation_source_hash_deterministic_over_real_sources():
 
 
 # Every allowlisted source/config input that can change the navigation
-# outputs without changing snapshot data: the four shaping sources plus the
+# outputs without changing snapshot data: the three shaping sources plus the
 # exact values of the similarity-tuning constants.
 _SOURCE_MUTATIONS = [
-    *[("file", name) for name in ("deploy.py", "directory.py", "similarity.py", "countries.py")],
+    *[("file", name) for name in ("directory.py", "similarity.py", "countries.py")],
     *[
         ("constant", name)
         for name in (
