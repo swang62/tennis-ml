@@ -1,6 +1,7 @@
 """Tests for PostgreSQL-to-DuckDB training snapshots."""
 
 import os
+from collections.abc import Sequence
 
 import duckdb
 import pytest
@@ -48,7 +49,7 @@ def _write_valid_snapshot(
     extra_table: str | None = None,
     bad_columns: bool = False,
     empty: bool = False,
-    rows: list[tuple] | None = None,
+    rows: Sequence[tuple[int, ...]] | None = None,
 ) -> None:
     """Write a DuckDB file that passes (or breaks) validate_snapshot."""
     if bad_columns:
@@ -206,11 +207,11 @@ def test_refresh_failure_cleans_temp_when_validation_fails(tmp_path, monkeypatch
 
 def test_refresh_snapshot_copies_exactly_the_snapshot_tables(tmp_path, monkeypatch) -> None:
     """refresh_snapshot installs exactly the snapshot tables (two gold tables
-    plus the bronze profile metadata), exact column order, atomically."""
+    plus bronze profile metadata), exact column order, atomically."""
     p = tmp_path / "live_snap.duckdb"
 
     def fake_copy(tmp: "os.PathLike[str]", _pg_url: str) -> None:
-        # Stand-in for the PostgreSQL copy: write a valid three-table snapshot.
+        # Stand-in for the PostgreSQL copy: write a valid four-table snapshot.
         _write_valid_snapshot(tmp)
 
     monkeypatch.setattr(snapshot, "_copy_tables", fake_copy)

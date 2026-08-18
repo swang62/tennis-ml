@@ -21,7 +21,11 @@
 WITH player_agg AS (
     SELECT
         pm.player_id,
-        COUNT(*)                                                   AS match_count,
+        -- Per-player physical-match count: each bronze match expands into two
+        -- directional player_matches rows with different player_ids, so a
+        -- player's own rows already list each match they played exactly once.
+        -- DISTINCT makes the count explicit so it can never double-count.
+        COUNT(DISTINCT pm.match_id)                               AS match_count,
         MAX(pm.match_date)                                         AS latest_match_date,
         -- latest positive rank points (ignore newer zero/null obs)
         MAX(pm.player_rank_points) FILTER (WHERE pm.player_rank_points > 0)      AS latest_positive_points,

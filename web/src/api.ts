@@ -247,6 +247,7 @@ async function get<T>(path: string): Promise<T> {
 
 export function getDirectoryInfo(): Promise<{
   latest_match_date: string | null;
+  total_matches: number;
 }> {
   return get("/directory_info");
 }

@@ -213,7 +213,8 @@ LIMIT %s
 """
 
 _DIRECTORY_INFO_SQL = f"""
-SELECT MAX(match_date) AS latest_match_date
+SELECT MAX(match_date) AS latest_match_date,
+       (SELECT COUNT(DISTINCT match_id) FROM {SILVER_PLAYER_MATCHES}) AS total_matches
 FROM {BRONZE_MATCHES_TABLE}
 """
 
@@ -305,7 +306,7 @@ logging.getLogger("bentoml._internal.server.http_app").addFilter(
 # SQL values are always parameterized; response shapes are a dashboard contract.
 
 
-def _safe_query(sql: str, params: list | None = None) -> pd.DataFrame:
+def _safe_query(sql: str, params: list[object] | None = None) -> pd.DataFrame:
     """Run *sql* and return the result; return empty DataFrame only when a
     dbt-created relation (silver/gold table) does not exist yet, so the web
     dashboard renders an empty state instead of a 500 before ETL. Other
@@ -499,8 +500,15 @@ def _predict_from_ids_bulk_impl(
 def _directory_info(_request: Request) -> JSONResponse:
     try:
         df = execute_df(_DIRECTORY_INFO_SQL)
-        latest_match_date = None if df.empty else _iso(first_row_dict(df)["latest_match_date"])
-        return _ok({"latest_match_date": latest_match_date})
+        if df.empty:
+            return _ok({"latest_match_date": None, "total_matches": 0})
+        row = first_row_dict(df)
+        return _ok(
+            {
+                "latest_match_date": _iso(row["latest_match_date"]),
+                "total_matches": int(row["total_matches"]),
+            }
+        )
     except Exception as exc:
         return _err(500, f"directory info query failed: {exc}")
 
@@ -890,12 +898,13 @@ def _health(_request: Request) -> JSONResponse:
 # (the SDK's server checks its own routes first, then falls through to mounts).
 
 
-async def _handle_starlette_error(_request: Request, exc: StarletteHTTPException):
+async def _handle_starlette_error(_request: Request, exc: Exception):
     """Return every Starlette HTTPException as a json {ok, error} envelope."""
+    http_exc = cast(StarletteHTTPException, exc)
     return JSONResponse(
-        {"ok": False, "error": exc.detail or "internal error"},
-        status_code=exc.status_code,
-        headers=getattr(exc, "headers", None) or {},
+        {"ok": False, "error": http_exc.detail or "internal error"},
+        status_code=http_exc.status_code,
+        headers=getattr(http_exc, "headers", None) or {},
     )
 
 

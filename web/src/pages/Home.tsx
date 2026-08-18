@@ -8,6 +8,7 @@ import {
   useEffect,
 } from "react";
 import {
+  getDirectoryInfo,
   getMatchHistory,
   getPlayerProfile,
   getRankHistory,
@@ -30,7 +31,15 @@ export default function Home() {
   const selectedId = searchPlayer ?? null;
   const directoryQ = usePlayerDirectory();
   const players = directoryQ.data?.players ?? [];
-  const totalMatches = players.reduce((n, p) => n + p.matches_played, 0);
+  // True physical match total (distinct match_id), so a match is counted once
+  // rather than once per participant.
+  const directoryInfoQ = useQuery({
+    queryKey: ["directory-info"],
+    queryFn: getDirectoryInfo,
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
+  const totalMatches = directoryInfoQ.data?.total_matches ?? 0;
   // Directory rank backs the profile's current-rank label while the profile
   // query loads; the profile response is authoritative once it lands.
   const selectedPlayer =

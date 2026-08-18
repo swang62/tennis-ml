@@ -26,16 +26,22 @@ from src.serving.service import (
 client = TestClient(DATA_APP)
 
 
-def test_directory_info_returns_latest_match_date():
+def test_directory_info_returns_latest_match_date_and_total():
     with patch(
         "src.serving.service.execute_df",
-        return_value=pd.DataFrame({"latest_match_date": [date(2026, 8, 10)]}),
+        return_value=pd.DataFrame(
+            {"latest_match_date": [date(2026, 8, 10)], "total_matches": [123456]}
+        ),
     ) as exec:
         response = client.get("/directory_info")
 
     assert response.status_code == 200
-    assert response.json() == {"ok": True, "data": {"latest_match_date": "2026-08-10"}}
+    assert response.json() == {
+        "ok": True,
+        "data": {"latest_match_date": "2026-08-10", "total_matches": 123456},
+    }
     assert "MAX(match_date)" in exec.call_args.args[0]
+    assert "COUNT(DISTINCT match_id)" in exec.call_args.args[0]
     assert "FROM bronze.match_events" in exec.call_args.args[0]
 
 
@@ -431,7 +437,7 @@ class _ONNXSession:
         return [np.array([[2.0]])]  # sigmoid(2) ~ 0.88
 
 
-def _fake_execute_df(sql: str, _params: list | None = None) -> pd.DataFrame:
+def _fake_execute_df(sql: str, _params: list[object] | None = None) -> pd.DataFrame:
     """Hermetic execute_df stand-in: cold-start DB state keyed on the SQL text."""
     if "tour_averages" in sql:
         row: dict[str, object] = dict.fromkeys(TOUR_AVERAGES_FALLBACK_COLS, 1.0)
