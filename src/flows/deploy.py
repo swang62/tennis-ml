@@ -977,6 +977,11 @@ def generate_navigation_artifacts() -> Path:
             "snapshot inputs and shaping sources unchanged; reusing staged navigation artifacts",
         )
         return RAW_DIRECTORY_ARTIFACT
+    _log(
+        "minisearch",
+        f"snapshot inputs or sources changed: rebuilding similarity index for "
+        f"{len(profiles)} players (bio embedding — no output until it finishes)",
+    )
     similarity = PlayerSimilarity()
     similarity.build(
         query=training.to_dataframe,

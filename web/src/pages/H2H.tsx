@@ -304,19 +304,7 @@ export default function H2H() {
                 position: "end",
                 rotate: 0,
               },
-              data: [
-                { xAxis: preferenceEdge(pred.p_win) * 2 },
-                {
-                  xAxis: 0.2,
-                  lineStyle: { color: t.line, type: "dotted", width: 1 },
-                  label: { show: false },
-                },
-                {
-                  xAxis: 0.6,
-                  lineStyle: { color: t.line, type: "dotted", width: 1 },
-                  label: { show: false },
-                },
-              ],
+              data: [{ xAxis: preferenceEdge(pred.p_win) * 2 }],
             },
           },
         ],
