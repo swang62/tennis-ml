@@ -239,7 +239,8 @@ function Layout() {
       <footer className="footer container">
         <span>Courtside — model-driven tennis intelligence.</span>
         {directoryInfoQ.data?.latest_match_date && (
-          <span>
+          <span className="footer-updated">
+            <span className="footer-live-dot" aria-hidden="true" />
             Last updated {formatLongDate(directoryInfoQ.data.latest_match_date)}
           </span>
         )}
