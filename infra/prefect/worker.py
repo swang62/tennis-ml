@@ -34,15 +34,21 @@ print(f"Connecting worker to Prefect API at {api_url}")
 def _register_deployments() -> None:
     """Register host-run scheduled deployments (idempotent upserts by name).
 
-    The Monday scrape and ETL deployments live on the host work pool, so they
-    are created/updated whenever this worker starts and stay manually
-    triggerable from the Prefect UI or `prefect deployment run`.
+    Independent Monday deployments for rankings (``rankings-flow/rankings``,
+    06:00 UTC) and matches (``matches-flow/matches``, 06:30 UTC), plus the
+    automation-triggered ETL and drift deployments, all live on the host work
+    pool, so they are created/updated whenever this worker starts and stay
+    manually triggerable from the Prefect UI or `prefect deployment run`.
+    Each module registers exactly its own deployment — no duplicates, and no
+    combined scrape flow.
     """
     from src.flows.drift import register_deployment as register_drift
     from src.flows.etl import register_deployment as register_etl
-    from src.flows.scrape import register_deployment as register_scrape
+    from src.flows.matches import register_deployment as register_matches
+    from src.flows.rankings import register_deployment as register_rankings
 
-    register_scrape()
+    register_rankings()
+    register_matches()
     register_etl()
     register_drift()
 
@@ -50,8 +56,9 @@ def _register_deployments() -> None:
 def _register_automations() -> None:
     """Register event-driven automations (idempotent upserts by name).
 
-    The scrape -> ETL trigger is a visible Prefect automation, not an in-flow
-    command, so it lives here alongside the deployments it wires together.
+    The rankings/matches -> ETL trigger is a visible Prefect automation, not an
+    in-flow command, so it lives here alongside the deployments it wires
+    together.
     """
     from src.flows.etl import register_automation
 

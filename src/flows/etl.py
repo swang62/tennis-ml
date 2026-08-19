@@ -15,8 +15,10 @@ deployment runs incremental.
 
 import argparse
 import json
+import logging
 import os
 import re
+import shlex
 import subprocess
 import sys
 from contextlib import suppress
@@ -25,7 +27,7 @@ from pathlib import Path
 from typing import TextIO, cast
 from uuid import UUID
 
-from prefect import flow, task
+from prefect import flow, get_run_logger, task
 from prefect.automations import Automation
 from prefect.client.orchestration import get_client
 from prefect.events.actions import RunDeployment
@@ -50,10 +52,12 @@ DBT_RUN_RESULTS = constants.ROOT / "dbt" / "target" / "run_results.json"
 
 ETL_DEPLOYMENT_NAME = "etl"
 # No cron: ETL is triggered by the "scrape-triggers-etl" automation (see
-# register_automation) whenever a scrape flow run completes successfully. The
-# trigger is a visible Prefect automation, not an in-flow command.
+# register_automation) whenever a rankings or matches flow run completes
+# successfully. The trigger is a visible Prefect automation, not an in-flow
+# command.
 
-SCRAPE_FLOW_NAME = "scrape-flow"  # Prefect flow name of src/flows/scrape.py:scrape_flow
+RANKINGS_FLOW_NAME = "rankings-flow"  # Prefect flow name of src/flows/rankings.py:rankings_flow
+MATCHES_FLOW_NAME = "matches-flow"  # Prefect flow name of src/flows/matches.py:matches_flow
 SCRAPE_ETL_AUTOMATION_NAME = "scrape-triggers-etl"
 
 
@@ -61,20 +65,31 @@ def run_dbt_build(
     profiles_dir: str | Path = "dbt",
     log_file: Path | None = None,
     incremental: bool = False,
+    logger: logging.Logger | logging.LoggerAdapter | None = None,
 ) -> subprocess.CompletedProcess:
-    """Build dbt models, optionally streaming output to ``log_file``."""
-    cmd = DBT_BUILD_CMD if incremental else [*DBT_BUILD_CMD, "--full-refresh"]
+    """Build dbt models, streaming output to ``log_file`` and ``logger``."""
+    cmd = [*DBT_BUILD_CMD]
     if str(profiles_dir) != "dbt":
-        cmd = [*DBT_BUILD_CMD[:-2], "--profiles-dir", str(profiles_dir)]
+        cmd[-2:] = ["--profiles-dir", str(profiles_dir)]
+    if not incremental:
+        cmd.append("--full-refresh")
+    if logger is not None:
+        logger.info(f"dbt command: {' '.join(shlex.quote(part) for part in cmd)}")
     env = {**os.environ, **dbt_env(constants.get_database_url())}
     if log_file is None:
         return subprocess.run(cmd, cwd=constants.ROOT, check=True, env=env)
     log_file.parent.mkdir(parents=True, exist_ok=True)
     with log_file.open("w") as log:
-        return _run_streamed(cmd, log, env)
+        log.write(f"$ {' '.join(shlex.quote(part) for part in cmd)}\n")
+        return _run_streamed(cmd, log, env, logger)
 
 
-def _run_streamed(cmd: list[str], log: TextIO, env: dict[str, str]) -> subprocess.CompletedProcess:
+def _run_streamed(
+    cmd: list[str],
+    log: TextIO,
+    env: dict[str, str],
+    logger: logging.Logger | logging.LoggerAdapter | None = None,
+) -> subprocess.CompletedProcess:
     proc = subprocess.Popen(
         cmd, cwd=constants.ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env
     )
@@ -85,8 +100,19 @@ def _run_streamed(cmd: list[str], log: TextIO, env: dict[str, str]) -> subproces
         sys.stdout.flush()
         log.write(text)
         log.flush()
+        if logger is not None:
+            logger.info(text.rstrip())
     returncode = proc.wait()
+    if logger is not None:
+        logger.info(f"dbt build exited with code {returncode}")
     if returncode != 0:
+        message = (
+            f"dbt build failed with exit code {returncode}; see the artifact log for dbt's error"
+        )
+        log.write(f"{message}\n")
+        log.flush()
+        if logger is not None:
+            logger.error(message)
         raise subprocess.CalledProcessError(returncode, cmd)
     return subprocess.CompletedProcess(cmd, returncode)
 
@@ -102,7 +128,12 @@ def bronze_to_gold(incremental: bool = False) -> int:
     log_file = _etl_log_file()
     mode = "incremental" if incremental else "full_refresh"
     print(f"dbt mode: {mode}")
-    run_dbt_build(log_file=log_file, incremental=incremental)
+    try:
+        logger = get_run_logger()
+    except RuntimeError:
+        # No active run context (e.g. hermetic .fn() tests); skip Prefect logs.
+        logger = None
+    run_dbt_build(log_file=log_file, incremental=incremental, logger=logger)
     with connection() as conn, conn.cursor() as cur:
         counts = {
             BRONZE_MATCHES_TABLE: _table_count(cur, BRONZE_MATCHES_TABLE),
@@ -168,9 +199,9 @@ def register_deployment() -> None:
 
     Registered on the host ``tennis-pool`` work pool so the automation's
     ``RunDeployment`` action can resolve it by ``etl-flow/etl``. No cron — ETL
-    runs only when the scrape flow completes successfully. The deployment pins
-    ``incremental=True`` so scrape-triggered ETL appends new rows instead of
-    rebuilding from bronze.
+    runs only when a rankings or matches flow run completes successfully. The
+    deployment pins ``incremental=True`` so automation-triggered ETL appends
+    new rows instead of rebuilding from bronze.
     """
     repo_root = Path(__file__).resolve().parent.parent.parent
     from typing import Any, cast
@@ -197,21 +228,22 @@ def register_deployment() -> None:
 
 
 def build_scrape_etl_automation(etl_deployment_id: UUID) -> Automation:
-    """Automation spec: run ETL when the scrape flow completes successfully.
+    """Automation spec: run ETL when a rankings or matches flow completes successfully.
 
     Pure builder (no API calls) so the trigger/action wiring is unit-testable
     without a Prefect server. The trigger matches ``prefect.flow-run.Completed``
-    events whose related ``flow`` resource is the scrape flow, so a scrape run
-    that fails (or any other flow completing) never fires ETL.
+    events whose related ``flow`` resource is the rankings or the matches flow
+    (one match_related spec with both flow names, i.e. OR across names), so a
+    failed run — or any other flow completing — never fires ETL.
     """
     return Automation(
         name=SCRAPE_ETL_AUTOMATION_NAME,
-        description="Run ETL after a successful scrape flow run.",
+        description="Run ETL after a successful rankings or matches flow run.",
         trigger=EventTrigger(
             expect={"prefect.flow-run.Completed"},
             match_related={
                 "prefect.resource.role": "flow",
-                "prefect.resource.name": SCRAPE_FLOW_NAME,
+                "prefect.resource.name": [RANKINGS_FLOW_NAME, MATCHES_FLOW_NAME],
             },
         ),
         actions=[RunDeployment.model_validate({"deployment_id": etl_deployment_id})],
@@ -219,7 +251,7 @@ def build_scrape_etl_automation(etl_deployment_id: UUID) -> Automation:
 
 
 def register_automation() -> None:
-    """Idempotent upsert of the scrape -> ETL automation (by name).
+    """Idempotent upsert of the rankings/matches -> ETL automation (by name).
 
     Replaces any existing automation with the same name, so worker restarts
     converge on the current spec. Runs on the host worker (alongside the
@@ -233,7 +265,8 @@ def register_automation() -> None:
     automation.create()
     print(
         f"Registered automation {SCRAPE_ETL_AUTOMATION_NAME!r}: "
-        f"{SCRAPE_FLOW_NAME} success -> {etl_flow.name}/{ETL_DEPLOYMENT_NAME}"
+        f"{RANKINGS_FLOW_NAME} or {MATCHES_FLOW_NAME} success -> "
+        f"{etl_flow.name}/{ETL_DEPLOYMENT_NAME}"
     )
 
 

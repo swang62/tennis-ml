@@ -1,14 +1,19 @@
-"""Prefect flow: ATP site scraping (currently weekly rankings catch-up).
+"""Prefect flow: weekly ATP rankings catch-up.
 
 The database is the self-healing watermark (``MAX(bronze.rankings.ranking_date)``).
-Runs with no params fetch every missing Monday from the watermark through the
-most recent completed Monday. Manual backfills pass ``--param end_date=YYYY-MM-DD``
-to fetch missing Mondays after the watermark through that date, or both
-``--param start_date`` and ``--param end_date`` to fetch every Monday in that
-explicit range regardless of the watermark, skipping weeks already complete
-(>= 100 stored rows) but retrying partial ones. Weeks are fetched from
-the ATP Tour site with the CloakBrowser Python library (an interactive
-stealth-Chromium Playwright wrapper) — never the CloakBrowser MCP server.
+``rankings_flow`` runs with no params to fetch every missing Monday from the
+watermark through the most recent completed Monday. Manual backfills pass
+``--param end_date=YYYY-MM-DD`` to fetch missing Mondays after the watermark
+through that date, or both ``--param start_date`` and ``--param end_date`` to
+fetch every Monday in that explicit range regardless of the watermark. Safety
+guarantees for every path: a ranking week already present in
+``bronze.rankings`` is never re-scraped (presence is the only completeness
+test — partial prior ingests are not refetched), the scan never reaches
+earlier than the Monday after the stored watermark nor earlier than Jan 1 of
+the current year, and never later than the most recent completed Monday.
+Weeks are fetched from the ATP Tour site with the CloakBrowser Python library
+(an interactive stealth-Chromium Playwright wrapper) — never the CloakBrowser
+MCP server.
 
 Identity is resolved only through the approved ranking identity map
 (``load_ranking_player_map``): the page exposes each player's canonical
@@ -16,6 +21,12 @@ ATP_Database id in the profile URL slug (e.g. ``/en/players/jannik-sinner/s0ag/o
 which must be present as a value in the reviewed map to be stored. Raw
 numeric ranking source ids never reach the database, and unmapped players are
 skipped and reported.
+
+This module also hosts the browser discipline (``_launch_browser``/``_jitter``)
+and the shared identity/tier fallbacks (``resolve_player_id``,
+``tier_from_bronze``) reused by the match-stats flow (``src/flows/matches.py``):
+one persistent CloakBrowser profile, one identity convention, and one bronze
+fallback for every ATP site scrape.
 
 Session discipline (CloakBrowser free tier tracks sessions server-side; a
 process that exits without a clean ``browser.close()`` permanently wedges that
@@ -35,13 +46,20 @@ weeks is a failure: the run is marked failed (and retried) rather than silently
 succeeding on no data. Finding a parseable page is success even when its rows
 are already stored. Each successful week commits independently.
 
-Run once (manual/local):  ``just scrape``
-Backfill to a date:       ``just scrape --param end_date=YYYY-MM-DD``
-Backfill a range:         ``just scrape --param start_date=YYYY-MM-DD --param end_date=YYYY-MM-DD``
+Run once (manual/local):  ``just rankings``
+Backfill to a date:       ``just rankings --end YYYY-MM-DD``
+Backfill a range:         ``just rankings --start YYYY-MM-DD --end YYYY-MM-DD``
+
+Rankings and matches are independent Prefect flows: ``rankings-flow/rankings``
+(Monday 06:00 UTC) and ``matches-flow/matches`` (Monday 06:30 UTC), and a
+successful rankings or matches run triggers the incremental ETL deployment
+(see ``src/flows/etl.py``). There is no combined scrape flow; ``rankings.py``
+and ``matches.py`` are standalone commands (``just rankings`` / ``just matches``).
 """
 
 from __future__ import annotations
 
+import argparse
 import random
 import re
 import time
@@ -59,6 +77,8 @@ from src.db.ingest import (
     BRONZE_RANKINGS_TABLE,
     RANKING_TARGET_COLUMNS,
     _copy_df_into,
+    _normalize_name_variants,
+    canonical_players,
     load_ranking_player_map,
 )
 from src.utils import load_env
@@ -95,8 +115,6 @@ FILTER_VERIFY_BUDGET_S = 15
 # Per-navigation page-load budget for the rankings URL (goto, not row render).
 PAGE_NAVIGATION_TIMEOUT_MS = 60_000
 
-SCRAPE_DEPLOYMENT_NAME = "scrape"
-SCRAPE_CRON = "0 6 * * 1"  # Monday 06:00 UTC
 CLOAKBROWSER_PROFILE_DIR = (
     Path.home() / ".local" / "share" / "tennis-prefect-worker" / "cloakbrowser"
 )
@@ -159,21 +177,7 @@ def stored_ranking_mondays() -> set[date]:
         return {row[0] for row in cur.fetchall()}
 
 
-# A full weekly ranking (top-200 page) holds ~200 rows; treat >= 100 as a
-# complete week so an explicit-range backfill skips finished weeks but retries
-# partial prior ingests.
-COMPLETE_RANKING_MIN_ROWS = 100
-
-
-def stored_ranking_monday_counts(start: date, end: date) -> dict[date, int]:
-    """Row counts per ranking Monday in [start, end], from one batched query."""
-    with connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            f"SELECT ranking_date, COUNT(*) FROM {BRONZE_RANKINGS_TABLE} "
-            "WHERE ranking_date BETWEEN %s AND %s GROUP BY ranking_date",
-            (start, end),
-        )
-        return {row[0]: row[1] for row in cur.fetchall()}
+# ── Date math ────────────────────────────────────────────────────
 
 
 @task
@@ -187,40 +191,40 @@ def missing_ranking_mondays(
     empty and ``weeks`` is then empty because the flow must not scrape history
     from scratch (run ``just seed`` first).
 
+    Presence is the only completeness gate: a ranking Monday already in
+    ``stored_ranking_mondays()`` is never re-scraped, whatever its row count.
     With no ``start_date`` the scan starts one week after the watermark (the
     max stored Monday); with an explicit ``start_date`` it starts there (snapped
-    forward to the next Monday), so a manual backfill covers an arbitrary
-    historical window regardless of the watermark. The upper bound is
-    ``end_date`` when given, else the most recent completed Monday. Weeks come
-    back oldest first.
+    forward to the next Monday). The upper bound is ``end_date`` when given,
+    else the most recent completed Monday. Weeks come back oldest first.
 
-    Any explicit range (``start_date`` and/or ``end_date``) checks DB coverage
-    with one batched ``stored_ranking_monday_counts`` query and treats a week as
-    complete only when it holds at least ``COMPLETE_RANKING_MIN_ROWS`` rows, so
-    partial prior ingests are re-fetched. The default scheduled run (no
-    arguments) skips the coverage count entirely: it uses watermark-driven
-    presence checks only (``stored_ranking_mondays``).
+    Safety floors apply to every path (bare, start-only, end-only, both): the
+    effective start never precedes the Monday after the watermark nor Jan 1 of
+    the current year, and the effective end never follows the most recent
+    completed Monday — so an explicit historical ``start_date`` can never
+    backfill before this year and stored weeks are never touched.
     """
     stored = stored_ranking_mondays()
     if not stored:
         return None, []
     watermark = max(stored)
-    end = end_date or latest_completed_monday(date.today())
+    today = date.today()
+    last_completed = latest_completed_monday(today)
     if start_date is None:
         start = watermark + timedelta(days=7)
     else:
         start = start_date + timedelta(days=(7 - start_date.weekday()) % 7)
-    counts: dict[date, int] | None = None
-    if (start_date is not None or end_date is not None) and start <= end:
-        counts = stored_ranking_monday_counts(start, end)
+    end = min(end_date or last_completed, last_completed)
+    # Safety floors: never earlier than the Monday after the watermark, never
+    # earlier than Jan 1 of the current year, never later than the most recent
+    # completed Monday. The start is snapped to a Monday to keep the weekly step.
+    floor = max(watermark + timedelta(days=7), date(today.year, 1, 1))
+    start = max(start, floor)
+    start += timedelta(days=(7 - start.weekday()) % 7)
     weeks: list[date] = []
     monday = start
     while monday <= end:
-        if counts is not None:
-            complete = counts.get(monday, 0) >= COMPLETE_RANKING_MIN_ROWS
-        else:
-            complete = monday in stored
-        if not complete:
+        if monday not in stored:
             weeks.append(monday)
         monday += timedelta(days=7)
     return watermark, weeks
@@ -305,6 +309,76 @@ def translate_rank_rows(
     return cast(pd.DataFrame, frame), skipped
 
 
+def resolve_player_id(
+    name: str,
+    source_id: str,
+    rank_map: dict[str, str],
+    canonical: dict[str, str] | None = None,
+) -> str | None:
+    """Resolve a page player to a canonical bronze player id, or None to skip.
+
+    Exact map entry wins (the reviewed ranking map), then an exact canonical-id
+    match (matches pages carry the canonical ATP_Database id in the profile
+    URL), then a deterministic normalized-name match against the canonical
+    player reference. A name that matches no canonical player, or more than one,
+    resolves to None and the caller skips + reports — the reviewed map is never
+    modified here and the name field is audit-only, never a match key.
+    """
+    src = str(source_id).strip().upper()
+    if src in rank_map:
+        return rank_map[src]
+    if canonical is None:
+        canonical = canonical_players()
+    for pid in canonical:
+        if str(pid).strip().upper() == src:
+            return pid
+    norm_index: dict[str, list[str]] = {}
+    for pid, cname in canonical.items():
+        norm = _normalize_name(cname)
+        if norm:
+            norm_index.setdefault(norm, []).append(pid)
+    candidates: list[str] = []
+    for variant in _normalize_name_variants(name or ""):
+        candidates = norm_index.get(variant, [])
+        if candidates:
+            break
+    if len(set(candidates)) == 1:
+        return candidates[0]
+    return None
+
+
+def _normalize_name(name: str) -> str:
+    """Deterministic normalized name for review-only candidate matching."""
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def tier_from_bronze(
+    tournament_id: str, existing_rows: list[dict[str, Any]] | None = None
+) -> str | None:
+    """Bronze tier for a tournament from existing match rows; None when unknown.
+
+    Bronze has no tournament_id column, so a row belongs to the tournament when
+    its ``match_id`` carries the id as a ``-``-separated segment (both the
+    Sackmann ``YYYY-TOURNAMENT_ID-NNN`` and the match-stats
+    ``YYYY-YYYY-TOURNAMENT_ID-NNN`` shapes embed it). Returns the ``tournament``
+    value (already bronze vocabulary, set at ingest) of the newest matching row.
+    Unknown tournaments resolve to None — the caller skips/reports instead of
+    inventing a tier. Purely over the supplied rows; nothing is scraped here.
+    """
+    token = f"-{str(tournament_id).strip()}-"
+    if not existing_rows or token == "--":
+        return None
+    known = [
+        row
+        for row in existing_rows
+        if token in str(row.get("match_id", "")) and row.get("tournament")
+    ]
+    if not known:
+        return None
+    newest = max(known, key=lambda row: str(row.get("match_date", "")))
+    return str(newest["tournament"])
+
+
 def _launch_browser():
     """Open the shared persistent CloakBrowser profile for this scrape run.
 
@@ -330,7 +404,7 @@ def _launch_browser():
         human_preset="careful",
         geoip=True,
         license_key=license_key,
-        args=["--disable-http2"] if first_launch else [],
+        args=(["--disable-http2", "--start-minimized"] if first_launch else ["--start-minimized"]),
     )
 
 
@@ -452,7 +526,7 @@ def fetch_and_upsert_week(page, week: date, rank_map: dict[str, str]) -> int | N
 
 
 @flow(log_prints=True, retries=2)
-def scrape_flow(start_date: date | None = None, end_date: date | None = None):
+def rankings_flow(start_date: date | None = None, end_date: date | None = None):
     """Scrape missing ranking weeks: watermark-to-today (no params) or a date range.
 
     With no params every missing Monday from the watermark through the most
@@ -462,9 +536,14 @@ def scrape_flow(start_date: date | None = None, end_date: date | None = None):
     missing Monday from the watermark through that date is fetched oldest
     first; any explicit ``start_date`` and/or ``end_date`` — both together
     fetch every Monday in that range regardless of the watermark (for
-    historical backfills) — skips weeks already complete (>= 100 stored rows)
-    but retries partial prior ingests. An ``end_date`` at or before the
-    watermark naturally fetches nothing. Launches exactly one CloakBrowser session, processes every missing
+    historical backfills). Safety guarantees, enforced for every path: a week
+    already present in ``bronze.rankings`` is never re-scraped (presence is
+    the only completeness test — partial prior ingests are not refetched); the
+    effective start never precedes the Monday after the stored watermark or
+    Jan 1 of the current year (an explicit historical ``start_date`` is
+    clamped, with a warning); and the effective end never follows the most
+    recent completed Monday. An ``end_date`` at or before the watermark
+    naturally fetches nothing. Launches exactly one CloakBrowser session, processes every missing
     week inside a try block, and closes the browser in finally — even when a
     week fails, the session is always released before the flow returns/raises.
     A run that had weeks to fetch but could not access or parse the rankings
@@ -473,6 +552,12 @@ def scrape_flow(start_date: date | None = None, end_date: date | None = None):
     success, not a failure.
     """
     load_env()
+    today = date.today()
+    if start_date is not None and start_date < date(today.year, 1, 1):
+        print(
+            f"WARNING: start_date {start_date.isoformat()} is before Jan 1 {today.year}; "
+            "the scan is clamped to this year and never reaches weeks before the stored watermark."
+        )
     watermark, weeks = missing_ranking_mondays(start_date, end_date)
     if watermark is None:
         print(
@@ -534,34 +619,65 @@ def _fail_if_no_data_found(found_data: bool, weeks: list[date]) -> None:
         )
 
 
-def register_deployment() -> None:
-    """Create/update the Monday-scheduled scrape deployment (idempotent by name).
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--start",
+        type=date.fromisoformat,
+        help="inclusive window start (YYYY-MM-DD); floored to Jan 1 of the current "
+        "year and to the week after the stored watermark",
+    )
+    parser.add_argument(
+        "--end",
+        type=date.fromisoformat,
+        help="inclusive window end (YYYY-MM-DD); defaults to today",
+    )
+    return parser.parse_args(argv)
 
-    The deployment runs on the host ``tennis-pool`` work pool via the existing
-    host worker and stays manually triggerable from the Prefect UI or
-    ``prefect deployment run``. Flow code is the local repo checkout (process
-    work pool — no image/remote storage is required).
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    rankings_flow(start_date=args.start, end_date=args.end)
+
+
+if __name__ == "__main__":
+    main()
+
+
+# ── Deployment ─────────────────────────────────────────────────────
+
+RANKINGS_DEPLOYMENT_NAME = "rankings"
+RANKINGS_CRON = "0 22 * * 1"
+
+
+def register_deployment() -> None:
+    """Create/update the Monday-scheduled rankings deployment (idempotent by name).
+
+    Scheduled production runs use this independent deployment; rankings and
+    matches are separate deployments — there is no combined scrape flow.
+    Runs on the host ``tennis-pool`` work pool via the host worker and stays
+    manually triggerable from the Prefect UI or ``prefect deployment run``.
+    Flow code is the local repo checkout (process work pool — no image or
+    remote storage is required).
     """
     repo_root = Path(__file__).resolve().parent.parent.parent
-    # No static parameter defaults here: deployment parameters are frozen at
+    # No static parameter defaults: deployment parameters are frozen at
     # registration, so a baked-in date would go stale for later cron runs. The
-    # flow defaults to the watermark itself (see scrape_flow); pass explicit
+    # flow defaults to the watermark (see rankings_flow); pass explicit
     # --param start_date/end_date to override for a manual backfill.
-    # prefect's async_dispatch stubs from_source() as a Coroutine union, but in
-    # a sync context it returns the Flow itself; cast to Any sidesteps that.
     deployment = cast(
         Any,
-        scrape_flow.from_source(
+        rankings_flow.from_source(
             source=str(repo_root),
-            entrypoint="src/flows/scrape.py:scrape_flow",
+            entrypoint="src/flows/rankings.py:rankings_flow",
         ),
     )
     deployment.deploy(
-        name=SCRAPE_DEPLOYMENT_NAME,
+        name=RANKINGS_DEPLOYMENT_NAME,
         work_pool_name=WORK_POOL_NAME,
-        cron=SCRAPE_CRON,
+        cron=RANKINGS_CRON,
         build=False,
         ignore_warnings=True,
         print_next_steps=False,
     )
-    print(f"Registered deployment {SCRAPE_DEPLOYMENT_NAME!r} (cron {SCRAPE_CRON})")
+    print(f"Registered deployment {RANKINGS_DEPLOYMENT_NAME!r} (cron {RANKINGS_CRON})")
