@@ -69,6 +69,10 @@ lint:
 migrate:
     uv run python src/db/migrate_db.py migrate
 
+# Scrape ATP match stats for a window; pass --start YYYY-MM-DD --end YYYY-MM-DD (runs standalone, no rankings scrape).
+matches *args:
+    uv run python src/flows/matches.py {{ args }}
+
 # Delete every registered model and non-default experiment from MLflow.
 mlflow-reset:
     uv run python scripts/reset_mlflow.py
@@ -77,9 +81,9 @@ mlflow-reset:
 probe:
     uv run python scripts/probe.py
 
-# Trigger the Prefect scrape deployment; --param start_date=YYYY-MM-DD --param end_date=YYYY-MM-DD.
-scrape *args:
-    uv run prefect deployment run scrape-flow/scrape {{ args }}
+# Scrape ATP rankings for a window; pass --start YYYY-MM-DD --end YYYY-MM-DD (runs standalone, no matches scrape).
+rankings *args:
+    uv run python src/flows/rankings.py {{ args }}
 
 # Seed deterministic raw matches. --all (every match) --enrich (Wikipedia bios) --force (overwrite existing rows).
 seed *args:

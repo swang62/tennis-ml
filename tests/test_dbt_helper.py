@@ -1,3 +1,4 @@
+import logging
 import subprocess
 from typing import cast
 from uuid import uuid4
@@ -53,6 +54,110 @@ def test_run_dbt_build_propagates_called_process_error(monkeypatch):
 
     assert excinfo.value.returncode == 1
     assert excinfo.value.cmd == DBT_BUILD_CMD
+
+
+def test_run_dbt_build_incremental_controls_full_refresh(monkeypatch):
+    """incremental=False (default) appends --full-refresh; True omits it."""
+    calls = []
+
+    def fake_run(*args, **_kwargs):
+        calls.append(args[0])
+
+    monkeypatch.setattr("src.flows.etl.subprocess.run", fake_run)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@db:5432/tennis")
+
+    run_dbt_build(incremental=True)
+    run_dbt_build(incremental=False)
+
+    assert calls == [DBT_BUILD_CMD, [*DBT_BUILD_CMD, "--full-refresh"]]
+
+
+def test_run_dbt_build_custom_profiles_dir_keeps_full_refresh(monkeypatch):
+    """A non-default profiles_dir replaces the --profiles-dir pair without
+    dropping --full-refresh from the command."""
+    calls = []
+
+    def fake_run(*args, **_kwargs):
+        calls.append(args[0])
+
+    monkeypatch.setattr("src.flows.etl.subprocess.run", fake_run)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@db:5432/tennis")
+
+    run_dbt_build(profiles_dir="/tmp/profiles")
+    run_dbt_build(profiles_dir="/tmp/profiles", incremental=True)
+
+    assert calls[0] == [
+        "uv",
+        "run",
+        "dbt",
+        "build",
+        "--project-dir",
+        "dbt",
+        "--profiles-dir",
+        "/tmp/profiles",
+        "--full-refresh",
+    ]
+    assert calls[1] == [
+        "uv",
+        "run",
+        "dbt",
+        "build",
+        "--project-dir",
+        "dbt",
+        "--profiles-dir",
+        "/tmp/profiles",
+    ]
+
+
+def test_streamed_build_streams_lines_to_log_and_logger(monkeypatch, tmp_path, caplog):
+    class FakePopen:
+        def __init__(self, *_args, **_kwargs):
+            self.stdout = [b"line one\n", b"line two\n"]
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr("src.flows.etl.subprocess.Popen", FakePopen)
+    log_file = tmp_path / "etl.log"
+
+    with (
+        caplog.at_level(logging.INFO, logger="dbt-test"),
+        log_file.open("w") as log,
+    ):
+        result = etl._run_streamed(DBT_BUILD_CMD, log, {"K": "V"}, logging.getLogger("dbt-test"))
+
+    assert result.returncode == 0
+    assert log_file.read_text() == "line one\nline two\n"
+    assert ("dbt-test", logging.INFO, "line one") in caplog.record_tuples
+    assert ("dbt-test", logging.INFO, "line two") in caplog.record_tuples
+    assert ("dbt-test", logging.INFO, "dbt build exited with code 0") in caplog.record_tuples
+
+
+def test_streamed_build_failure_logs_error_and_raises(monkeypatch, tmp_path, caplog):
+    class FailingPopen:
+        def __init__(self, *_args, **_kwargs):
+            self.stdout = [b"boom\n"]
+
+        def wait(self):
+            return 3
+
+    monkeypatch.setattr("src.flows.etl.subprocess.Popen", FailingPopen)
+    log_file = tmp_path / "fail.log"
+
+    with (
+        caplog.at_level(logging.INFO, logger="dbt-test"),
+        pytest.raises(subprocess.CalledProcessError) as excinfo,
+        log_file.open("w") as log,
+    ):
+        etl._run_streamed(DBT_BUILD_CMD, log, {"K": "V"}, logging.getLogger("dbt-test"))
+
+    assert excinfo.value.returncode == 3
+    assert excinfo.value.cmd == DBT_BUILD_CMD
+    assert "failed with exit code 3" in log_file.read_text()
+    assert any(
+        level == logging.ERROR and "failed with exit code 3" in msg
+        for _name, level, msg in caplog.record_tuples
+    )
 
 
 def test_etl_flow_builds_without_enrichment(monkeypatch):
@@ -148,9 +253,10 @@ def test_enrich_missing_is_callable():
 
 
 def test_scrape_etl_automation_triggers_etl_on_scrape_completion():
-    """The scrape -> ETL trigger is a visible Prefect automation (not an in-flow
-    command): it fires on the scrape flow's Completed event and runs the ETL
-    deployment. Pure builder, so no Prefect server or database is touched.
+    """The rankings/matches -> ETL trigger is a visible Prefect automation (not an
+    in-flow command): it fires on a rankings or matches flow's Completed event
+    and runs the ETL deployment. Pure builder, so no Prefect server or database
+    is touched.
     """
     deployment_id = uuid4()
     automation = etl.build_scrape_etl_automation(deployment_id)
@@ -161,7 +267,7 @@ def test_scrape_etl_automation_triggers_etl_on_scrape_completion():
     match_related = cast(ResourceSpecification, trigger.match_related)
     assert match_related.root == {
         "prefect.resource.role": "flow",
-        "prefect.resource.name": etl.SCRAPE_FLOW_NAME,
+        "prefect.resource.name": [etl.RANKINGS_FLOW_NAME, etl.MATCHES_FLOW_NAME],
     }
     assert len(automation.actions) == 1
     action = cast(RunDeployment, automation.actions[0])

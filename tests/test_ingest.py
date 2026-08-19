@@ -217,7 +217,7 @@ def test_atp_rows_to_bronze_maps_raw_columns():
 
     assert len(df) == 1
     row = df.iloc[0]
-    assert row["match_id"] == "20260105-2026-9900-001"
+    assert row["match_id"] == "2026-9900-001"
     assert row["match_date"] == "2026-01-05"
     assert row["tournament"] == "grand_slam"
     assert row["tournament_name"] == "Test Open"
@@ -297,10 +297,53 @@ def test_atp_rows_to_bronze_float_parses_age_and_defaults_missing_stats():
 def test_atp_rows_to_bronze_filters_by_selected_ids():
     rows = [_raw_row(match_num=1), _raw_row(match_num=2)]
 
-    df = ingest.atp_rows_to_bronze(rows, selected_ids={"20260105-2026-9900-002"})
+    df = ingest.atp_rows_to_bronze(rows, selected_ids={"2026-9900-002"})
 
     assert len(df) == 1
-    assert df.iloc[0]["match_id"] == "20260105-2026-9900-002"
+    assert df.iloc[0]["match_id"] == "2026-9900-002"
+
+
+def test_match_id_is_date_free_and_stable():
+    """Same opaque tourney_id + match sequence -> same id, whatever the date."""
+    ids = {
+        ingest.atp_rows_to_bronze([_raw_row(match_num=26, tourney_date=d)]).iloc[0]["match_id"]
+        for d in ("20260102", "20260207", "20260314")
+    }
+    assert ids == {"2026-9900-026"}
+
+
+def test_match_id_prefixes_only_a_missing_edition_year():
+    """The date-derived year is prepended once, and only when the opaque
+    tourney_id does not already repeat that same year at its start."""
+    assert ingest.canonical_match_id("2026-418", 26, 2026) == "2026-418-026"
+    assert ingest.canonical_match_id("2026", 26, 2026) == "2026-026"
+    assert ingest.canonical_match_id("1987", 26, 2026) == "2026-1987-026"
+    assert ingest.canonical_match_id("1987-foo", 26, 2026) == "2026-1987-foo-026"
+    assert ingest.canonical_match_id("418", 26, 2026) == "2026-418-026"
+
+
+def test_match_id_keeps_opaque_dashed_tournament_ids_distinct():
+    """Dashes inside tourney_id are preserved, never parsed; Davis Cup style
+    non-numeric ids pass through (prefixed with the edition year). ``2026-41-8``
+    and ``2026-418`` cannot collide."""
+    a = _raw_row(match_num=1)
+    a["tourney_id"] = "2026-41-8"
+    b = _raw_row(match_num=1)
+    b["tourney_id"] = "2026-418"
+    c = _raw_row(match_num=1)
+    c["tourney_id"] = "1967-southern-pro"
+    c["tourney_level"] = "D"
+
+    df = ingest.atp_rows_to_bronze([a, b, c])
+
+    assert sorted(df["match_id"]) == [
+        "2026-1967-southern-pro-001",
+        "2026-41-8-001",
+        "2026-418-001",
+    ]
+    assert (
+        df.loc[df["match_id"] == "2026-1967-southern-pro-001", "tournament"].iloc[0] == "davis_cup"
+    )
 
 
 def test_atp_rows_to_bronze_empty_rows_gives_schema_only():

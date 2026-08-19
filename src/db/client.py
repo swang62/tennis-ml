@@ -15,7 +15,9 @@ far too long to hold server capacity). `execute_df()` checks out one
 connection per call; multi-step writes run inside an explicit
 `transaction()` context manager that holds one checked-out connection,
 commits on success and rolls back on error. A broken connection is discarded
-by the pool — statements are never replayed automatically.
+by the pool — statements are never replayed automatically. Transient network
+or TLS failures during checkout (SSL eof, pool timeouts) are retried with
+bounded exponential backoff; only the checkout is retried, never a statement.
 
 DuckDB remains installed solely for the training database snapshots; it is
 not part of the operational query path.
@@ -25,6 +27,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any, LiteralString, cast
@@ -32,7 +35,7 @@ from typing import Any, LiteralString, cast
 import pandas as pd
 import psycopg
 from psycopg.rows import tuple_row
-from psycopg_pool import ConnectionPool
+from psycopg_pool import ConnectionPool, PoolTimeout
 
 # Pool bounds: two Bento workers x max 4 connections per process cap the app
 # at 8 concurrent PostgreSQL queries (H2H fires three in parallel); min 0
@@ -55,6 +58,23 @@ MAX_IDLE_S = 10.0
 CONNECT_TIMEOUT_S = 30
 POOL_TIMEOUT_S = 30.0
 RECONNECT_TIMEOUT_S = 30.0
+
+# Transient-failure retries: a remote PostgreSQL over TLS can drop a
+# connection during handshake or under load ("SSL error: unexpected eof",
+# pool checkout timeouts). Checkout is retried with bounded exponential
+# backoff; statements are never replayed, so writes stay safe.
+DB_RETRY_ATTEMPTS = 4
+DB_RETRY_BASE_S = 1.0
+DB_RETRY_MAX_S = 5.0
+
+# Transient-only: syntax errors, constraint violations, and other
+# ProgrammingError/DatabaseError subclasses are deterministic — never retried.
+# PoolTimeout is a subclass of OperationalError, listed explicitly for clarity.
+TRANSIENT_ERRORS: tuple[type[psycopg.Error], ...] = (
+    psycopg.OperationalError,
+    psycopg.InterfaceError,
+    PoolTimeout,
+)
 
 _pool: ConnectionPool | None = None
 _pool_lock = threading.Lock()
@@ -115,10 +135,27 @@ def connection() -> Iterator[psycopg.Connection[Any]]:
     """Check out one pooled connection for the duration of the block.
 
     The connection is returned to the pool on exit, so callers never hold a
-    pooled connection longer than their work needs.
+    pooled connection longer than their work needs. Checkout is retried with
+    bounded exponential backoff on transient failures (TLS drops, pool
+    checkout timeouts); once checked out, the caller's work runs exactly
+    once — an error from the body propagates untouched, never replayed.
     """
-    with get_pool().connection() as conn:
-        yield conn
+    delay = DB_RETRY_BASE_S
+    for attempt in range(DB_RETRY_ATTEMPTS):
+        checkout = get_pool().connection()
+        try:
+            conn = checkout.__enter__()
+        except TRANSIENT_ERRORS:
+            if attempt == DB_RETRY_ATTEMPTS - 1:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, DB_RETRY_MAX_S)
+            continue
+        try:
+            yield conn
+        finally:
+            checkout.__exit__(None, None, None)
+        return
 
 
 @contextmanager
@@ -145,8 +182,9 @@ def execute_df(sql: str, params: list[object] | tuple[object, ...] | None = None
 
     Each call checks out one pooled connection and returns it on exit. A
     connection-level failure (OperationalError/InterfaceError) is discarded by
-    the pool and replaced asynchronously. Statements are never replayed
-    automatically here: callers may be writing.
+    the pool and replaced asynchronously. Checkout failures are retried with
+    bounded backoff (see `connection()`); the statement itself is never
+    replayed automatically here: callers may be writing.
     """
     with connection() as conn, conn.cursor() as cur:
         cur.execute(cast(LiteralString, sql), params)

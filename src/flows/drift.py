@@ -82,7 +82,7 @@ EXPERIMENT_NAME = "drift-monitor"
 
 DRIFT_DEPLOYMENT_NAME = "drift"
 # 30 minutes after the scrape cron (Monday 06:00 UTC), so ETL has finished.
-DRIFT_CRON = "30 6 1 * *"
+DRIFT_CRON = "0 20 1 * *"
 
 # Drift analysis frame: the numeric bronze serve/point rates whose per-column
 # PSI drives the feature verdict, the derived orientation label, and the

@@ -14,6 +14,7 @@ from src.constants import ROOT
 from src.db.ingest import (
     BRONZE_MATCHES_TABLE,
     atp_rows_to_bronze,
+    canonical_match_id,
     discover_ranking_csvs,
     enrich_players,
     ingest_rankings,
@@ -179,7 +180,8 @@ def main_default(enrich: bool = False, force: bool = False) -> None:
     )
     selected = select_matches(matches, official_ranks=latest_official_ranks() if matches else {})
     selected_ids = {
-        f"{int(m['tourney_date'])}-{m['tourney_id']}-{int(m['match_num']):03d}" for m in selected
+        canonical_match_id(m["tourney_id"], int(m["match_num"]), int(m["tourney_date"]) // 10000)
+        for m in selected
     }
 
     bronze = atp_rows_to_bronze(matches, selected_ids=selected_ids)

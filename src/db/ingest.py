@@ -129,6 +129,29 @@ load_env()
 
 # ── Raw ATP → Bronze transform (shared with seed.py) ──────────────
 
+# Canonical match id rule: the year derived from the match date is prepended to
+# the opaque tourney_id only when that same year is not already repeated at the
+# id's start — "2026-418" + 2026 stays "2026-418" (never "2026-2026-418"),
+# while "1987-foo" + 2026 -> "2026-1987-foo". Shared by bronze ingestion, the
+# seed selection filter, and the match scrape so every path derives the same id.
+
+
+def canonical_match_id(tourney_id: str, match_num: int, year: int | None = None) -> str:
+    """Canonical Sackmann match id ``YYYY-TOURNAMENT_ID-NNN``, date-free.
+
+    The date-derived ``year`` is prepended once, and only when the tourney_id
+    does not already repeat that same year at its start (``2026-418`` + 2026
+    stays ``2026-418``; ``1987`` + 2026 -> ``2026-1987``). Any other four-digit
+    start is a different year and still gets the prefix — the check is against
+    the derived year, never "starts with any four digits". The id is opaque:
+    internal dashes/nonstandard Davis Cup ids pass through untouched, never
+    parsed as numeric. ``match_num`` is zero-padded to three digits.
+    """
+    tid = str(tourney_id).strip()
+    if year is None or tid.startswith(str(year)):
+        return f"{tid}-{int(match_num):03d}"
+    return f"{year}-{tid}-{int(match_num):03d}"
+
 
 def _stat(row: dict[str, Any], key: str) -> int:
     """Int stat value; 0 for empty/NaN (raw ATP CSVs leave stats empty)."""
@@ -226,8 +249,12 @@ def atp_rows_to_bronze(
 
     out = []
     for m in rows:
-        # tourney_id repeats, so match_id also includes the event date.
-        match_id = f"{int(m['tourney_date'])}-{m['tourney_id']}-{int(m['match_num']):03d}"
+        # Canonical, date-free id from the shared rule: an already year-prefixed
+        # tourney_id (e.g. "2026-418") is kept verbatim; a bare one gets the
+        # edition year once, so the raw CSV and a match scrape always agree.
+        match_id = canonical_match_id(
+            m["tourney_id"], int(m["match_num"]), int(m["tourney_date"]) // 10000
+        )
         if selected_ids is not None and match_id not in selected_ids:
             continue
         level = LEVEL_MAP.get(str(m["tourney_level"]))

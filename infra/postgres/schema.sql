@@ -234,7 +234,7 @@ ALTER TABLE bronze.player_profiles ALTER COLUMN ioc SET NOT NULL;
 --
 -- The composite PK (ranking_date, player_id) is the identity both ingestion
 -- paths upsert on: src/db/ingest.py ingest_rankings (seed) and the weekly
--- scrape catch-up (src/flows/scrape.py), each ON CONFLICT (ranking_date,
+-- rankings catch-up (src/flows/rankings.py), each ON CONFLICT (ranking_date,
 -- player_id) — so re-running either is idempotent.
 CREATE TABLE IF NOT EXISTS bronze.rankings (
     ranking_date DATE     NOT NULL,   -- weekly ranking Monday

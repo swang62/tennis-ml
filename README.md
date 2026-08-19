@@ -6,7 +6,7 @@ Tennis match predictions end to end. I made this repo with the goal of learning 
 
 ## Core Features
 
-- **Weekly ATP scrape** — Prefect rankings ingestion with self-healing backfills.
+- **Weekly ATP scrape** — Prefect rankings + match-stats ingestion with self-healing backfills (rankings Monday 06:00 UTC, matches 06:30 UTC; each triggers incremental ETL on success).
 - **Warehouse pipeline** — PostgreSQL bronze → dbt silver → dbt gold.
 - **Model training** — Optuna tunes linear, GBDT, and neural-network models before an OOF-trained logistic stacker combines them.
 - **Reproducible deployment** — MLflow lineage, a single `@champion` alias, and BentoML serving.
@@ -105,7 +105,9 @@ The weekly drift flow scores new production data through the champion Bento and 
 
 ## Data Pipelines
 
-- `scrape.py` — weekly ATP rankings backfill.
+- `rankings.py` — weekly ATP rankings catch-up (scheduled deployment `rankings-flow/rankings`, Monday 06:00 UTC; rankings trigger ETL on success).
+- `matches.py` — match-stats enrichment (scheduled deployment `matches-flow/matches`, Monday 06:30 UTC; matches trigger ETL on success).
+- Rankings and matches are independent Prefect flows — there is no combined scrape flow.
 - `seed.py` — load matches and rankings into bronze, with optional enrichment.
 - `etl.py` — build bronze → silver → gold with dbt.
 - `pipeline.py` — snapshot data, train models, build the ensemble, evaluate, and promote.
