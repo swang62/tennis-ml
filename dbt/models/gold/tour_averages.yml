@@ -23,6 +23,11 @@ models:
       Limited historical leakage is intentional: old cold-start or otherwise
       missing cells use the same full-pool singleton as current rows, and a
       verification query reports the affected row/cell count.
+      Precision contract: every floating/statistical output is rounded to 3
+      decimal places at the model's output boundary
+      (ROUND(x::NUMERIC, 3)::DOUBLE PRECISION), so the aggregate CTEs retain
+      full precision internally. singleton_id, counts, and pool_as_of_date are
+      unchanged.
 
     columns:
       # Singleton identity and observability.

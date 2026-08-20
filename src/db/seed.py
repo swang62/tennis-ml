@@ -15,6 +15,7 @@ from src.db.ingest import (
     BRONZE_MATCHES_TABLE,
     atp_rows_to_bronze,
     canonical_match_id,
+    clear_match_events,
     discover_ranking_csvs,
     enrich_players,
     ingest_rankings,
@@ -125,7 +126,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="overwrite existing rows and ignore idempotent skips (matches, rankings, profiles, bios)",
+        help="clear and rebuild bronze.match_events, and overwrite rankings, profiles, bios",
     )
     args, _ignored = parser.parse_known_args(argv)
     return args
@@ -193,10 +194,14 @@ def main_default(enrich: bool = False, force: bool = False) -> None:
     )
 
     # Idempotent by default (DO NOTHING on an existing match_id); --force
-    # overwrites the seed's own rows (DO UPDATE) so repeat runs converge.
-    inserted = insert_bronze_rows(bronze, overwrite=force)
+    # clears bronze.match_events first so the corpus inserts into an empty
+    # table instead of overwriting selected rows.
     if force:
-        print(f"Inserted {inserted} rows into {BRONZE_MATCHES_TABLE} (overwrite)")
+        clear_match_events()
+        print(f"Cleared {BRONZE_MATCHES_TABLE} for a clean rebuild")
+    inserted = insert_bronze_rows(bronze, overwrite=False)
+    if force:
+        print(f"Inserted {inserted} rows into {BRONZE_MATCHES_TABLE} (clean rebuild)")
     else:
         print(
             f"Inserted {inserted} rows into {BRONZE_MATCHES_TABLE} "
@@ -209,7 +214,8 @@ def main_default(enrich: bool = False, force: bool = False) -> None:
 
 
 def main_all(enrich: bool = False, force: bool = False) -> None:
-    """Seed every ATP CSV, skipping existing rows unless --force."""
+    """Seed every ATP CSV; --force clears bronze.match_events first so the full
+    corpus is rebuilt cleanly."""
     csv_paths = discover_atp_csvs(RAW_DIR)
     if not csv_paths:
         print(f"No ATP CSVs found under {RAW_DIR}; nothing to seed")
@@ -223,9 +229,12 @@ def main_all(enrich: bool = False, force: bool = False) -> None:
         f"{distinct_players} players"
     )
 
-    inserted = insert_bronze_rows(bronze, overwrite=force)
     if force:
-        print(f"Inserted {inserted} rows into {BRONZE_MATCHES_TABLE} (overwrite)")
+        clear_match_events()
+        print(f"Cleared {BRONZE_MATCHES_TABLE} for a clean rebuild")
+    inserted = insert_bronze_rows(bronze, overwrite=False)
+    if force:
+        print(f"Inserted {inserted} rows into {BRONZE_MATCHES_TABLE} (clean rebuild)")
     else:
         print(
             f"Inserted {inserted} rows into {BRONZE_MATCHES_TABLE} "

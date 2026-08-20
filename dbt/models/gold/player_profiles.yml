@@ -12,6 +12,11 @@ models:
       bronze.player_profiles — consumers join bronze metadata with this
       table's aggregates. Zero-match players are preserved with zero counts
       and null rates.
+      Precision contract: every emitted floating/statistical aggregate is
+      truncated to 5 decimal places at the output boundary
+      (TRUNC(x::NUMERIC, 5)), so the weighted sums/denominators retain full
+      precision internally. Integer identifiers, counts, rank points, dates,
+      and current_rank are unchanged.
     columns:
       - name: player_id
         description: Canonical ATP id; the DB primary key pk_player_profiles created by the model's post-hook enforces uniqueness and non-nullity, and ensure_not_null_sql re-applies NOT NULL explicitly.

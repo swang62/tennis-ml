@@ -91,6 +91,7 @@ from src.db.ingest import (
     _copy_df_into,
     canonical_match_id,
     canonical_players,
+    load_player_metadata,
     load_ranking_player_map,
 )
 from src.features.columns import (
@@ -731,6 +732,36 @@ def _lookup(values: dict[str, Any] | None, player_id: str, default: Any) -> Any:
     return default if value is None else value
 
 
+def _field_text(value: Any) -> str:
+    """Trimmed payload/scrape text; '' when absent."""
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _payload_int(value: Any) -> int | None:
+    """Positive integer payload field (draw size, number of sets); None when absent."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _match_minutes(value: Any) -> int | None:
+    """Total minutes from an ``HH:MM:SS`` payload duration; None when malformed."""
+    parts = _field_text(value).split(":")
+    if len(parts) != 3:
+        return None
+    try:
+        hours, minutes, seconds = (int(part) for part in parts)
+    except ValueError:
+        return None
+    return round(hours * 60 + minutes + seconds / 60)
+
+
 def hawkeye_to_bronze(
     payload: dict[str, Any],
     discovered_match: dict[str, Any] | None = None,
@@ -757,6 +788,11 @@ def hawkeye_to_bronze(
     ``discovered_match`` when available and is None otherwise; ``surface``
     (bronze fallback), ``rank_points``, and ``ages`` are injected lookups
     with the seed defaults (0 / 0.0) for unknown players.
+
+    The returned row also carries non-bronze extra keys for the raw CSV sink
+    (never written to bronze): per-side seed/entry in winner/loser
+    orientation, draw_size/best_of/minutes from the payload, and the
+    discovered page names — each None when absent, never fabricated.
     """
     if not isinstance(payload, dict) or not isinstance(payload.get("Match"), dict):
         _report("payload has no Match object", discovered_match)
@@ -851,6 +887,30 @@ def hawkeye_to_bronze(
     )
     tournament_name = tournament.get("EventDisplayName") or tournament.get("TournamentName")
 
+    # Raw-CSV source metadata (extra row keys, never bronze columns): per-side
+    # seed/entry follow the payload winner orientation, draw_size/best_of/
+    # minutes come from the payload when present — absent values stay None.
+    winner_identity, loser_identity = (
+        (identity_a, identity_b)
+        if winner_is_a
+        else (
+            identity_b,
+            identity_a,
+        )
+    )
+    source_metadata: dict[str, Any] = {
+        "winner_seed": _field_text(winner_identity.get("SeedPlayerTeam")),
+        "winner_entry": _field_text(winner_identity.get("EntryStatusPlayerTeam")),
+        "loser_seed": _field_text(loser_identity.get("SeedPlayerTeam")),
+        "loser_entry": _field_text(loser_identity.get("EntryStatusPlayerTeam")),
+        "draw_size": _payload_int(tournament.get("Singles")),
+        "best_of": _payload_int(match.get("NumberOfSets")),
+        "minutes": _match_minutes(match.get("MatchTime") or match.get("MatchTimeTotal")),
+    }
+    if discovered_match:
+        source_metadata["player1_name"] = _field_text(discovered_match.get("player1_name"))
+        source_metadata["player2_name"] = _field_text(discovered_match.get("player2_name"))
+
     row = dict.fromkeys(BRONZE_COLUMNS)
     row.update(
         {
@@ -875,6 +935,7 @@ def hawkeye_to_bronze(
     row["player1_age"] = _lookup(ages, player1_id, 0.0)
     row["player2_age"] = _lookup(ages, player2_id, 0.0)
     row["winner_id"] = player1_id
+    row.update({key: (value or None) for key, value in source_metadata.items()})
     return row
 
 
@@ -1216,7 +1277,9 @@ def upsert_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
 
 # Full Sackmann match-CSV header, in file order — the columns of
 # data/raw/{year}.csv (seed.py convention). Appended rows keep this exact
-# column/order/format; only the fields the scrape actually knows are filled.
+# column/order/format; fields fill from the scrape (payload-derived source
+# metadata), the per-run player profile map (names/hand/height/IOC), or stay
+# empty when neither knows them.
 RAW_MATCH_COLUMNS = [
     "tourney_id",
     "tourney_name",
@@ -1311,40 +1374,66 @@ def _fmt_num(value: Any) -> str:
     return str(int(number)) if number.is_integer() else f"{number:.3f}"
 
 
-def bronze_row_to_raw_match(row: dict[str, Any]) -> dict[str, str]:
+def bronze_row_to_raw_match(
+    row: dict[str, Any], profiles: dict[str, dict[str, str]] | None = None
+) -> dict[str, str]:
     """One Sackmann-format raw row from a bronze match_events row.
 
     The canonical match_id embeds the raw tourney_id and match sequence, so it
     round-trips: ``2026-418-026`` -> tourney_id ``2026-418``, match_num 26, and
     re-deriving the id through the shared rule reproduces ``2026-418-026``.
-    Every field the scrape cannot know (draw size, seeds, names, hands, best
-    of, minutes) stays empty; stats/ranks/ages map from the bronze columns.
+    ``profiles`` is the per-run in-memory player metadata map
+    (``load_player_metadata``): it supplies display name, hand, height, and IOC
+    for winner/loser when the player is known (the discovered page names on the
+    row are the fallback). The payload-derived source fields (per-side seed and
+    entry, draw_size, best_of, minutes) are stamped extra keys on the bronze row
+    by ``hawkeye_to_bronze``; stats/ranks/ages map from the bronze columns. Any
+    field the scrape cannot know stays empty — nothing is fabricated.
     """
     match_id = str(row.get("match_id") or "")
     tourney_id, sep, seq = match_id.rpartition("-")
     if not sep:
         return dict.fromkeys(RAW_MATCH_COLUMNS, "")
     match_date = _as_date(row.get("match_date"))
+    winner_id = str(row.get("winner_id") or "")
+    loser_id = str(row.get("player2_id") or "")
+    winner_profile = (profiles or {}).get(winner_id.upper()) or {}
+    loser_profile = (profiles or {}).get(loser_id.upper()) or {}
     raw = dict.fromkeys(RAW_MATCH_COLUMNS, "")
     raw.update(
         {
             "tourney_id": tourney_id,
             "tourney_name": str(row.get("tournament_name") or ""),
             "surface": str(row.get("surface") or "").capitalize(),
+            "draw_size": _fmt_num(row.get("draw_size")),
             "tourney_level": _BRONZE_TIER_TO_LEVEL.get(str(row.get("tournament") or ""), ""),
             "indoor": _INDOR_TO_RAW.get(row.get("is_indoor"), ""),
             "tourney_date": match_date.strftime("%Y%m%d") if match_date else "",
             "match_num": str(int(seq)),
-            "winner_id": str(row.get("winner_id") or ""),
-            "loser_id": str(row.get("player2_id") or ""),
+            "winner_id": winner_id,
+            "winner_seed": str(row.get("winner_seed") or ""),
+            "winner_entry": str(row.get("winner_entry") or ""),
+            "winner_name": winner_profile.get("display_name") or str(row.get("player1_name") or ""),
+            "winner_hand": winner_profile.get("hand") or "",
+            "winner_ht": winner_profile.get("height") or "",
+            "winner_ioc": winner_profile.get("ioc") or "",
             "winner_age": _fmt_num(row.get("player1_age")),
-            "loser_age": _fmt_num(row.get("player2_age")),
             "winner_rank": _fmt_num(row.get("player1_ranking")),
-            "loser_rank": _fmt_num(row.get("player2_ranking")),
             "winner_rank_points": _fmt_num(row.get("player1_rank_points")),
+            "loser_id": loser_id,
+            "loser_seed": str(row.get("loser_seed") or ""),
+            "loser_entry": str(row.get("loser_entry") or ""),
+            "loser_name": loser_profile.get("display_name") or str(row.get("player2_name") or ""),
+            "loser_hand": loser_profile.get("hand") or "",
+            "loser_ht": loser_profile.get("height") or "",
+            "loser_ioc": loser_profile.get("ioc") or "",
+            "loser_age": _fmt_num(row.get("player2_age")),
+            "loser_rank": _fmt_num(row.get("player2_ranking")),
             "loser_rank_points": _fmt_num(row.get("player2_rank_points")),
             "score": str(row.get("score") or ""),
+            "best_of": _fmt_num(row.get("best_of")),
             "round": str(row.get("round") or "").upper(),
+            "minutes": _fmt_num(row.get("minutes")),
         }
     )
     for suffix, winner_col in _BRONZE_TO_RAW_STATS.items():
@@ -1706,6 +1795,7 @@ def _process_tournament(
     ages: dict[str, float],
     rank_map: dict[str, str],
     canonical: dict[str, str] | None,
+    profiles: dict[str, dict[str, str]] | None = None,
     csv_ids: dict[int, set[str]] | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
@@ -1820,7 +1910,7 @@ def _process_tournament(
             ids = (csv_ids or {}).setdefault(year, load_csv_match_ids(csv_path))
             if bronze_match_id not in ids:
                 appended, ids = append_raw_match_rows(
-                    [bronze_row_to_raw_match(row)], csv_path, existing=ids
+                    [bronze_row_to_raw_match(row, profiles)], csv_path, existing=ids
                 )
                 result["csv_appended"] += appended
                 if csv_ids is not None:
@@ -1911,6 +2001,7 @@ def matches_flow(
     rank_points, ages = _latest_rank_points_and_ages(rows)
     rank_map = load_ranking_player_map()
     canonical = canonical_players()
+    profiles = load_player_metadata()
 
     totals: dict[str, int] = {
         "discovered": 0,
@@ -1974,6 +2065,7 @@ def matches_flow(
                     ages=ages,
                     rank_map=rank_map,
                     canonical=canonical,
+                    profiles=profiles,
                     csv_ids=csv_ids,
                     force=force,
                 )

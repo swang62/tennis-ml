@@ -17,6 +17,12 @@
 -- Materialization: plain table, rebuilt in full on every ETL run. Career
 -- aggregates change with every new match, so this recomputes globally (never
 -- incremental) by design.
+--
+-- Numeric precision contract: every emitted floating/statistical aggregate is
+-- truncated to 5 decimal places via TRUNC(x::NUMERIC, 5) in the final SELECT,
+-- so the weighted sums/denominators above retain full precision internally.
+-- Integer identifiers, counts, rank points, dates, and current_rank are
+-- unchanged.
 
 WITH player_agg AS (
     SELECT
@@ -167,36 +173,48 @@ SELECT
     -- player's rank during their most recent match when absent
     COALESCE(lr.rank, pa.last_match_rank)       AS current_rank,
 
-    -- service
-    pa.first_serve_in_pct,
-    pa.aces_per_first_serve,
-    pa.first_serve_points_won_pct,
-    pa.second_serve_points_won_pct,
-    pa.overall_serve_points_won_pct,
-    pa.double_faults_per_serve_point,
-    pa.aces_per_service_game,
-    pa.break_points_saved_pct,
+    -- service (weighted rates, truncated to 5 dp)
+    TRUNC(pa.first_serve_in_pct::NUMERIC, 5)::DOUBLE PRECISION AS first_serve_in_pct,
+    TRUNC(pa.aces_per_first_serve::NUMERIC, 5)::DOUBLE PRECISION AS aces_per_first_serve,
+    TRUNC(pa.first_serve_points_won_pct::NUMERIC, 5)::DOUBLE PRECISION
+        AS first_serve_points_won_pct,
+    TRUNC(pa.second_serve_points_won_pct::NUMERIC, 5)::DOUBLE PRECISION
+        AS second_serve_points_won_pct,
+    TRUNC(pa.overall_serve_points_won_pct::NUMERIC, 5)::DOUBLE PRECISION
+        AS overall_serve_points_won_pct,
+    TRUNC(pa.double_faults_per_serve_point::NUMERIC, 5)::DOUBLE PRECISION
+        AS double_faults_per_serve_point,
+    TRUNC(pa.aces_per_service_game::NUMERIC, 5)::DOUBLE PRECISION
+        AS aces_per_service_game,
+    TRUNC(pa.break_points_saved_pct::NUMERIC, 5)::DOUBLE PRECISION
+        AS break_points_saved_pct,
 
-    -- return
-    pa.return_points_won_pct,
-    ra.first_serve_return_points_won_pct,
-    ra.second_serve_return_points_won_pct,
-    ra.return_games_won_pct,
-    ra.break_point_conversion_pct,
-    ra.break_point_opportunities_per_return_game,
+    -- return (weighted rates, truncated to 5 dp)
+    TRUNC(pa.return_points_won_pct::NUMERIC, 5)::DOUBLE PRECISION
+        AS return_points_won_pct,
+    TRUNC(ra.first_serve_return_points_won_pct::NUMERIC, 5)::DOUBLE PRECISION
+        AS first_serve_return_points_won_pct,
+    TRUNC(ra.second_serve_return_points_won_pct::NUMERIC, 5)::DOUBLE PRECISION
+        AS second_serve_return_points_won_pct,
+    TRUNC(ra.return_games_won_pct::NUMERIC, 5)::DOUBLE PRECISION
+        AS return_games_won_pct,
+    TRUNC(ra.break_point_conversion_pct::NUMERIC, 5)::DOUBLE PRECISION
+        AS break_point_conversion_pct,
+    TRUNC(ra.break_point_opportunities_per_return_game::NUMERIC, 5)::DOUBLE PRECISION
+        AS break_point_opportunities_per_return_game,
 
-    -- surface
+    -- surface (counts unchanged; win rates truncated to 5 dp)
     COALESCE(pa.hard_matches, 0)              AS hard_matches,
     COALESCE(pa.clay_matches, 0)              AS clay_matches,
     COALESCE(pa.grass_matches, 0)             AS grass_matches,
-    pa.hard_win_rate,
-    pa.clay_win_rate,
-    pa.grass_win_rate,
-    pa.career_win_rate,
+    TRUNC(pa.hard_win_rate::NUMERIC, 5)::DOUBLE PRECISION AS hard_win_rate,
+    TRUNC(pa.clay_win_rate::NUMERIC, 5)::DOUBLE PRECISION AS clay_win_rate,
+    TRUNC(pa.grass_win_rate::NUMERIC, 5)::DOUBLE PRECISION AS grass_win_rate,
+    TRUNC(pa.career_win_rate::NUMERIC, 5)::DOUBLE PRECISION AS career_win_rate,
 
-    -- recent form
+    -- recent form (field already truncated to 5 dp upstream; idempotent)
     ls.recent_snapshot_date,
-    ls.win_rate_10
+    TRUNC(ls.win_rate_10::NUMERIC, 5) AS win_rate_10
 FROM {{ source('bronze', 'player_profiles') }} bp
 LEFT JOIN player_agg pa       ON pa.player_id = bp.player_id
 LEFT JOIN return_agg ra       ON ra.player_id = bp.player_id

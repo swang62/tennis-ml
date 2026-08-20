@@ -183,6 +183,16 @@ CREATE INDEX IF NOT EXISTS idx_match_events_p1_date_match
 CREATE INDEX IF NOT EXISTS idx_match_events_p2_date_match
     ON bronze.match_events (player2_id, match_date DESC, match_id DESC);
 
+-- Exact unordered-pair seek indexes for the gold H2H five-meeting lookup:
+-- (p1_id, p2_id) equality in (match_date DESC, match_id DESC) order lets each
+-- directional row's bounded lateral scan stop after its five newest
+-- strictly-prior meetings instead of OR-scanning either side's full history.
+-- Also serve direct pair queries from /head_to_head-style endpoints.
+CREATE INDEX IF NOT EXISTS idx_match_events_p1_p2_date_match
+    ON bronze.match_events (player1_id, player2_id, match_date DESC, match_id DESC);
+CREATE INDEX IF NOT EXISTS idx_match_events_p2_p1_date_match
+    ON bronze.match_events (player2_id, player1_id, match_date DESC, match_id DESC);
+
 -- Global latest-match lookup for the dynamic directory footer.
 CREATE INDEX IF NOT EXISTS idx_match_events_date
     ON bronze.match_events (match_date);

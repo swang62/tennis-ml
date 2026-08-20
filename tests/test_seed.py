@@ -299,6 +299,11 @@ def test_seed_wires_existing_ranking_and_enrichment_paths():
     assert seed.enrich_players is ingest.enrich_players
 
 
+def test_seed_wires_clear_match_events():
+    """--force reuses the DB-layer clear helper, not a seed-local DELETE."""
+    assert seed.clear_match_events is ingest.clear_match_events
+
+
 def test_main_dispatches_without_network(monkeypatch):
     """Flag combos dispatch offline; --enrich is the only network gate."""
     calls = []
@@ -432,6 +437,7 @@ def _patch_seed_writes(monkeypatch, calls):
     monkeypatch.setattr(seed, "load_all_raw_atp_rows", lambda _paths: [])
     monkeypatch.setattr(seed, "select_matches", lambda _matches, **_kwargs: [])
     monkeypatch.setattr(seed, "atp_rows_to_bronze", _fake_bronze)
+    monkeypatch.setattr(seed, "clear_match_events", lambda: calls.append("clear"))
     monkeypatch.setattr(
         seed, "insert_bronze_rows", lambda _df, overwrite=False: calls.append(overwrite) or 0
     )
@@ -464,15 +470,51 @@ def test_main_all_skips_existing_rows_by_default(monkeypatch):
     assert calls == [False, (["A0E2", "Z355"], True, False)]
 
 
-def test_main_force_overwrites_everywhere(monkeypatch):
-    """--force propagates to matches, profiles, rankings, and enrichment."""
+def test_main_default_force_clears_match_events_before_insert(monkeypatch):
+    """--force on the default miniset clears bronze.match_events, then inserts
+    the corpus fresh (overwrite=False) instead of overwriting rows."""
+    calls = []
+    _patch_seed_writes(monkeypatch, calls)
+
+    seed.main_default(force=True)
+
+    assert calls == ["clear", False, (["A0E2", "Z355"], False, True)]
+
+
+def test_main_all_force_clears_match_events_before_insert(monkeypatch):
+    """--force on --all clears bronze.match_events, then inserts the full
+    corpus fresh (overwrite=False)."""
+    calls = []
+    monkeypatch.setattr(seed, "discover_atp_csvs", lambda _dir: [Path("2026.csv")])
+    _patch_seed_writes(monkeypatch, calls)
+
+    seed.main_all(force=True)
+
+    assert calls == ["clear", False, (["A0E2", "Z355"], False, True)]
+
+
+def test_main_without_force_never_clears_match_events(monkeypatch):
+    """Only --force clears; the idempotent path goes straight to the insert."""
+    calls = []
+    monkeypatch.setattr(seed, "discover_atp_csvs", lambda _dir: [Path("2026.csv")])
+    _patch_seed_writes(monkeypatch, calls)
+
+    seed.main_all(enrich=True)
+
+    assert "clear" not in calls
+    assert calls == [False, (["A0E2", "Z355"], True, False)]
+
+
+def test_main_force_clears_and_rebuilds(monkeypatch):
+    """--force clears matches (fresh insert), while overwrite still reaches
+    profiles, rankings, and enrichment."""
     calls = []
     monkeypatch.setattr(seed, "discover_atp_csvs", lambda _dir: [Path("2026.csv")])
     _patch_seed_writes(monkeypatch, calls)
 
     seed.main_all(enrich=True, force=True)
 
-    assert calls == [True, (["A0E2", "Z355"], True, True)]
+    assert calls == ["clear", False, (["A0E2", "Z355"], True, True)]
 
 
 def test_main_default_imports_rank_history_only_for_miniset_players(monkeypatch):
@@ -527,11 +569,12 @@ def test_main_default_prints_actual_inserted_and_skipped_counts(monkeypatch, cap
     )
 
 
-def test_main_force_prints_inserted_overwrite_count(monkeypatch, capsys):
-    """--force reports the overwritten count without a skipped-existing tail."""
+def test_main_force_prints_clear_and_rebuild_count(monkeypatch, capsys):
+    """--force reports the cleared table and the rebuilt inserted count."""
     monkeypatch.setattr(seed, "discover_atp_csvs", lambda _dir: [Path("2026.csv")])
     monkeypatch.setattr(seed, "load_all_raw_atp_rows", lambda _paths: [])
     monkeypatch.setattr(seed, "atp_rows_to_bronze", _fake_bronze)
+    monkeypatch.setattr(seed, "clear_match_events", lambda: None)
     monkeypatch.setattr(seed, "insert_bronze_rows", lambda _df, **kwargs: 2)  # noqa: ARG005
     monkeypatch.setattr(seed, "load_profiles_for", lambda _ids, _src, **_kwargs: None)
     monkeypatch.setattr(
@@ -540,4 +583,6 @@ def test_main_force_prints_inserted_overwrite_count(monkeypatch, capsys):
 
     seed.main_all(enrich=True, force=True)
 
-    assert "Inserted 2 rows into bronze.match_events (overwrite)" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Cleared bronze.match_events for a clean rebuild" in out
+    assert "Inserted 2 rows into bronze.match_events (clean rebuild)" in out

@@ -1,5 +1,5 @@
--- Assert every snapshot-backed feature of each match_features row comes from
--- the player's PRIOR snapshot only — the latest rolling_features snapshot
+-- Assert every snapshot-backed feature of each SAMPLED match_features row comes
+-- from the player's PRIOR snapshot only — the latest rolling_features snapshot
 -- strictly before the match date (snapshot_date < match_date, the same
 -- date-strict semantics match_features and inference use; a same-date snapshot
 -- of another match can never supply it) — or, when that prior state is missing
@@ -9,6 +9,30 @@
 -- mirrors of a match are checked independently. Any mismatch means the row
 -- used a current-match snapshot (leakage), its current-match raw stats, a
 -- wrong snapshot, or the wrong default.
+--
+-- SAMPLED CONTRACT (performance; assertion semantics unchanged): instead of
+-- re-deriving every directional row (~400k, ~286s on the full dataset), the
+-- test samples a deterministic, bounded set of PHYSICAL match_ids
+-- (silver.player_matches holds both directional rows per physical match under
+-- one match_id) and re-derives only the directional gold rows of each sampled
+-- match — both mirrors always. The sample deliberately covers, each from an
+-- ordered, LIMIT-capped stratum so its size is bounded regardless of dataset
+-- growth:
+--   * earliest history  — first N matches by (match_date, match_id)
+--   * latest history    — last N matches
+--   * cold starts       — matches where either side has player_match_number 1,
+--                         so no strictly-prior snapshot exists
+--   * same-date matches — matches where some player played twice on one date;
+--                         the strict < guard is what keeps the later match's
+--                         prior state from picking up a same-day snapshot
+--   * repeated H2H      — matches whose unordered player pair meets in >= 2
+--                         distinct matches
+--   * uniform coverage  — deterministic md5(match_id)-based ~1/256 sample over
+--                         all physical matches
+-- The strata are deduped by match_id. md5 is a stable public function, so the
+-- sample is identical on every run against the same data. Comparisons carry
+-- player_id and join results back on (match_id, player_id), so each comparison
+-- row maps to exactly one directional row (no directional multiplication).
 --
 -- Silver now STORES the Beta(1,1)-smoothed rates ((successes+1)/(opportunities+2)),
 -- and match_features consumes those stored values directly, so the
@@ -33,6 +57,13 @@
 -- age, rank_trend) come from the PRIOR snapshot (pre-match known, never from
 -- current-match raw stats).
 --
+-- Precision contract: match_features truncates every emitted float to 5
+-- decimal places at its output boundary, so each re-derived prior_val below
+-- is truncated the same way (TRUNC(x::NUMERIC, 5)) before the comparison —
+-- otherwise the 1e-5 output quantization would flag every >5dp row as a
+-- false positive. Leakage shifts a feature by O(0.01), far above the 1e-6
+-- float-round-off tolerance, so the check keeps full teeth.
+--
 -- Covered snapshot-backed fields:
 --   diff form:      win_rate_diff, streak_diff, surface_form_diff, surface
 --                    (via per-side), days_since_last_match_diff,
@@ -47,6 +78,10 @@
 --                    player/opponent_matches_10 (exposure, from prior snapshot)
 --   as-of-date:     player/opponent_ranking, player/opponent_age,
 --                    rank_points_diff (prior snapshot)
+{% set sample_sizes = {
+    "early": 25, "late": 25, "cold": 50, "same_date": 50, "h2h": 50,
+} %}
+{% set uniform_denom = 256 %}
 {% set diff_cols = [
     "win_rate_10", "ace_rate_10", "first_serve_pct_10",
     "break_points_saved_pct_10", "first_serve_win_pct_10",
@@ -66,7 +101,65 @@
     "aces_per_svc_game_10": "aces_per_svc_game_diff",
     "avg_rank_faced_10": "avg_rank_faced_diff",
 } %}
-WITH prior_snapshot AS (
+WITH sampled_matches AS (
+    -- Deterministic, bounded physical-match sample. Each stratum is a
+    -- per-branch parenthesized LIMIT, so the sample size is capped even as
+    -- the dataset grows. (match_date, match_id) is unique per physical match.
+    SELECT match_id
+    FROM (
+        (SELECT DISTINCT match_id, match_date
+         FROM {{ ref('player_matches') }}
+         ORDER BY match_date, match_id
+         LIMIT {{ sample_sizes.early }})
+        UNION ALL
+        (SELECT DISTINCT match_id, match_date
+         FROM {{ ref('player_matches') }}
+         ORDER BY match_date DESC, match_id DESC
+         LIMIT {{ sample_sizes.late }})
+        UNION ALL
+        -- Cold start: either side's first career match has no strictly-prior
+        -- snapshot, so both its feature values fall back to the singleton.
+        (SELECT DISTINCT match_id, match_date
+         FROM {{ ref('player_matches') }}
+         WHERE player_match_number = 1
+         ORDER BY match_date, match_id
+         LIMIT {{ sample_sizes.cold }})
+        UNION ALL
+        -- Same-date: a player plays twice on one date; the later match's only
+        -- prior snapshot is same-date, which the strict < guard must exclude.
+        (SELECT DISTINCT match_id, match_date
+         FROM {{ ref('player_matches') }}
+         WHERE (player_id, match_date) IN (
+             SELECT player_id, match_date
+             FROM {{ ref('player_matches') }}
+             GROUP BY player_id, match_date
+             HAVING COUNT(*) > 1
+         )
+         ORDER BY match_date, match_id
+         LIMIT {{ sample_sizes.same_date }})
+        UNION ALL
+        -- Repeated H2H: the unordered player pair meets in two or more matches.
+        (SELECT DISTINCT match_id, match_date
+         FROM {{ ref('player_matches') }}
+         WHERE (LEAST(player_id, opponent_id), GREATEST(player_id, opponent_id)) IN (
+             SELECT LEAST(player_id, opponent_id), GREATEST(player_id, opponent_id)
+             FROM {{ ref('player_matches') }}
+             GROUP BY 1, 2
+             HAVING COUNT(DISTINCT match_id) >= 2
+         )
+         ORDER BY match_date, match_id
+         LIMIT {{ sample_sizes.h2h }})
+        UNION ALL
+        -- Uniform coverage: first md5 byte modulo the denominator selects about
+        -- 1/256 of all physical matches, deterministically (md5 is a stable
+        -- public function; the byte value is portable across PostgreSQL).
+        (SELECT DISTINCT match_id, match_date
+         FROM {{ ref('player_matches') }}
+         WHERE get_byte(decode(md5(match_id), 'hex'), 0) % {{ uniform_denom }} = 0)
+    ) strata
+    GROUP BY match_id
+),
+prior_snapshot AS (
     SELECT
         mf.match_id,
         mf.player_id,
@@ -179,7 +272,13 @@ WITH prior_snapshot AS (
              ELSE pm.match_date - prp.snapshot_date END AS player_prior_days_since,
         CASE WHEN pro.player_id IS NULL THEN fd.days_since_default
              ELSE po.match_date - pro.snapshot_date END AS opponent_prior_days_since
-    FROM {{ ref('match_features') }} mf
+    -- Filter BEFORE the lateral expansion: match_features is reduced to the
+    -- sampled physical matches, so the per-row prior lookups run only for
+    -- sampled directional rows.
+    FROM (
+        SELECT * FROM {{ ref('match_features') }}
+        WHERE match_id IN (SELECT match_id FROM sampled_matches)
+    ) mf
     JOIN {{ ref('player_matches') }} pm
       ON pm.match_id = mf.match_id AND pm.player_id = mf.player_id
     JOIN {{ ref('player_matches') }} po
@@ -202,71 +301,78 @@ WITH prior_snapshot AS (
 ),
 comparisons AS (
     {% for c in diff_cols %}
-    SELECT match_id, '{{ c }}_diff' AS feature, {{ diff_stored[c] }} AS mf_val,
-           player_prior_{{ c }} - opponent_prior_{{ c }} AS prior_val,
+    SELECT match_id, player_id, '{{ c }}_diff' AS feature, {{ diff_stored[c] }} AS mf_val,
+           TRUNC((player_prior_{{ c }} - opponent_prior_{{ c }})::NUMERIC, 5)
+               ::DOUBLE PRECISION AS prior_val,
            player_raw_{{ c }} IS NOT NULL AND opponent_raw_{{ c }} IS NOT NULL AS guard
     FROM prior_snapshot
     UNION ALL
     {% endfor %}
-    SELECT match_id, 'streak_diff' AS feature, streak_diff AS mf_val,
+    SELECT match_id, player_id, 'streak_diff' AS feature, streak_diff AS mf_val,
            player_prior_streak - opponent_prior_streak AS prior_val,
            player_raw_streak IS NOT NULL AND opponent_raw_streak IS NOT NULL AS guard
     FROM prior_snapshot
     UNION ALL
-    SELECT match_id, 'surface_form_diff' AS feature, surface_form_diff AS mf_val,
-           player_prior_surface_form - opponent_prior_surface_form AS prior_val,
+    SELECT match_id, player_id, 'surface_form_diff' AS feature, surface_form_diff AS mf_val,
+           TRUNC((player_prior_surface_form - opponent_prior_surface_form)::NUMERIC, 5)
+               ::DOUBLE PRECISION AS prior_val,
            player_raw_surface_form IS NOT NULL AND opponent_raw_surface_form IS NOT NULL AS guard
     FROM prior_snapshot
     UNION ALL
-    SELECT match_id, 'days_since_last_match_diff' AS feature, days_since_last_match_diff AS mf_val,
-           LN(1.0 + player_prior_days_since) - LN(1.0 + opponent_prior_days_since) AS prior_val,
+    SELECT match_id, player_id, 'days_since_last_match_diff' AS feature, days_since_last_match_diff AS mf_val,
+           TRUNC((LN(1.0 + player_prior_days_since)
+               - LN(1.0 + opponent_prior_days_since))::NUMERIC, 5)::DOUBLE PRECISION AS prior_val,
            player_raw_days_since IS NOT NULL AND opponent_raw_days_since IS NOT NULL AS guard
     FROM prior_snapshot
     UNION ALL
-    SELECT match_id, 'recent_game_margin_diff' AS feature, recent_game_margin_diff AS mf_val,
-           player_prior_game_margin_10 - opponent_prior_game_margin_10 AS prior_val,
+    SELECT match_id, player_id, 'recent_game_margin_diff' AS feature, recent_game_margin_diff AS mf_val,
+           TRUNC((player_prior_game_margin_10 - opponent_prior_game_margin_10)::NUMERIC, 5)
+               ::DOUBLE PRECISION AS prior_val,
            player_raw_game_margin_10 IS NOT NULL AND opponent_raw_game_margin_10 IS NOT NULL AS guard
     FROM prior_snapshot
     UNION ALL
-    SELECT match_id, 'rank_trend_diff' AS feature, rank_trend_diff AS mf_val,
-           (player_prior_avg_rank_10 - player_prior_ranking)
-           - (opponent_prior_avg_rank_10 - opponent_prior_ranking) AS prior_val,
+    SELECT match_id, player_id, 'rank_trend_diff' AS feature, rank_trend_diff AS mf_val,
+           TRUNC(((player_prior_avg_rank_10 - player_prior_ranking)
+               - (opponent_prior_avg_rank_10 - opponent_prior_ranking))::NUMERIC, 5)
+               ::DOUBLE PRECISION AS prior_val,
            player_raw_avg_rank_10 IS NOT NULL AND player_raw_ranking IS NOT NULL
            AND opponent_raw_avg_rank_10 IS NOT NULL AND opponent_raw_ranking IS NOT NULL
            AS guard
     FROM prior_snapshot
     UNION ALL
-    SELECT match_id, 'player_weighted_form_10' AS feature,
-           player_weighted_form_10 AS mf_val, player_prior_weighted_form_10 AS prior_val,
+    SELECT match_id, player_id, 'player_weighted_form_10' AS feature,
+           player_weighted_form_10 AS mf_val,
+           TRUNC(player_prior_weighted_form_10::NUMERIC, 5)::DOUBLE PRECISION AS prior_val,
            player_raw_weighted_form_10 IS NOT NULL AS guard
     FROM prior_snapshot
     UNION ALL
-    SELECT match_id, 'opponent_weighted_form_10' AS feature,
-           opponent_weighted_form_10 AS mf_val, opponent_prior_weighted_form_10 AS prior_val,
+    SELECT match_id, player_id, 'opponent_weighted_form_10' AS feature,
+           opponent_weighted_form_10 AS mf_val,
+           TRUNC(opponent_prior_weighted_form_10::NUMERIC, 5)::DOUBLE PRECISION AS prior_val,
            opponent_raw_weighted_form_10 IS NOT NULL AS guard
     FROM prior_snapshot
     UNION ALL
-    SELECT match_id, 'player_matches_10' AS feature,
+    SELECT match_id, player_id, 'player_matches_10' AS feature,
            player_matches_10 AS mf_val, player_prior_matches_10 AS prior_val,
            player_raw_matches_10 IS NOT NULL AS guard
     FROM prior_snapshot
     UNION ALL
-    SELECT match_id, 'opponent_matches_10' AS feature,
+    SELECT match_id, player_id, 'opponent_matches_10' AS feature,
            opponent_matches_10 AS mf_val, opponent_prior_matches_10 AS prior_val,
            opponent_raw_matches_10 IS NOT NULL AS guard
     FROM prior_snapshot
     UNION ALL
-    SELECT match_id, 'age_diff' AS feature, age_diff AS mf_val,
-           player_prior_age - opponent_prior_age AS prior_val,
+    SELECT match_id, player_id, 'age_diff' AS feature, age_diff AS mf_val,
+           TRUNC((player_prior_age - opponent_prior_age)::NUMERIC, 5)::DOUBLE PRECISION AS prior_val,
            player_raw_age IS NOT NULL AND opponent_raw_age IS NOT NULL AS guard
     FROM prior_snapshot
     UNION ALL
-    SELECT match_id, 'rank_diff' AS feature, rank_diff AS mf_val,
+    SELECT match_id, player_id, 'rank_diff' AS feature, rank_diff AS mf_val,
            player_prior_ranking - opponent_prior_ranking AS prior_val,
            player_raw_ranking IS NOT NULL AND opponent_raw_ranking IS NOT NULL AS guard
     FROM prior_snapshot
     UNION ALL
-    SELECT match_id, 'rank_points_diff' AS feature, rank_points_diff AS mf_val,
+    SELECT match_id, player_id, 'rank_points_diff' AS feature, rank_points_diff AS mf_val,
            player_prior_rank_points - opponent_prior_rank_points AS prior_val,
            player_raw_rank_points IS NOT NULL AND opponent_raw_rank_points IS NOT NULL AS guard
     FROM prior_snapshot
@@ -279,7 +385,9 @@ SELECT
     c.mf_val,
     c.prior_val
 FROM comparisons c
-JOIN prior_snapshot ps USING (match_id)
+JOIN prior_snapshot ps
+    ON ps.match_id = c.match_id
+   AND ps.player_id = c.player_id
 WHERE c.guard
   -- Real leakage shifts a feature by an O(0.01) amount; tolerate float
   -- round-off so recomputation noise never flags a false positive.
@@ -287,4 +395,4 @@ WHERE c.guard
     (c.mf_val IS NULL) <> (c.prior_val IS NULL)
     OR ABS(c.mf_val - c.prior_val) > 1e-6
   )
-ORDER BY c.match_id, c.feature
+ORDER BY c.match_id, c.player_id, c.feature
