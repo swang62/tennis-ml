@@ -1,6 +1,4 @@
 import re
-from contextlib import nullcontext
-from types import SimpleNamespace
 
 import src.db.migrate_db as migrate_db
 
@@ -13,6 +11,7 @@ def _schema_ddl() -> str:
 class _Cursor:
     def __init__(self):
         self.statements = []
+        self.results_called = False
 
     def __enter__(self):
         return self
@@ -23,6 +22,24 @@ class _Cursor:
     def execute(self, statement):
         self.statements.append(statement)
 
+    def results(self):
+        self.results_called = True
+        yield None
+
+
+class _Connection:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def cursor(self):
+        return self._cursor
+
 
 def test_migrate_bootstraps_configured_database_from_template1(monkeypatch, tmp_path):
     """Bootstrap derives the target and SSL settings from DATABASE_URL."""
@@ -30,29 +47,32 @@ def test_migrate_bootstraps_configured_database_from_template1(monkeypatch, tmp_
     schema_sql.write_text("CREATE SCHEMA bronze;")
     maintenance_cursor = _Cursor()
     target_cursor = _Cursor()
-    maintenance_connection = SimpleNamespace(cursor=lambda: maintenance_cursor)
-    target_connection = SimpleNamespace(cursor=lambda: target_cursor, transaction=lambda: _Cursor())
+    maintenance_connection = _Connection(maintenance_cursor)
+    target_connection = _Connection(target_cursor)
     connects = []
 
     def connect(conninfo, **_kwargs):
         connects.append((conninfo, _kwargs))
-        return maintenance_connection
+        return [maintenance_connection, target_connection][len(connects) - 1]
 
     monkeypatch.setenv(
         "DATABASE_URL", "postgresql://postgres:password@localhost:6543/tennis?sslmode=require"
     )
     monkeypatch.setattr(migrate_db, "SCHEMA_SQL", schema_sql)
     monkeypatch.setattr(migrate_db.psycopg, "connect", connect)
-    monkeypatch.setattr(migrate_db, "connection", lambda: nullcontext(target_connection))
-
     migrate_db.migrate()
 
     conninfo, kwargs = connects[0]
     assert "dbname=template1" in conninfo
     assert "sslmode=require" in conninfo
-    assert kwargs == {"autocommit": True, "connect_timeout": migrate_db.CONNECT_TIMEOUT_S}
+    assert kwargs == {
+        "autocommit": True,
+        "connect_timeout": migrate_db.CONNECT_TIMEOUT_S,
+        "options": "-c lock_timeout=30000 -c statement_timeout=300000",
+    }
     assert "CREATE DATABASE" in repr(maintenance_cursor.statements[0])
     assert target_cursor.statements == ["CREATE SCHEMA bronze;"]
+    assert target_cursor.results_called
 
 
 def test_migrate_prints_sanitized_progress_before_connecting(monkeypatch, capsys, tmp_path):
@@ -60,22 +80,20 @@ def test_migrate_prints_sanitized_progress_before_connecting(monkeypatch, capsys
     URL, user, or password leaked."""
     schema_sql = tmp_path / "schema.sql"
     schema_sql.write_text("CREATE SCHEMA bronze;")
-    maintenance_connection = SimpleNamespace(cursor=lambda: _Cursor())
-    target_connection = SimpleNamespace(cursor=lambda: _Cursor(), transaction=lambda: _Cursor())
+    maintenance_connection = _Connection(_Cursor())
+    target_connection = _Connection(_Cursor())
     output_at_connect = []
 
     def connect(_conninfo, **_kwargs):
         # Snapshot the output as it is when the first network call happens.
         output_at_connect.append(capsys.readouterr().out)
-        return maintenance_connection
+        return [maintenance_connection, target_connection][len(output_at_connect) - 1]
 
     monkeypatch.setenv(
         "DATABASE_URL", "postgresql://user:secret@localhost:6543/tennis?sslmode=require"
     )
     monkeypatch.setattr(migrate_db, "SCHEMA_SQL", schema_sql)
     monkeypatch.setattr(migrate_db.psycopg, "connect", connect)
-    monkeypatch.setattr(migrate_db, "connection", lambda: nullcontext(target_connection))
-
     migrate_db.migrate()
 
     assert output_at_connect[0] == "Connecting to localhost:6543/tennis...\n"
