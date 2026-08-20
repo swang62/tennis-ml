@@ -77,6 +77,8 @@ models:
         description: Mean serve_win_pct_10 over the full snapshot pool; 0.0 when empty.
       - name: return_points_won_pct_10
         description: Mean return_points_won_pct_10 over the full snapshot pool; 0.0 when empty (similarity-only input).
+      - name: dominance_10
+        description: Ratio of the pool-mean serve/return rates (mean return_points_won_pct_10 / (1 - mean serve_win_pct_10)); 0.0 when the pool is empty.
       - name: df_rate_10
         description: Mean df_rate_10 over the full snapshot pool; 0.0 when empty.
       - name: aces_per_svc_game_10

@@ -66,6 +66,22 @@ CHAMPION_ALIAS = "champion"
 # --- Prefect ---
 WORK_POOL_NAME = "tennis-pool"
 
+# --- Chronological train/validation/test split fractions ---
+# 01_train_test_split cuts the gold match date range into three contiguous
+# chronological bands with these fractions. The validation fraction also sizes
+# the within-fold early-stopping holdouts in the 02 tuners; the grouped
+# temporal CV folds themselves are not the 96/2/2 split.
+TRAIN_FRACTION = 0.96
+VAL_FRACTION = 0.02
+TEST_FRACTION = 0.02
+
+# The three bands must partition the date span exactly.
+assert abs(TRAIN_FRACTION + VAL_FRACTION + TEST_FRACTION - 1.0) < 1e-9
+
+# Shared time-forward grouped-CV fold count written by 01 and consumed by
+# every 02 tuner.
+CV_FOLDS = 5
+
 # --- Deployed production Bento ---
 IMAGE_NAME = "tennis-bento"
 PRODUCTION_BENTO_URL = os.getenv("PRODUCTION_BENTO_URL", "http://127.0.0.1:8187")

@@ -10,6 +10,12 @@
 -- is never NULL; `matches_10` exposes how many matches actually back the
 -- 10-match rates (1 for the first match, up to 10). Surface rates are smoothed
 -- the same way; they remain NULL for unseen surfaces (no surface match yet).
+-- dominance_10 is the ratio of two smoothed rates,
+-- return_points_won_pct_10 / (1 - serve_win_pct_10), expressing return
+-- strength per unit of serve weakness; both inputs are strictly below 1 (the
+-- Beta(1,1) smoothing caps the smoothed serve/return rates at < 1), so the
+-- denominator is never zero and dominance_10 is never NULL. It is a ratio, not
+-- a probability, so it is unbounded above.
 -- aces_per_svc_game_10, weighted_form_10, streak, game_margin_10, and the
 -- rank averages are NOT probabilities and are deliberately left unsmoothed.
 -- game_margin_10 is the rolling average per-match game margin (games won minus
@@ -314,11 +320,21 @@ LEFT JOIN player_surface_matches psm_hard
 WINDOW
     w10 AS (PARTITION BY s.player_id ORDER BY s.snapshot_date, s.match_id
             ROWS BETWEEN 9 PRECEDING AND CURRENT ROW)
+),
+-- dominance_10: return strength per unit of serve weakness. Derived from the
+-- two smoothed rates above (never the raw window sums) so the ratio matches
+-- what gold/inference recompute from the stored rates cell for cell.
+dominance AS (
+    SELECT
+        *,
+        TRUNC((return_points_won_pct_10 / (1.0 - serve_win_pct_10))::NUMERIC, 5)
+            AS dominance_10
+    FROM computed
 )
 -- Trim to the affected players' full histories; every window above was
 -- evaluated over the full history, so these rows carry exactly the values a
 -- full rebuild gives and the temp relation holds unique (player_id, match_id)s.
-SELECT * FROM computed
+SELECT * FROM dominance
 {% if is_incremental() %}
 WHERE player_id IN (SELECT player_id FROM changed_players)
 {% endif %}

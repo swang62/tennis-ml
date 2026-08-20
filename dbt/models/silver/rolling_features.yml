@@ -114,6 +114,12 @@ models:
           silver.player_matches from the opponent's raw serve counts. Smoothed,
           never NULL. Consumed only by the PlayerSimilarity style index (not a
           model feature).
+      - name: dominance_10
+        description: >
+          Return strength per unit of serve weakness:
+          return_points_won_pct_10 / (1 - serve_win_pct_10) over the last 10
+          matches including this one. A ratio of two smoothed rates, so never
+          NULL (both inputs < 1) and unbounded above.
       - name: aces_per_svc_game_10
         description: Sum(aces) / sum(service_games) over the last 10 matches including this one; NULL when the window has no service games. Per-game count, not smoothed.
       - name: game_margin_10

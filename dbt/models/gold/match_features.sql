@@ -3,7 +3,8 @@
 -- TWO directional rows per physical match, keyed by (match_id, player_id):
 -- one row per player, each in that player's own perspective. The two rows
 -- share match_id and the match context, exchange the paired player_*/opponent_*
--- side values, negate the signed differences and h2h_advantage, and carry
+-- side values, negate the signed differences and the h2h advantage features,
+-- and carry
 -- complementary match_won labels. Every side-level value (ranking, rank
 -- points, age, rolling state, profile, activity) is imputed BEFORE matchup
 -- differences are calculated, so every FEATURE_COLS cell is non-null and
@@ -20,11 +21,14 @@
 -- match_won = 1 iff this row's player side won, else 0. It is the LABEL, not
 -- a feature.
 --
--- H2H uses the five most recent distinct, strictly-prior unordered-pair
--- meetings, read directly from bronze.match_events via winner_id (no id
--- canonicalization). h2h_exposure is the shared meeting count (identical for
--- both mirrors); h2h_advantage is the Beta(1,1)-smoothed directional advantage
--- and negates across mirrors.
+-- H2H reads bronze.match_events (via winner_id, no id canonicalization).
+-- h2h_exposure is the LIFETIME count of all strictly-prior unordered-pair
+-- meetings (uncapped, identical for both mirrors); h2h_advantage and
+-- h2h_surface_advantage are Beta(1,1)-smoothed directional advantages built
+-- from the FIVE most recent strictly-prior meetings (the surface variant
+-- restricted to meetings on the current match's surface) and negate across
+-- mirrors. Recent-5 lookups stay bounded (LIMIT 5 laterals); lifetime
+-- exposure uses a separate unbounded count.
 --
 -- Player snapshot state stays strictly prior (no current-match leakage);
 -- fallback values are intentionally global: the same full-pool singleton is
@@ -102,6 +106,9 @@ player_match_enriched AS (
         COALESCE(pr.serve_win_pct_10, fd.serve_win_pct_10) AS serve_win_pct_10,
         COALESCE(pr.return_points_won_pct_10, fd.return_points_won_pct_10)
             AS return_points_won_pct_10,
+        -- Return strength per unit of serve weakness (ratio of smoothed rates,
+        -- never NULL: both inputs are < 1).
+        COALESCE(pr.dominance_10, fd.dominance_10) AS dominance_10,
         COALESCE(pr.df_rate_10, fd.df_rate_10) AS df_rate_10,
         COALESCE(pr.aces_per_svc_game_10, fd.aces_per_svc_game_10)
             AS aces_per_svc_game_10,
@@ -182,13 +189,16 @@ player_match_enriched AS (
 -- candidate meetings per directional row reach the window below; the global
 -- (match_date DESC, match_id DESC) top five is then identical to the old
 -- OR-join over all prior meetings while scanning only the newest meetings.
+-- meeting_surface_matches marks meetings on the CURRENT match's surface so the
+-- surface advantage can be computed from the same bounded top-five window.
 pair_meetings AS (
-    SELECT match_id, player_id, winner_is_current_player
+    SELECT match_id, player_id, winner_is_current_player, meeting_surface_matches
     FROM (
         SELECT
             match_id,
             player_id,
             (winner_id = player_id) AS winner_is_current_player,
+            (meeting_surface = surface) AS meeting_surface_matches,
             ROW_NUMBER() OVER (
                 PARTITION BY match_id, player_id
                 ORDER BY match_date DESC, meeting_match_id DESC
@@ -200,10 +210,12 @@ pair_meetings AS (
                 current_match.player_id,
                 meeting.winner_id,
                 meeting.match_date,
-                meeting.match_id AS meeting_match_id
+                meeting.match_id AS meeting_match_id,
+                meeting.surface AS meeting_surface,
+                current_match.surface
             FROM player_match_enriched current_match
             CROSS JOIN LATERAL (
-                SELECT winner_id, match_date, match_id
+                SELECT winner_id, match_date, match_id, surface
                 FROM {{ source('bronze', 'match_events') }} meeting
                 WHERE meeting.player1_id = current_match.player_id
                   AND meeting.player2_id = current_match.opponent_id
@@ -218,10 +230,12 @@ pair_meetings AS (
                 current_match.player_id,
                 meeting.winner_id,
                 meeting.match_date,
-                meeting.match_id AS meeting_match_id
+                meeting.match_id AS meeting_match_id,
+                meeting.surface AS meeting_surface,
+                current_match.surface
             FROM player_match_enriched current_match
             CROSS JOIN LATERAL (
-                SELECT winner_id, match_date, match_id
+                SELECT winner_id, match_date, match_id, surface
                 FROM {{ source('bronze', 'match_events') }} meeting
                 WHERE meeting.player1_id = current_match.opponent_id
                   AND meeting.player2_id = current_match.player_id
@@ -233,14 +247,41 @@ pair_meetings AS (
     ) ranked
     WHERE rn <= 5
 ),
--- Directional H2H per row: shared exposure, wins oriented to the row player.
--- pair_meetings already restricted each row to its five newest meetings.
+-- LIFETIME strictly-prior meeting count per directional row (uncapped; the
+-- pair is unordered, so both mirrors of a match agree). Separate unbounded
+-- count — the recent-5 advantages above stay bounded.
+pair_lifetime AS (
+    SELECT match_id, player_id, COUNT(*) AS lifetime_exposure
+    FROM (
+        SELECT
+            current_match.match_id,
+            current_match.player_id,
+            meeting.match_id AS meeting_match_id
+        FROM player_match_enriched current_match
+        CROSS JOIN LATERAL (
+            SELECT match_id
+            FROM {{ source('bronze', 'match_events') }} meeting
+            WHERE ((meeting.player1_id = current_match.player_id
+                        AND meeting.player2_id = current_match.opponent_id)
+                   OR (meeting.player1_id = current_match.opponent_id
+                        AND meeting.player2_id = current_match.player_id))
+              AND meeting.match_date < current_match.match_date
+        ) meeting
+    ) all_meetings
+    GROUP BY match_id, player_id
+),
+-- Directional H2H per row: recent-5 wins oriented to the row player plus the
+-- surface-restricted recent-5 wins. pair_meetings already restricted each row
+-- to its five newest meetings.
 prior_h2h AS (
     SELECT
         match_id,
         player_id,
-        COUNT(*) AS h2h_exposure,
-        SUM(CASE WHEN winner_is_current_player THEN 1 ELSE 0 END) AS wins_for_player
+        COUNT(*) AS recent_meetings,
+        SUM(CASE WHEN winner_is_current_player THEN 1 ELSE 0 END) AS wins_for_player,
+        COUNT(*) FILTER (WHERE meeting_surface_matches) AS surface_meetings,
+        SUM(CASE WHEN winner_is_current_player AND meeting_surface_matches THEN 1 ELSE 0 END)
+            AS surface_wins_for_player
     FROM pair_meetings
     GROUP BY match_id, player_id
 )
@@ -275,6 +316,8 @@ SELECT
         AS serve_win_pct_diff,
     TRUNC((p.return_points_won_pct_10 - o.return_points_won_pct_10)::NUMERIC, 5)
         ::DOUBLE PRECISION AS return_points_won_pct_diff,
+    TRUNC((p.dominance_10 - o.dominance_10)::NUMERIC, 5)::DOUBLE PRECISION
+        AS dominance_diff,
     TRUNC((p.df_rate_10 - o.df_rate_10)::NUMERIC, 5)::DOUBLE PRECISION
         AS df_rate_diff,
     TRUNC((p.aces_per_svc_game_10 - o.aces_per_svc_game_10)::NUMERIC, 5)
@@ -306,11 +349,15 @@ SELECT
     TRUNC(p.years_pro::NUMERIC, 5)::DOUBLE PRECISION AS player_years_pro,
     TRUNC(o.years_pro::NUMERIC, 5)::DOUBLE PRECISION AS opponent_years_pro,
 
-    -- ── Pair-level head-to-head: shared exposure + signed smoothed advantage ──
-    COALESCE(h.h2h_exposure, 0) AS h2h_exposure,
+    -- ── Pair-level head-to-head: lifetime exposure + recent-5 signed
+    --    advantages (overall and current-surface) ──
+    COALESCE(l.lifetime_exposure, 0) AS h2h_exposure,
     TRUNC(((COALESCE(h.wins_for_player, 0) + 1.0)
-        / (COALESCE(h.h2h_exposure, 0) + 2.0) - 0.5)::NUMERIC, 5)
+        / (COALESCE(h.recent_meetings, 0) + 2.0) - 0.5)::NUMERIC, 5)
         AS h2h_advantage,
+    TRUNC(((COALESCE(h.surface_wins_for_player, 0) + 1.0)
+        / (COALESCE(h.surface_meetings, 0) + 2.0) - 0.5)::NUMERIC, 5)
+        AS h2h_surface_advantage,
 
     -- ── Numeric match context (one-hot surface for linear and neural models) ──
     CAST(CASE WHEN p.surface = 'clay'  THEN 1 ELSE 0 END AS SMALLINT) AS is_clay,
@@ -356,4 +403,7 @@ JOIN player_match_enriched o
 LEFT JOIN prior_h2h h
     ON h.match_id = p.match_id
    AND h.player_id = p.player_id
+LEFT JOIN pair_lifetime l
+    ON l.match_id = p.match_id
+   AND l.player_id = p.player_id
 ORDER BY p.match_date, p.match_id, p.player_id
