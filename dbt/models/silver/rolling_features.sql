@@ -37,14 +37,6 @@
 --
 -- Only gold/inference inputs remain; activity and current-match rates are derived on demand.
 --
--- Numeric precision contract: every emitted floating/statistical column is
--- truncated to 5 decimal places via TRUNC(x::NUMERIC, 5) in the computed CTE,
--- which is the output boundary (the outermost SELECT is a passthrough of
--- computed), so the window/aggregate expressions above retain full precision
--- internally. Integer identifiers, ordinals, counts, dates, surfaces, the
--- pass-through integer ranks/rank points, and the signed streak are
--- unchanged; latest_player_age is the pass-through bronze float now truncated.
---
 -- Incremental boundary: affected-player rebuilds, not append-only. A snapshot
 -- depends on matches up to its own (match_date, match_id), so a historical
 -- bronze insert that lands before existing matches changes the rolling values
@@ -195,8 +187,7 @@ SELECT
     s.player_match_number,
     s.surface,
 
-    -- Current ranking, rank points, and age. Age is a pass-through bronze
-    -- float, truncated to 5 dp with the other emitted floats.
+    -- Current ranking, rank points, and age.
     s.player_ranking AS latest_player_ranking,
     s.player_rank_points AS latest_player_rank_points,
     TRUNC(s.player_age::NUMERIC, 5)::DOUBLE PRECISION AS latest_player_age,

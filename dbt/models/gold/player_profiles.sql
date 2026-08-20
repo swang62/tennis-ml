@@ -17,12 +17,6 @@
 -- Materialization: plain table, rebuilt in full on every ETL run. Career
 -- aggregates change with every new match, so this recomputes globally (never
 -- incremental) by design.
---
--- Numeric precision contract: every emitted floating/statistical aggregate is
--- truncated to 5 decimal places via TRUNC(x::NUMERIC, 5) in the final SELECT,
--- so the weighted sums/denominators above retain full precision internally.
--- Integer identifiers, counts, rank points, dates, and current_rank are
--- unchanged.
 
 WITH player_agg AS (
     SELECT
@@ -173,7 +167,7 @@ SELECT
     -- player's rank during their most recent match when absent
     COALESCE(lr.rank, pa.last_match_rank)       AS current_rank,
 
-    -- service (weighted rates, truncated to 5 dp)
+    -- service
     TRUNC(pa.first_serve_in_pct::NUMERIC, 5)::DOUBLE PRECISION AS first_serve_in_pct,
     TRUNC(pa.aces_per_first_serve::NUMERIC, 5)::DOUBLE PRECISION AS aces_per_first_serve,
     TRUNC(pa.first_serve_points_won_pct::NUMERIC, 5)::DOUBLE PRECISION
@@ -189,7 +183,7 @@ SELECT
     TRUNC(pa.break_points_saved_pct::NUMERIC, 5)::DOUBLE PRECISION
         AS break_points_saved_pct,
 
-    -- return (weighted rates, truncated to 5 dp)
+    -- return
     TRUNC(pa.return_points_won_pct::NUMERIC, 5)::DOUBLE PRECISION
         AS return_points_won_pct,
     TRUNC(ra.first_serve_return_points_won_pct::NUMERIC, 5)::DOUBLE PRECISION
@@ -203,7 +197,7 @@ SELECT
     TRUNC(ra.break_point_opportunities_per_return_game::NUMERIC, 5)::DOUBLE PRECISION
         AS break_point_opportunities_per_return_game,
 
-    -- surface (counts unchanged; win rates truncated to 5 dp)
+    -- surface
     COALESCE(pa.hard_matches, 0)              AS hard_matches,
     COALESCE(pa.clay_matches, 0)              AS clay_matches,
     COALESCE(pa.grass_matches, 0)             AS grass_matches,
@@ -212,7 +206,7 @@ SELECT
     TRUNC(pa.grass_win_rate::NUMERIC, 5)::DOUBLE PRECISION AS grass_win_rate,
     TRUNC(pa.career_win_rate::NUMERIC, 5)::DOUBLE PRECISION AS career_win_rate,
 
-    -- recent form (field already truncated to 5 dp upstream; idempotent)
+    -- recent form
     ls.recent_snapshot_date,
     TRUNC(ls.win_rate_10::NUMERIC, 5) AS win_rate_10
 FROM {{ source('bronze', 'player_profiles') }} bp
