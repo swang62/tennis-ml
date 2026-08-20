@@ -322,6 +322,16 @@ def test_match_id_prefixes_only_a_missing_edition_year():
     assert ingest.canonical_match_id("418", 26, 2026) == "2026-418-026"
 
 
+def test_match_id_reduces_date_like_year_to_edition_year():
+    """A YYYYMMDD year is normalized to its four-digit edition year, so the id
+    never embeds a full date: 19670220 + 1967-southern-pro stays
+    ``1967-southern-pro-001``, and the year-prefix rule still applies to the
+    reduced year for bare tournament ids."""
+    assert ingest.canonical_match_id("1967-southern-pro", 1, 19670220) == "1967-southern-pro-001"
+    assert ingest.canonical_match_id("418", 26, 20260201) == "2026-418-026"
+    assert ingest.canonical_match_id("2026-418", 26, 20260201) == "2026-418-026"
+
+
 def test_match_id_keeps_opaque_dashed_tournament_ids_distinct():
     """Dashes inside tourney_id are preserved, never parsed; Davis Cup style
     non-numeric ids pass through (prefixed with the edition year). ``2026-41-8``
@@ -534,6 +544,14 @@ def test_insert_bronze_rows_returns_db_affected_count(fake_ingest_conn):
 
     # The row was still staged/attempted — the DB just skipped the conflict.
     assert len(fake_ingest_conn.copied_rows) == 1
+
+
+def test_clear_match_events_deletes_all_rows_in_one_transaction(fake_ingest_conn):
+    """seed --force wipes bronze.match_events (never the table/schema) inside
+    the same transaction pattern as the COPY-based inserts."""
+    ingest.clear_match_events()
+
+    assert fake_ingest_conn.statements == [(f"DELETE FROM {ingest.BRONZE_MATCHES_TABLE}", None)]
 
 
 # ── search_wikipedia / fetch_summary ──────────────────────────────
@@ -1218,6 +1236,44 @@ def test_canonical_players_loads_id_to_name_reference():
     assert "A0E2" in players  # canonical ATP_Database id for Carlos Alcaraz
     assert players["A0E2"] == "Carlos Alcaraz"
     assert all(pid and name for pid, name in players.items())
+
+
+def _write_metadata_csv(tmp_path: Path) -> Path:
+    csv = tmp_path / "player_metadata.csv"
+    pd.DataFrame(
+        [
+            {"id": "P1", "player": "Player One", "hand": "R", "height": "185", "ioc": "fra"},
+            {"id": "p2", "player": "Player Two", "hand": "L", "height": "0", "ioc": ""},
+            {"id": "P3", "player": "Player Three", "hand": "", "height": "nan", "ioc": "USA"},
+        ]
+    ).to_csv(csv, index=False)
+    return csv
+
+
+def test_load_player_metadata_normalizes_reference_fields(tmp_path):
+    profiles = ingest.load_player_metadata(_write_metadata_csv(tmp_path))
+
+    # Ids uppercase; hand/height/ioc pass through in Sackmann vocabulary.
+    assert profiles["P1"] == {
+        "display_name": "Player One",
+        "hand": "R",
+        "height": "185",
+        "ioc": "FRA",
+    }
+    # 0 height is the reference's unknown marker; missing hand/ioc stay blank,
+    # never fabricated.
+    assert profiles["P2"] == {
+        "display_name": "Player Two",
+        "hand": "L",
+        "height": "",
+        "ioc": "",
+    }
+    assert profiles["P3"] == {
+        "display_name": "Player Three",
+        "hand": "",
+        "height": "",
+        "ioc": "USA",
+    }
 
 
 def test_load_ranking_player_map_returns_source_to_canonical(tmp_path):

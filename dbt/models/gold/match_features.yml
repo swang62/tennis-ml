@@ -33,6 +33,13 @@ models:
       the bronze boundary (CHECK + normalization at ingest); match_won,
       tournament_level, and round_encoded are guaranteed by the model's own
       CASE derivations, so no accepted_values tests are needed.
+      Precision contract: every emitted floating/statistical column — matchup
+      differences, absolute state values, the h2h advantage, and the
+      similarity-only serve/return columns — is truncated to 5 decimal places
+      at the output boundary (TRUNC(x::NUMERIC, 5)), so imputation/matchup
+      arithmetic retains full precision internally. Integer identifiers,
+      match_won, counts, 0/1 flags, encoded categoricals, and integer-valued
+      rank/rank-points/streak differences are unchanged.
     columns:
       - name: match_id
         description: Immutable group key for one physical match; exactly two directional rows (one per player) share it.

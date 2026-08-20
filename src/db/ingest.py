@@ -143,11 +143,17 @@ def canonical_match_id(tourney_id: str, match_num: int, year: int | None = None)
     does not already repeat that same year at its start (``2026-418`` + 2026
     stays ``2026-418``; ``1987`` + 2026 -> ``2026-1987``). Any other four-digit
     start is a different year and still gets the prefix — the check is against
-    the derived year, never "starts with any four digits". The id is opaque:
-    internal dashes/nonstandard Davis Cup ids pass through untouched, never
-    parsed as numeric. ``match_num`` is zero-padded to three digits.
+    the derived year, never "starts with any four digits". A date-like year
+    (``19670220``) is reduced to its four-digit edition year (``1967``), so the
+    id never embeds a YYYYMMDD. The id is opaque: internal dashes/nonstandard
+    Davis Cup ids pass through untouched, never parsed as numeric. ``match_num``
+    is zero-padded to three digits.
     """
     tid = str(tourney_id).strip()
+    if year is not None:
+        year = int(year)
+        if year > 9999:
+            year //= 10000
     if year is None or tid.startswith(str(year)):
         return f"{tid}-{int(match_num):03d}"
     return f"{year}-{tid}-{int(match_num):03d}"
@@ -385,15 +391,26 @@ def _copy_df_into(
         return int(cur.rowcount or 0)
 
 
+def clear_match_events() -> None:
+    """Delete every bronze.match_events row inside one transaction.
+
+    Called by the seed's --force path so the corpus inserts into an empty
+    table; the table/schema itself is never dropped.
+    """
+    with connection() as conn, conn.transaction(), conn.cursor() as cur:
+        cur.execute(cast(LiteralString, f"DELETE FROM {BRONZE_MATCHES_TABLE}"))
+
+
 def insert_bronze_rows(df: pd.DataFrame, *, overwrite: bool = False) -> int:
     """Insert bronze.match_events rows from a DataFrame; returns the number of
     rows actually inserted (0 when every row already exists and overwrite is
     False).
 
     Shared by the ingest CLI and the dev seed so both paths use one INSERT.
-    match_id is the PK: generic ingestion skips an existing match_id
-    (DO NOTHING), while the seed passes overwrite=True so re-seeding replaces
-    its own selected rows (DO UPDATE) — repeat identical sources converge.
+    match_id is the PK: ingestion skips an existing match_id (DO NOTHING).
+    The seed's --force path clears bronze.match_events first (see
+    clear_match_events) and inserts fresh rows; overwrite=True stays available
+    for callers that want full-row replacement (DO UPDATE).
     """
     df = df.copy()
     # Canonical surface boundary: absent/0/unmapped source values become hard
@@ -577,6 +594,43 @@ def canonical_players(csv_path: str | Path = ATP_DATABASE_CSV) -> dict[str, str]
         str(pid).strip(): (name or "").strip()
         for pid, name in zip(df["id"], df["player"], strict=True)
     }
+
+
+def _metadata_csv_value(value: Any) -> str:
+    """Non-empty cell from the player-reference CSV; '' for missing/NaN."""
+    if value is None or pd.isna(value):
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() == "nan" else text
+
+
+def load_player_metadata(
+    csv_path: str | Path = ATP_DATABASE_CSV,
+) -> dict[str, dict[str, str]]:
+    """In-memory {uppercase player_id: {display_name, hand, height, ioc}}.
+
+    Reads the same local ATP reference ``canonical_players`` does, loaded once
+    per flow run — never a per-match query. Values pass through in Sackmann
+    vocabulary when the CSV has them (hand R/L/A, height in cm, IOC code) and
+    stay blank when absent; the CSV's 0 height marker is treated as missing.
+    Players without a row are simply absent from the map.
+    """
+    df = pd.read_csv(csv_path, dtype=str)
+    if not {"id", "player", "hand", "height", "ioc"} <= set(df.columns):
+        raise ValueError(f"player metadata CSV missing expected columns: {csv_path}")
+    profiles: dict[str, dict[str, str]] = {}
+    for record in df.to_dict(orient="records"):
+        player_id = _metadata_csv_value(record.get("id")).upper()
+        if not player_id:
+            continue
+        height = _metadata_csv_value(record.get("height"))
+        profiles[player_id] = {
+            "display_name": _metadata_csv_value(record.get("player")),
+            "hand": _metadata_csv_value(record.get("hand")),
+            "height": "" if height == "0" else height,
+            "ioc": _metadata_csv_value(record.get("ioc")).upper(),
+        }
+    return profiles
 
 
 def _normalize_name(name: str) -> str:

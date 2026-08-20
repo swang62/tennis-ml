@@ -51,6 +51,11 @@ models:
       outputs not consumed downstream are removed. days_since_last_match,
       matches_30d, and current-match serve/break rates are derived on demand
       (not stored here); raw serve/break counts remain in silver.
+      Precision contract: every emitted floating/statistical column is
+      truncated to 5 decimal places at the computed output boundary
+      (TRUNC(x::NUMERIC, 5)); window/aggregate expressions retain full
+      precision internally. Integer identifiers, ordinals, counts, dates,
+      surfaces, ranks, rank points, and the signed streak are unchanged.
     columns:
       - name: player_id
         description: Player this post-match snapshot describes.

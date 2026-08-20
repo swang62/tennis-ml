@@ -21,6 +21,12 @@
 -- Per-surface windows are carried forward with conditional MAX because
 -- PostgreSQL lacks LAST_VALUE IGNORE NULLS.
 --
+-- Query shape: the rolling 10-match rates and the signed streak share one
+-- player-ordered window pass; the per-surface carries ride the snapshot
+-- builder's own player-ordered pass; surface rates use their own (player,
+-- surface) window; and the weighted-form decay derives its reversed exponent
+-- from the player's max match ordinal, so no descending sort is needed.
+--
 -- Streak is the signed current win/loss run, including this match.
 --
 -- match_features derives rank trend; AVG skips unranked NULL values.
@@ -30,6 +36,14 @@
 -- explicit CAST + NULLIF guard.
 --
 -- Only gold/inference inputs remain; activity and current-match rates are derived on demand.
+--
+-- Numeric precision contract: every emitted floating/statistical column is
+-- truncated to 5 decimal places via TRUNC(x::NUMERIC, 5) in the computed CTE,
+-- which is the output boundary (the outermost SELECT is a passthrough of
+-- computed), so the window/aggregate expressions above retain full precision
+-- internally. Integer identifiers, ordinals, counts, dates, surfaces, the
+-- pass-through integer ranks/rank points, and the signed streak are
+-- unchanged; latest_player_age is the pass-through bronze float now truncated.
 --
 -- Incremental boundary: affected-player rebuilds, not append-only. A snapshot
 -- depends on matches up to its own (match_date, match_id), so a historical
@@ -41,6 +55,8 @@
 --
 -- The window CTEs are always evaluated over the FULL player_matches history, so
 -- each returned snapshot carries exactly the values a full rebuild gives.
+-- player_matches is scanned once by the snapshot builder and once (indexed) by
+-- the surface-rate windows; the carries ride the snapshot window pass.
 
 {{ config(
     materialized="incremental",
@@ -82,34 +98,12 @@ player_surface_matches AS (
         ) + 2.0) AS surface_win_rate_10
     FROM {{ ref('player_matches') }}
 ),
-surface_carry AS (
-    -- Latest match number per surface at each snapshot (0 if unseen).
-    SELECT
-        player_id,
-        match_id,
-        MAX(CASE WHEN surface = 'clay'  THEN player_match_number ELSE 0 END) OVER (
-            PARTITION BY player_id
-            ORDER BY match_date, match_id
-            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-        ) AS clay_last_match_number,
-        MAX(CASE WHEN surface = 'grass' THEN player_match_number ELSE 0 END) OVER (
-            PARTITION BY player_id
-            ORDER BY match_date, match_id
-            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-        ) AS grass_last_match_number,
-        MAX(CASE WHEN surface = 'hard'  THEN player_match_number ELSE 0 END) OVER (
-            PARTITION BY player_id
-            ORDER BY match_date, match_id
-            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-        ) AS hard_last_match_number
-    FROM {{ ref('player_matches') }}
-),
 -- Winner-perspective per-match game margin parsed from the bronze score.
 -- Tiebreak digits were stripped at ingest; every completed-set token "6-4"
 -- contributes a - b, non-set tokens (W/O, RET) and missing scores are skipped.
 -- The winner-first orientation is the ingest contract, so the sign follows
 -- the row's match_won in snapshots below.
-match_game_margins AS (
+match_game_margins AS MATERIALIZED (
     SELECT
         sets.match_id,
         SUM(sets.winner_games - sets.loser_games) AS winner_game_margin
@@ -137,11 +131,6 @@ snapshots AS (
         pm.match_id,
         pm.match_date AS snapshot_date,
         pm.player_match_number,
-        -- Reverse ordinal for weighted-form decay; window results cannot nest.
-        ROW_NUMBER() OVER (
-            PARTITION BY pm.player_id
-            ORDER BY pm.match_date DESC, pm.match_id DESC
-        ) - 1 AS match_rn_rev,
         pm.surface,
         pm.player_ranking,
         pm.opponent_ranking,
@@ -159,17 +148,42 @@ snapshots AS (
         pm.break_points_faced,
         pm.return_points_won,
         pm.return_points_available,
-        sc.clay_last_match_number,
-        sc.grass_last_match_number,
-        sc.hard_last_match_number,
         -- Game margin in this match's player perspective: winner-first score
         -- signed by the perspective's result (winner +, loser -).
         CASE WHEN pm.match_won = 1 THEN mgm.winner_game_margin
-             ELSE -mgm.winner_game_margin END AS game_margin
+             ELSE -mgm.winner_game_margin END AS game_margin,
+        -- Latest match number per surface at each snapshot (0 if unseen),
+        -- carried forward with conditional MAX because PostgreSQL lacks
+        -- LAST_VALUE IGNORE NULLS. Computed here, not in a separate scan of
+        -- player_matches, so the surface-rate join keys exist as plain columns.
+        MAX(CASE WHEN pm.surface = 'clay'  THEN pm.player_match_number ELSE 0 END) OVER (
+            PARTITION BY pm.player_id
+            ORDER BY pm.match_date, pm.match_id
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS clay_last_match_number,
+        MAX(CASE WHEN pm.surface = 'grass' THEN pm.player_match_number ELSE 0 END) OVER (
+            PARTITION BY pm.player_id
+            ORDER BY pm.match_date, pm.match_id
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS grass_last_match_number,
+        MAX(CASE WHEN pm.surface = 'hard'  THEN pm.player_match_number ELSE 0 END) OVER (
+            PARTITION BY pm.player_id
+            ORDER BY pm.match_date, pm.match_id
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS hard_last_match_number,
+        -- Last loss/win match numbers feed the signed streak below; they share
+        -- the same full-history window pass as the surface carries.
+        MAX(CASE WHEN pm.match_won = 0 THEN pm.player_match_number ELSE 0 END) OVER (
+            PARTITION BY pm.player_id
+            ORDER BY pm.match_date, pm.match_id
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS last_loss_match_number,
+        MAX(CASE WHEN pm.match_won = 1 THEN pm.player_match_number ELSE 0 END) OVER (
+            PARTITION BY pm.player_id
+            ORDER BY pm.match_date, pm.match_id
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS last_win_match_number
     FROM {{ ref('player_matches') }} pm
-    LEFT JOIN surface_carry sc
-        ON sc.player_id = pm.player_id
-       AND sc.match_id = pm.match_id
     LEFT JOIN match_game_margins mgm
         ON mgm.match_id = pm.match_id
 ),
@@ -181,103 +195,119 @@ SELECT
     s.player_match_number,
     s.surface,
 
-    -- Current ranking, rank points, and age.
+    -- Current ranking, rank points, and age. Age is a pass-through bronze
+    -- float, truncated to 5 dp with the other emitted floats.
     s.player_ranking AS latest_player_ranking,
     s.player_rank_points AS latest_player_rank_points,
-    s.player_age AS latest_player_age,
+    TRUNC(s.player_age::NUMERIC, 5)::DOUBLE PRECISION AS latest_player_age,
 
-    -- Exponentially-decayed 10-match win rate; newest weight is 1.
-    SUM(s.match_won * POW(0.9, s.match_rn_rev)) OVER w10
-        / NULLIF(SUM(POW(0.9, s.match_rn_rev)) OVER w10, 0) AS weighted_form_10,
+    -- Exponentially-decayed 10-match win rate; newest weight is 1. The decay
+    -- weight per row is precomputed (match_decay) with an exponent equal to
+    -- the reverse row number, so the frame stays ascending and needs no
+    -- reversed sort pass; the values are identical to the original
+    -- POW(0.9, reverse_row_number) formulation.
+    TRUNC((SUM(s.match_won * s.match_decay) OVER w10
+        / NULLIF(SUM(s.match_decay) OVER w10, 0))::NUMERIC, 5)::DOUBLE PRECISION
+        AS weighted_form_10,
 
     -- Rolling win rate over the last 10 matches, including this one, smoothed
     -- with the fixed Beta(1,1) prior: (wins + 1) / (matches + 2). The first
     -- match yields the neutral 0.5, never 0 or 1.
-    (SUM(s.match_won) OVER w10 + 1.0) / (COUNT(*) OVER w10 + 2.0) AS win_rate_10,
+    TRUNC(((SUM(s.match_won) OVER w10 + 1.0) / (COUNT(*) OVER w10 + 2.0))::NUMERIC, 5)
+        AS win_rate_10,
 
     -- Ace rate: (aces + 1) / (first serves made + 2), last 10 incl. this one.
     -- Smoothed so a zero-opportunity window is never NULL (>= 2 denominator).
-    (SUM(s.aces) OVER w10 + 1.0) / (SUM(s.first_serves_made) OVER w10 + 2.0)
+    TRUNC(((SUM(s.aces) OVER w10 + 1.0) / (SUM(s.first_serves_made) OVER w10 + 2.0))::NUMERIC, 5)
         AS ace_rate_10,
 
     -- First-serve percentage: (first serves made + 1) / (total serve points + 2)
-    (SUM(s.first_serves_made) OVER w10 + 1.0)
-        / (SUM(s.total_serve_points) OVER w10 + 2.0) AS first_serve_pct_10,
+    TRUNC(((SUM(s.first_serves_made) OVER w10 + 1.0)
+        / (SUM(s.total_serve_points) OVER w10 + 2.0))::NUMERIC, 5)
+        AS first_serve_pct_10,
 
     -- Break-point save rate: (saved + 1) / (faced + 2), last 10 incl. this one
-    (SUM(s.break_points_saved) OVER w10 + 1.0)
-        / (SUM(s.break_points_faced) OVER w10 + 2.0) AS break_points_saved_pct_10,
+    TRUNC(((SUM(s.break_points_saved) OVER w10 + 1.0)
+        / (SUM(s.break_points_faced) OVER w10 + 2.0))::NUMERIC, 5)
+        AS break_points_saved_pct_10,
 
     -- First-serve win rate: (first-serve points won + 1) / (first serves made + 2)
-    (SUM(s.first_serve_points_won) OVER w10 + 1.0)
-        / (SUM(s.first_serves_made) OVER w10 + 2.0) AS first_serve_win_pct_10,
+    TRUNC(((SUM(s.first_serve_points_won) OVER w10 + 1.0)
+        / (SUM(s.first_serves_made) OVER w10 + 2.0))::NUMERIC, 5)
+        AS first_serve_win_pct_10,
 
     -- Second-serve win rate: (second-serve points won + 1) / (second serves
     -- made + 2), where second serves made = total serve points - first serves
-    (SUM(s.second_serve_points_won) OVER w10 + 1.0)
-        / (SUM(s.total_serve_points - s.first_serves_made) OVER w10 + 2.0)
+    TRUNC(((SUM(s.second_serve_points_won) OVER w10 + 1.0)
+        / (SUM(s.total_serve_points - s.first_serves_made) OVER w10 + 2.0))::NUMERIC, 5)
         AS second_serve_win_pct_10,
 
     -- Serve win rate: ((first + second serve points won) + 1) / (total + 2)
-    (SUM(s.first_serve_points_won + s.second_serve_points_won) OVER w10 + 1.0)
-        / (SUM(s.total_serve_points) OVER w10 + 2.0) AS serve_win_pct_10,
+    TRUNC(((SUM(s.first_serve_points_won + s.second_serve_points_won) OVER w10 + 1.0)
+        / (SUM(s.total_serve_points) OVER w10 + 2.0))::NUMERIC, 5)
+        AS serve_win_pct_10,
 
     -- Return points won: (return_points_won + 1) / (return_points_available + 2)
-    (SUM(s.return_points_won) OVER w10 + 1.0)
-        / (SUM(s.return_points_available) OVER w10 + 2.0)
+    TRUNC(((SUM(s.return_points_won) OVER w10 + 1.0)
+        / (SUM(s.return_points_available) OVER w10 + 2.0))::NUMERIC, 5)
         AS return_points_won_pct_10,
 
     -- Double-fault rate: (double faults + 1) / (total serve points + 2)
-    (SUM(s.double_faults) OVER w10 + 1.0)
-        / (SUM(s.total_serve_points) OVER w10 + 2.0) AS df_rate_10,
+    TRUNC(((SUM(s.double_faults) OVER w10 + 1.0)
+        / (SUM(s.total_serve_points) OVER w10 + 2.0))::NUMERIC, 5)
+        AS df_rate_10,
 
     -- Number of matches in the last-10 window backing the smoothed rates;
     -- 1 for the first match, up to 10. Carried to gold as matches_10 exposure.
     COUNT(*) OVER w10 AS matches_10,
 
     -- Aces per service game, 10
-    CAST(SUM(s.aces) OVER w10 AS DOUBLE PRECISION)
-        / NULLIF(SUM(s.service_games) OVER w10, 0) AS aces_per_svc_game_10,
+    TRUNC((CAST(SUM(s.aces) OVER w10 AS DOUBLE PRECISION)
+        / NULLIF(SUM(s.service_games) OVER w10, 0))::NUMERIC, 5)::DOUBLE PRECISION
+        AS aces_per_svc_game_10,
 
     -- Rolling average per-match game margin over the last 10 incl. this one.
     -- AVG skips matches without a parseable score (NULL game_margin); NULL
     -- until the player's first match with a completed-set score.
-    AVG(s.game_margin) OVER w10 AS game_margin_10,
+    TRUNC((AVG(s.game_margin) OVER w10)::NUMERIC, 5) AS game_margin_10,
 
     -- Rolling average player rank over the last 10 (rank_trend derived
     -- downstream in match_features, not here)
-    AVG(s.player_ranking) OVER w10 AS avg_player_rank_10,
+    TRUNC((AVG(s.player_ranking) OVER w10)::NUMERIC, 5) AS avg_player_rank_10,
 
     -- Rolling average opponent rank (strength of schedule) over the last 10;
     -- AVG skips NULL opponent rankings, so unranked opponents inside the
     -- window never pollute the average
-    AVG(s.opponent_ranking) OVER w10 AS avg_rank_faced_10,
+    TRUNC((AVG(s.opponent_ranking) OVER w10)::NUMERIC, 5) AS avg_rank_faced_10,
 
-    -- Signed current win/loss run.
-    CASE WHEN s.match_won = 1 THEN
-        s.player_match_number - (
-            MAX(CASE WHEN s.match_won = 0 THEN s.player_match_number ELSE 0 END) OVER (
-                PARTITION BY s.player_id ORDER BY s.snapshot_date, s.match_id
-                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-            )
-        )
-    ELSE
-        -1 * (
-            s.player_match_number - (
-                MAX(CASE WHEN s.match_won = 1 THEN s.player_match_number ELSE 0 END) OVER (
-                    PARTITION BY s.player_id ORDER BY s.snapshot_date, s.match_id
-                    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-                )
-            )
-        )
-    END AS streak,
+    -- Signed current win/loss run, computed in the FROM subquery from the
+    -- snapshot pass's last-loss/last-win ordinals.
+    s.streak,
 
     -- Per-surface rates carried forward from the latest surface match.
-    psm_clay.surface_win_rate_10  AS clay_win_rate_10,
-    psm_grass.surface_win_rate_10 AS grass_win_rate_10,
-    psm_hard.surface_win_rate_10  AS hard_win_rate_10
+    TRUNC(psm_clay.surface_win_rate_10::NUMERIC, 5)  AS clay_win_rate_10,
+    TRUNC(psm_grass.surface_win_rate_10::NUMERIC, 5) AS grass_win_rate_10,
+    TRUNC(psm_hard.surface_win_rate_10::NUMERIC, 5)  AS hard_win_rate_10
 
-FROM snapshots s
+FROM (
+    -- Player max match ordinal (the constant needed for the weighted-form
+    -- decay; a partition-only window, so it needs no sort) plus the signed
+    -- streak built from the full-history pass's last-loss/last-win ordinals.
+    -- The join keys for the surface-rate joins below must live here: window
+    -- results are not visible to the FROM/JOIN clauses that use them.
+    SELECT s.*,
+        MAX(s.player_match_number) OVER (PARTITION BY s.player_id)
+            AS player_max_match_number,
+        -- Precomputed decay weight so the window pass only sums, not pow()s
+        -- over and over for each frame row.
+        POW(0.9, MAX(s.player_match_number) OVER (PARTITION BY s.player_id)
+            - s.player_match_number) AS match_decay,
+        CASE WHEN s.match_won = 1
+            THEN s.player_match_number - s.last_loss_match_number
+            ELSE -1 * (s.player_match_number - s.last_win_match_number)
+        END AS streak
+    FROM snapshots s
+) s
 LEFT JOIN player_surface_matches psm_clay
     ON psm_clay.player_id = s.player_id
    AND psm_clay.surface = 'clay'

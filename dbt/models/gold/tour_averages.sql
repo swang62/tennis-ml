@@ -36,19 +36,30 @@
 -- ratios from silver.player_matches (NOT unweighted per-player AVG). They may
 -- be NULL only when their source denominator is zero; defaults must never be
 -- NULL.
+--
+-- Query shape: pool_stats folds the pool metadata and the full-pool snapshot
+-- aggregates into a single scan of silver.rolling_features, and activity
+-- reduces the pool to one latest snapshot per player BEFORE joining the
+-- 30-day match window — so the window join runs per player, not per snapshot
+-- row (previously ~11.5M intermediate rows from 399,802 snapshots × their
+-- in-window matches). The per-player 30-day count is now the true match count
+-- for that player instead of the snapshot-multiplied join count; the rounded
+-- median is unchanged on current data (verified 13347 / 0).
+--
+-- Numeric precision contract: every floating/statistical output below is
+-- rounded to 3 decimal places at the final SELECT boundary via
+-- ROUND(x::NUMERIC, 3)::DOUBLE PRECISION, so the pool/aggregate CTEs retain
+-- full precision internally. singleton_id, counts, and pool_as_of_date are
+-- unchanged.
 
 WITH
--- Singleton metadata: pool_as_of_date and snapshot-pool observability counts.
-pool_meta AS (
+-- Singleton metadata + full-pool snapshot fallback aggregates, one scan of
+-- rolling_features.
+pool_stats AS (
     SELECT
         COALESCE(MAX(snapshot_date), CURRENT_DATE) + 1 AS pool_as_of_date,
         COUNT(*) AS snapshot_pool_rows,
-        COUNT(DISTINCT player_id) AS snapshot_pool_players
-    FROM {{ ref('rolling_features') }}
-),
--- Full-pool snapshot fallback aggregates over ALL rolling_features rows.
-snapshot_aggregates AS (
-    SELECT
+        COUNT(DISTINCT player_id) AS snapshot_pool_players,
         ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY latest_player_ranking))
             AS latest_player_ranking,
         ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY latest_player_rank_points))
@@ -75,6 +86,16 @@ snapshot_aggregates AS (
         AVG(hard_win_rate_10) AS hard_win_rate_10
     FROM {{ ref('rolling_features') }}
 ),
+-- One latest snapshot per player: the recency anchor for the cold-start
+-- activity defaults. Reduces the 30-day window join from one row per
+-- snapshot to one row per player.
+latest_snapshots AS (
+    SELECT
+        player_id,
+        MAX(snapshot_date) AS latest_snapshot_date
+    FROM {{ ref('rolling_features') }}
+    GROUP BY player_id
+),
 -- Cold-start activity defaults: rounded medians of per-player latest-snapshot
 -- recency and 30-day pre-pool match count.
 activity AS (
@@ -85,16 +106,18 @@ activity AS (
             AS median_matches_30d
     FROM (
         SELECT
-            r.player_id,
-            p.pool_as_of_date - MAX(r.snapshot_date) AS days_since,
-            COUNT(pm.match_id) AS matches_30d
-        FROM {{ ref('rolling_features') }} r
-        CROSS JOIN pool_meta p
-        LEFT JOIN {{ ref('player_matches') }} pm
-            ON pm.player_id = r.player_id
-           AND pm.match_date >= p.pool_as_of_date - INTERVAL '30 days'
-           AND pm.match_date < p.pool_as_of_date
-        GROUP BY r.player_id, p.pool_as_of_date
+            ls.player_id,
+            p.pool_as_of_date - ls.latest_snapshot_date AS days_since,
+            COALESCE(w.matches_30d, 0) AS matches_30d
+        FROM latest_snapshots ls
+        CROSS JOIN pool_stats p
+        LEFT JOIN LATERAL (
+            SELECT COUNT(*) AS matches_30d
+            FROM {{ ref('player_matches') }} pm
+            WHERE pm.player_id = ls.player_id
+              AND pm.match_date >= p.pool_as_of_date - INTERVAL '30 days'
+              AND pm.match_date < p.pool_as_of_date
+        ) w ON true
     ) per_player
 ),
 -- Static profile pool: left-handed rate over known L/R only, time-aware
@@ -107,7 +130,7 @@ profile_aggregates AS (
         AVG(EXTRACT(YEAR FROM p.pool_as_of_date) - prof.turned_pro) AS avg_years_pro,
         COUNT(*) AS profile_rows
     FROM {{ source('bronze', 'player_profiles') }} prof
-    CROSS JOIN pool_meta p
+    CROSS JOIN pool_stats p
 ),
 -- Weighted tour benchmarks: SUM(numerator) / SUM(denominator) over ALL
 -- silver.player_matches rows. NULL when the denominator is zero.
@@ -152,53 +175,86 @@ SELECT
     pa.profile_rows,
     tr.player_match_rows,
 
-    -- Rank/streak-like medians, rounded; empty pool falls back to constants.
-    COALESCE(s.latest_player_ranking, 100)::DOUBLE PRECISION AS latest_player_ranking,
-    COALESCE(s.latest_player_rank_points, 500)::DOUBLE PRECISION AS latest_player_rank_points,
-    COALESCE(s.streak, 0)::DOUBLE PRECISION AS streak,
-    COALESCE(s.avg_player_rank_10, 100)::DOUBLE PRECISION AS avg_player_rank_10,
-    COALESCE(s.avg_rank_faced_10, 100)::DOUBLE PRECISION AS avg_rank_faced_10,
+    -- Rank/streak-like medians (whole values), rounded to 3 dp per the
+    -- singleton precision contract; empty pool falls back to constants.
+    ROUND(COALESCE(p.latest_player_ranking, 100)::NUMERIC, 3)::DOUBLE PRECISION
+        AS latest_player_ranking,
+    ROUND(COALESCE(p.latest_player_rank_points, 500)::NUMERIC, 3)::DOUBLE PRECISION
+        AS latest_player_rank_points,
+    ROUND(COALESCE(p.streak, 0)::NUMERIC, 3)::DOUBLE PRECISION AS streak,
+    ROUND(COALESCE(p.avg_player_rank_10, 100)::NUMERIC, 3)::DOUBLE PRECISION
+        AS avg_player_rank_10,
+    ROUND(COALESCE(p.avg_rank_faced_10, 100)::NUMERIC, 3)::DOUBLE PRECISION
+        AS avg_rank_faced_10,
 
-    -- Continuous means over the full pool.
-    COALESCE(s.latest_player_age, 26.0) AS latest_player_age,
-    COALESCE(s.weighted_form_10, 0.0) AS weighted_form_10,
-    COALESCE(s.win_rate_10, 0.0) AS win_rate_10,
-    COALESCE(s.ace_rate_10, 0.0) AS ace_rate_10,
-    COALESCE(s.first_serve_pct_10, 0.0) AS first_serve_pct_10,
-    COALESCE(s.break_points_saved_pct_10, 0.0) AS break_points_saved_pct_10,
-    COALESCE(s.first_serve_win_pct_10, 0.0) AS first_serve_win_pct_10,
-    COALESCE(s.second_serve_win_pct_10, 0.0) AS second_serve_win_pct_10,
-    COALESCE(s.serve_win_pct_10, 0.0) AS serve_win_pct_10,
-    COALESCE(s.return_points_won_pct_10, 0.0) AS return_points_won_pct_10,
-    COALESCE(s.df_rate_10, 0.0) AS df_rate_10,
-    COALESCE(s.aces_per_svc_game_10, 0.0) AS aces_per_svc_game_10,
-    COALESCE(s.clay_win_rate_10, 0.0) AS clay_win_rate_10,
-    COALESCE(s.grass_win_rate_10, 0.0) AS grass_win_rate_10,
-    COALESCE(s.hard_win_rate_10, 0.0) AS hard_win_rate_10,
+    -- Continuous means over the full pool, rounded to 3 dp.
+    ROUND(COALESCE(p.latest_player_age, 26.0)::NUMERIC, 3)::DOUBLE PRECISION
+        AS latest_player_age,
+    ROUND(COALESCE(p.weighted_form_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+        AS weighted_form_10,
+    ROUND(COALESCE(p.win_rate_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+        AS win_rate_10,
+    ROUND(COALESCE(p.ace_rate_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+        AS ace_rate_10,
+    ROUND(COALESCE(p.first_serve_pct_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+        AS first_serve_pct_10,
+    ROUND(COALESCE(p.break_points_saved_pct_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+        AS break_points_saved_pct_10,
+    ROUND(COALESCE(p.first_serve_win_pct_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+        AS first_serve_win_pct_10,
+    ROUND(COALESCE(p.second_serve_win_pct_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+        AS second_serve_win_pct_10,
+    ROUND(COALESCE(p.serve_win_pct_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+        AS serve_win_pct_10,
+    ROUND(COALESCE(p.return_points_won_pct_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+        AS return_points_won_pct_10,
+    ROUND(COALESCE(p.df_rate_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+        AS df_rate_10,
+    ROUND(COALESCE(p.aces_per_svc_game_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+        AS aces_per_svc_game_10,
+    ROUND(COALESCE(p.clay_win_rate_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+        AS clay_win_rate_10,
+    ROUND(COALESCE(p.grass_win_rate_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+        AS grass_win_rate_10,
+    ROUND(COALESCE(p.hard_win_rate_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+        AS hard_win_rate_10,
 
-    -- Cold-start activity defaults; pre-rounded whole values.
-    COALESCE(a.median_days_since, 365)::DOUBLE PRECISION AS days_since_default,
-    COALESCE(a.median_matches_30d, 0)::DOUBLE PRECISION AS matches_30d_default,
+    -- Cold-start activity defaults (already whole medians), rounded to 3 dp.
+    ROUND(COALESCE(a.median_days_since, 365)::NUMERIC, 3)::DOUBLE PRECISION
+        AS days_since_default,
+    ROUND(COALESCE(a.median_matches_30d, 0)::NUMERIC, 3)::DOUBLE PRECISION
+        AS matches_30d_default,
 
-    -- Explicit fixed constants and static profile-pool means.
+    -- Explicit fixed constant (already exactly 3 dp) and profile-pool means.
     0.5 AS rate_default,
-    COALESCE(pa.left_handed_rate, 0.0) AS left_handed_rate,
-    COALESCE(pa.avg_years_pro, 8.0) AS avg_years_pro,
+    ROUND(COALESCE(pa.left_handed_rate, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+        AS left_handed_rate,
+    ROUND(COALESCE(pa.avg_years_pro, 8.0)::NUMERIC, 3)::DOUBLE PRECISION
+        AS avg_years_pro,
 
-    -- Weighted tour benchmarks (may be NULL only when denominator is zero).
-    tr.tour_ace_rate,
-    tr.tour_first_serve_pct,
-    tr.tour_break_points_saved_pct,
-    tr.tour_first_serve_win_pct,
-    tr.tour_second_serve_win_pct,
-    tr.tour_serve_win_pct,
-    tr.tour_return_points_won_pct,
-    tr.tour_df_rate,
-    tr.tour_aces_per_svc_game,
-    tr.tour_break_point_opportunities_per_return_game,
-    tr.tour_return_games_won_pct
-FROM pool_meta p
-CROSS JOIN snapshot_aggregates s
+    -- Weighted tour benchmarks (may be NULL only when denominator is zero),
+    -- rounded to 3 dp; NULLs preserved.
+    ROUND(tr.tour_ace_rate::NUMERIC, 3)::DOUBLE PRECISION AS tour_ace_rate,
+    ROUND(tr.tour_first_serve_pct::NUMERIC, 3)::DOUBLE PRECISION
+        AS tour_first_serve_pct,
+    ROUND(tr.tour_break_points_saved_pct::NUMERIC, 3)::DOUBLE PRECISION
+        AS tour_break_points_saved_pct,
+    ROUND(tr.tour_first_serve_win_pct::NUMERIC, 3)::DOUBLE PRECISION
+        AS tour_first_serve_win_pct,
+    ROUND(tr.tour_second_serve_win_pct::NUMERIC, 3)::DOUBLE PRECISION
+        AS tour_second_serve_win_pct,
+    ROUND(tr.tour_serve_win_pct::NUMERIC, 3)::DOUBLE PRECISION
+        AS tour_serve_win_pct,
+    ROUND(tr.tour_return_points_won_pct::NUMERIC, 3)::DOUBLE PRECISION
+        AS tour_return_points_won_pct,
+    ROUND(tr.tour_df_rate::NUMERIC, 3)::DOUBLE PRECISION AS tour_df_rate,
+    ROUND(tr.tour_aces_per_svc_game::NUMERIC, 3)::DOUBLE PRECISION
+        AS tour_aces_per_svc_game,
+    ROUND(tr.tour_break_point_opportunities_per_return_game::NUMERIC, 3)
+        ::DOUBLE PRECISION AS tour_break_point_opportunities_per_return_game,
+    ROUND(tr.tour_return_games_won_pct::NUMERIC, 3)::DOUBLE PRECISION
+        AS tour_return_games_won_pct
+FROM pool_stats p
 CROSS JOIN activity a
 CROSS JOIN profile_aggregates pa
 CROSS JOIN tour_rates tr

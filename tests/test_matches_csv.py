@@ -43,6 +43,15 @@ def test_csv_row_match_id_derives_year_from_row_date():
     assert matches._csv_row_match_id(_raw_csv_row("1987-foo", "26")) == "2026-1987-foo-026"
 
 
+def test_csv_row_match_id_normalizes_date_like_explicit_year():
+    """An explicitly passed YYYYMMDD year is reduced to its edition year, so the
+    CSV dedup set can never carry a date-prefixed id."""
+    assert (
+        matches._csv_row_match_id(_raw_csv_row("1967-southern-pro", "1", "19670220"), 19670220)
+        == "1967-southern-pro-001"
+    )
+
+
 def test_bronze_row_to_raw_match_round_trips_and_keeps_column_order():
     raw = matches.bronze_row_to_raw_match(_bronze_row())
 
@@ -96,3 +105,92 @@ def test_append_raw_match_rows_dedupes_against_existing_file(tmp_path):
     assert appended_twice == 0
     rows = list(csv.DictReader(path.open()))
     assert [r["tourney_id"] for r in rows] == ["2026-418", "2026-419"]
+
+
+def test_raw_match_row_fills_profile_fields_in_winner_loser_columns():
+    raw = matches.bronze_row_to_raw_match(
+        _bronze_row(),
+        {
+            "W1": {"display_name": "Won One", "hand": "L", "height": "190", "ioc": "FRA"},
+            "L1": {"display_name": "Lost One", "hand": "R", "height": "188", "ioc": "GBR"},
+        },
+    )
+
+    assert list(raw) == matches.RAW_MATCH_COLUMNS  # exact Sackmann header order
+    assert raw["winner_name"] == "Won One"
+    assert raw["winner_hand"] == "L"
+    assert raw["winner_ht"] == "190"
+    assert raw["winner_ioc"] == "FRA"
+    assert raw["loser_name"] == "Lost One"
+    assert raw["loser_hand"] == "R"
+    assert raw["loser_ht"] == "188"
+    assert raw["loser_ioc"] == "GBR"
+
+
+def test_raw_match_row_fills_source_metadata_columns():
+    row = _bronze_row()
+    row.update(
+        {
+            "winner_seed": "5",
+            "loser_seed": "28",
+            "winner_entry": "WC",
+            "loser_entry": "Q",
+            "draw_size": 96,
+            "best_of": 3,
+            "minutes": 87,
+        }
+    )
+
+    raw = matches.bronze_row_to_raw_match(row)
+
+    assert list(raw) == matches.RAW_MATCH_COLUMNS
+    assert raw["winner_seed"] == "5"
+    assert raw["winner_entry"] == "WC"
+    assert raw["loser_seed"] == "28"
+    assert raw["loser_entry"] == "Q"
+    assert raw["draw_size"] == "96"
+    assert raw["best_of"] == "3"
+    assert raw["minutes"] == "87"
+
+
+def test_raw_match_row_leaves_unknown_metadata_blank_and_prefers_profile_name():
+    row = _bronze_row()
+    row["player1_name"] = "Ben Shelton"
+    row["player2_name"] = "Brandon Nakashima"
+
+    raw = matches.bronze_row_to_raw_match(
+        row, {"W1": {"display_name": "Profile Name", "hand": "", "height": "", "ioc": ""}}
+    )
+
+    assert list(raw) == matches.RAW_MATCH_COLUMNS
+    for column in (
+        "winner_seed",
+        "winner_entry",
+        "loser_seed",
+        "loser_entry",
+        "draw_size",
+        "best_of",
+        "minutes",
+    ):
+        assert raw[column] == ""  # absent source fields are never fabricated
+    assert raw["winner_name"] == "Profile Name"  # profile display name wins
+    assert raw["loser_name"] == "Brandon Nakashima"  # page name fallback
+    assert raw["winner_hand"] == "" and raw["loser_ht"] == ""  # no profile values
+
+
+def test_append_raw_match_rows_dedupes_metadata_rows(tmp_path):
+    path = tmp_path / "2026.csv"
+    a = matches.bronze_row_to_raw_match({**_bronze_row(), "winner_seed": "5", "draw_size": 96})
+    b = matches.bronze_row_to_raw_match({**_bronze_row(), "match_id": "2026-419-001"})
+
+    matches.append_raw_match_rows([a, b], path)
+    # Metadata-bearing rows dedupe by the same canonical id as plain rows.
+    appended, ids = matches.append_raw_match_rows(
+        [a, b], path, existing=matches.load_csv_match_ids(path)
+    )
+    assert appended == 0
+    assert ids == {"2026-418-026", "2026-419-001"}
+
+    rows = list(csv.DictReader(path.open()))
+    assert rows[0]["winner_seed"] == "5"
+    assert rows[0]["draw_size"] == "96"
