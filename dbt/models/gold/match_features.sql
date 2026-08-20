@@ -44,14 +44,6 @@
 -- rebuilt gold.tour_averages singleton), so a new match's rows are exactly
 -- what a full rebuild would produce; existing rows are untouched. Re-running
 -- with no new bronze matches inserts nothing (idempotent).
---
--- Numeric precision contract: every emitted floating/statistical column
--- (matchup differences, absolute state values, the h2h advantage, and the
--- similarity-only serve/return columns) is truncated to 5 decimal places via
--- TRUNC(x::NUMERIC, 5) in the final SELECT, so all imputation and matchup
--- arithmetic above retains full precision. Integer identifiers, match_won
--- (the label), counts, the 0/1 flags, encoded categoricals, and the
--- integer-valued rank/rank-points/streak differences are unchanged.
 
 {{ config(
     materialized="incremental",
@@ -336,8 +328,7 @@ SELECT
 
     -- ── Similarity-analysis serve/return percentages (NOT model features) ──
     -- Appended style signals for PlayerSimilarity, never FEATURE_COLS. They
-    -- share the same defaults imputation but are documented as non-model;
-    -- truncated to 5 dp like every emitted float.
+    -- share the same defaults imputation but are documented as non-model.
     TRUNC(p.first_serve_pct_10::NUMERIC, 5)::DOUBLE PRECISION
         AS player_first_serve_pct_10,
     TRUNC(o.first_serve_pct_10::NUMERIC, 5)::DOUBLE PRECISION

@@ -45,12 +45,6 @@
 -- in-window matches). The per-player 30-day count is now the true match count
 -- for that player instead of the snapshot-multiplied join count; the rounded
 -- median is unchanged on current data (verified 13347 / 0).
---
--- Numeric precision contract: every floating/statistical output below is
--- rounded to 3 decimal places at the final SELECT boundary via
--- ROUND(x::NUMERIC, 3)::DOUBLE PRECISION, so the pool/aggregate CTEs retain
--- full precision internally. singleton_id, counts, and pool_as_of_date are
--- unchanged.
 
 WITH
 -- Singleton metadata + full-pool snapshot fallback aggregates, one scan of
@@ -175,8 +169,7 @@ SELECT
     pa.profile_rows,
     tr.player_match_rows,
 
-    -- Rank/streak-like medians (whole values), rounded to 3 dp per the
-    -- singleton precision contract; empty pool falls back to constants.
+    -- Rank/streak-like medians, rounded; empty pool falls back to constants.
     ROUND(COALESCE(p.latest_player_ranking, 100)::NUMERIC, 3)::DOUBLE PRECISION
         AS latest_player_ranking,
     ROUND(COALESCE(p.latest_player_rank_points, 500)::NUMERIC, 3)::DOUBLE PRECISION
@@ -187,7 +180,7 @@ SELECT
     ROUND(COALESCE(p.avg_rank_faced_10, 100)::NUMERIC, 3)::DOUBLE PRECISION
         AS avg_rank_faced_10,
 
-    -- Continuous means over the full pool, rounded to 3 dp.
+    -- Continuous means over the full pool.
     ROUND(COALESCE(p.latest_player_age, 26.0)::NUMERIC, 3)::DOUBLE PRECISION
         AS latest_player_age,
     ROUND(COALESCE(p.weighted_form_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
@@ -219,21 +212,20 @@ SELECT
     ROUND(COALESCE(p.hard_win_rate_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
         AS hard_win_rate_10,
 
-    -- Cold-start activity defaults (already whole medians), rounded to 3 dp.
+    -- Cold-start activity defaults; pre-rounded whole values.
     ROUND(COALESCE(a.median_days_since, 365)::NUMERIC, 3)::DOUBLE PRECISION
         AS days_since_default,
     ROUND(COALESCE(a.median_matches_30d, 0)::NUMERIC, 3)::DOUBLE PRECISION
         AS matches_30d_default,
 
-    -- Explicit fixed constant (already exactly 3 dp) and profile-pool means.
+    -- Explicit fixed constants and static profile-pool means.
     0.5 AS rate_default,
     ROUND(COALESCE(pa.left_handed_rate, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
         AS left_handed_rate,
     ROUND(COALESCE(pa.avg_years_pro, 8.0)::NUMERIC, 3)::DOUBLE PRECISION
         AS avg_years_pro,
 
-    -- Weighted tour benchmarks (may be NULL only when denominator is zero),
-    -- rounded to 3 dp; NULLs preserved.
+    -- Weighted tour benchmarks (may be NULL only when denominator is zero).
     ROUND(tr.tour_ace_rate::NUMERIC, 3)::DOUBLE PRECISION AS tour_ace_rate,
     ROUND(tr.tour_first_serve_pct::NUMERIC, 3)::DOUBLE PRECISION
         AS tour_first_serve_pct,
