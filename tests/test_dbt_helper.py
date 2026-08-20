@@ -200,15 +200,18 @@ def test_bronze_to_gold_maps_incremental_to_dbt_full_refresh(monkeypatch):
     monkeypatch.setattr("src.flows.etl._dbt_summary", lambda _log: "Done. PASS=1")
 
     conn = MagicMock()
+    direct_conn = MagicMock()
     cursor = MagicMock()
     cursor.fetchone.return_value = None
-    conn.cursor.return_value.__enter__.return_value = cursor
-    monkeypatch.setattr("src.flows.etl.connection", lambda: conn)
+    conn.__enter__.return_value = direct_conn
+    direct_conn.cursor.return_value.__enter__.return_value = cursor
+    monkeypatch.setattr("src.flows.etl.psycopg.connect", lambda *_args, **_kwargs: conn)
 
     etl.bronze_to_gold.fn(incremental=False)
     etl.bronze_to_gold.fn(incremental=True)
 
     assert [call["incremental"] for call in dbt_calls] == [False, True]
+    assert conn.__enter__.call_count == 2
 
 
 def test_cli_default_runs_full_refresh(monkeypatch):

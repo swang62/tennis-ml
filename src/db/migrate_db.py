@@ -37,7 +37,10 @@ def migrate() -> None:
         **{key: str(value) for key, value in conninfo.items() if value is not None}
     )
     with psycopg.connect(
-        maintenance_url, autocommit=True, connect_timeout=CONNECT_TIMEOUT_S
+        maintenance_url,
+        autocommit=True,
+        connect_timeout=CONNECT_TIMEOUT_S,
+        options="-c lock_timeout=30000 -c statement_timeout=300000",
     ).cursor() as cur:
         try:
             cur.execute(pg_sql.SQL("CREATE DATABASE {}").format(pg_sql.Identifier(database)))
@@ -45,8 +48,19 @@ def migrate() -> None:
         except DuplicateDatabase:
             pass
     schema_sql = SCHEMA_SQL.read_text()
-    with connection() as conn, conn.transaction(), conn.cursor() as cur:
+    # Migrations are one multi-statement operation. Avoid the application pool:
+    # a stale pooled session must not prevent schema recovery.
+    with (
+        psycopg.connect(
+            get_database_url(),
+            connect_timeout=CONNECT_TIMEOUT_S,
+            options="-c lock_timeout=30000 -c statement_timeout=300000",
+        ) as conn,
+        conn.cursor() as cur,
+    ):
         cur.execute(cast(LiteralString, schema_sql))
+        for _ in cur.results():
+            pass
     print("[db] PostgreSQL migration: done")
 
 

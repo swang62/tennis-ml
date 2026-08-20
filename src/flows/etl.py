@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TextIO, cast
 from uuid import UUID
 
+import psycopg
 from prefect import flow, get_run_logger, task
 from prefect.automations import Automation
 from prefect.client.orchestration import get_client
@@ -43,7 +44,7 @@ from src.constants import (
     SILVER_ROLLING_FEATURES,
     WORK_POOL_NAME,
 )
-from src.db.client import connection
+from src.db.client import CONNECT_TIMEOUT_S
 from src.db.conninfo import dbt_env
 from src.utils import load_env
 
@@ -134,7 +135,16 @@ def bronze_to_gold(incremental: bool = False) -> int:
         # No active run context (e.g. hermetic .fn() tests); skip Prefect logs.
         logger = None
     run_dbt_build(log_file=log_file, incremental=incremental, logger=logger)
-    with connection() as conn, conn.cursor() as cur:
+    # dbt owns the ETL write connection; use a separate bounded connection for
+    # post-build counts rather than contending with serving's process-local pool.
+    with (
+        psycopg.connect(
+            constants.get_database_url(),
+            connect_timeout=CONNECT_TIMEOUT_S,
+            options="-c statement_timeout=30000",
+        ) as conn,
+        conn.cursor() as cur,
+    ):
         counts = {
             BRONZE_MATCHES_TABLE: _table_count(cur, BRONZE_MATCHES_TABLE),
             SILVER_PLAYER_MATCHES: _table_count(cur, SILVER_PLAYER_MATCHES),
