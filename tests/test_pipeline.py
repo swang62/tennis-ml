@@ -74,6 +74,44 @@ def test_parameter_notebooks_declare_a_validating_nbformat():
         nbformat.validate(nb)  # raises NotebookValidationError on the original mismatch
 
 
+def test_parameter_notebooks_use_central_split_constants():
+    """Split fractions and the CV fold count live in src.constants only: the
+    01 split notebook imports all four central constants, every 02 tuner
+    imports CV_FOLDS, and no parameter notebook defines local test_size /
+    val_size / cv_folds."""
+    notebook_names = {
+        "01_train_test_split.ipynb",
+        "02_tune_linear.ipynb",
+        "02_tune_gbdt.ipynb",
+        "02_tune_nn.ipynb",
+    }
+    local_split_names = {"test_size", "val_size", "cv_folds"}
+    for path in sorted(Path("notebooks/parameters").glob("*.ipynb")):
+        if path.name not in notebook_names:
+            continue
+        notebook = json.loads(path.read_text())
+        code_sources = [
+            "".join(cell["source"]) for cell in notebook["cells"] if cell["cell_type"] == "code"
+        ]
+        assert code_sources, f"{path.name}: expected at least one code cell"
+        imported: set[str] = set()
+        for src in code_sources:
+            tree = ast.parse(src)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module == "src.constants":
+                    imported.update(alias.name for alias in node.names)
+                if isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name) and target.id in local_split_names:
+                            raise AssertionError(f"{path.name}: local {target.id} definition")
+        if path.name.startswith("01_"):
+            assert {"TRAIN_FRACTION", "VAL_FRACTION", "TEST_FRACTION", "CV_FOLDS"} <= imported, (
+                f"{path.name}: missing central split constants"
+            )
+        else:
+            assert "CV_FOLDS" in imported, f"{path.name}: missing central CV_FOLDS import"
+
+
 def test_02_linear_notebook_selects_no_svm_candidate():
     """The linear tuner offers only LogisticRegression and GaussianNB. SVC was
     removed: it is superquadratic on the current data scale and needs internal

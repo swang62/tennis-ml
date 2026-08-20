@@ -81,6 +81,8 @@ models:
         description: player_serve_win_pct_10 - opponent_serve_win_pct_10.
       - name: return_points_won_pct_diff
         description: player_return_points_won_pct_10 - opponent_return_points_won_pct_10.
+      - name: dominance_diff
+        description: player dominance - opponent dominance (player_return_points_won_pct_10 / (1 - player_serve_win_pct_10) minus the opponent's ratio, prior snapshots, imputed).
       - name: df_rate_diff
         description: player_df_rate_10 - opponent_df_rate_10.
       - name: aces_per_svc_game_diff

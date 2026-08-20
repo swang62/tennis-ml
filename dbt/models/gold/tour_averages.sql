@@ -201,6 +201,11 @@ SELECT
         AS serve_win_pct_10,
     ROUND(COALESCE(p.return_points_won_pct_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
         AS return_points_won_pct_10,
+    -- Pool dominance: return strength per unit of serve weakness, the ratio of
+    -- the two pool-mean rates above.
+    ROUND((COALESCE(p.return_points_won_pct_10, 0.0)
+        / (1.0 - COALESCE(p.serve_win_pct_10, 0.0)))::NUMERIC, 3)::DOUBLE PRECISION
+        AS dominance_10,
     ROUND(COALESCE(p.df_rate_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
         AS df_rate_10,
     ROUND(COALESCE(p.aces_per_svc_game_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION

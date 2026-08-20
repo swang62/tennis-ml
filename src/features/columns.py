@@ -11,8 +11,8 @@ signed differences, and carry complementary labels.
 
 Swap behavior
 -------------
-- Signed features (``*_diff``, ``h2h_advantage``): negate when the player and
-  opponent sides are swapped.
+- Signed features (``*_diff``, ``h2h_advantage``, ``h2h_surface_advantage``): negate when
+  the player and opponent sides are swapped.
 - Paired features (``player_*`` / ``opponent_*``): exchange between the two
   directional rows of a match.
 - Invariant features (``h2h_exposure``, context): stay equal across the pair.
@@ -101,6 +101,7 @@ SILVER_ROLLING_COLS: list[str] = [
     "second_serve_win_pct_10",
     "serve_win_pct_10",
     "return_points_won_pct_10",
+    "dominance_10",
     "df_rate_10",
     "aces_per_svc_game_10",
     "game_margin_10",
@@ -120,11 +121,15 @@ PROFILE_COLS: list[str] = [
 ]
 
 # Pair-level head-to-head history (no player_/opponent_ prefix). Both
-# orientations of a match share the same meeting count; advantage is the
-# signed, Beta(1,1)-smoothed directional value and negates on side swap.
+# orientations of a match share the same lifetime meeting count; h2h_advantage
+# and h2h_surface_advantage are signed, Beta(1,1)-smoothed directional values
+# built from the five most recent strictly-prior meetings (the surface variant
+# restricted to meetings on the current match's surface) and negate on side
+# swap.
 H2H_COLS: list[str] = [
-    "h2h_exposure",  # invariant: strictly-prior meeting count (0 when never met)
-    "h2h_advantage",  # signed: (player_prior_wins + 1) / (prior_meetings + 2) - 0.5
+    "h2h_exposure",  # invariant: LIFETIME strictly-prior meeting count (0 when never met)
+    "h2h_advantage",  # signed: (recent-5 wins + 1) / (recent-5 meetings + 2) - 0.5
+    "h2h_surface_advantage",  # signed, same formula, recent-5 meetings on the current surface only
 ]
 
 
@@ -175,6 +180,7 @@ DIFF_COLS: list[str] = [
     "second_serve_win_pct_diff",
     "serve_win_pct_diff",
     "return_points_won_pct_diff",
+    "dominance_diff",
     "df_rate_diff",
     "aces_per_svc_game_diff",
     "rank_trend_diff",
@@ -233,6 +239,7 @@ TOUR_AVERAGES_FALLBACK_COLS: list[str] = [
     "second_serve_win_pct_10",
     "serve_win_pct_10",
     "return_points_won_pct_10",
+    "dominance_10",
     "df_rate_10",
     "aces_per_svc_game_10",
     "avg_player_rank_10",
