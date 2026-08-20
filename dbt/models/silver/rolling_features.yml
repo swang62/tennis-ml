@@ -40,22 +40,20 @@ models:
       second_serve_win_pct_10, serve_win_pct_10, return_points_won_pct_10,
       df_rate_10, and clay/grass/hard_win_rate_10. NOT probabilities, so
       deliberately left unsmoothed: aces_per_svc_game_10 (per-game count, no
-      upper bound), weighted_form_10 (decay-weighted index), streak,
-      game_margin_10 (signed, no upper bound), and the rank averages.
+      upper bound), weighted_form_10 (decay-weighted index), streak, and the
+      rank averages.
       clay/grass/hard_win_rate_10 remain NULL until the player has played on
-      that surface, and game_margin_10 NULL until the player has a match with
-      a parseable completed-set score.
+      that surface.
 
       Task 6: every `_5`/`_20` output, the separate win/loss streaks (replaced
       by a single signed `streak`), last_match_date, and intermediate/source
       outputs not consumed downstream are removed. days_since_last_match,
       matches_30d, and current-match serve/break rates are derived on demand
       (not stored here); raw serve/break counts remain in silver.
-      Precision contract: every emitted floating/statistical column is
-      truncated to 5 decimal places at the computed output boundary
-      (TRUNC(x::NUMERIC, 5)); window/aggregate expressions retain full
-      precision internally. Integer identifiers, ordinals, counts, dates,
-      surfaces, ranks, rank points, and the signed streak are unchanged.
+      Precision contract: every emitted floating/statistical column is stored
+      at full arithmetic precision (no truncation or rounding). Integer
+      identifiers, ordinals, counts, dates, surfaces, ranks, rank points, and
+      the signed streak are unchanged.
     columns:
       - name: player_id
         description: Player this post-match snapshot describes.
@@ -87,9 +85,11 @@ models:
       - name: weighted_form_10
         description: >
           Exponentially-decayed win rate over the last 10 matches including
-          this one: match_won weighted by POW(0.9, rn), where rn counts
-          backwards from the newest match (newest = 0, weight 1) and each
-          older match decays by 0.9 per step. NULL only when the window is
+          this one: match_won weighted by POW(0.9, max_match_number -
+          player_match_number), where max_match_number is the player's latest
+          match ordinal over the full history and player_match_number is this
+          snapshot's ascending ordinal (newest = gap 0, weight 1); each older
+          match decays by 0.9 per step. NULL only when the window is
           empty; otherwise in [0, 1].
       - name: win_rate_10
         description: (wins + 1) / (matches + 2) over the last 10 completed matches including this one — Beta(1,1)-smoothed; 0.5 for the first match.
@@ -114,25 +114,8 @@ models:
           silver.player_matches from the opponent's raw serve counts. Smoothed,
           never NULL. Consumed only by the PlayerSimilarity style index (not a
           model feature).
-      - name: dominance_10
-        description: >
-          Return strength per unit of serve weakness:
-          return_points_won_pct_10 / (1 - serve_win_pct_10) over the last 10
-          matches including this one. A ratio of two smoothed rates, so never
-          NULL (both inputs < 1) and unbounded above.
       - name: aces_per_svc_game_10
         description: Sum(aces) / sum(service_games) over the last 10 matches including this one; NULL when the window has no service games. Per-game count, not smoothed.
-      - name: game_margin_10
-        description: >
-          Average per-match game margin (games won minus games lost) over the
-          last 10 matches including this one, parsed from the winner-first
-          bronze score: each completed-set token "a-b" contributes a - b, so
-          W/O, RET, and missing scores contribute nothing (a retired match
-          counts only its completed sets). Signed per the snapshot's own
-          match_won (winner +, loser -), so the two perspectives of a match
-          negate. AVG skips matches without a parseable score; NULL until the
-          player's first scored match. Unsmoothed; match_features imputes a
-          neutral 0.0 (even games) on cold start.
       - name: df_rate_10
         description: (double_faults + 1) / (total_serve_points + 2) over the last 10 matches including this one; smoothed, never NULL.
       - name: matches_10

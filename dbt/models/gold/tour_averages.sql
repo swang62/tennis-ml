@@ -170,86 +170,81 @@ SELECT
     tr.player_match_rows,
 
     -- Rank/streak-like medians, rounded; empty pool falls back to constants.
-    ROUND(COALESCE(p.latest_player_ranking, 100)::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(COALESCE(p.latest_player_ranking, 100)::NUMERIC, 5)::DOUBLE PRECISION
         AS latest_player_ranking,
-    ROUND(COALESCE(p.latest_player_rank_points, 500)::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(COALESCE(p.latest_player_rank_points, 500)::NUMERIC, 5)::DOUBLE PRECISION
         AS latest_player_rank_points,
-    ROUND(COALESCE(p.streak, 0)::NUMERIC, 3)::DOUBLE PRECISION AS streak,
-    ROUND(COALESCE(p.avg_player_rank_10, 100)::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(COALESCE(p.streak, 0)::NUMERIC, 5)::DOUBLE PRECISION AS streak,
+    ROUND(COALESCE(p.avg_player_rank_10, 100)::NUMERIC, 5)::DOUBLE PRECISION
         AS avg_player_rank_10,
-    ROUND(COALESCE(p.avg_rank_faced_10, 100)::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(COALESCE(p.avg_rank_faced_10, 100)::NUMERIC, 5)::DOUBLE PRECISION
         AS avg_rank_faced_10,
 
     -- Continuous means over the full pool.
-    ROUND(COALESCE(p.latest_player_age, 26.0)::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(COALESCE(p.latest_player_age, 26.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS latest_player_age,
-    ROUND(COALESCE(p.weighted_form_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(COALESCE(p.weighted_form_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS weighted_form_10,
-    ROUND(COALESCE(p.win_rate_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(COALESCE(p.win_rate_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS win_rate_10,
-    ROUND(COALESCE(p.ace_rate_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(COALESCE(p.ace_rate_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS ace_rate_10,
-    ROUND(COALESCE(p.first_serve_pct_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(COALESCE(p.first_serve_pct_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS first_serve_pct_10,
-    ROUND(COALESCE(p.break_points_saved_pct_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(COALESCE(p.break_points_saved_pct_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS break_points_saved_pct_10,
-    ROUND(COALESCE(p.first_serve_win_pct_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(COALESCE(p.first_serve_win_pct_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS first_serve_win_pct_10,
-    ROUND(COALESCE(p.second_serve_win_pct_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(COALESCE(p.second_serve_win_pct_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS second_serve_win_pct_10,
-    ROUND(COALESCE(p.serve_win_pct_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(COALESCE(p.serve_win_pct_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS serve_win_pct_10,
-    ROUND(COALESCE(p.return_points_won_pct_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(COALESCE(p.return_points_won_pct_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS return_points_won_pct_10,
-    -- Pool dominance: return strength per unit of serve weakness, the ratio of
-    -- the two pool-mean rates above.
-    ROUND((COALESCE(p.return_points_won_pct_10, 0.0)
-        / (1.0 - COALESCE(p.serve_win_pct_10, 0.0)))::NUMERIC, 3)::DOUBLE PRECISION
-        AS dominance_10,
-    ROUND(COALESCE(p.df_rate_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(COALESCE(p.df_rate_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS df_rate_10,
-    ROUND(COALESCE(p.aces_per_svc_game_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(COALESCE(p.aces_per_svc_game_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS aces_per_svc_game_10,
-    ROUND(COALESCE(p.clay_win_rate_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(COALESCE(p.clay_win_rate_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS clay_win_rate_10,
-    ROUND(COALESCE(p.grass_win_rate_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(COALESCE(p.grass_win_rate_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS grass_win_rate_10,
-    ROUND(COALESCE(p.hard_win_rate_10, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(COALESCE(p.hard_win_rate_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS hard_win_rate_10,
 
     -- Cold-start activity defaults; pre-rounded whole values.
-    ROUND(COALESCE(a.median_days_since, 365)::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(COALESCE(a.median_days_since, 365)::NUMERIC, 5)::DOUBLE PRECISION
         AS days_since_default,
-    ROUND(COALESCE(a.median_matches_30d, 0)::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(COALESCE(a.median_matches_30d, 0)::NUMERIC, 5)::DOUBLE PRECISION
         AS matches_30d_default,
 
     -- Explicit fixed constants and static profile-pool means.
     0.5 AS rate_default,
-    ROUND(COALESCE(pa.left_handed_rate, 0.0)::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(COALESCE(pa.left_handed_rate, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS left_handed_rate,
-    ROUND(COALESCE(pa.avg_years_pro, 8.0)::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(COALESCE(pa.avg_years_pro, 8.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS avg_years_pro,
 
     -- Weighted tour benchmarks (may be NULL only when denominator is zero).
-    ROUND(tr.tour_ace_rate::NUMERIC, 3)::DOUBLE PRECISION AS tour_ace_rate,
-    ROUND(tr.tour_first_serve_pct::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(tr.tour_ace_rate::NUMERIC, 5)::DOUBLE PRECISION AS tour_ace_rate,
+    ROUND(tr.tour_first_serve_pct::NUMERIC, 5)::DOUBLE PRECISION
         AS tour_first_serve_pct,
-    ROUND(tr.tour_break_points_saved_pct::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(tr.tour_break_points_saved_pct::NUMERIC, 5)::DOUBLE PRECISION
         AS tour_break_points_saved_pct,
-    ROUND(tr.tour_first_serve_win_pct::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(tr.tour_first_serve_win_pct::NUMERIC, 5)::DOUBLE PRECISION
         AS tour_first_serve_win_pct,
-    ROUND(tr.tour_second_serve_win_pct::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(tr.tour_second_serve_win_pct::NUMERIC, 5)::DOUBLE PRECISION
         AS tour_second_serve_win_pct,
-    ROUND(tr.tour_serve_win_pct::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(tr.tour_serve_win_pct::NUMERIC, 5)::DOUBLE PRECISION
         AS tour_serve_win_pct,
-    ROUND(tr.tour_return_points_won_pct::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(tr.tour_return_points_won_pct::NUMERIC, 5)::DOUBLE PRECISION
         AS tour_return_points_won_pct,
-    ROUND(tr.tour_df_rate::NUMERIC, 3)::DOUBLE PRECISION AS tour_df_rate,
-    ROUND(tr.tour_aces_per_svc_game::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(tr.tour_df_rate::NUMERIC, 5)::DOUBLE PRECISION AS tour_df_rate,
+    ROUND(tr.tour_aces_per_svc_game::NUMERIC, 5)::DOUBLE PRECISION
         AS tour_aces_per_svc_game,
-    ROUND(tr.tour_break_point_opportunities_per_return_game::NUMERIC, 3)
+    ROUND(tr.tour_break_point_opportunities_per_return_game::NUMERIC, 5)
         ::DOUBLE PRECISION AS tour_break_point_opportunities_per_return_game,
-    ROUND(tr.tour_return_games_won_pct::NUMERIC, 3)::DOUBLE PRECISION
+    ROUND(tr.tour_return_games_won_pct::NUMERIC, 5)::DOUBLE PRECISION
         AS tour_return_games_won_pct
 FROM pool_stats p
 CROSS JOIN activity a

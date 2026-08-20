@@ -5,11 +5,14 @@ models:
     description: >
       TWO DIRECTIONAL ROWS PER MATCH, one per player, keyed by
       (match_id, player_id), built by pairing each player_match row with that
-      player's immediately preceding post-match snapshot
-      (player_match_number - 1) from silver.rolling_features. The two rows of
-      a physical match share match_id and match context, exchange the paired
-      player_*/opponent_* side values, negate the signed differences and
-      h2h_advantage, and carry complementary match_won labels. Every
+      player's latest post-match snapshot strictly before match_date
+      (snapshot_date < match_date, same-date matches cannot supply it) from
+      silver.rolling_features; the (snapshot_date, match_id) DESC lateral
+      equals player_match_number DESC. The two rows of a physical match share
+      match_id and match context, exchange the paired player_*/opponent_*
+      side values, negate the signed differences and the h2h advantages
+      (h2h_advantage, h2h_surface_advantage), and carry complementary
+      match_won labels. Every
       side-level value is imputed from the single-row gold.tour_averages
       singleton (CROSS JOIN) BEFORE matchup differences are calculated, so
       every FEATURE_COLS cell is non-null and finite; dbt fails when the
@@ -33,13 +36,12 @@ models:
       the bronze boundary (CHECK + normalization at ingest); match_won,
       tournament_level, and round_encoded are guaranteed by the model's own
       CASE derivations, so no accepted_values tests are needed.
-      Precision contract: every emitted floating/statistical column — matchup
-      differences, absolute state values, the h2h advantage, and the
-      similarity-only serve/return columns — is truncated to 5 decimal places
-      at the output boundary (TRUNC(x::NUMERIC, 5)), so imputation/matchup
-      arithmetic retains full precision internally. Integer identifiers,
-      match_won, counts, 0/1 flags, encoded categoricals, and integer-valued
-      rank/rank-points/streak differences are unchanged.
+      Precision contract: every floating/statistical column is emitted at full
+      arithmetic precision (no truncation or rounding at the output boundary).
+      Integer identifiers, match_won, counts, 0/1 flags, encoded categoricals,
+      and integer-valued rank/rank-points/streak differences are unchanged.
+      Tour-average fallbacks are the only rounded values: gold.tour_averages
+      stores them rounded to 5 decimal places.
     columns:
       - name: match_id
         description: Immutable group key for one physical match; exactly two directional rows (one per player) share it.
@@ -81,8 +83,6 @@ models:
         description: player_serve_win_pct_10 - opponent_serve_win_pct_10.
       - name: return_points_won_pct_diff
         description: player_return_points_won_pct_10 - opponent_return_points_won_pct_10.
-      - name: dominance_diff
-        description: player dominance - opponent dominance (player_return_points_won_pct_10 / (1 - player_serve_win_pct_10) minus the opponent's ratio, prior snapshots, imputed).
       - name: df_rate_diff
         description: player_df_rate_10 - opponent_df_rate_10.
       - name: aces_per_svc_game_diff
@@ -106,14 +106,8 @@ models:
           each side's days between the match date and its immediately preceding
           match (the prior snapshot's date; pool median days-since
           (days_since_default) on cold start), log-transformed to compress the
-          long rest tail. Per-side raw days-since is unchanged.
-      - name: recent_game_margin_diff
-        description: >
-          player_game_margin_10 - opponent_game_margin_10: each side's prior
-          snapshot's average per-match game margin (games won minus games lost
-          over the last 10, from the winner-first score, completed sets only);
-          neutral 0.0 (even games) when no prior scored match exists. Negates
-          across the match's two directional rows.
+          long rest tail. Per-side raw days-since is capped at 30 before the
+          log transform (both sides cap identically).
 
       # Absolute state values where both sides matter.
       - name: player_weighted_form_10
@@ -140,9 +134,11 @@ models:
       # directional rows of a match share the same exposure; advantage is
       # signed and complementary across the pair.
       - name: h2h_exposure
-        description: Prior meetings between the two players, strictly before this match (0 when never met). Invariant across the match's two directional rows.
+        description: Number of the five most recent strictly-prior meetings between the two players (0 when never met). Invariant across the match's two directional rows.
       - name: h2h_advantage
         description: Smoothed directional advantage (row player's prior wins + 1) / (prior meetings + 2) - 0.5 from those strictly-prior meetings; negates on side swap and is 0.0 when never met.
+      - name: h2h_surface_advantage
+        description: Smoothed directional advantage over recent-5 meetings on the current match's surface only, (row player's prior surface wins + 1) / (prior surface meetings + 2) - 0.5; 0.0 when no surface-restricted meetings exist. Negates on side swap.
 
       # Numeric match context (one-hot surface for linear and neural models).
       # is_clay/is_grass/is_hard derive directly from the surface domain

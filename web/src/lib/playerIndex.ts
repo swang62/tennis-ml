@@ -1,26 +1,13 @@
-// Shared static player-directory source for Home and H2H. The directory
-// payload is bundled in the Vite entry, so initial picker data is synchronous
-// with no network state. The serialized MiniSearch index is emitted as a
-// separate Vite-hashed asset and fetched only after the first non-empty
-// picker search; it is never constructed in the browser. HTTP caching of the
-// immutable hashed search asset is the only client cache (no localStorage, no
-// polling, no API fallback).
+// Shared API-fetched player-directory source for Home, H2H, and the Layout
+// footer. The directory (players + summary) is fetched once per React Query
+// cache lifecycle via GET /directory; no generated artifacts are bundled. The
+// in-memory MiniSearch fuzzy/prefix index is built lazily from the fetched
+// players on the first picker search and shared by every consumer (no
+// localStorage, no polling, no background refresh).
 
 import { useQuery } from "@tanstack/react-query";
-import type MiniSearch from "minisearch";
 import type { Player } from "../api";
-// Generated before Vite/dev runs by web/scripts/build-player-index.mjs from
-// data/deploy/player-directory.json (missing inputs fail the build on purpose).
-import directoryJson from "../assets/generated/player-directory.json" with {
-  type: "json",
-};
-// ?url&no-inline emits the search payload as a hashed /assets/ file instead of
-// inlining it into the entry chunk.
-import searchAssetUrl from "../assets/generated/player-search.json?url&no-inline" with {
-  type: "json",
-};
 
-// Must match MINISEARCH_OPTS in web/scripts/build-player-index.mjs.
 export const MINISEARCH_OPTS = Object.freeze({
   fields: ["display_name"],
   idField: "player_id",
@@ -29,26 +16,23 @@ export const MINISEARCH_OPTS = Object.freeze({
 
 export interface PlayerIndexData {
   players: Player[];
+  latest_match_date: string | null;
+  total_matches: number;
   loadSearch: () => Promise<PlayerSearch>;
 }
 
 export type PlayerSearch = (query: string) => Player[];
 
-type MiniSearchConstructor = typeof MiniSearch;
-
-// The MiniSearch module and serialized index are loaded only after the user
-// types a query; initial picker defaults use the directory payload alone.
-// `MiniSearchCtor` is passed by loadPlayerSearch so the asset fetch and the
-// module import run concurrently; the standalone fallback keeps callers that
-// only have the payload (tests) working.
-export async function deserializePlayerSearch(
-  indexPayload: string,
+// Builds the in-memory MiniSearch index over the fetched players and returns
+// a query function. The module import stays lazy so the minisearch chunk is
+// loaded only when the first picker search runs; the index is built per
+// directory payload, never serialized or fetched.
+export async function buildPlayerSearch(
   players: Player[],
-  MiniSearchCtor?: MiniSearchConstructor,
 ): Promise<PlayerSearch> {
-  const MiniSearchClass =
-    MiniSearchCtor ?? (await import("minisearch")).default;
-  const index = MiniSearchClass.loadJSON(indexPayload, MINISEARCH_OPTS);
+  const { default: MiniSearchClass } = await import("minisearch");
+  const index = new MiniSearchClass(MINISEARCH_OPTS);
+  index.addAll(players);
   const playersById = new Map(
     players.map((player) => [player.player_id, player]),
   );
@@ -61,43 +45,38 @@ export async function deserializePlayerSearch(
   };
 }
 
-// One fetch + one minisearch chunk load on the first invocation; later calls
-// reuse the resolved in-memory search function.
-let searchPromise: Promise<PlayerSearch> | undefined;
-export function loadPlayerSearch(): Promise<PlayerSearch> {
-  searchPromise ??= Promise.all([
-    fetch(searchAssetUrl).then(async (res) => {
-      if (!res.ok) {
-        throw new Error(`player search index: HTTP ${res.status}`);
-      }
-      return ((await res.json()) as { index: string }).index;
-    }),
-    import("minisearch"),
-  ]).then(([indexPayload, { default: MiniSearchClass }]) =>
-    deserializePlayerSearch(
-      indexPayload,
-      directoryJson.players,
-      MiniSearchClass,
-    ),
-  );
-  return searchPromise;
+// Shared lazy loader: the index is built once per directory payload; later
+// calls reuse the resolved in-memory search function.
+export function createPlayerSearchLoader(
+  players: Player[],
+): () => Promise<PlayerSearch> {
+  let searchPromise: Promise<PlayerSearch> | undefined;
+  return () => {
+    searchPromise ??= buildPlayerSearch(players);
+    return searchPromise;
+  };
 }
-
-const directoryData: PlayerIndexData = {
-  players: directoryJson.players,
-  loadSearch: loadPlayerSearch,
-};
 
 export const playerIndexQueryKey = ["player-index"] as const;
 
 // One shared query key/source: whichever of Layout/Home/H2H mounts first
-// exposes the bundled players synchronously; the rest read the same stable
-// cached result. initialData keeps isLoading false from first render.
+// fetches the directory once; the rest read the same cached result for the
+// page's lifetime. staleTime/gcTime Infinity keep the payload in memory, so
+// a reload retry re-fetches only on error.
 export function usePlayerDirectory() {
   return useQuery({
     queryKey: playerIndexQueryKey,
-    queryFn: () => directoryData,
-    initialData: directoryData,
+    // Dynamic import keeps the hook node-testable: node's ESM loader cannot
+    // resolve the bundler-style extensionless ../api, and Vite resolves it.
+    queryFn: async () => {
+      const directory = await import("../api").then(({ getDirectory }) =>
+        getDirectory(),
+      );
+      return {
+        ...directory,
+        loadSearch: createPlayerSearchLoader(directory.players),
+      } satisfies PlayerIndexData;
+    },
     staleTime: Infinity,
     gcTime: Infinity,
   });

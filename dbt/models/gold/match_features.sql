@@ -22,13 +22,12 @@
 -- a feature.
 --
 -- H2H reads bronze.match_events (via winner_id, no id canonicalization).
--- h2h_exposure is the LIFETIME count of all strictly-prior unordered-pair
--- meetings (uncapped, identical for both mirrors); h2h_advantage and
+-- h2h_exposure is the count of the FIVE most recent strictly-prior
+-- unordered-pair meetings (identical for both mirrors); h2h_advantage and
 -- h2h_surface_advantage are Beta(1,1)-smoothed directional advantages built
--- from the FIVE most recent strictly-prior meetings (the surface variant
--- restricted to meetings on the current match's surface) and negate across
--- mirrors. Recent-5 lookups stay bounded (LIMIT 5 laterals); lifetime
--- exposure uses a separate unbounded count.
+-- from the same bounded five-meeting window (the surface variant restricted
+-- to meetings on the current match's surface) and negate across mirrors.
+-- Lookups stay bounded (LIMIT 5 laterals); no lifetime count is kept.
 --
 -- Player snapshot state stays strictly prior (no current-match leakage);
 -- fallback values are intentionally global: the same full-pool singleton is
@@ -41,10 +40,11 @@
 -- Model columns are metadata plus FEATURE_COLS. Height and current-match
 -- rates are not model features.
 --
--- Incremental boundary: bronze is immutable and append-only, so each ETL run
--- appends exactly two directional rows per new bronze match. New rows are
+-- Incremental boundary: the ETL watermark identifies bronze rows ingested
+-- since the last successful dbt build, so each ETL run appends exactly two
+-- directional rows per new bronze match without scanning this target. New rows are
 -- computed against the FULL silver history (prior snapshots via the
--- date-strict lateral join, H2H over all strictly-prior meetings, the freshly
+-- date-strict lateral join, H2H over the bounded recent-five meetings, the freshly
 -- rebuilt gold.tour_averages singleton), so a new match's rows are exactly
 -- what a full rebuild would produce; existing rows are untouched. Re-running
 -- with no new bronze matches inserts nothing (idempotent).
@@ -57,13 +57,16 @@
 
 WITH
 {% if is_incremental() %}
--- Directional rows not yet materialized, keyed on the bronze append identity.
--- DISTINCT: player_matches carries one row per player perspective, so the
--- same match_id appears twice.
+-- New bronze rows since the last successful dbt build. The source watermark is
+-- recorded only after the whole build succeeds, so a failed downstream model
+-- leaves the batch eligible for the next run.
 new_match_ids AS (
-    SELECT DISTINCT match_id
-    FROM {{ ref('player_matches') }}
-    WHERE match_id NOT IN (SELECT match_id FROM {{ this }})
+    SELECT match_id
+    FROM {{ source('bronze', 'match_events') }}
+    WHERE ingested_at > COALESCE(
+        (SELECT source_watermark FROM bronze.etl_state WHERE pipeline = 'dbt'),
+        '-infinity'::TIMESTAMPTZ
+    )
 ),
 {% endif %}
 player_match_enriched AS (
@@ -106,9 +109,6 @@ player_match_enriched AS (
         COALESCE(pr.serve_win_pct_10, fd.serve_win_pct_10) AS serve_win_pct_10,
         COALESCE(pr.return_points_won_pct_10, fd.return_points_won_pct_10)
             AS return_points_won_pct_10,
-        -- Return strength per unit of serve weakness (ratio of smoothed rates,
-        -- never NULL: both inputs are < 1).
-        COALESCE(pr.dominance_10, fd.dominance_10) AS dominance_10,
         COALESCE(pr.df_rate_10, fd.df_rate_10) AS df_rate_10,
         COALESCE(pr.aces_per_svc_game_10, fd.aces_per_svc_game_10)
             AS aces_per_svc_game_10,
@@ -139,13 +139,10 @@ player_match_enriched AS (
         -- prior snapshot's date is that match); pool median days-since
         -- fallback on cold start. Same-date matches cannot supply the prior
         -- snapshot (strict <), so a same-week back-to-back is at least 1 day.
-        CASE WHEN pr.player_id IS NULL THEN fd.days_since_default
+        -- Capped at 30 before the downstream ln(1 + days) transform.
+        LEAST(30, CASE WHEN pr.player_id IS NULL THEN fd.days_since_default
              ELSE pm.match_date - pr.snapshot_date
-        END AS days_since_last_match,
-
-        -- Rolling average per-match game margin from the prior snapshot;
-        -- neutral 0.0 (even games) when no prior scored match exists.
-        COALESCE(pr.game_margin_10, 0.0) AS game_margin_10,
+        END) AS days_since_last_match,
 
         -- Missing or non-L/R handedness uses the pool left-handed rate.
         COALESCE(
@@ -247,29 +244,6 @@ pair_meetings AS (
     ) ranked
     WHERE rn <= 5
 ),
--- LIFETIME strictly-prior meeting count per directional row (uncapped; the
--- pair is unordered, so both mirrors of a match agree). Separate unbounded
--- count — the recent-5 advantages above stay bounded.
-pair_lifetime AS (
-    SELECT match_id, player_id, COUNT(*) AS lifetime_exposure
-    FROM (
-        SELECT
-            current_match.match_id,
-            current_match.player_id,
-            meeting.match_id AS meeting_match_id
-        FROM player_match_enriched current_match
-        CROSS JOIN LATERAL (
-            SELECT match_id
-            FROM {{ source('bronze', 'match_events') }} meeting
-            WHERE ((meeting.player1_id = current_match.player_id
-                        AND meeting.player2_id = current_match.opponent_id)
-                   OR (meeting.player1_id = current_match.opponent_id
-                        AND meeting.player2_id = current_match.player_id))
-              AND meeting.match_date < current_match.match_date
-        ) meeting
-    ) all_meetings
-    GROUP BY match_id, player_id
-),
 -- Directional H2H per row: recent-5 wins oriented to the row player plus the
 -- surface-restricted recent-5 wins. pair_meetings already restricted each row
 -- to its five newest meetings.
@@ -299,64 +273,47 @@ SELECT
     -- ── Matchup differences (imputed row player side minus imputed opponent) ──
     p.player_ranking - o.player_ranking AS rank_diff,
     p.player_rank_points - o.player_rank_points AS rank_points_diff,
-    TRUNC((p.player_age - o.player_age)::NUMERIC, 5)::DOUBLE PRECISION AS age_diff,
-    TRUNC((p.win_rate_10 - o.win_rate_10)::NUMERIC, 5)::DOUBLE PRECISION
-        AS win_rate_diff,
-    TRUNC((p.ace_rate_10 - o.ace_rate_10)::NUMERIC, 5)::DOUBLE PRECISION
-        AS ace_rate_diff,
-    TRUNC((p.first_serve_pct_10 - o.first_serve_pct_10)::NUMERIC, 5)::DOUBLE PRECISION
-        AS first_serve_pct_diff,
-    TRUNC((p.break_points_saved_pct_10 - o.break_points_saved_pct_10)::NUMERIC, 5)
-        ::DOUBLE PRECISION AS break_points_saved_pct_diff,
-    TRUNC((p.first_serve_win_pct_10 - o.first_serve_win_pct_10)::NUMERIC, 5)
-        ::DOUBLE PRECISION AS first_serve_win_pct_diff,
-    TRUNC((p.second_serve_win_pct_10 - o.second_serve_win_pct_10)::NUMERIC, 5)
-        ::DOUBLE PRECISION AS second_serve_win_pct_diff,
-    TRUNC((p.serve_win_pct_10 - o.serve_win_pct_10)::NUMERIC, 5)::DOUBLE PRECISION
-        AS serve_win_pct_diff,
-    TRUNC((p.return_points_won_pct_10 - o.return_points_won_pct_10)::NUMERIC, 5)
-        ::DOUBLE PRECISION AS return_points_won_pct_diff,
-    TRUNC((p.dominance_10 - o.dominance_10)::NUMERIC, 5)::DOUBLE PRECISION
-        AS dominance_diff,
-    TRUNC((p.df_rate_10 - o.df_rate_10)::NUMERIC, 5)::DOUBLE PRECISION
-        AS df_rate_diff,
-    TRUNC((p.aces_per_svc_game_10 - o.aces_per_svc_game_10)::NUMERIC, 5)
-        ::DOUBLE PRECISION AS aces_per_svc_game_diff,
-    TRUNC((p.rank_trend_10 - o.rank_trend_10)::NUMERIC, 5)::DOUBLE PRECISION
-        AS rank_trend_diff,
-    TRUNC((p.avg_rank_faced_10 - o.avg_rank_faced_10)::NUMERIC, 5)::DOUBLE PRECISION
-        AS avg_rank_faced_diff,
+    p.player_age - o.player_age AS age_diff,
+    p.win_rate_10 - o.win_rate_10 AS win_rate_diff,
+    p.ace_rate_10 - o.ace_rate_10 AS ace_rate_diff,
+    p.first_serve_pct_10 - o.first_serve_pct_10 AS first_serve_pct_diff,
+    p.break_points_saved_pct_10 - o.break_points_saved_pct_10
+        AS break_points_saved_pct_diff,
+    p.first_serve_win_pct_10 - o.first_serve_win_pct_10 AS first_serve_win_pct_diff,
+    p.second_serve_win_pct_10 - o.second_serve_win_pct_10 AS second_serve_win_pct_diff,
+    p.serve_win_pct_10 - o.serve_win_pct_10 AS serve_win_pct_diff,
+    p.return_points_won_pct_10 - o.return_points_won_pct_10
+        AS return_points_won_pct_diff,
+    p.df_rate_10 - o.df_rate_10 AS df_rate_diff,
+    p.aces_per_svc_game_10 - o.aces_per_svc_game_10 AS aces_per_svc_game_diff,
+    p.rank_trend_10 - o.rank_trend_10 AS rank_trend_diff,
+    p.avg_rank_faced_10 - o.avg_rank_faced_10 AS avg_rank_faced_diff,
     p.streak - o.streak AS streak_diff,
-    TRUNC((p.surface_form - o.surface_form)::NUMERIC, 5)::DOUBLE PRECISION
-        AS surface_form_diff,
-    -- Log-transformed directional rest: ln(1 + player) - ln(1 + opponent).
-    TRUNC((LN(1.0 + p.days_since_last_match)
-        - LN(1.0 + o.days_since_last_match))::NUMERIC, 5)
+    p.surface_form - o.surface_form AS surface_form_diff,
+    -- Log-transformed directional rest: ln(1 + player) - ln(1 + opponent),
+    -- both inputs capped at 30 before the transform.
+    LN(1.0 + p.days_since_last_match) - LN(1.0 + o.days_since_last_match)
         AS days_since_last_match_diff,
-    TRUNC((p.game_margin_10 - o.game_margin_10)::NUMERIC, 5)
-        AS recent_game_margin_diff,
 
     -- ── Absolute state values where both sides matter ──
-    TRUNC(p.weighted_form_10::NUMERIC, 5)::DOUBLE PRECISION
-        AS player_weighted_form_10,
-    TRUNC(o.weighted_form_10::NUMERIC, 5)::DOUBLE PRECISION
-        AS opponent_weighted_form_10,
+    p.weighted_form_10 AS player_weighted_form_10,
+    o.weighted_form_10 AS opponent_weighted_form_10,
     -- Rate-exposure counts backing the smoothed 10-match rates (0 cold start).
     p.matches_10            AS player_matches_10,
     o.matches_10            AS opponent_matches_10,
     p.is_left_handed        AS player_is_left_handed,
     o.is_left_handed        AS opponent_is_left_handed,
-    TRUNC(p.years_pro::NUMERIC, 5)::DOUBLE PRECISION AS player_years_pro,
-    TRUNC(o.years_pro::NUMERIC, 5)::DOUBLE PRECISION AS opponent_years_pro,
+    p.years_pro AS player_years_pro,
+    o.years_pro AS opponent_years_pro,
 
-    -- ── Pair-level head-to-head: lifetime exposure + recent-5 signed
-    --    advantages (overall and current-surface) ──
-    COALESCE(l.lifetime_exposure, 0) AS h2h_exposure,
-    TRUNC(((COALESCE(h.wins_for_player, 0) + 1.0)
-        / (COALESCE(h.recent_meetings, 0) + 2.0) - 0.5)::NUMERIC, 5)
+    -- ── Pair-level head-to-head: recent-5 exposure + signed advantages
+    --    (overall and current-surface) from the bounded meeting window ──
+    COALESCE(h.recent_meetings, 0) AS h2h_exposure,
+    ((COALESCE(h.wins_for_player, 0) + 1.0)
+        / (COALESCE(h.recent_meetings, 0) + 2.0) - 0.5)
         AS h2h_advantage,
-    TRUNC(((COALESCE(h.surface_wins_for_player, 0) + 1.0)
-        / (COALESCE(h.surface_meetings, 0) + 2.0) - 0.5)::NUMERIC, 5)
+    ((COALESCE(h.surface_wins_for_player, 0) + 1.0)
+        / (COALESCE(h.surface_meetings, 0) + 2.0) - 0.5)
         AS h2h_surface_advantage,
 
     -- ── Numeric match context (one-hot surface for linear and neural models) ──
@@ -376,26 +333,16 @@ SELECT
     -- ── Similarity-analysis serve/return percentages (NOT model features) ──
     -- Appended style signals for PlayerSimilarity, never FEATURE_COLS. They
     -- share the same defaults imputation but are documented as non-model.
-    TRUNC(p.first_serve_pct_10::NUMERIC, 5)::DOUBLE PRECISION
-        AS player_first_serve_pct_10,
-    TRUNC(o.first_serve_pct_10::NUMERIC, 5)::DOUBLE PRECISION
-        AS opponent_first_serve_pct_10,
-    TRUNC(p.first_serve_win_pct_10::NUMERIC, 5)::DOUBLE PRECISION
-        AS player_first_serve_win_pct_10,
-    TRUNC(o.first_serve_win_pct_10::NUMERIC, 5)::DOUBLE PRECISION
-        AS opponent_first_serve_win_pct_10,
-    TRUNC(p.second_serve_win_pct_10::NUMERIC, 5)::DOUBLE PRECISION
-        AS player_second_serve_win_pct_10,
-    TRUNC(o.second_serve_win_pct_10::NUMERIC, 5)::DOUBLE PRECISION
-        AS opponent_second_serve_win_pct_10,
-    TRUNC(p.serve_win_pct_10::NUMERIC, 5)::DOUBLE PRECISION
-        AS player_serve_win_pct_10,
-    TRUNC(o.serve_win_pct_10::NUMERIC, 5)::DOUBLE PRECISION
-        AS opponent_serve_win_pct_10,
-    TRUNC(p.return_points_won_pct_10::NUMERIC, 5)::DOUBLE PRECISION
-        AS player_return_points_won_pct_10,
-    TRUNC(o.return_points_won_pct_10::NUMERIC, 5)::DOUBLE PRECISION
-        AS opponent_return_points_won_pct_10
+    p.first_serve_pct_10 AS player_first_serve_pct_10,
+    o.first_serve_pct_10 AS opponent_first_serve_pct_10,
+    p.first_serve_win_pct_10 AS player_first_serve_win_pct_10,
+    o.first_serve_win_pct_10 AS opponent_first_serve_win_pct_10,
+    p.second_serve_win_pct_10 AS player_second_serve_win_pct_10,
+    o.second_serve_win_pct_10 AS opponent_second_serve_win_pct_10,
+    p.serve_win_pct_10 AS player_serve_win_pct_10,
+    o.serve_win_pct_10 AS opponent_serve_win_pct_10,
+    p.return_points_won_pct_10 AS player_return_points_won_pct_10,
+    o.return_points_won_pct_10 AS opponent_return_points_won_pct_10
 FROM player_match_enriched p
 JOIN player_match_enriched o
     ON o.match_id = p.match_id
@@ -403,7 +350,4 @@ JOIN player_match_enriched o
 LEFT JOIN prior_h2h h
     ON h.match_id = p.match_id
    AND h.player_id = p.player_id
-LEFT JOIN pair_lifetime l
-    ON l.match_id = p.match_id
-   AND l.player_id = p.player_id
 ORDER BY p.match_date, p.match_id, p.player_id

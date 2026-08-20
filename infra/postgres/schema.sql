@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS bronze.match_events (
     player1_age                DOUBLE PRECISION NOT NULL,
     player2_age                DOUBLE PRECISION NOT NULL,
     winner_id                  VARCHAR NOT NULL,
+    ingested_at                TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (match_id),
     CONSTRAINT match_events_check_players_distinct CHECK (player1_id <> player2_id),
     CONSTRAINT match_events_check_winner         CHECK (winner_id = player1_id),
@@ -99,6 +100,11 @@ CREATE TABLE IF NOT EXISTS bronze.match_events (
     CONSTRAINT match_events_check_indoor CHECK (is_indoor IS NULL OR is_indoor IN (0, 1)),
     CONSTRAINT match_events_check_surface CHECK (surface IN ('clay', 'grass', 'hard', 'carpet'))
 );
+
+-- Existing databases need the append watermark too. New and existing rows are
+-- stamped once here; later inserts/overwrites advance it at ingestion time.
+ALTER TABLE bronze.match_events
+    ADD COLUMN IF NOT EXISTS ingested_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP;
 
 -- Upgrade existing local databases created before match score was ingested.
 ALTER TABLE bronze.match_events ADD COLUMN IF NOT EXISTS score VARCHAR;
@@ -196,6 +202,17 @@ CREATE INDEX IF NOT EXISTS idx_match_events_p2_p1_date_match
 -- Global latest-match lookup for the dynamic directory footer.
 CREATE INDEX IF NOT EXISTS idx_match_events_date
     ON bronze.match_events (match_date);
+
+-- Fast incremental ETL boundary: only source changes since this watermark need
+-- the expensive windowed dbt models. The watermark advances after a successful
+-- full incremental build, never before it.
+CREATE INDEX IF NOT EXISTS idx_match_events_ingested_at_match_id
+    ON bronze.match_events (ingested_at, match_id);
+
+CREATE TABLE IF NOT EXISTS bronze.etl_state (
+    pipeline             VARCHAR PRIMARY KEY,
+    source_watermark     TIMESTAMPTZ
+);
 
 -- Identity backbone for players, sourced from the ATP player database
 -- (data/ATP_player_database.csv, canonical ATP id/name + base metadata).

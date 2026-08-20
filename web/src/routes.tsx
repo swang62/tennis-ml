@@ -8,8 +8,8 @@ import {
   useLocation,
 } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
-import { useDirectoryInfo } from "./lib/directoryInfo";
 import { formatLongDate } from "./lib/format";
+import { usePlayerDirectory } from "./lib/playerIndex";
 import Home from "./pages/Home";
 import { type ThemeName, useTheme } from "./theme";
 
@@ -113,10 +113,10 @@ function Layout() {
   const { theme, toggle } = useTheme();
   const [menuOpen, setMenuOpen] = useState(false);
   const headerRef = useRef<HTMLElement>(null);
-  // The footer "last updated" date is not on the critical path: the shared
-  // hook holds the Bento round-trip until the browser is idle so it never
-  // blocks first paint.
-  const directoryInfoQ = useDirectoryInfo();
+  // The footer "last updated" date rides the same directory query that feeds
+  // the pickers, so it adds no extra request; it renders whenever the cache
+  // already holds the payload.
+  const directoryQ = usePlayerDirectory();
   const { pathname } = useLocation();
   useEffect(() => {
     document.title =
@@ -238,10 +238,10 @@ function Layout() {
       </main>
       <footer className="footer container">
         <span>Courtside — model-driven tennis intelligence.</span>
-        {directoryInfoQ.data?.latest_match_date && (
+        {directoryQ.data?.latest_match_date && (
           <span className="footer-updated">
             <span className="footer-live-dot" aria-hidden="true" />
-            Last updated {formatLongDate(directoryInfoQ.data.latest_match_date)}
+            Last updated {formatLongDate(directoryQ.data.latest_match_date)}
           </span>
         )}
       </footer>

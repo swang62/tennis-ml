@@ -70,10 +70,10 @@ WORK_POOL_NAME = "tennis-pool"
 # 01_train_test_split cuts the gold match date range into three contiguous
 # chronological bands with these fractions. The validation fraction also sizes
 # the within-fold early-stopping holdouts in the 02 tuners; the grouped
-# temporal CV folds themselves are not the 96/2/2 split.
-TRAIN_FRACTION = 0.96
-VAL_FRACTION = 0.02
-TEST_FRACTION = 0.02
+# temporal CV folds themselves are not the 90/5/5 split.
+TRAIN_FRACTION = 0.90
+VAL_FRACTION = 0.05
+TEST_FRACTION = 0.05
 
 # The three bands must partition the date span exactly.
 assert abs(TRAIN_FRACTION + VAL_FRACTION + TEST_FRACTION - 1.0) < 1e-9

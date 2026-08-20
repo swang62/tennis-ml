@@ -1,6 +1,2 @@
 node_modules/
 dist/
-# Generated Vite inputs written before Vite/Docker runs by the node builder
-# (web/scripts/build-player-index.mjs) from data/deploy/player-directory.json;
-# never committed, but included in the web Docker build via `COPY . .`.
-/src/assets/generated/

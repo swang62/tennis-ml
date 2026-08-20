@@ -15,43 +15,38 @@ MODEL = (ROOT / "dbt/models/gold/match_features.sql").read_text()
 TEST = (ROOT / "dbt/tests/gold/match_features_h2h_no_current_match.sql").read_text()
 
 
-def test_model_sources_exposure_from_unbounded_lifetime_count():
-    # h2h_exposure is the LIFETIME unordered-pair count: fed by the separate
-    # uncapped pair_lifetime CTE, never by the bounded recent-5 window.
-    assert "pair_lifetime AS" in MODEL
-    assert "lifetime_exposure" in MODEL
-    assert "COALESCE(l.lifetime_exposure, 0) AS h2h_exposure" in MODEL
-    pair_lifetime = MODEL[MODEL.index("pair_lifetime AS") :]
-    pair_lifetime = pair_lifetime[: pair_lifetime.index("-- Directional H2H")]
-    assert "LIMIT" not in pair_lifetime  # uncapped
-    assert "meeting.match_date < current_match.match_date" in pair_lifetime
+def test_model_sources_exposure_from_bounded_recent_five():
+    # h2h_exposure is the count of the FIVE most recent unordered-pair
+    # meetings: fed by the bounded recent-5 pair_meetings window. There is no
+    # lifetime/unbounded count anywhere in the model.
+    assert "pair_lifetime" not in MODEL
+    assert "lifetime_exposure" not in MODEL
+    assert "COALESCE(h.recent_meetings, 0) AS h2h_exposure" in MODEL
 
 
 def test_model_advantages_use_bounded_strictly_prior_window():
     # The recent-5 advantages stay bounded and every meeting is strictly prior.
     assert "LIMIT 5" in MODEL
     assert "WHERE rn <= 5" in MODEL
-    assert MODEL.count("meeting.match_date < current_match.match_date") >= 3
+    assert MODEL.count("meeting.match_date < current_match.match_date") >= 2
 
 
-def test_model_truncates_advantage_to_five_decimals():
-    assert "TRUNC(((COALESCE(h.wins_for_player, 0) + 1.0)" in MODEL
-    assert "::NUMERIC, 5)" in MODEL
+def test_model_does_not_truncate_advantages():
+    # No truncation at the output boundary; advantages are stored at full
+    # arithmetic precision.
+    assert "TRUNC" not in MODEL
 
 
-def test_test_re_derives_exposure_uncapped():
-    # exposure must be the LIFETIME count (no recent-5 cap); the recent-5 cap
-    # applies only to the advantage window.
-    assert "COUNT(*) AS exp_exposure" in TEST
+def test_test_re_derives_exposure_capped_at_five():
+    # exposure must be the recent-5 count (identical to the advantage window).
     assert "COUNT(*) FILTER (WHERE rn <= 5) AS exp_recent_meetings" in TEST
-    derived_block = TEST[TEST.index("derived AS") :]
-    derived_block = derived_block[: derived_block.index("GROUP BY")]
-    from_to_group = derived_block[derived_block.index("FROM prior_meeting_rows") :]
-    assert "WHERE" not in from_to_group  # exposure count is not row-filtered
+    assert "exp_exposure" not in TEST
+    assert "mf.h2h_exposure IS DISTINCT FROM COALESCE(d.exp_recent_meetings, 0)" in TEST
 
 
-def test_test_advantage_uses_recent_window_and_mirrors_trunc():
+def test_test_advantage_uses_recent_window_and_no_trunc():
     # The advantage denominator is the recent-5 meeting count, and the derived
-    # value is TRUNC'd identically to the model's stored column.
+    # value is compared at full precision (the model no longer truncates).
     assert "exp_recent_meetings" in TEST
-    assert "::NUMERIC, 5)::DOUBLE PRECISION) > 1e-6" in TEST
+    assert "TRUNC" not in TEST
+    assert "::DOUBLE PRECISION)) > 1e-6" in TEST

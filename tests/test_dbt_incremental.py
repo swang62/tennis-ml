@@ -128,10 +128,36 @@ def test_silver_incremental_predicates_rebuild_changed_players():
         assert "player_id IN (SELECT player_id FROM changed_players)" in sql
 
 
-def test_gold_incremental_predicate_selects_new_matches():
+def test_gold_incremental_predicate_uses_ingestion_watermark():
     sql = _read(INCREMENTAL_MODELS["match_features"][0])
     assert "{% if is_incremental() %}" in sql
-    assert "match_id NOT IN (SELECT match_id FROM {{ this }})" in sql
+    assert "ingested_at > COALESCE(" in sql
+    assert "source_watermark FROM bronze.etl_state" in sql
+
+
+def test_weighted_form_uses_max_match_number_gap():
+    """weighted_form_10 decays with POW(0.9, max_match_number -
+    player_match_number): a full-history partition MAX over the player's
+    ascending ordinals replaces the old reversed row-number pass, keeping the
+    window frame ascending with identical decay semantics."""
+    sql = _read(INCREMENTAL_MODELS["rolling_features"][0])
+    assert "POW(0.9, s.player_max_match_number - s.player_match_number)" in sql
+    assert "MAX(pm.player_match_number) OVER (" in sql
+    assert "match_rn_rev" not in sql
+
+
+def test_incremental_etl_uses_an_ingestion_watermark():
+    schema = (ROOT / "infra/postgres/schema.sql").read_text()
+    etl = (ROOT / "src/flows/etl.py").read_text()
+    assert "ingested_at" in schema
+    assert "idx_match_events_ingested_at_match_id" in schema
+    assert "CREATE TABLE IF NOT EXISTS bronze.etl_state" in schema
+    assert "no changed bronze matches: refreshing player_profiles only" in etl
+
+
+def test_incremental_match_lookup_has_a_match_id_index():
+    project = _read("dbt_project.yml")
+    assert "idx_player_matches_match_id" in project
 
 
 def test_aggregate_models_recompute_globally():

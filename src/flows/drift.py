@@ -661,7 +661,7 @@ def _recommendation(
     return "healthy"
 
 
-@flow(log_prints=True, retries=2)
+@flow(log_prints=True)
 def drift_flow(cutoff: date | None = None) -> int:
     """Drift monitor: dbt build, champion validation, score windows, verdict.
 

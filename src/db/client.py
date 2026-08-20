@@ -153,9 +153,38 @@ def connection() -> Iterator[psycopg.Connection[Any]]:
             continue
         try:
             yield conn
-        finally:
+        except BaseException as exc:
+            checkout.__exit__(type(exc), exc, exc.__traceback__)
+            raise
+        else:
             checkout.__exit__(None, None, None)
         return
+
+
+def clear_active_sessions() -> tuple[list[int], list[int]]:
+    """Cancel active queries and terminate idle transactions in this database."""
+    with (
+        psycopg.connect(os.environ["DATABASE_URL"], connect_timeout=CONNECT_TIMEOUT_S) as conn,
+        conn.cursor() as cur,
+    ):
+        cur.execute(
+            """
+            SELECT pid, state
+            FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND pid <> pg_backend_pid()
+              AND backend_type = 'client backend'
+              AND state IN ('active', 'idle in transaction', 'idle in transaction (aborted)')
+            """
+        )
+        sessions = cur.fetchall()
+        cancelled = [pid for pid, state in sessions if state == "active"]
+        terminated = [pid for pid, state in sessions if state != "active"]
+        for pid in cancelled:
+            cur.execute("SELECT pg_cancel_backend(%s)", (pid,))
+        for pid in terminated:
+            cur.execute("SELECT pg_terminate_backend(%s)", (pid,))
+    return cancelled, terminated
 
 
 @contextmanager

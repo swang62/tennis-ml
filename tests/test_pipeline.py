@@ -19,6 +19,7 @@ def test_run_notebook_streams_cell_output_and_keeps_existing_contract(monkeypatc
 
     def _fake_execute_notebook(**kwargs):
         calls.append(kwargs)
+        Path(str(kwargs["output_path"])).write_text("executed notebook")
         return None
 
     monkeypatch.setattr(pipeline.pm, "execute_notebook", _fake_execute_notebook)
@@ -37,6 +38,7 @@ def test_run_notebook_streams_cell_output_and_keeps_existing_contract(monkeypatc
     output = Path(str(kwargs["output_path"]))
     assert output.parent == tmp_path / "out"
     assert re.fullmatch(r"\d{8}_\d{6}_00_test\.ipynb", output.name)
+    assert (tmp_path / "out" / "latest_00_test.ipynb").read_text() == "executed notebook"
     assert set(kwargs) == {
         "input_path",
         "output_path",
@@ -46,10 +48,16 @@ def test_run_notebook_streams_cell_output_and_keeps_existing_contract(monkeypatc
     }
 
 
+def test_selected_notebooks_runs_only_evaluation_for_promotion():
+    assert pipeline.selected_notebooks(promote_only=True) == ["04_evaluate.ipynb"]
+    assert pipeline.selected_notebooks(promote_only=False) == pipeline.NB_ORDER
+
+
 def test_pipeline_source_has_no_navigation_build_or_mlflow_pins():
     source = pipeline.__file__
     assert source is not None
     text = Path(source).read_text()
+    assert "refresh_snapshot" not in text
     assert "build_similarity_index" not in text
     assert "similarity_pins.json" not in text
     assert "mlflow" not in text
@@ -110,6 +118,15 @@ def test_parameter_notebooks_use_central_split_constants():
             )
         else:
             assert "CV_FOLDS" in imported, f"{path.name}: missing central CV_FOLDS import"
+
+
+def test_split_fractions_are_90_5_5():
+    """The chronological split is 90/5/5: these exact fraction constants drive
+    the 01 cutoffs and must stay the pipeline's source of truth."""
+    from src.constants import TEST_FRACTION, TRAIN_FRACTION, VAL_FRACTION
+
+    assert (TRAIN_FRACTION, VAL_FRACTION, TEST_FRACTION) == (0.90, 0.05, 0.05)
+    assert abs(TRAIN_FRACTION + VAL_FRACTION + TEST_FRACTION - 1.0) < 1e-9
 
 
 def test_02_linear_notebook_selects_no_svm_candidate():

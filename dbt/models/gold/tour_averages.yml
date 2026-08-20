@@ -23,9 +23,9 @@ models:
       Limited historical leakage is intentional: old cold-start or otherwise
       missing cells use the same full-pool singleton as current rows, and a
       verification query reports the affected row/cell count.
-      Precision contract: every floating/statistical output is rounded to 3
+      Precision contract: every floating/statistical output is rounded to 5
       decimal places at the model's output boundary
-      (ROUND(x::NUMERIC, 3)::DOUBLE PRECISION), so the aggregate CTEs retain
+      (ROUND(x::NUMERIC, 5)::DOUBLE PRECISION), so the aggregate CTEs retain
       full precision internally. singleton_id, counts, and pool_as_of_date are
       unchanged.
 
@@ -77,8 +77,6 @@ models:
         description: Mean serve_win_pct_10 over the full snapshot pool; 0.0 when empty.
       - name: return_points_won_pct_10
         description: Mean return_points_won_pct_10 over the full snapshot pool; 0.0 when empty (similarity-only input).
-      - name: dominance_10
-        description: Ratio of the pool-mean serve/return rates (mean return_points_won_pct_10 / (1 - mean serve_win_pct_10)); 0.0 when the pool is empty.
       - name: df_rate_10
         description: Mean df_rate_10 over the full snapshot pool; 0.0 when empty.
       - name: aces_per_svc_game_10

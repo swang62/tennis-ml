@@ -11,3 +11,6 @@ tennis_ml:
       dbname: "{{ env_var('POSTGRES_DB', 'tennis') }}"
       schema: gold
       threads: 1
+      keepalives_idle: 60
+      connect_timeout: 30
+      retries: 4
