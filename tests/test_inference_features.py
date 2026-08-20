@@ -9,6 +9,7 @@ database, connection, DATABASE_URL, or seed is involved.
 """
 
 import math
+import re
 from datetime import date
 from typing import cast, override
 
@@ -19,7 +20,7 @@ import pytest
 from src.constants import SILVER_ROLLING_FEATURES
 from src.features import inference
 from src.features.columns import CONTEXT_COLS, DIFF_COLS, FEATURE_COLS, TOUR_AVERAGES_FALLBACK_COLS
-from src.features.inference import build_inference_features
+from src.features.inference import build_inference_features, build_inference_features_bulk
 from src.features.tour_averages import load_tour_averages
 
 # All fixture matches are in 2026 (2026-01-04 .. 2026-07-12); a fixed as-of
@@ -28,11 +29,32 @@ AS_OF_AFTER_ALL_MATCHES = date(2026, 9, 1)
 
 _DB: duckdb.DuckDBPyConnection | None = None
 
+# The bulk queries drive the requested rows through a multi-argument PostgreSQL
+# unnest, which DuckDB does not support; rewrite only that FROM clause into
+# DuckDB's zipped-UNNEST subquery form so the real bulk SQL runs hermetically
+# against the fixture (the LATERAL/COUNT/GROUP BY semantics stay untouched).
+_BULK_UNNEST_RE = re.compile(
+    r"unnest\((?P<args>(?:\?::\w+\[\])(?:, \?::\w+\[\])*)\) AS (?P<alias>\w+)\((?P<names>[^)]+)\)"
+)
+
+
+def _translate_unnest(sql: str) -> str:
+    def repl(match: re.Match[str]) -> str:
+        columns = ", ".join(
+            f"UNNEST({arg.upper()}) AS {name.strip()}"
+            for arg, name in zip(
+                match.group("args").split(", "), match.group("names").split(","), strict=True
+            )
+        )
+        return f"(SELECT {columns}) AS {match.group('alias')}"
+
+    return _BULK_UNNEST_RE.sub(repl, sql)
+
 
 def execute_df(sql: str, params: list[object] | None = None) -> pd.DataFrame:
     """Test stand-in for src.db.client.execute_df over the in-memory DuckDB."""
     assert _DB is not None, "the _duck_db_backed fixture must be active"
-    return _DB.execute(sql.replace("%s", "?"), params or []).df()
+    return _DB.execute(_translate_unnest(sql.replace("%s", "?")), params or []).df()
 
 
 # ── Fixture data ─────────────────────────────────────────────────────────────
@@ -946,6 +968,43 @@ def test_h2h_zero_prior_meetings_neutral():
     assert row["h2h_surface_advantage"] == 0.0
     assert "player_h2h_win_rate" not in out.columns
     assert "opponent_h2h_matches" not in out.columns
+
+
+def test_bulk_never_met_pair_zero_lifetime_exposure():
+    """Scalar/bulk parity for a never-met pair: both report h2h_exposure 0.
+
+    Regression: the bulk lifetime query counts non-null match ids, so its
+    LEFT JOIN LATERAL null-extended row must not inflate a never-met pair to a
+    meeting_count of 1 (COUNT(*) would). The bulk row is byte-identical to the
+    scalar row.
+    """
+    req = {
+        "player_id": "S0AG",
+        "opponent_id": "UNKNOWN_ID",
+        "surface": "hard",
+        "as_of_date": AS_OF_AFTER_ALL_MATCHES,
+    }
+    scalar = build_inference_features(**req)
+    bulk = build_inference_features_bulk([req])
+    assert bulk.iloc[0]["h2h_exposure"] == 0
+    assert scalar.iloc[0]["h2h_exposure"] == 0
+    pd.testing.assert_frame_equal(bulk, scalar, check_exact=True)
+
+
+def test_bulk_met_pair_still_counts_lifetime_exposure():
+    """The fix must not deflate real meetings: the seeded S0AG-vs-Z355 meeting
+    still counts once through the bulk path, matching the scalar builder."""
+    req = {
+        "player_id": "S0AG",
+        "opponent_id": "Z355",
+        "surface": "hard",
+        "as_of_date": AS_OF_AFTER_ALL_MATCHES,
+    }
+    scalar = build_inference_features(**req)
+    bulk = build_inference_features_bulk([req])
+    assert bulk.iloc[0]["h2h_exposure"] == 1
+    assert scalar.iloc[0]["h2h_exposure"] == 1
+    pd.testing.assert_frame_equal(bulk, scalar, check_exact=True)
 
 
 def test_h2h_real_seeded_meeting():

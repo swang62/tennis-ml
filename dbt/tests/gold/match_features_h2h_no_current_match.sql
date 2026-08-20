@@ -1,13 +1,15 @@
 -- Assert every match_features H2H value is exactly re-derivable from prior
 -- meetings, so no row's H2H counts include the current match itself:
---   * matches strictly before the row's match_date (same-date excluded),
+--   * meetings strictly before the row's match_date (same-date excluded),
 --   * deduped to distinct match_ids (silver has 2 rows per match),
---   * restricted to the most recent 5 (match_date DESC, match_id DESC),
 --   * oriented per directional row, keyed on (match_id, player_id).
--- h2h_exposure is the shared unordered-pair meeting count (identical for both
--- mirrors); h2h_advantage is the Beta(1,1)-smoothed directional value
--- (row player's prior wins + 1) / (prior meetings + 2) - 0.5 and negates
--- across mirrors. Any returned row is a violation.
+-- h2h_exposure is the LIFETIME count of all such prior meetings (uncapped,
+-- identical for both mirrors); h2h_advantage is the Beta(1,1)-smoothed
+-- directional value built from the FIVE most recent prior meetings
+-- (match_date DESC, match_id DESC): (row player's prior wins + 1) /
+-- (prior meetings + 2) - 0.5 and negates across mirrors. The model stores the
+-- advantage TRUNC'd to 5 decimals, so the derived value is truncated
+-- identically before comparison. Any returned row is a violation.
 WITH pair_meetings AS (
     -- One row per distinct match between an unordered pair; a_won is the
     -- lower-id (LEAST/GREATEST canonicalization for lookup only) side's
@@ -43,10 +45,10 @@ derived AS (
         match_id,
         player_id,
         COUNT(*) AS exp_exposure,
-        SUM(CASE WHEN player_id < opponent_id THEN a_won
-                 ELSE 1 - a_won END) AS exp_player_wins
+        COUNT(*) FILTER (WHERE rn <= 5) AS exp_recent_meetings,
+        SUM(CASE WHEN rn <= 5 AND player_id < opponent_id THEN a_won
+                 WHEN rn <= 5 THEN 1 - a_won END) AS exp_player_wins
     FROM prior_meeting_rows
-    WHERE rn <= 5
     GROUP BY match_id, player_id
 )
 SELECT
@@ -56,14 +58,17 @@ SELECT
     mf.h2h_exposure,
     mf.h2h_advantage,
     COALESCE(d.exp_exposure, 0) AS exp_exposure,
+    COALESCE(d.exp_recent_meetings, 0) AS exp_recent_meetings,
     COALESCE(d.exp_player_wins, 0) AS exp_player_wins,
-    (COALESCE(d.exp_player_wins, 0) + 1.0) / (COALESCE(d.exp_exposure, 0) + 2.0) - 0.5
+    TRUNC(((COALESCE(d.exp_player_wins, 0) + 1.0)
+        / (COALESCE(d.exp_recent_meetings, 0) + 2.0) - 0.5)::NUMERIC, 5)
         AS exp_advantage
 FROM {{ ref('match_features') }} mf
 LEFT JOIN derived d
     ON d.match_id = mf.match_id
    AND d.player_id = mf.player_id
 WHERE mf.h2h_exposure IS DISTINCT FROM COALESCE(d.exp_exposure, 0)
-   OR ABS(mf.h2h_advantage - (
-       (COALESCE(d.exp_player_wins, 0) + 1.0) / (COALESCE(d.exp_exposure, 0) + 2.0) - 0.5
-   )) > 1e-6
+   OR ABS(mf.h2h_advantage - TRUNC((
+       (COALESCE(d.exp_player_wins, 0) + 1.0)
+       / (COALESCE(d.exp_recent_meetings, 0) + 2.0) - 0.5
+   )::NUMERIC, 5)::DOUBLE PRECISION) > 1e-6
