@@ -1,5 +1,6 @@
 import logging
 import subprocess
+from datetime import datetime
 from typing import cast
 from uuid import uuid4
 
@@ -70,6 +71,20 @@ def test_run_dbt_build_incremental_controls_full_refresh(monkeypatch):
     run_dbt_build(incremental=False)
 
     assert calls == [DBT_BUILD_CMD, [*DBT_BUILD_CMD, "--full-refresh"]]
+
+
+def test_run_dbt_build_selects_only_requested_models(monkeypatch):
+    calls = []
+
+    def fake_run(*args, **_kwargs):
+        calls.append(args[0])
+
+    monkeypatch.setattr("src.flows.etl.subprocess.run", fake_run)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@db:5432/tennis")
+
+    run_dbt_build(incremental=True, select=["player_profiles"])
+
+    assert calls == [[*DBT_BUILD_CMD, "--select", "player_profiles"]]
 
 
 def test_run_dbt_build_custom_profiles_dir_keeps_full_refresh(monkeypatch):
@@ -160,6 +175,33 @@ def test_streamed_build_failure_logs_error_and_raises(monkeypatch, tmp_path, cap
     )
 
 
+def test_streamed_build_terminates_dbt_when_interrupted(monkeypatch, tmp_path):
+    class InterruptingPopen:
+        def __init__(self, *_args, **_kwargs):
+            self.stdout = self
+            self.terminated = False
+
+        def __iter__(self):
+            raise KeyboardInterrupt
+            yield b""  # pragma: no cover
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            assert self.terminated
+            assert timeout == 5
+            return -15
+
+    proc = InterruptingPopen()
+    monkeypatch.setattr("src.flows.etl.subprocess.Popen", lambda *_args, **_kwargs: proc)
+
+    with pytest.raises(KeyboardInterrupt), (tmp_path / "etl.log").open("w") as log:
+        etl._run_streamed(DBT_BUILD_CMD, log, {"K": "V"})
+
+    assert proc.terminated
+
+
 def test_etl_flow_builds_without_enrichment(monkeypatch):
     """ETL builds bronze-to-gold without enrichment — it's a separate step."""
     monkeypatch.setattr("src.flows.etl.bronze_to_gold", lambda **_: FAKE_GOLD_COUNT)
@@ -198,6 +240,11 @@ def test_bronze_to_gold_maps_incremental_to_dbt_full_refresh(monkeypatch):
     monkeypatch.setattr("src.flows.etl.run_dbt_build", lambda **kwargs: dbt_calls.append(kwargs))
     monkeypatch.setattr("src.flows.etl._dbt_model_rows", lambda: {})
     monkeypatch.setattr("src.flows.etl._dbt_summary", lambda _log: "Done. PASS=1")
+    monkeypatch.setattr(
+        "src.flows.etl._incremental_watermarks",
+        lambda: (datetime(2026, 1, 2), datetime(2026, 1, 1)),
+    )
+    monkeypatch.setattr("src.flows.etl._record_incremental_watermark", lambda _watermark: None)
 
     conn = MagicMock()
     direct_conn = MagicMock()
@@ -212,6 +259,31 @@ def test_bronze_to_gold_maps_incremental_to_dbt_full_refresh(monkeypatch):
 
     assert [call["incremental"] for call in dbt_calls] == [False, True]
     assert conn.__enter__.call_count == 2
+
+
+def test_bronze_to_gold_skips_expensive_models_without_new_matches(monkeypatch):
+    from unittest.mock import MagicMock
+
+    dbt_calls = []
+    monkeypatch.setattr("src.flows.etl.run_dbt_build", lambda **kwargs: dbt_calls.append(kwargs))
+    monkeypatch.setattr("src.flows.etl._dbt_model_rows", lambda: {})
+    monkeypatch.setattr("src.flows.etl._dbt_summary", lambda _log: "Done. PASS=1")
+    monkeypatch.setattr(
+        "src.flows.etl._incremental_watermarks",
+        lambda: (datetime(2026, 1, 1), datetime(2026, 1, 1)),
+    )
+
+    conn = MagicMock()
+    direct_conn = MagicMock()
+    cursor = MagicMock()
+    cursor.fetchone.return_value = None
+    conn.__enter__.return_value = direct_conn
+    direct_conn.cursor.return_value.__enter__.return_value = cursor
+    monkeypatch.setattr("src.flows.etl.psycopg.connect", lambda *_args, **_kwargs: conn)
+
+    etl.bronze_to_gold.fn(incremental=True)
+
+    assert dbt_calls[0]["select"] == ["player_profiles"]
 
 
 def test_cli_default_runs_full_refresh(monkeypatch):

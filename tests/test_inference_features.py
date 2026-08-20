@@ -83,7 +83,6 @@ _S0AG = (
     0.42,
     0.05,
     0.4,
-    2.0,
     3,
     3.0,
     20.0,
@@ -106,7 +105,6 @@ _Z355 = (
     0.4,
     0.03,
     0.3,
-    -1.0,
     1,
     5.0,
     25.0,
@@ -129,7 +127,6 @@ _MINOR = (
     0.42,
     0.04,
     0.35,
-    1.5,
     2,
     2.0,
     30.0,
@@ -153,7 +150,6 @@ _SNAP_COLS = (
     "return_points_won_pct_10",
     "df_rate_10",
     "aces_per_svc_game_10",
-    "game_margin_10",
     "streak",
     "avg_player_rank_10",
     "avg_rank_faced_10",
@@ -213,7 +209,7 @@ _PARITY_GOLD = (
     "S0AG",
     "Z355",
     "hard",
-    # 20 matchup diffs (S0AG side minus Z355)
+    # 18 matchup diffs (S0AG side minus Z355)
     -2.0,
     6945.0,
     -4.42,
@@ -225,16 +221,13 @@ _PARITY_GOLD = (
     0.05,
     0.08,
     0.02,  # return_points_won_pct_diff: 0.42 - 0.40
-    0.24625,  # dominance_diff: 0.42/0.37 - 0.40/0.45 (TRUNCed to 5)
     0.02,  # df_rate_diff: 0.05 - 0.03
     0.1,
     0.0,
     -5.0,
     2.0,
     0.2,  # surface_form_diff (hard): 0.8 - 0.6
-    math.log(1.0 + 53.0)
-    - math.log(1.0 + 137.0),  # ln(1+53) - ln(1+137) (s5 2026-05-20, z3 2026-02-25)
-    3.0,  # recent_game_margin_diff: 2.0 - (-1.0)
+    0.0,  # days_since_last_match_diff: both sides capped at 30 -> ln(31)-ln(31)
     # 8 absolute state values (incl. matches_10 exposure pair)
     0.8,
     0.4,
@@ -265,7 +258,7 @@ _PARITY_GOLD_BA = (
     "Z355",
     "S0AG",
     "hard",
-    # 20 matchup diffs (Z355 side minus S0AG = negated)
+    # 18 matchup diffs (Z355 side minus S0AG = negated)
     2.0,
     -6945.0,
     4.42,
@@ -277,15 +270,13 @@ _PARITY_GOLD_BA = (
     -0.05,
     -0.08,
     -0.02,
-    -0.24625,  # dominance_diff negated
     -0.02,
     -0.1,
     0.0,
     5.0,
     -2.0,
     -0.2,  # surface_form_diff (hard): 0.6 - 0.8
-    math.log(1.0 + 137.0) - math.log(1.0 + 53.0),  # ln(1+137) - ln(1+53)
-    -3.0,  # recent_game_margin_diff: -1.0 - 2.0
+    0.0,  # days_since_last_match_diff: both sides capped at 30
     # 8 absolute state values (Z355 first; matches_10 pair exchanged)
     0.4,
     0.8,
@@ -363,7 +354,7 @@ def _seed(con: duckdb.DuckDBPyConnection) -> None:
     )
 
     con.executemany(
-        f"INSERT INTO silver.rolling_features VALUES ({', '.join(['?'] * 27)})",
+        f"INSERT INTO silver.rolling_features VALUES ({', '.join(['?'] * 26)})",
         _snap_rows(),
     )
     # The only seeded pair meeting is pm-s6 (S0AG beat Z355 on 2026-07-12),
@@ -403,8 +394,6 @@ def _seed(con: duckdb.DuckDBPyConnection) -> None:
         "second_serve_win_pct_10": 0.5,
         "serve_win_pct_10": 0.58,
         "return_points_won_pct_10": 0.42,
-        # Pool dominance ratio of those two rates: 0.42 / (1 - 0.58) = 1.0.
-        "dominance_10": 1.0,
         "df_rate_10": 0.04,
         "aces_per_svc_game_10": 0.35,
         "avg_player_rank_10": 15.0,
@@ -950,7 +939,7 @@ def test_null_handedness_falls_back_to_pool_rate(monkeypatch):
     assert values["years_pro"] == 8.0  # 2026 - 2018
 
 
-# ── Head-to-head (perspective-explicit; lifetime exposure, recent-5 advantages) ──
+# ── Head-to-head (perspective-explicit; recent-5 exposure, recent-5 advantages) ──
 #
 # Seed data has no repeated pair, so H2H tests use isolated synthetic rows.
 
@@ -970,10 +959,10 @@ def test_h2h_zero_prior_meetings_neutral():
     assert "opponent_h2h_matches" not in out.columns
 
 
-def test_bulk_never_met_pair_zero_lifetime_exposure():
+def test_bulk_never_met_pair_zero_exposure():
     """Scalar/bulk parity for a never-met pair: both report h2h_exposure 0.
 
-    Regression: the bulk lifetime query counts non-null match ids, so its
+    Regression: the bulk recent-5 query counts non-null match ids, so its
     LEFT JOIN LATERAL null-extended row must not inflate a never-met pair to a
     meeting_count of 1 (COUNT(*) would). The bulk row is byte-identical to the
     scalar row.
@@ -991,9 +980,9 @@ def test_bulk_never_met_pair_zero_lifetime_exposure():
     pd.testing.assert_frame_equal(bulk, scalar, check_exact=True)
 
 
-def test_bulk_met_pair_still_counts_lifetime_exposure():
+def test_bulk_met_pair_still_counts_exposure():
     """The fix must not deflate real meetings: the seeded S0AG-vs-Z355 meeting
-    still counts once through the bulk path, matching the scalar builder."""
+    still counts once through the bulk recent-5 path, matching the scalar builder."""
     req = {
         "player_id": "S0AG",
         "opponent_id": "Z355",
@@ -1063,7 +1052,7 @@ def test_h2h_last5_recency_drops_oldest():
     """A 6th prior meeting drops the oldest from the recency window: only the
     5 most recent meetings feed the advantage. The dropped meeting is the
     pair's only A win, so the requested A side has 0 wins in the window:
-    (0+1)/(5+2)-0.5. Lifetime exposure stays uncapped at 6."""
+    (0+1)/(5+2)-0.5. Exposure is the recent-5 count, 5."""
     a, b = "H2H_C", "H2H_D"
     _insert_prior_meetings(
         a,
@@ -1079,7 +1068,7 @@ def test_h2h_last5_recency_drops_oldest():
     )
     out = build_inference_features(a, b, "hard", as_of_date=date(2026, 7, 1))
     row = out.iloc[0]
-    assert row["h2h_exposure"] == 6  # lifetime, uncapped
+    assert row["h2h_exposure"] == 5  # five most recent, not lifetime
     assert row["h2h_advantage"] == pytest.approx((0 + 1) / (5 + 2) - 0.5)  # -0.3571
     # All five window meetings are hard: surface advantage matches the overall.
     assert row["h2h_surface_advantage"] == pytest.approx((0 + 1) / (5 + 2) - 0.5)
@@ -1104,10 +1093,10 @@ def test_h2h_surface_advantage_filters_bounded_window():
     )
     out = build_inference_features(a, b, "clay", as_of_date=date(2026, 7, 1))
     row = out.iloc[0]
-    # Lifetime exposure counts all six; the recent-5 window is v2..v6, of which
-    # four are clay with two A wins: (2+1)/(4+2)-0.5 = 0.0. Overall advantage
-    # over all five window meetings (2 wins): (2+1)/(5+2)-0.5 = -1/14.
-    assert row["h2h_exposure"] == 6
+    # Exposure is the recent-5 count, 5; the recent-5 window is v2..v6, of
+    # which four are clay with two A wins: (2+1)/(4+2)-0.5 = 0.0. Overall
+    # advantage over all five window meetings (2 wins): (2+1)/(5+2)-0.5 = -1/14.
+    assert row["h2h_exposure"] == 5
     assert row["h2h_surface_advantage"] == pytest.approx((2 + 1) / (4 + 2) - 0.5)  # 0.0
     assert row["h2h_advantage"] == pytest.approx((2 + 1) / (5 + 2) - 0.5)  # -1/14
     # The old clay win (v1) is outside the window: a clay request must NOT see it.
@@ -1236,70 +1225,25 @@ def test_new_contract_features_present_and_finite():
     assert row["opponent_matches_10"] == 4
 
 
-# ── dominance_diff (return strength per unit of serve weakness) ──
-#
-# Per-side dominance = TRUNC(return_points_won_pct_10 / (1 - serve_win_pct_10), 5),
-# the same truncation silver applies, so inference and gold agree cell for cell.
+# ── surface_form_diff and days_since_last_match_diff ──
 
 
-def test_dominance_diff_formula_and_finiteness():
-    """dominance_diff is the per-side truncated dominance ratio minus the
-    opponent's, from each side's strictly-prior snapshot."""
-    out = build_inference_features("S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
-    row = out.iloc[0]
-    # S0AG s6: 0.42 / (1 - 0.63) -> 1.13513; Z355 z4: 0.40 / (1 - 0.55) -> 0.88888.
-    assert row["dominance_diff"] == pytest.approx(1.13513 - 0.88888, abs=1e-9)
-    assert math.isfinite(row["dominance_diff"])
-
-
-def test_dominance_diff_mirror_negates():
-    """Swapping the sides negates dominance_diff (signed diff symmetry)."""
-    out_ab = build_inference_features("S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
-    out_ba = build_inference_features("Z355", "S0AG", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
-    assert out_ba.iloc[0]["dominance_diff"] == pytest.approx(
-        -(out_ab.iloc[0]["dominance_diff"]), abs=1e-9
-    )
-    assert out_ba.iloc[0]["dominance_diff"] == pytest.approx(-(1.13513 - 0.88888), abs=1e-9)
-
-
-def test_dominance_cold_start_neutral_and_finite():
-    """Two unknown players share the tour-average fallback on both sides, so
-    dominance_diff is exactly 0 and the fallback matches the singleton's stored
-    ratio of the two pooled rate cells."""
-    out = build_inference_features("ZZZZ", "YYYY", "hard", as_of_date=date(2026, 9, 1))
-    row = out.iloc[0]
-    assert row["dominance_diff"] == 0.0
-    assert math.isfinite(row["dominance_diff"])
-    defaults = cast(dict[str, float], load_tour_averages())
-    assert float(defaults["dominance_10"]) == pytest.approx(0.42 / (1.0 - 0.58))
-
-
-def test_dominance_one_known_one_unknown_finite():
-    """One known player keeps its own truncated dominance ratio while the
-    unknown side imputes the pool fallback; the diff is finite and non-neutral."""
-    out = build_inference_features("S0AG", "UNKNOWN_ID", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
-    row = out.iloc[0]
-    assert row["dominance_diff"] == pytest.approx(1.13513 - 1.0, abs=1e-9)
-    assert math.isfinite(row["dominance_diff"])
-
-
-def test_surface_form_days_since_and_game_margin_diffs():
-    """The three new contract diffs carry exact training-parity semantics.
+def test_surface_form_and_days_since_diffs():
+    """The two contract diffs carry exact training-parity semantics.
 
     surface_form_diff picks the CURRENT surface's carried per-surface rate
     (clay/grass query their own columns; carpet uses the neutral 0.5 on both
-    sides); days_since_last_match_diff is ln(1 + as_of-minus-prior) per side,
-    differenced; recent_game_margin_diff is the prior game_margin_10 delta.
+    sides); days_since_last_match_diff is ln(1 + capped as_of-minus-prior) per
+    side, differenced, with both sides capped at 30 before the transform.
     """
-    # Strictly-prior snapshots at 2026-07-12: S0AG s5 (05-20), Z355 z3 (02-25);
-    # ln(1+53) - ln(1+137); hard surface rates 0.8 - 0.6; margins 2.0 - (-1.0).
+    # Strictly-prior snapshots at 2026-07-12: S0AG s5 (05-20, +53d), Z355 z3
+    # (02-25, +137d); both cap to 30, so the diff is ln(31) - ln(31) = 0.0.
     out = build_inference_features("S0AG", "Z355", "hard", as_of_date=date(2026, 7, 12))
     row = out.iloc[0]
     assert row["surface_form_diff"] == pytest.approx(0.8 - 0.6)
-    assert row["days_since_last_match_diff"] == pytest.approx(
-        math.log(1.0 + 53.0) - math.log(1.0 + 137.0)
-    )
-    assert row["recent_game_margin_diff"] == pytest.approx(3.0)
+    assert row["days_since_last_match_diff"] == pytest.approx(0.0)
+    # The un-capped log difference would be non-zero, proving the cap applies.
+    assert math.log(1.0 + 53.0) - math.log(1.0 + 137.0) != 0.0
     # Surface-specific selection: clay and grass read their own carried rates
     # (same player rates for all surfaces in the fixture, so both give 0.2).
     for surface in ("clay", "grass"):
@@ -1308,11 +1252,10 @@ def test_surface_form_days_since_and_game_margin_diffs():
     # Carpet has no per-surface rate: both sides use the neutral rate_default.
     carpet = build_inference_features("S0AG", "Z355", "carpet", as_of_date=date(2026, 7, 12))
     assert carpet.iloc[0]["surface_form_diff"] == 0.0
-    # Cold start: unknown players fall back to the pool median days-since and
-    # neutral 0.0 margin on both sides, so both diffs stay neutral.
+    # Cold start: unknown players fall back to the pool median days-since on
+    # both sides, so the days diff stays neutral.
     cold = build_inference_features("ZZZZ", "YYYY", "hard", as_of_date=date(2026, 9, 1))
     assert cold.iloc[0]["days_since_last_match_diff"] == 0.0
-    assert cold.iloc[0]["recent_game_margin_diff"] == 0.0
 
 
 # ── is_indoor context feature ────────────────────────────────────

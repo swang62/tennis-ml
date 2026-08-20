@@ -62,33 +62,23 @@ PINNED_BENTOFILE = DATA_PROCESSED / "bentofile.pinned.yaml"
 BENTO_TAG_FILE = DATA_PROCESSED / "bento_tag.txt"
 STATE_FILE = DATA_PROCESSED / "bento_build_state.json"
 # Snapshot-input hash and source/config fingerprint of the last staged
-# navigation build (directory + similarity artifacts). Kept separate from the
-# bento state so navigation reuse never mixes with model lineage. Missing,
+# similarity build (FAISS index + metadata). Kept separate from the bento
+# state so similarity reuse never mixes with model lineage. Missing,
 # invalid, or legacy (no source fingerprint) -> treated as a rebuild.
-NAVIGATION_STATE_FILE = DATA_PROCESSED / "navigation_artifacts_state.json"
+SIMILARITY_STATE_FILE = DATA_PROCESSED / "similarity_artifacts_state.json"
 
-# Repository-controlled sources whose exact contents shape the navigation
-# outputs without changing snapshot data: the directory SQL/shaping
-# (serving/directory.py), the similarity vector construction, embedding/PCA,
-# weights (models/similarity.py), and the canonical country/player mapping
-# (countries.py). The similarity-tuning constants live in constants.py next
-# to unrelated settings, so only their exact values are fingerprinted, not
-# the whole file. The web MiniSearch builder (web/scripts/build-player-index.mjs)
-# is not a deploy-time input: it consumes the staged raw directory after this
-# function returns and its options can never change the directory bytes, so
-# deploy cannot (and need not) force its content-hash cache to miss.
-NAVIGATION_SOURCE_FILES = [
+# Repository-controlled sources whose exact contents shape the similarity
+# outputs without changing snapshot data: the player-list SQL/shaping that
+# supplies the index rows (serving/directory.py), the similarity vector
+# construction, embedding/PCA, weights (models/similarity.py), and the
+# canonical country/player mapping (countries.py). The similarity-tuning
+# constants live in constants.py next to unrelated settings, so only their
+# exact values are fingerprinted, not the whole file.
+SIMILARITY_SOURCE_FILES = [
     ROOT / "src" / "serving" / "directory.py",
     ROOT / "src" / "models" / "similarity.py",
     ROOT / "src" / "countries.py",
 ]
-
-# Raw player directory the host-side web index builder consumes, generated
-# from the local DuckDB training snapshot at deploy time (see
-# generate_navigation_artifacts). Retained under data/deploy/ as the builder's
-# input — never served or champion-pinned; git-ignored via **/data/deploy/*
-# at the repo root.
-RAW_DIRECTORY_ARTIFACT = DEPLOY_ARTIFACTS / "player-directory.json"
 
 # Multi-architecture publishing: one Docker Hub manifest list for both platforms.
 MULTIARCH_PLATFORMS = ("linux/amd64", "linux/arm64")
@@ -106,7 +96,7 @@ MLFLOW_URI_META_KEY = "mlflow_uri"
 MLFLOW_VERSION_META_KEY = "mlflow_version"
 
 # Model artifacts are materialized into DEPLOY_ARTIFACTS from champion lineage;
-# navigation artifacts are freshly rebuilt there from the training snapshot.
+# similarity artifacts are freshly rebuilt there from the training snapshot.
 NN_ONNX_FILE = DEPLOY_ARTIFACTS / "nn_best.onnx"
 # Packaged index for offline /similar_players requests.
 SIMILARITY_INDEX = DEPLOY_ARTIFACTS / "player_similarity.index"
@@ -158,7 +148,7 @@ DOCKER_TAG = os.getenv("DOCKER_TAG", "dev")
 
 
 def _log(category: str, message: str) -> None:
-    colors = {"bento": "\033[32m", "minisearch": "\033[35m"}
+    colors = {"bento": "\033[32m", "similarity": "\033[35m"}
     color = (
         colors.get(category, "")
         if sys.stdout.isatty() or os.getenv("COURTSIDE_COLOR") == "1"
@@ -189,16 +179,15 @@ def _write_state(state: dict[str, Any]) -> None:
     STATE_FILE.write_text(json.dumps(state) + "\n")
 
 
-def _navigation_inputs_hash(
+def _similarity_inputs_hash(
     profiles: pd.DataFrame,
     lifetime: pd.DataFrame,
 ) -> str:
-    """SHA-256 over every snapshot input the directory and similarity builds read."""
+    """SHA-256 over every snapshot input the similarity build reads."""
     payload = {
-        # Row order of profiles shapes the artifacts (index row order, JSON row
-        # order) and is preserved; lifetime rows only feed player-keyed merges,
-        # so they are sorted for a canonical hash regardless of snapshot row
-        # order.
+        # Row order of profiles shapes the artifacts (index row order) and is
+        # preserved; lifetime rows only feed player-keyed merges, so they are
+        # sorted for a canonical hash regardless of snapshot row order.
         "profiles": json.loads(profiles.to_json(orient="records")),
         "lifetime": _frame_records(lifetime),
     }
@@ -214,25 +203,25 @@ def _frame_records(frame: pd.DataFrame) -> list[dict[str, Any]]:
     return json.loads(frame.to_json(orient="records"))
 
 
-def _read_navigation_inputs_hash() -> str | None:
-    """The persisted inputs hash of the last staged navigation build, else None."""
+def _read_similarity_inputs_hash() -> str | None:
+    """The persisted inputs hash of the last staged similarity build, else None."""
     try:
-        return json.loads(NAVIGATION_STATE_FILE.read_text())["inputs_hash"]
+        return json.loads(SIMILARITY_STATE_FILE.read_text())["inputs_hash"]
     except (FileNotFoundError, ValueError, KeyError, TypeError):
         return None
 
 
-def _navigation_source_hash() -> str:
+def _similarity_source_hash() -> str:
     """SHA-256 over every repository-controlled source/config input that can
-    change the directory or similarity outputs without changing snapshot data.
+    change the similarity outputs without changing snapshot data.
 
-    Hashes the exact contents of NAVIGATION_SOURCE_FILES (relative path + SHA-256
+    Hashes the exact contents of SIMILARITY_SOURCE_FILES (relative path + SHA-256
     per file, mirroring the bento source fingerprint) plus the exact values of
     the similarity-tuning constants. A missing allowlisted file aborts loudly
     rather than silently weakening the fingerprint.
     """
     hasher = hashlib.sha256()
-    for path in NAVIGATION_SOURCE_FILES:
+    for path in SIMILARITY_SOURCE_FILES:
         hasher.update(f"{path.relative_to(ROOT)}:{_file_hash(path)}\n".encode())
     constants = {
         "sim": {
@@ -251,20 +240,20 @@ def _navigation_source_hash() -> str:
     return hasher.hexdigest()
 
 
-def _read_navigation_source_hash() -> str | None:
+def _read_similarity_source_hash() -> str | None:
     """The persisted source fingerprint of the last staged build, else None.
 
     A state written before the source fingerprint existed has no
     ``source_hash`` key and so reads as None, forcing a rebuild.
     """
     try:
-        return json.loads(NAVIGATION_STATE_FILE.read_text())["source_hash"]
+        return json.loads(SIMILARITY_STATE_FILE.read_text())["source_hash"]
     except (FileNotFoundError, ValueError, KeyError, TypeError):
         return None
 
 
-def _write_navigation_state(inputs_hash: str, source_hash: str) -> None:
-    NAVIGATION_STATE_FILE.write_text(
+def _write_similarity_state(inputs_hash: str, source_hash: str) -> None:
+    SIMILARITY_STATE_FILE.write_text(
         json.dumps({"inputs_hash": inputs_hash, "source_hash": source_hash}) + "\n"
     )
 
@@ -397,7 +386,7 @@ def _download_aux_artifacts(client: Any, tags: dict[str, str]) -> float:
     any required tag is not deployable and must be re-promoted from a full
     training run. The temperature-scaling calibration artifact is materialized
     separately by _materialize_calibration (optional for legacy champions).
-    Navigation artifacts are rebuilt from the DuckDB snapshot at
+    Similarity artifacts are rebuilt from the DuckDB snapshot at
     deploy time and are never champion-pinned.
     """
     import mlflow
@@ -990,7 +979,7 @@ def build_bento_image() -> tuple[str, int]:
     _reuse_or_materialize_nn_onnx(state, pins["nn"])
     version_tags = client.get_model_version(PRODUCTION_MODEL, production.version).tags
     calibration_temperature = _download_aux_artifacts(client, version_tags)
-    generate_navigation_artifacts()
+    generate_similarity_artifacts()
     fingerprint = build_input_fingerprint(client, production)
     _write_model_info(client, production, pins, fingerprint, calibration_temperature)
 
@@ -1022,32 +1011,21 @@ def build_bento_image() -> tuple[str, int]:
     return image, int(production.version)
 
 
-def _write_raw_directory(players: list[dict[str, object]]) -> None:
-    """Write the raw player-directory artifact the web index builder consumes."""
-    RAW_DIRECTORY_ARTIFACT.parent.mkdir(parents=True, exist_ok=True)
-    RAW_DIRECTORY_ARTIFACT.write_text(json.dumps({"players": players}, indent=2) + "\n")
+def generate_similarity_artifacts() -> Path:
+    """Build and stage the FAISS similarity assets from the local DuckDB snapshot.
 
+    Stages ``data/deploy/player_similarity.index`` and
+    ``data/deploy/player_metadata.json`` from the snapshot — never downloaded
+    from MLflow or pinned on the champion. A missing snapshot aborts the
+    deploy with the snapshot helper's actionable error.
 
-def generate_navigation_artifacts() -> Path:
-    """Build and stage all navigation assets from the local DuckDB snapshot.
-
-    The host-side web index builder (web/scripts/build-player-index.mjs)
-    consumes ``data/deploy/player-directory.json`` and serializes it into the
-    content-hashed MiniSearch payload + manifest. Navigation artifacts are
-    rebuilt at deploy time from the snapshot — never downloaded from MLflow
-    or pinned on the champion. A missing snapshot aborts the deploy with the
-    snapshot helper's actionable error.
-
-    When every snapshot input that shapes the directory and similarity outputs
-    (profiles, gold lifetime stats) and every repository-controlled source
-    that shapes them (directory SQL/shaping, similarity vector/embedding/PCA/
-    weights, country mapping) is unchanged since the last staging and the
-    staged similarity artifacts still exist, the similarity artifacts are
-    reused and the deterministic raw directory is restaged byte-identically.
-    The raw input is retained under data/deploy/ (never deleted) as the
-    builder's staging input, so restaging identical bytes lets the builder
-    reuse its hashed payloads. Any input change, source/config change, missing
-    similarity artifact, or missing/legacy state rebuilds everything.
+    When every snapshot input that shapes the similarity outputs (profiles,
+    gold lifetime stats) and every repository-controlled source that shapes
+    them (player-list SQL/shaping, similarity vector/embedding/PCA/weights,
+    country mapping) is unchanged since the last staging and the staged
+    similarity artifacts still exist, the artifacts are reused. Any input
+    change, source/config change, missing artifact, or missing/legacy state
+    rebuilds them.
     """
     from src.db import training
     from src.models.similarity import PLAYER_LIFETIME_SQL, PlayerSimilarity
@@ -1056,24 +1034,20 @@ def generate_navigation_artifacts() -> Path:
     profiles = training.to_dataframe(PLAYERS_SQL)
     if profiles.empty:
         raise RuntimeError("training snapshot has no player profiles; refresh it before deploy")
-    inputs_hash = _navigation_inputs_hash(profiles, training.to_dataframe(PLAYER_LIFETIME_SQL))
-    source_hash = _navigation_source_hash()
+    inputs_hash = _similarity_inputs_hash(profiles, training.to_dataframe(PLAYER_LIFETIME_SQL))
+    source_hash = _similarity_source_hash()
     if (
-        inputs_hash == _read_navigation_inputs_hash()
-        and source_hash == _read_navigation_source_hash()
+        inputs_hash == _read_similarity_inputs_hash()
+        and source_hash == _read_similarity_source_hash()
         and all(path.exists() for path in (SIMILARITY_INDEX, SIMILARITY_METADATA))
     ):
-        # Only the similarity artifacts gate reuse; the deterministic raw
-        # directory is retained byte-identically as the builder's input,
-        # restaged from the hashed profiles.
-        _write_raw_directory(directory_players(profiles))
         _log(
-            "minisearch",
-            "snapshot inputs and shaping sources unchanged; reusing staged navigation artifacts",
+            "similarity",
+            "snapshot inputs and shaping sources unchanged; reusing staged similarity artifacts",
         )
-        return RAW_DIRECTORY_ARTIFACT
+        return SIMILARITY_INDEX
     _log(
-        "minisearch",
+        "similarity",
         f"snapshot inputs or sources changed: rebuilding similarity index for "
         f"{len(profiles)} players (bio embedding — no output until it finishes)",
     )
@@ -1087,14 +1061,15 @@ def generate_navigation_artifacts() -> Path:
     players = directory_players(profiles)
     metadata = {str(player["player_id"]): player for player in similarity.players}
     if set(metadata) != {str(player["player_id"]) for player in players}:
-        raise RuntimeError("directory and similarity player IDs differ in the training snapshot")
-    _write_raw_directory(players)
-    _write_navigation_state(inputs_hash, source_hash)
+        raise RuntimeError(
+            "similarity index and directory player IDs differ in the training snapshot"
+        )
+    _write_similarity_state(inputs_hash, source_hash)
     _log(
-        "minisearch",
-        f"staged snapshot-backed navigation artifacts: {SIMILARITY_INDEX}, {RAW_DIRECTORY_ARTIFACT}",
+        "similarity",
+        f"staged snapshot-backed similarity artifacts: {SIMILARITY_INDEX}, {SIMILARITY_METADATA}",
     )
-    return RAW_DIRECTORY_ARTIFACT
+    return SIMILARITY_INDEX
 
 
 def deploy_bento() -> None:

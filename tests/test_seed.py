@@ -3,8 +3,15 @@
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from src.db import ingest, seed
+
+
+@pytest.fixture(autouse=True)
+def _skip_session_cleanup(monkeypatch):
+    monkeypatch.setattr(seed, "clear_active_sessions", lambda: ([], []))
+
 
 TOP_PLAYERS = seed.TOP_PLAYERS
 RECENT = seed.RECENT
@@ -12,6 +19,16 @@ select_matches = seed.select_matches
 discover_atp_csvs = seed.discover_atp_csvs
 load_all_raw_atp_rows = seed.load_all_raw_atp_rows
 parse_args = seed.parse_args
+
+
+def test_main_clears_active_sessions_before_seeding(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(seed, "clear_active_sessions", lambda: ([1], [2]))
+    monkeypatch.setattr(seed, "main_all", lambda **_kwargs: calls.append("seed"))
+
+    seed.main(["--all"])
+
+    assert calls == ["seed"]
 
 
 def _match(winner_id, loser_id, winner_rank, loser_rank, tourney_id, tourney_date, match_num):

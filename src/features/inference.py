@@ -17,7 +17,6 @@ from __future__ import annotations
 import builtins
 import math
 from datetime import date, datetime
-from decimal import ROUND_DOWN, Decimal
 from numbers import Real
 from time import perf_counter
 from typing import Any, NamedTuple, cast
@@ -79,7 +78,7 @@ LIMIT 1
 # Python, inside the bounded window — the same semantics as gold's pair_meetings
 # CTE). Bronze stores one row per physical match; winner_id is the explicit
 # winner, so the caller counts wins by comparing winner_id to the requested
-# player id.
+# player id. h2h_exposure is the size of this same bounded recent-5 window.
 _H2H_PRIOR_SQL = f"""
 SELECT match_id, winner_id, surface
 FROM {BRONZE_MATCHES_TABLE}
@@ -88,17 +87,6 @@ WHERE ((player1_id = %s AND player2_id = %s)
   AND match_date < %s::date
 ORDER BY match_date DESC, match_id DESC
 LIMIT {H2H_PRIOR_MEETINGS}
-"""
-
-# LIFETIME strictly-prior meeting count for the requested pair (uncapped,
-# identical for both mirror orientations). Separate unbounded count — the
-# recency features above stay bounded.
-_H2H_LIFETIME_SQL = f"""
-SELECT COUNT(*) AS meeting_count
-FROM {BRONZE_MATCHES_TABLE}
-WHERE ((player1_id = %s AND player2_id = %s)
-    OR (player1_id = %s AND player2_id = %s))
-  AND match_date < %s::date
 """
 
 # Per-player static identity lookup (metadata lives in bronze; gold has
@@ -149,28 +137,11 @@ LEFT JOIN LATERAL (
 
 # COUNT(h.match_id), not COUNT(*): the LEFT JOIN LATERAL null-extends pairs
 # with no prior meetings, and COUNT(*) would count that null row as a meeting.
-_H2H_LIFETIME_BULK_SQL = f"""
-SELECT req.player_id AS req_player_id, req.opponent_id AS req_opponent_id,
-       req.as_of_iso, COUNT(h.match_id) AS meeting_count
-FROM unnest(%s::text[], %s::text[], %s::date[]) AS req(player_id, opponent_id, as_of_iso)
-LEFT JOIN LATERAL (
-    SELECT match_id
-    FROM {BRONZE_MATCHES_TABLE}
-    WHERE ((req.player_id = player1_id AND req.opponent_id = player2_id)
-        OR (req.opponent_id = player1_id AND req.player_id = player2_id))
-      AND match_date < req.as_of_iso::date
-) h ON true
-GROUP BY req.player_id, req.opponent_id, req.as_of_iso
-"""
+# (kept as a comment for the bounded prior-meeting bulk query below)
 
 
 # Keep the real type because tests monkeypatch the module's `date` name.
 _DATE_TYPE = date
-
-
-def _trunc5(value: float) -> float:
-    """Truncate toward zero at 5 decimals (SQL TRUNC(x::NUMERIC, 5) parity)."""
-    return float(Decimal(str(value)).quantize(Decimal("0.00001"), rounding=ROUND_DOWN))
 
 
 def _to_date(value: object) -> date:
@@ -204,7 +175,7 @@ def _side_values(
         if row is not None:
             value = row.get(snapshot_col)
             # NaN is the only supported numeric value that is not self-equal.
-            if value is not None and isinstance(value, (Real, Decimal)) and value == value:
+            if value is not None and isinstance(value, Real) and value == value:
                 return float(value)
         return fallback
 
@@ -227,11 +198,15 @@ def _side_values(
     )
     # Rest: as-of date minus the strictly-prior snapshot's date (snapshot_date
     # is that match's date); the pool median days-since on cold start (parity
-    # with gold's days_since_last_match).
-    days_since_last_match = (
-        float((as_of_date - _to_date(row["snapshot_date"])).days)
-        if row is not None
-        else float(defaults["days_since_default"])
+    # with gold's days_since_last_match). Capped at 30 days (parity with gold's
+    # LEAST(..., 30) before the ln scaling in the diff).
+    days_since_last_match = min(
+        (
+            float((as_of_date - _to_date(row["snapshot_date"])).days)
+            if row is not None
+            else float(defaults["days_since_default"])
+        ),
+        30.0,
     )
 
     return {
@@ -247,18 +222,6 @@ def _side_values(
         "second_serve_win_pct_10": cell("second_serve_win_pct_10", "second_serve_win_pct_10"),
         "serve_win_pct_10": cell("serve_win_pct_10", "serve_win_pct_10"),
         "return_points_won_pct_10": cell("return_points_won_pct_10", "return_points_won_pct_10"),
-        # Return strength per unit of serve weakness, truncated like silver's
-        # stored value so gold/pr.snapshot and inference agree cell for cell.
-        # Cold start uses the materialized singleton ratio (gold's fd.* cell),
-        # not a recompute from the rounded pool rates.
-        "dominance_10": (
-            _trunc5(
-                cell("return_points_won_pct_10", "return_points_won_pct_10")
-                / (1.0 - cell("serve_win_pct_10", "serve_win_pct_10"))
-            )
-            if row is not None
-            else cell("dominance_10", "dominance_10")
-        ),
         "df_rate_10": cell("df_rate_10", "df_rate_10"),
         "aces_per_svc_game_10": cell("aces_per_svc_game_10", "aces_per_svc_game_10"),
         "rank_trend_10": avg_rank_10 - ranking,
@@ -268,9 +231,6 @@ def _side_values(
         "matches_10": int(float(cast(Real, row["matches_10"]))) if row is not None else 0,
         "surface_form": surface_form,
         "days_since_last_match": days_since_last_match,
-        # Rolling average per-match game margin; cold start is neutral 0.0
-        # (parity with gold's COALESCE(pr.game_margin_10, 0.0)).
-        "game_margin_10": cell_lit("game_margin_10", 0.0),
     }
 
 
@@ -410,7 +370,6 @@ def _assemble_row(
     player_side: dict[str, int | float],
     opponent_side: dict[str, int | float],
     h2h_exposure: int,
-    h2h_meetings: int,
     h2h_wins_for_requested_player: int,
     h2h_surface_meetings: int,
     h2h_surface_wins_for_requested_player: int,
@@ -418,11 +377,11 @@ def _assemble_row(
     """Assemble one directional row in FEATURE_COLS order (shared by builders).
 
     ``player_*`` is the requested player, ``opponent_*`` the requested opponent.
-    h2h_exposure is the LIFETIME strictly-prior meeting count (shared by both
-    mirrors); h2h_advantage and h2h_surface_advantage are the Beta(1,1)-smoothed
-    signed advantages over the five most recent strictly-prior meetings (the
-    surface variant restricted to meetings on the requested surface), negating
-    on side swap — the same formulas applied in gold.
+    h2h_exposure is the five most recent strictly-prior meeting count (shared
+    by both mirrors); h2h_advantage and h2h_surface_advantage are the
+    Beta(1,1)-smoothed signed advantages over those same bounded recent-5
+    meetings (the surface variant restricted to meetings on the requested
+    surface), negating on side swap — the same formulas applied in gold.
     """
     row: dict[str, int | float | str] = {}
 
@@ -456,7 +415,6 @@ def _assemble_row(
     row["return_points_won_pct_diff"] = (
         player_side["return_points_won_pct_10"] - opponent_side["return_points_won_pct_10"]
     )
-    row["dominance_diff"] = player_side["dominance_10"] - opponent_side["dominance_10"]
     row["df_rate_diff"] = player_side["df_rate_10"] - opponent_side["df_rate_10"]
     row["aces_per_svc_game_diff"] = (
         player_side["aces_per_svc_game_10"] - opponent_side["aces_per_svc_game_10"]
@@ -467,11 +425,10 @@ def _assemble_row(
     )
     row["streak_diff"] = player_side["streak"] - opponent_side["streak"]
     row["surface_form_diff"] = player_side["surface_form"] - opponent_side["surface_form"]
-    # Log-transformed directional rest (parity with gold's LN(1 + days)).
+    # Log-transformed directional rest (parity with gold's LN(1 + capped days)).
     row["days_since_last_match_diff"] = math.log(
         1.0 + player_side["days_since_last_match"]
     ) - math.log(1.0 + opponent_side["days_since_last_match"])
-    row["recent_game_margin_diff"] = player_side["game_margin_10"] - opponent_side["game_margin_10"]
 
     # Absolute state values (both sides matter).
     for name in (
@@ -486,10 +443,10 @@ def _assemble_row(
     ):
         row[name] = side(name, player_side, opponent_side)
 
-    # Pair-level head-to-head: shared lifetime exposure + signed smoothed
-    # advantages over the bounded recent-5 window (overall and current-surface).
+    # Pair-level head-to-head: shared bounded recent-5 exposure + signed
+    # smoothed advantages over that same window (overall and current-surface).
     row["h2h_exposure"] = h2h_exposure
-    row["h2h_advantage"] = (h2h_wins_for_requested_player + 1.0) / (h2h_meetings + 2.0) - 0.5
+    row["h2h_advantage"] = (h2h_wins_for_requested_player + 1.0) / (h2h_exposure + 2.0) - 0.5
     row["h2h_surface_advantage"] = (h2h_surface_wins_for_requested_player + 1.0) / (
         h2h_surface_meetings + 2.0
     ) - 0.5
@@ -562,26 +519,23 @@ def _build_inference_features_with_meta(
     player_side.update(_profile_values(ctx.player_id, ctx.as_of_date, defaults))
     opponent_side.update(_profile_values(ctx.opponent_id, ctx.as_of_date, defaults))
 
-    # ── Head-to-head: lifetime strictly-prior meeting count plus the five most
-    #    recent strictly-prior meetings for the requested pair. bronze.match_events
-    #    stores one row per physical match and winner_id marks the explicit
-    #    winner, so wins for the requested side are counted directly by comparing
-    #    winner_id to the requested player id. Surface filtering runs inside the
-    #    bounded recent-5 window (parity with gold's pair_meetings CTE).
+    # ── Head-to-head: the five most recent strictly-prior meetings for the
+    #    requested pair. bronze.match_events stores one row per physical match
+    #    and winner_id marks the explicit winner, so wins for the requested side
+    #    are counted directly by comparing winner_id to the requested player id.
+    #    Surface filtering runs inside the bounded recent-5 window (parity with
+    #    gold's pair_meetings CTE); h2h_exposure is that same bounded count.
     h2h_df = execute_df(
         _H2H_PRIOR_SQL,
         [ctx.player_id, ctx.opponent_id, ctx.opponent_id, ctx.player_id, ctx.as_of_iso],
     )
-    h2h_lifetime = execute_df(
-        _H2H_LIFETIME_SQL,
-        [ctx.player_id, ctx.opponent_id, ctx.opponent_id, ctx.player_id, ctx.as_of_iso],
-    )
     if h2h_df.empty:
-        h2h_meetings = h2h_wins = h2h_surface_meetings = h2h_surface_wins = 0
+        h2h_wins = h2h_surface_meetings = h2h_surface_wins = 0
+        h2h_exposure = 0
     else:
         winner_id_values = h2h_df["winner_id"].tolist()
         surface_values = h2h_df["surface"].tolist()
-        h2h_meetings = len(winner_id_values)
+        h2h_exposure = len(winner_id_values)
         h2h_wins = sum(1 for w in winner_id_values if str(w) == ctx.player_id)
         on_surface = [s == ctx.surface for s in surface_values]
         h2h_surface_meetings = int(sum(on_surface))
@@ -590,9 +544,6 @@ def _build_inference_features_with_meta(
             for w, matches in zip(winner_id_values, on_surface, strict=True)
             if str(w) == ctx.player_id and matches
         )
-    # COUNT(*) always yields one row on a real table, but cold-start stand-ins
-    # may return an empty frame for every query.
-    h2h_exposure = int(h2h_lifetime.iloc[0]["meeting_count"]) if not h2h_lifetime.empty else 0
 
     # ── Assemble the directional row in FEATURE_COLS order ──
     row = _assemble_row(
@@ -600,7 +551,6 @@ def _build_inference_features_with_meta(
         player_side,
         opponent_side,
         h2h_exposure,
-        h2h_meetings,
         h2h_wins,
         h2h_surface_meetings,
         h2h_surface_wins,
@@ -717,10 +667,9 @@ def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame
     # H2H lookup is keyed on the requested (player, opponent, as-of) triple;
     # the recent-5 lateral matches either storage orientation and winner_id
     # marks the explicit winner, so wins for each requested side are counted
-    # directly, with surface filtering applied inside the bounded window. The
-    # lifetime count is a separate unbounded aggregate.
+    # directly, with surface filtering applied inside the bounded window.
+    # h2h_exposure is the size of that same bounded recent-5 window.
     h2h: dict[tuple[str, str, str], list[tuple[str, str, str]]] = {}
-    h2h_lifetime: dict[tuple[str, str, str], int] = {}
     h2h_triples = list({(c.player_id, c.opponent_id, c.as_of_iso) for c in ctxs})
     h2h_rows = execute_df(
         _H2H_PRIOR_BULK_SQL,
@@ -737,16 +686,6 @@ def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame
         h2h.setdefault(key, []).append(
             (str(rec["match_id"]), str(rec["winner_id"]), str(rec["surface"]))
         )
-    for rec in execute_df(
-        _H2H_LIFETIME_BULK_SQL,
-        [
-            [t[0] for t in h2h_triples],
-            [t[1] for t in h2h_triples],
-            [_to_date(t[2]) for t in h2h_triples],
-        ],
-    ).to_dict("records"):
-        key = (rec["req_player_id"], rec["req_opponent_id"], _to_date(rec["as_of_iso"]).isoformat())
-        h2h_lifetime[key] = int(rec["meeting_count"])
 
     out_rows: list[dict[str, int | float | str]] = []
     for ctx in ctxs:
@@ -785,7 +724,6 @@ def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame
                 ctx,
                 player_side,
                 opponent_side,
-                h2h_lifetime.get((ctx.player_id, ctx.opponent_id, ctx.as_of_iso), 0),
                 len(winner_id_values),
                 h2h_wins,
                 int(sum(on_surface)),

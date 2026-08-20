@@ -9,6 +9,7 @@ tags without re-beating production.
 
 import argparse
 import logging
+import shutil
 import sys
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
@@ -23,7 +24,6 @@ from src.constants import (
     PARAMS,
 )
 from src.db import training
-from src.db.snapshot import SNAPSHOT_PATH, refresh_snapshot
 from src.utils import ensure_kernel, load_env, suppress_insecure_tls_warning
 
 # Training notebooks (00-05), run in order.
@@ -61,7 +61,14 @@ def run_notebook(name: str, parameters: dict | None = None) -> None:
         parameters=parameters,
         log_output=True,  # stream cell stdout/stderr live (progress bar is default)
     )
-    print(f"  Done: {name}")
+    latest = OUTPUTS / f"latest_{name}"
+    shutil.copyfile(dst, latest)
+    print(f"  Done: {name} (latest: {latest.name})")
+
+
+def selected_notebooks(promote_only: bool) -> list[str]:
+    """Return the evaluation notebook alone for a promotion-only run."""
+    return ["04_evaluate.ipynb"] if promote_only else NB_ORDER
 
 
 class _Tee:
@@ -87,6 +94,11 @@ if __name__ == "__main__":
         action="store_true",
         help="always promote the candidate, bypassing the metric gate",
     )
+    parser.add_argument(
+        "--promote-only",
+        action="store_true",
+        help="run only 04_evaluate against the existing candidate artifacts",
+    )
     args, ignored = parser.parse_known_args()
     if ignored:
         print(f"Ignoring unsupported pipeline arguments: {' '.join(ignored)}")
@@ -105,13 +117,10 @@ if __name__ == "__main__":
         # The handler binds the tee because it is created inside the redirect.
         logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(message)s")
 
-        # Refresh first so training cannot read a stale snapshot.
-        print("Refreshing training snapshot from PostgreSQL...")
-        refresh_snapshot()
-        print(f"  Snapshot refreshed: {SNAPSHOT_PATH}")
-
-        print("Pipeline starting...")
-        for name in NB_ORDER:
+        print(
+            "Promotion-only pipeline starting..." if args.promote_only else "Pipeline starting..."
+        )
+        for name in selected_notebooks(args.promote_only):
             parameters = (
                 {"force_promote": args.force_promote} if name == "04_evaluate.ipynb" else None
             )

@@ -15,14 +15,14 @@ set -u
 
 if [ -t 1 ]; then
     COLOR_DB=$(printf '\033[34m')
-    COLOR_MINISEARCH=$(printf '\033[35m')
+    COLOR_SIMILARITY=$(printf '\033[35m')
     COLOR_BENTO=$(printf '\033[32m')
     COLOR_DEV=$(printf '\033[90m')
     COLOR_RESET=$(printf '\033[0m')
     export COURTSIDE_COLOR=1
 else
     COLOR_DB=''
-    COLOR_MINISEARCH=''
+    COLOR_SIMILARITY=''
     COLOR_BENTO=''
     COLOR_DEV=''
     COLOR_RESET=''
@@ -34,7 +34,7 @@ log() {
     message=$2
     case "$category" in
         db) color=$COLOR_DB ;;
-        minisearch) color=$COLOR_MINISEARCH ;;
+        similarity) color=$COLOR_SIMILARITY ;;
         bento) color=$COLOR_BENTO ;;
         *) color=$COLOR_DEV ;;
     esac
@@ -141,24 +141,18 @@ command -v uv >/dev/null 2>&1 || { echo "[dev] error: 'uv' not found (install it
 command -v pnpm >/dev/null 2>&1 || { echo "[dev] error: 'pnpm' not found (install it; see package.json)" >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || { echo "[dev] error: 'curl' not found" >&2; exit 1; }
 
-# --- Stage navigation artifacts and generate the Vite-directory inputs -------
-# Vite must never serve a stale or fixture directory (e.g. the old Player
-# A/B/C test data): stage data/deploy/player-directory.json and the similarity
-# index from the DuckDB training snapshot, then run the same node builder as
-# `just deploy` (input data/deploy/player-directory.json, manifest
-# data/deploy/player-index.manifest.json, output web/src/assets/generated/).
-# Both steps fail fast, so Vite starts only after the inputs reflect the
-# snapshot players (run `just snapshot` after changing DATABASE_URL).
-log minisearch "staging navigation artifacts and generating Vite inputs from training snapshot..."
+# --- Stage the FAISS similarity assets from the training snapshot -----------
+# The Bento /similar_players endpoint loads the index from
+# data/deploy/player_similarity.index; stage it (plus its metadata) from the
+# DuckDB training snapshot. Fails fast, so Bento starts only after the
+# similarity inputs reflect the snapshot players (run `just snapshot` after
+# changing DATABASE_URL).
+log similarity "staging FAISS similarity artifacts from training snapshot..."
 uv run python -c '
-from src.flows.deploy import generate_navigation_artifacts
-generate_navigation_artifacts()
+from src.flows.deploy import generate_similarity_artifacts
+generate_similarity_artifacts()
 ' || {
-    echo "[minisearch] error: player-directory generation failed (missing training snapshot or artifact write)" >&2
-    exit 1
-}
-node web/scripts/build-player-index.mjs || {
-    echo "[minisearch] error: player index build failed (web dependencies missing? run pnpm install)" >&2
+    echo "[similarity] error: similarity artifact staging failed (missing training snapshot or artifact write)" >&2
     exit 1
 }
 

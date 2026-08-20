@@ -57,17 +57,15 @@
 -- age, rank_trend) come from the PRIOR snapshot (pre-match known, never from
 -- current-match raw stats).
 --
--- Precision contract: match_features truncates every emitted float to 5
--- decimal places at its output boundary, so each re-derived prior_val below
--- is truncated the same way (TRUNC(x::NUMERIC, 5)) before the comparison —
--- otherwise the 1e-5 output quantization would flag every >5dp row as a
--- false positive. Leakage shifts a feature by O(0.01), far above the 1e-6
--- float-round-off tolerance, so the check keeps full teeth.
---
+-- Precision contract: match_features emits every float at full arithmetic
+-- precision (no truncation or rounding at its output boundary), so each
+-- re-derived prior_val below is computed plainly and compared with a 1e-6
+-- float-round-off tolerance. Leakage shifts a feature by O(0.01), far above
+-- that tolerance, so the check keeps full teeth.
+
 -- Covered snapshot-backed fields:
 --   diff form:      win_rate_diff, streak_diff, surface_form_diff, surface
---                    (via per-side), days_since_last_match_diff,
---                    recent_game_margin_diff (via per-side)
+--                    (via per-side), days_since_last_match_diff
 --   diff serve/bk:  ace_rate_diff, first_serve_pct_diff,
 --                    break_points_saved_pct_diff, first_serve_win_pct_diff,
 --                    second_serve_win_pct_diff, serve_win_pct_diff,
@@ -176,7 +174,6 @@ prior_snapshot AS (
         mf.avg_rank_faced_diff, mf.rank_trend_diff,
         mf.rank_diff, mf.rank_points_diff, mf.age_diff,
         mf.surface_form_diff, mf.days_since_last_match_diff,
-        mf.recent_game_margin_diff,
         -- Stored per-side absolute values
         mf.player_weighted_form_10, mf.opponent_weighted_form_10,
         -- Prior snapshot inputs (N-1), COALESCE'd to the singleton defaults so
@@ -237,10 +234,6 @@ prior_snapshot AS (
         -- Surface form: prior snapshot's carried per-surface win rate chosen by
         -- the match surface (pool mean when unseen; carpet has no rate, so the
         -- fixed 0.5 rate_default applies, never a pool value).
-        prp.game_margin_10 AS player_raw_game_margin_10,
-        pro.game_margin_10 AS opponent_raw_game_margin_10,
-        COALESCE(prp.game_margin_10, 0.0) AS player_prior_game_margin_10,
-        COALESCE(pro.game_margin_10, 0.0) AS opponent_prior_game_margin_10,
         CASE pm.surface
             WHEN 'clay'  THEN prp.clay_win_rate_10
             WHEN 'grass' THEN prp.grass_win_rate_10
@@ -265,13 +258,14 @@ prior_snapshot AS (
             WHEN 'hard'  THEN COALESCE(pro.hard_win_rate_10,  fd.hard_win_rate_10)
             ELSE fd.rate_default
         END AS opponent_prior_surface_form,
-        -- Rest: days since the prior snapshot's match; pool median on cold start.
+        -- Rest: days since the prior snapshot's match; pool median on cold
+        -- start. Capped at 30 before the log transform, exactly as the model.
         pm.match_date - prp.snapshot_date AS player_raw_days_since,
         po.match_date - pro.snapshot_date AS opponent_raw_days_since,
-        CASE WHEN prp.player_id IS NULL THEN fd.days_since_default
-             ELSE pm.match_date - prp.snapshot_date END AS player_prior_days_since,
-        CASE WHEN pro.player_id IS NULL THEN fd.days_since_default
-             ELSE po.match_date - pro.snapshot_date END AS opponent_prior_days_since
+        LEAST(30, CASE WHEN prp.player_id IS NULL THEN fd.days_since_default
+             ELSE pm.match_date - prp.snapshot_date END) AS player_prior_days_since,
+        LEAST(30, CASE WHEN pro.player_id IS NULL THEN fd.days_since_default
+             ELSE po.match_date - pro.snapshot_date END) AS opponent_prior_days_since
     -- Filter BEFORE the lateral expansion: match_features is reduced to the
     -- sampled physical matches, so the per-row prior lookups run only for
     -- sampled directional rows.
@@ -302,8 +296,7 @@ prior_snapshot AS (
 comparisons AS (
     {% for c in diff_cols %}
     SELECT match_id, player_id, '{{ c }}_diff' AS feature, {{ diff_stored[c] }} AS mf_val,
-           TRUNC((player_prior_{{ c }} - opponent_prior_{{ c }})::NUMERIC, 5)
-               ::DOUBLE PRECISION AS prior_val,
+           player_prior_{{ c }} - opponent_prior_{{ c }} AS prior_val,
            player_raw_{{ c }} IS NOT NULL AND opponent_raw_{{ c }} IS NOT NULL AS guard
     FROM prior_snapshot
     UNION ALL
@@ -314,27 +307,18 @@ comparisons AS (
     FROM prior_snapshot
     UNION ALL
     SELECT match_id, player_id, 'surface_form_diff' AS feature, surface_form_diff AS mf_val,
-           TRUNC((player_prior_surface_form - opponent_prior_surface_form)::NUMERIC, 5)
-               ::DOUBLE PRECISION AS prior_val,
+           player_prior_surface_form - opponent_prior_surface_form AS prior_val,
            player_raw_surface_form IS NOT NULL AND opponent_raw_surface_form IS NOT NULL AS guard
     FROM prior_snapshot
     UNION ALL
     SELECT match_id, player_id, 'days_since_last_match_diff' AS feature, days_since_last_match_diff AS mf_val,
-           TRUNC((LN(1.0 + player_prior_days_since)
-               - LN(1.0 + opponent_prior_days_since))::NUMERIC, 5)::DOUBLE PRECISION AS prior_val,
+           LN(1.0 + player_prior_days_since) - LN(1.0 + opponent_prior_days_since) AS prior_val,
            player_raw_days_since IS NOT NULL AND opponent_raw_days_since IS NOT NULL AS guard
     FROM prior_snapshot
     UNION ALL
-    SELECT match_id, player_id, 'recent_game_margin_diff' AS feature, recent_game_margin_diff AS mf_val,
-           TRUNC((player_prior_game_margin_10 - opponent_prior_game_margin_10)::NUMERIC, 5)
-               ::DOUBLE PRECISION AS prior_val,
-           player_raw_game_margin_10 IS NOT NULL AND opponent_raw_game_margin_10 IS NOT NULL AS guard
-    FROM prior_snapshot
-    UNION ALL
     SELECT match_id, player_id, 'rank_trend_diff' AS feature, rank_trend_diff AS mf_val,
-           TRUNC(((player_prior_avg_rank_10 - player_prior_ranking)
-               - (opponent_prior_avg_rank_10 - opponent_prior_ranking))::NUMERIC, 5)
-               ::DOUBLE PRECISION AS prior_val,
+           (player_prior_avg_rank_10 - player_prior_ranking)
+               - (opponent_prior_avg_rank_10 - opponent_prior_ranking) AS prior_val,
            player_raw_avg_rank_10 IS NOT NULL AND player_raw_ranking IS NOT NULL
            AND opponent_raw_avg_rank_10 IS NOT NULL AND opponent_raw_ranking IS NOT NULL
            AS guard
@@ -342,13 +326,13 @@ comparisons AS (
     UNION ALL
     SELECT match_id, player_id, 'player_weighted_form_10' AS feature,
            player_weighted_form_10 AS mf_val,
-           TRUNC(player_prior_weighted_form_10::NUMERIC, 5)::DOUBLE PRECISION AS prior_val,
+           player_prior_weighted_form_10 AS prior_val,
            player_raw_weighted_form_10 IS NOT NULL AS guard
     FROM prior_snapshot
     UNION ALL
     SELECT match_id, player_id, 'opponent_weighted_form_10' AS feature,
            opponent_weighted_form_10 AS mf_val,
-           TRUNC(opponent_prior_weighted_form_10::NUMERIC, 5)::DOUBLE PRECISION AS prior_val,
+           opponent_prior_weighted_form_10 AS prior_val,
            opponent_raw_weighted_form_10 IS NOT NULL AS guard
     FROM prior_snapshot
     UNION ALL
@@ -363,7 +347,7 @@ comparisons AS (
     FROM prior_snapshot
     UNION ALL
     SELECT match_id, player_id, 'age_diff' AS feature, age_diff AS mf_val,
-           TRUNC((player_prior_age - opponent_prior_age)::NUMERIC, 5)::DOUBLE PRECISION AS prior_val,
+           player_prior_age - opponent_prior_age AS prior_val,
            player_raw_age IS NOT NULL AND opponent_raw_age IS NOT NULL AS guard
     FROM prior_snapshot
     UNION ALL

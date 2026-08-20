@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, LiteralString, cast
 
 import pandas as pd
+import psycopg
 import requests
 
 from src.constants import (
@@ -19,9 +20,10 @@ from src.constants import (
     ENRICH_WORKERS,
     GOLD_MATCHES_TABLE,
     ROOT,
+    get_database_url,
 )
 from src.countries import UNK, valid_ioc
-from src.db.client import connection, to_dataframe
+from src.db.client import CONNECT_TIMEOUT_S, connection, to_dataframe
 from src.features.columns import BRONZE_COLUMNS, CANONICAL_SURFACES
 from src.features.validate import run_ingestion_checks
 from src.utils import load_env
@@ -364,8 +366,16 @@ def _copy_df_into(
     """
     columns = list(df.columns)
     columns_sql = ", ".join(columns)
-    with connection() as conn, conn.transaction(), conn.cursor() as cur:
-        cur.execute(cast(LiteralString, f"CREATE TEMP TABLE stage (LIKE {table}) ON COMMIT DROP"))
+    with (
+        psycopg.connect(get_database_url(), connect_timeout=CONNECT_TIMEOUT_S) as conn,
+        conn.cursor() as cur,
+    ):
+        cur.execute(
+            cast(
+                LiteralString,
+                f"CREATE TEMP TABLE stage (LIKE {table} INCLUDING DEFAULTS) ON COMMIT DROP",
+            )
+        )
         # NaN is pandas' NULL marker; COPY binary adapts Python None as SQL NULL.
         records = df.where(pd.notnull(df), None)
         with cur.copy(cast(LiteralString, f"COPY stage ({columns_sql}) FROM STDIN")) as copy:
@@ -381,6 +391,8 @@ def _copy_df_into(
             )
         else:
             updates = ", ".join(f"{col} = excluded.{col}" for col in update_cols)
+            if table == BRONZE_MATCHES_TABLE:
+                updates += ", ingested_at = CURRENT_TIMESTAMP"
             cur.execute(
                 cast(
                     LiteralString,

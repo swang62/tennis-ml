@@ -14,6 +14,7 @@ from src.evaluate.calibration import (
     apply_temperature,
     expected_calibration_error,
     fit_temperature,
+    select_temperature,
 )
 from src.evaluate.symmetry import clip_probability
 
@@ -80,6 +81,104 @@ def test_fit_temperature_handles_tiny_input():
     y = np.array([1, 0])
     t = fit_temperature(proba, y)
     assert isinstance(t, float) and t > 0
+
+
+def test_select_temperature_rejects_when_later_rows_are_worse(monkeypatch):
+    monkeypatch.setattr("src.evaluate.calibration.fit_temperature", lambda *_args, **_kwargs: 0.5)
+    result = select_temperature([0.9] * 8 + [0.9, 0.1], [1] * 8 + [1, 0], [0] * 8 + [1] * 2)
+
+    assert result.fitted_temperature == 0.5
+    assert result.temperature == 1.0
+    assert not result.accepted
+    assert result.calibrated_log_loss > result.raw_log_loss
+    assert result.calibrated_brier > result.raw_brier
+
+
+def test_select_temperature_accepts_only_when_both_later_metrics_improve(monkeypatch):
+    monkeypatch.setattr("src.evaluate.calibration.fit_temperature", lambda *_args, **_kwargs: 0.5)
+    result = select_temperature([0.9] * 8 + [0.9, 0.1], [1] * 8 + [0, 1], [0] * 8 + [1] * 2)
+
+    assert result.temperature == 0.5
+    assert result.accepted
+    assert result.calibrated_log_loss < result.raw_log_loss
+    assert result.calibrated_brier < result.raw_brier
+
+
+def test_select_temperature_fits_each_fold_from_prior_folds_only(monkeypatch):
+    seen: list[tuple[float, ...]] = []
+
+    def fake_fit(proba, *_args, **_kwargs):
+        seen.append(tuple(proba))
+        return 1.0
+
+    monkeypatch.setattr("src.evaluate.calibration.fit_temperature", fake_fit)
+    # y must hold both classes in every validation fold (fold 1: rows 2-3, fold 2: rows 4-5).
+    select_temperature([0.2, 0.3, 0.4, 0.5, 0.6, 0.7], [0, 1, 0, 1, 0, 1], [0, 0, 1, 1, 2, 2])
+
+    assert seen == [(0.2, 0.3), (0.2, 0.3, 0.4, 0.5), (0.2, 0.3, 0.4, 0.5, 0.6, 0.7)]
+
+
+def test_select_temperature_rejects_fractional_folds():
+    # Walk-forward ordering is meaningful only for integer-encoded ordinals;
+    # a fractional encoding silently misorders chronology and must be refused.
+    with pytest.raises(ValueError, match="integer ordinals"):
+        select_temperature([0.4, 0.6, 0.3], [1, 0, 1], [0.0, 0.5, 1.0])
+
+
+def test_select_temperature_rejects_single_class_validation_fold():
+    # A validation fold that cannot move between classes would drive a
+    # degenerate pooled comparison; refuse loudly instead of accepting blindly.
+    with pytest.raises(ValueError, match=r"validation fold 1.*both label classes"):
+        select_temperature([0.5] * 8 + [0.6, 0.7], [1] * 8 + [1, 1], [0] * 8 + [1] * 2)
+
+
+def test_select_temperature_brier_guardrail_accepts_within_tolerance(monkeypatch):
+    # t=0.7 on this fold improves log loss while Brier degrades by ~7e-7 — a
+    # noise-floor change inside the default guardrail tolerance, so the
+    # calibration is accepted on the log-loss primary gate.
+    monkeypatch.setattr("src.evaluate.calibration.fit_temperature", lambda *_args, **_kwargs: 0.7)
+    p_val = [
+        0.1663305428891164,
+        0.2538198406045636,
+        0.2857815239344147,
+        0.34140834903838135,
+        0.36919782351885067,
+        0.555474259176121,
+        0.7589521960679259,
+        0.9517364361221391,
+    ]
+    y_val = [1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]
+    result = select_temperature([0.5] * 8 + p_val, [1, 0] * 4 + y_val, [0] * 8 + [1] * 8)
+
+    assert result.accepted
+    assert result.calibrated_log_loss < result.raw_log_loss
+    assert 0.0 < result.calibrated_brier - result.raw_brier < 1e-3
+
+
+def test_select_temperature_brier_guardrail_rejects_beyond_tolerance(monkeypatch):
+    # Same fold, but a zero guardrail tolerance turns the degradation into a
+    # material violation: log loss still improves, yet the calibration is
+    # rejected because Brier must not degrade at all.
+    monkeypatch.setattr("src.evaluate.calibration.fit_temperature", lambda *_args, **_kwargs: 0.7)
+    p_val = [
+        0.1663305428891164,
+        0.2538198406045636,
+        0.2857815239344147,
+        0.34140834903838135,
+        0.36919782351885067,
+        0.555474259176121,
+        0.7589521960679259,
+        0.9517364361221391,
+    ]
+    y_val = [1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]
+    result = select_temperature(
+        [0.5] * 8 + p_val, [1, 0] * 4 + y_val, [0] * 8 + [1] * 8, brier_guard_tolerance=0.0
+    )
+
+    assert not result.accepted
+    assert result.temperature == 1.0
+    assert result.calibrated_log_loss < result.raw_log_loss
+    assert result.calibrated_brier > result.raw_brier
 
 
 def test_expected_calibration_error_perfect():

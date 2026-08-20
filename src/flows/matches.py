@@ -1935,7 +1935,7 @@ def _process_tournament(
     return result
 
 
-@flow(log_prints=True, retries=2)
+@flow(log_prints=True, retries=1)
 def matches_flow(
     start_date: date | None = None,
     end_date: date | None = None,

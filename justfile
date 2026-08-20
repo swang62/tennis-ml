@@ -20,14 +20,6 @@ cluster-restart:
     kubectl rollout restart deployment/prefect-server
     kubectl rollout status deployment/prefect-server --timeout=300s
 
-# End-to-end pipeline, targets the .env DATABASE_URL currently set
-full-pipeline *args: deps lint test cluster-create probe migrate
-    just seed {{ args }}
-    just etl {{ args }}
-    just train {{ args }}
-    just deploy
-    just docker
-
 # Drop and recreate PostgreSQL schemas.
 db-reset:
     uv run python src/db/migrate_db.py reset
@@ -35,7 +27,6 @@ db-reset:
 # Build and push all production docker images, bento and web images.
 deploy *args:
     uv run python src/flows/deploy.py
-    node web/scripts/build-player-index.mjs
     docker buildx build --builder tennis-multiarch --platform linux/amd64,linux/arm64 \
         --build-arg VITE_SITE_URL={{ env_var_or_default('VITE_SITE_URL', '') }} \
         --build-arg VITE_SITE_ID={{ env_var_or_default('VITE_SITE_ID', '') }} \
@@ -60,6 +51,14 @@ docker:
 # Run bronze-to-gold ETL; pass --incremental to process only latest matches.
 etl *args:
     uv run python src/flows/etl.py {{ args }}
+
+# End-to-end pipeline, targets the .env DATABASE_URL currently set
+full-pipeline *args: deps lint test cluster-create probe migrate
+    just seed {{ args }}
+    just etl {{ args }}
+    just snapshot
+    just train {{ args }}
+    just deploy
 
 # Run all configured linters.
 lint:
@@ -89,7 +88,7 @@ rankings *args:
 seed *args:
     uv run python src/db/seed.py {{ args }}
 
-# Export an atomic PostgreSQL training snapshot, optional as the training pipeline always snapshots first.
+# Export/refresh the local DuckDB training snapshot used by `just train`.
 snapshot:
     uv run python src/db/snapshot.py
 
@@ -101,3 +100,11 @@ test:
 # Run the notebook training pipeline. --force-promote will always promote the candidate model as @champion
 train *args:
     uv run python src/flows/pipeline.py {{ args }}
+
+# Evaluate the existing candidate and always promote it as @champion.
+promote:
+    uv run python src/flows/pipeline.py --promote-only --force-promote
+
+# Select a calibration temperature from existing OOF predictions; does not promote or deploy.
+calibrate:
+    uv run python src/flows/calibrate.py

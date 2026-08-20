@@ -16,7 +16,6 @@ import {
   getSimilarPlayers,
 } from "../api";
 import { ErrorBox, Kicker, Loading, PlayerPicker } from "../components";
-import { useDirectoryInfo } from "../lib/directoryInfo";
 import { usePlayerDirectory } from "../lib/playerIndex";
 import { homeRoute } from "../routes";
 import { useTheme } from "../theme";
@@ -59,17 +58,17 @@ export default function Home() {
   const directoryQ = usePlayerDirectory();
   const players = directoryQ.data?.players ?? [];
   // True physical match total (distinct match_id), so a match is counted once
-  // rather than once per participant. Shared with the Layout footer via one
-  // idle-gated query. On a cold load both stats start at 0 and count up when
-  // the payload lands; a warm in-memory cache renders the final values
-  // directly with no animation.
-  const directoryInfoQ = useDirectoryInfo();
-  const coldCache = useRef(directoryInfoQ.dataUpdatedAt === 0).current;
-  const infoLoaded = directoryInfoQ.data !== undefined;
+  // rather than once per participant. The directory response carries the same
+  // players + summary the Layout footer reads, so both consume one shared
+  // query. On a cold load both stats start at 0 and count up when the payload
+  // lands; a warm in-memory cache renders the final values directly, no
+  // animation.
+  const coldCache = useRef(directoryQ.dataUpdatedAt === 0).current;
+  const infoLoaded = directoryQ.data !== undefined;
   const animate = coldCache && infoLoaded;
   const playersShown = useCountUp(players.length, animate, coldCache);
   const matchesShown = useCountUp(
-    directoryInfoQ.data?.total_matches ?? 0,
+    directoryQ.data?.total_matches ?? 0,
     animate,
     coldCache,
   );

@@ -82,6 +82,12 @@ class _FakeConn:
         self.fetchall_result: list[tuple[object, ...]] = []
         self.rowcount = 1
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
     def cursor(self, row_factory=None):  # noqa: ARG002 — psycopg cursor API surface
         return _FakeCursor(self)
 
@@ -97,6 +103,7 @@ class _FakeConn:
 def fake_ingest_conn(monkeypatch):
     conn = _FakeConn()
     monkeypatch.setattr(ingest, "connection", lambda: nullcontext(conn))
+    monkeypatch.setattr(ingest.psycopg, "connect", lambda *_args, **_kwargs: conn)
     return conn
 
 
@@ -490,6 +497,16 @@ def test_insert_bronze_rows_copies_valid_rows_with_do_nothing(fake_ingest_conn):
     assert "DO UPDATE" not in insert_sql
 
 
+def test_insert_bronze_rows_staging_keeps_database_defaults(fake_ingest_conn):
+    """The stage must retain match_events.ingested_at's default timestamp."""
+    ingest.insert_bronze_rows(ingest.atp_rows_to_bronze([_raw_row()]))
+
+    create_sql, _params = fake_ingest_conn.statements[0]
+    assert "LIKE bronze.match_events INCLUDING DEFAULTS" in create_sql
+    copy_sql, _params = fake_ingest_conn.statements[1]
+    assert "ingested_at" not in copy_sql
+
+
 def test_insert_bronze_rows_normalizes_surface_at_boundary(fake_ingest_conn):
     """The write boundary normalizes non-canonical surfaces to hard before
     validation/insertion, so a non-canonical value never reaches bronze."""
@@ -523,6 +540,7 @@ def test_insert_bronze_rows_overwrite_uses_do_update(fake_ingest_conn):
     assert "ON CONFLICT (match_id) DO UPDATE SET" in insert_sql
     assert "match_id = excluded.match_id" not in insert_sql
     assert "winner_id = excluded.winner_id" in insert_sql
+    assert "ingested_at = CURRENT_TIMESTAMP" in insert_sql
 
 
 def test_insert_bronze_rows_generic_path_still_do_nothing(fake_ingest_conn):

@@ -525,7 +525,7 @@ def fetch_and_upsert_week(page, week: date, rank_map: dict[str, str]) -> int | N
     return len(frame)
 
 
-@flow(log_prints=True, retries=2)
+@flow(log_prints=True, retries=1)
 def rankings_flow(start_date: date | None = None, end_date: date | None = None):
     """Scrape missing ranking weeks: watermark-to-today (no params) or a date range.
 
@@ -608,8 +608,7 @@ def _fail_if_no_data_found(found_data: bool, weeks: list[date]) -> None:
     That legitimate case (an empty ``weeks`` because everything is current)
     returns before any browser work. Finding a parseable page counts as success
     even when it wrote no new rows (already-present data), so re-scraping stored
-    weeks is never a failure. Raising marks the flow run failed and lets its
-    ``retries=2`` re-run.
+    weeks is never a failure.
     """
     if not found_data:
         raise RuntimeError(

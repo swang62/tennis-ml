@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from src.constants import ROOT
+from src.db.client import clear_active_sessions
 from src.db.ingest import (
     BRONZE_MATCHES_TABLE,
     atp_rows_to_bronze,
@@ -134,6 +135,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+    cancelled, terminated = clear_active_sessions()
+    if cancelled or terminated:
+        print(f"Cleared {len(cancelled)} active queries and {len(terminated)} idle transactions")
     if args.all:
         main_all(enrich=args.enrich, force=args.force)
     else:

@@ -9,6 +9,7 @@ fit_temperature, which only training calls.
 from __future__ import annotations
 
 import itertools
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -48,6 +49,100 @@ def fit_temperature(proba, y, bounds=(0.05, 20.0)) -> float:
     if loss(t_fit) < loss(1.0):
         return t_fit
     return 1.0
+
+
+@dataclass(frozen=True)
+class CalibrationSelection:
+    """A temperature accepted only when it beats raw probabilities out of sample."""
+
+    temperature: float
+    fitted_temperature: float
+    accepted: bool
+    raw_log_loss: float
+    calibrated_log_loss: float
+    raw_brier: float
+    calibrated_brier: float
+
+
+def select_temperature(
+    proba,
+    y,
+    folds,
+    bounds=(0.05, 20.0),
+    brier_guard_tolerance=1e-3,
+) -> CalibrationSelection:
+    """Walk-forward temperature selection over chronological, match-safe folds.
+
+    Each validation fold is calibrated with a temperature fit on strictly
+    earlier folds only, then held-out predictions are pooled and compared with
+    raw probabilities. Acceptance gates on log loss (the objective temperature
+    scaling minimizes; ROC-AUC is invariant to the monotone logit transform)
+    with Brier as a guardrail: calibrated log loss must strictly improve and
+    calibrated Brier must not degrade by more than ``brier_guard_tolerance``.
+    The serving temperature is then refit on all out-of-fold data. ``folds``
+    must be integer ordinals written chronologically ascending (the grouped_cv
+    convention), and every validation fold must hold both label classes.
+    """
+    proba = np.asarray(proba, dtype=float)
+    y = np.asarray(y, dtype=float)
+    folds = np.asarray(folds)
+    if proba.ndim != 1 or y.ndim != 1 or proba.shape != y.shape or proba.shape != folds.shape:
+        raise ValueError("proba, y, and folds must be equal-length 1-D arrays")
+    if not np.all(np.isfinite(proba)) or not np.all(np.isfinite(y)):
+        raise ValueError("proba and y must be finite")
+    if folds.dtype.kind not in "iuf":
+        raise ValueError("fold labels must be integer ordinals in chronological order")
+    try:
+        fold_ids = folds.astype(np.int64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("fold labels must be integer ordinals in chronological order") from exc
+    if not np.array_equal(folds, fold_ids):
+        raise ValueError("fold labels must be integer ordinals in chronological order")
+    fold_values = np.unique(folds)
+    if len(fold_values) < 2:
+        raise ValueError("walk-forward calibration requires at least two folds")
+
+    raw_parts: list[np.ndarray] = []
+    calibrated_parts: list[np.ndarray] = []
+    label_parts: list[np.ndarray] = []
+    for index, fold in enumerate(fold_values[1:], start=1):
+        train = np.isin(folds, fold_values[:index])
+        validation = folds == fold
+        val_labels = y[validation]
+        if len(val_labels) < 2 or np.unique(val_labels).size < 2:
+            raise ValueError(
+                f"validation fold {int(fold)} must hold both label classes, "
+                f"got {np.unique(val_labels)}"
+            )
+        temperature = fit_temperature(proba[train], y[train], bounds=bounds)
+        raw_parts.append(proba[validation])
+        calibrated_parts.append(np.asarray(apply_temperature(proba[validation], temperature)))
+        label_parts.append(y[validation])
+
+    raw = np.clip(np.concatenate(raw_parts), 1e-12, 1.0 - 1e-12)
+    calibrated = np.clip(np.concatenate(calibrated_parts), 1e-12, 1.0 - 1e-12)
+    labels = np.concatenate(label_parts)
+    raw_log_loss = float(-np.mean(labels * np.log(raw) + (1.0 - labels) * np.log(1.0 - raw)))
+    calibrated_log_loss = float(
+        -np.mean(labels * np.log(calibrated) + (1.0 - labels) * np.log(1.0 - calibrated))
+    )
+    raw_brier = float(np.mean((labels - raw) ** 2))
+    calibrated_brier = float(np.mean((labels - calibrated) ** 2))
+    # Log loss is the primary gate (the fit's objective; AUC is invariant to
+    # the monotone logit transform); Brier only vetoes material degradation.
+    accepted = (
+        calibrated_log_loss < raw_log_loss and calibrated_brier < raw_brier + brier_guard_tolerance
+    )
+    fitted_temperature = fit_temperature(proba, y, bounds=bounds)
+    return CalibrationSelection(
+        temperature=fitted_temperature if accepted else 1.0,
+        fitted_temperature=fitted_temperature,
+        accepted=accepted,
+        raw_log_loss=raw_log_loss,
+        calibrated_log_loss=calibrated_log_loss,
+        raw_brier=raw_brier,
+        calibrated_brier=calibrated_brier,
+    )
 
 
 def expected_calibration_error(y_true, proba, n_bins=10) -> float:

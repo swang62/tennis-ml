@@ -48,7 +48,16 @@ from src.db.client import CONNECT_TIMEOUT_S
 from src.db.conninfo import dbt_env
 from src.utils import load_env
 
-DBT_BUILD_CMD = ["uv", "run", "dbt", "build", "--project-dir", "dbt", "--profiles-dir", "dbt"]
+DBT_BUILD_CMD = [
+    "uv",
+    "run",
+    "dbt",
+    "build",
+    "--project-dir",
+    "dbt",
+    "--profiles-dir",
+    "dbt",
+]
 DBT_RUN_RESULTS = constants.ROOT / "dbt" / "target" / "run_results.json"
 
 ETL_DEPLOYMENT_NAME = "etl"
@@ -66,6 +75,7 @@ def run_dbt_build(
     profiles_dir: str | Path = "dbt",
     log_file: Path | None = None,
     incremental: bool = False,
+    select: list[str] | None = None,
     logger: logging.Logger | logging.LoggerAdapter | None = None,
 ) -> subprocess.CompletedProcess:
     """Build dbt models, streaming output to ``log_file`` and ``logger``."""
@@ -74,6 +84,8 @@ def run_dbt_build(
         cmd[-2:] = ["--profiles-dir", str(profiles_dir)]
     if not incremental:
         cmd.append("--full-refresh")
+    if select:
+        cmd.extend(["--select", *select])
     if logger is not None:
         logger.info(f"dbt command: {' '.join(shlex.quote(part) for part in cmd)}")
     env = {**os.environ, **dbt_env(constants.get_database_url())}
@@ -92,17 +104,30 @@ def _run_streamed(
     logger: logging.Logger | logging.LoggerAdapter | None = None,
 ) -> subprocess.CompletedProcess:
     proc = subprocess.Popen(
-        cmd, cwd=constants.ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env
+        cmd,
+        cwd=constants.ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=env,
     )
     assert proc.stdout is not None
-    for line in proc.stdout:
-        text = line.decode(errors="replace")
-        sys.stdout.write(text)
-        sys.stdout.flush()
-        log.write(text)
-        log.flush()
-        if logger is not None:
-            logger.info(text.rstrip())
+    try:
+        for line in proc.stdout:
+            text = line.decode(errors="replace")
+            sys.stdout.write(text)
+            sys.stdout.flush()
+            log.write(text)
+            log.flush()
+            if logger is not None:
+                logger.info(text.rstrip())
+    except BaseException:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        raise
     returncode = proc.wait()
     if logger is not None:
         logger.info(f"dbt build exited with code {returncode}")
@@ -124,17 +149,66 @@ def _etl_log_file() -> Path:
     return LOGS / f"etl_dbt_{timestamp}.log"
 
 
+def _incremental_watermarks() -> tuple[datetime | None, datetime | None]:
+    """Return the bronze source and last successfully-built watermarks."""
+    with (
+        psycopg.connect(constants.get_database_url(), connect_timeout=CONNECT_TIMEOUT_S) as conn,
+        conn.cursor() as cur,
+    ):
+        cur.execute(f"SELECT MAX(ingested_at) FROM {BRONZE_MATCHES_TABLE}")
+        source = cur.fetchone()
+        cur.execute(
+            "SELECT source_watermark FROM bronze.etl_state WHERE pipeline = %s",
+            ("dbt",),
+        )
+        built = cur.fetchone()
+    return (
+        source[0] if source is not None else None,
+        built[0] if built is not None else None,
+    )
+
+
+def _record_incremental_watermark(watermark: datetime | None) -> None:
+    if watermark is None:
+        return
+    with (
+        psycopg.connect(constants.get_database_url(), connect_timeout=CONNECT_TIMEOUT_S) as conn,
+        conn.cursor() as cur,
+    ):
+        cur.execute(
+            """
+            INSERT INTO bronze.etl_state (pipeline, source_watermark)
+            VALUES (%s, %s)
+            ON CONFLICT (pipeline) DO UPDATE
+            SET source_watermark = EXCLUDED.source_watermark
+            """,
+            ("dbt", watermark),
+        )
+
+
 @task(retries=0)
 def bronze_to_gold(incremental: bool = False) -> int:
     log_file = _etl_log_file()
     mode = "incremental" if incremental else "full_refresh"
     print(f"dbt mode: {mode}")
+    source_watermark, built_watermark = _incremental_watermarks()
+    select = None
+    if (
+        incremental
+        and source_watermark is not None
+        and built_watermark is not None
+        and source_watermark <= built_watermark
+    ):
+        select = ["player_profiles"]
+        print("no changed bronze matches: refreshing player_profiles only")
     try:
         logger = get_run_logger()
     except RuntimeError:
         # No active run context (e.g. hermetic .fn() tests); skip Prefect logs.
         logger = None
-    run_dbt_build(log_file=log_file, incremental=incremental, logger=logger)
+    run_dbt_build(log_file=log_file, incremental=incremental, select=select, logger=logger)
+    if select is None:
+        _record_incremental_watermark(source_watermark)
     # dbt owns the ETL write connection; use a separate bounded connection for
     # post-build counts rather than contending with serving's process-local pool.
     with (
@@ -191,7 +265,7 @@ def _dbt_model_rows() -> dict[str, int]:
     }
 
 
-@flow(log_prints=True, retries=2)
+@flow(log_prints=True, retries=1)
 def etl_flow(incremental: bool = False):
     """Bronze → gold ETL: dbt build only. Enrichment is a seed-time step —
     run `just seed --enrich`, then re-run `just etl`.

@@ -198,7 +198,7 @@ def test_deploy_bento_logs_in_before_build_then_writes_state(monkeypatch, tmp_pa
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr("subprocess.run", fake_run)
-    monkeypatch.setattr(d, "generate_navigation_artifacts", lambda: None)
+    monkeypatch.setattr(d, "generate_similarity_artifacts", lambda: None)
     monkeypatch.setattr(d, "_docker_login", lambda: order.append("login"))
     monkeypatch.setattr(
         d,
@@ -224,7 +224,7 @@ def test_deploy_bento_does_not_require_postgres_password(monkeypatch, tmp_path):
     monkeypatch.setattr(d, "IMAGE_NAME", "tennis-bento")
     monkeypatch.setattr(d, "LOGS", tmp_path)
     monkeypatch.setattr(d, "build_bento_image", lambda **_kwargs: ("acme/tennis-bento:dev", 5))
-    monkeypatch.setattr(d, "generate_navigation_artifacts", lambda: None)
+    monkeypatch.setattr(d, "generate_similarity_artifacts", lambda: None)
     monkeypatch.setattr(d, "_docker_login", lambda: None)
     monkeypatch.setattr(d, "_read_state", lambda: {})
     monkeypatch.setattr(d, "_write_state", lambda _s: None)
@@ -243,7 +243,7 @@ def test_deploy_bento_does_not_require_postgres_password(monkeypatch, tmp_path):
 def test_deploy_bento_fails_when_buildx_push_fails(monkeypatch, tmp_path):
     d = _deploy()
     monkeypatch.setattr(d, "LOGS", tmp_path)
-    monkeypatch.setattr(d, "generate_navigation_artifacts", lambda: None)
+    monkeypatch.setattr(d, "generate_similarity_artifacts", lambda: None)
     monkeypatch.setattr(d, "_docker_login", lambda: None)
 
     def fail_build():
@@ -267,7 +267,7 @@ def test_deploy_bento_logs_build_and_buildx_to_single_file(monkeypatch, tmp_path
     monkeypatch.setattr(d, "LOGS", tmp_path)
     monkeypatch.setattr(d, "DOCKER_REPO", "acme")
     monkeypatch.setattr(d, "IMAGE_NAME", "tennis-bento")
-    monkeypatch.setattr(d, "generate_navigation_artifacts", lambda: None)
+    monkeypatch.setattr(d, "generate_similarity_artifacts", lambda: None)
     monkeypatch.setattr(d, "_docker_login", lambda: None)
     monkeypatch.setattr(d, "_read_state", lambda: {})
     monkeypatch.setattr(d, "_write_state", lambda _s: None)
@@ -308,7 +308,7 @@ def test_deploy_bento_leaves_log_when_build_fails(monkeypatch, tmp_path):
     """A raising build still leaves a non-empty deploy_*.log with its output."""
     d = _deploy()
     monkeypatch.setattr(d, "LOGS", tmp_path)
-    monkeypatch.setattr(d, "generate_navigation_artifacts", lambda: None)
+    monkeypatch.setattr(d, "generate_similarity_artifacts", lambda: None)
 
     def fail_build():
         print("champion missing lineage tags")
@@ -383,7 +383,7 @@ def _stub_bento_build(monkeypatch):
     )
     monkeypatch.setattr(d, "_reuse_or_materialize_nn_onnx", lambda _state, _nn: False)
     monkeypatch.setattr(d, "_download_aux_artifacts", lambda _client, _tags: None)
-    monkeypatch.setattr(d, "generate_navigation_artifacts", lambda: None)
+    monkeypatch.setattr(d, "generate_similarity_artifacts", lambda: None)
     monkeypatch.setattr(d, "build_input_fingerprint", lambda _client, _prod: "fp")
     monkeypatch.setattr(d, "_read_state", lambda: {"fingerprint": "fp"})
     monkeypatch.setattr(
@@ -1369,24 +1369,42 @@ def test_promotion_tags_lineage_before_champion_alias():
         assert "set_registered_model_alias" not in nb
 
 
-# --- Web image build consumes host-generated Vite inputs ---
+def test_evaluation_reports_the_promotion_outcome_and_reason():
+    src = (_deploy().ROOT / "notebooks" / "parameters" / "04_evaluate.ipynb").read_text()
+
+    assert "promotion_reason" in src
+    assert "EVALUATION COMPLETE: candidate" in src
+    assert 'mlflow.log_param(\\"promotion_reason\\", promotion_reason)' in src
+    assert src.count("display(fig)") == 4
+    assert "shap_waterfall_misclassified" not in src
+    assert 'bbox_inches=\\"tight\\"' in src
+    assert "select_temperature(" in src
+    assert "raw candidate" in src
+    assert "calibrated champion" in src
 
 
-def test_just_deploy_runs_staging_then_node_builder_then_web_build():
-    """`just deploy` order is: deploy.py stages snapshot navigation artifacts ->
-    the node generator verifies/reuses or rebuilds web/src/assets/generated/* ->
-    the Docker build, so the web image never reads data/deploy/ itself."""
+# --- Web image build needs no host-generated Vite inputs ---
+
+
+def test_just_deploy_stages_similarity_then_builds_web_image():
+    """`just deploy` order is: deploy.py stages the snapshot similarity
+    artifacts -> the Docker web build; no node index builder or raw-directory
+    staging remains anywhere in the deploy path."""
     justfile = (_deploy().ROOT / "justfile").read_text()
     staging = justfile.index("uv run python src/flows/deploy.py")
-    generator = justfile.index("node web/scripts/build-player-index.mjs")
     web_build = justfile.index("docker buildx build")
-    assert staging < generator < web_build
+    assert staging < web_build
     assert "--push web/" in justfile[web_build:]
+    assert "build-player-index" not in justfile
+    assert (
+        "generate_similarity_artifacts"
+        in (_deploy().ROOT / "src" / "flows" / "deploy.py").read_text()
+    )
 
 
 def test_web_dockerfile_has_no_in_container_index_builder():
-    """The node builder runs host-side only; the Docker image build just
-    consumes the pre-generated inputs via `COPY . .` in its web/ context."""
+    """The site is a self-contained SPA: no player-index/MiniSearch builder runs
+    inside the image build, so the static bundle is served as-is."""
     dockerfile = (_deploy().ROOT / "web" / "Dockerfile").read_text()
     assert "build-player-index" not in dockerfile
     assert "RUN node" not in dockerfile

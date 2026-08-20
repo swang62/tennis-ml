@@ -55,6 +55,7 @@ from src.features.inference import (
     build_inference_features_bulk,
 )
 from src.models.similarity import PlayerSimilarity
+from src.serving.directory import PLAYERS_SQL, directory_players
 from src.utils import load_env
 
 # Canonical champion manifest baked at deploy time (written by deploy.py from
@@ -213,7 +214,7 @@ ORDER BY match_date DESC, match_id DESC
 LIMIT %s
 """
 
-_DIRECTORY_INFO_SQL = f"""
+_DIRECTORY_SUMMARY_SQL = f"""
 SELECT MAX(match_date) AS latest_match_date,
        (SELECT COUNT(DISTINCT match_id) FROM {SILVER_PLAYER_MATCHES}) AS total_matches
 FROM {BRONZE_MATCHES_TABLE}
@@ -249,7 +250,7 @@ Bulk ids-based prediction (API-key gated). Body envelope `{"rows": [ { ... } ]}`
 same per-row fields as `POST /predict_from_ids`; max 1000 rows; unknown fields are rejected.
 
 ## GET endpoints
-Read-only dashboard data: `GET /directory_info`, `GET /player_profile`, `GET /rank_history`, `GET /match_history`, \
+Read-only dashboard data: `GET /directory`, `GET /player_profile`, `GET /rank_history`, `GET /match_history`, \
 `GET /head_to_head`, `GET /similar_players`.
 `GET /model_info` — API-key gated model metadata. `GET /health` — liveness.
 
@@ -518,20 +519,27 @@ def _predict_from_ids_bulk_impl(
 # ── Route handlers ─────────────────────────────────────────────────────────
 
 
-def _directory_info(_request: Request) -> JSONResponse:
+def _directory(_request: Request) -> JSONResponse:
     try:
-        df = execute_df(_DIRECTORY_INFO_SQL)
-        if df.empty:
-            return _ok({"latest_match_date": None, "total_matches": 0})
-        row = first_row_dict(df)
-        return _ok(
-            {
-                "latest_match_date": _iso(row["latest_match_date"]),
-                "total_matches": int(row["total_matches"]),
-            }
-        )
+        players_df = execute_df(PLAYERS_SQL)
+        summary_df = execute_df(_DIRECTORY_SUMMARY_SQL)
     except Exception as exc:
-        return _err(500, f"directory info query failed: {exc}")
+        return _err(500, f"directory query failed: {exc}")
+    players = directory_players(players_df)
+    if summary_df.empty:
+        latest_match_date: object = None
+        total_matches = 0
+    else:
+        row = first_row_dict(summary_df)
+        latest_match_date = _iso(row["latest_match_date"])
+        total_matches = int(row["total_matches"])
+    return _ok(
+        {
+            "players": players,
+            "latest_match_date": latest_match_date,
+            "total_matches": total_matches,
+        }
+    )
 
 
 def _player_profile(request: Request) -> JSONResponse:
@@ -968,7 +976,7 @@ DATA_APP = Starlette(
         Exception: _catch_all_error,
     },
     routes=[
-        Route("/directory_info", _directory_info, methods=["GET"]),
+        Route("/directory", _directory, methods=["GET"]),
         Route("/player_profile", _player_profile, methods=["GET"]),
         Route("/rank_history", _rank_history, methods=["GET"]),
         Route("/match_history", _match_history, methods=["GET"]),

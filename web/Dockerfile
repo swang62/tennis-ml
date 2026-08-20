@@ -14,9 +14,6 @@ COPY package.json pnpm-lock.yaml ./
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store,sharing=locked \
   pnpm install --frozen-lockfile --store-dir /pnpm/store
 
-# Vite inputs under the generated assets dir are produced host-side
-# (just deploy / just dev) from a data file outside this build context;
-# the Docker build only consumes the pre-generated files via COPY . . .
 COPY . .
 
 # Final production build

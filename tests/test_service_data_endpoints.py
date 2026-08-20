@@ -1,4 +1,4 @@
-"""Contract tests for /rank_history, /match_history, and /head_to_head."""
+"""Contract tests for /directory, /rank_history, /match_history, and /head_to_head."""
 
 import logging
 from datetime import date
@@ -13,6 +13,7 @@ from starlette.testclient import TestClient
 
 from src.constants import STACK_ORDER
 from src.features.columns import FEATURE_COLS, TOUR_AVERAGES_FALLBACK_COLS
+from src.serving.directory import PLAYERS_SQL
 from src.serving.service import (
     DATA_APP,
     PredictFromIdsRow,
@@ -26,23 +27,100 @@ from src.serving.service import (
 client = TestClient(DATA_APP)
 
 
-def test_directory_info_returns_latest_match_date_and_total():
-    with patch(
-        "src.serving.service.execute_df",
-        return_value=pd.DataFrame(
-            {"latest_match_date": [date(2026, 8, 10)], "total_matches": [123456]}
-        ),
-    ) as exec:
-        response = client.get("/directory_info")
+def _directory_players_df() -> pd.DataFrame:
+    """Shaped like the PLAYERS_SQL result (bronze profile joined to gold)."""
+    return pd.DataFrame(
+        [
+            {
+                "player_id": "p1",
+                "display_name": "A Player",
+                "ioc": "ESP",
+                "backhand": "1H",
+                "handedness": "R",
+                "summary": "s1",
+                "matches_played": np.int64(20),
+                "current_rank": np.int64(1),
+            },
+            {
+                "player_id": "p2",
+                "display_name": "B Player",
+                "ioc": "ARG",
+                "backhand": "2H",
+                "handedness": "L",
+                "summary": "s2",
+                "matches_played": np.int64(0),
+                "current_rank": None,
+            },
+        ]
+    )
 
-    assert response.status_code == 200
-    assert response.json() == {
-        "ok": True,
-        "data": {"latest_match_date": "2026-08-10", "total_matches": 123456},
-    }
-    assert "MAX(match_date)" in exec.call_args.args[0]
-    assert "COUNT(DISTINCT match_id)" in exec.call_args.args[0]
-    assert "FROM bronze.match_events" in exec.call_args.args[0]
+
+def _directory_fake_execute_df(
+    players_df: pd.DataFrame,
+    summary_df: pd.DataFrame | None = None,
+) -> tuple[object, list[tuple[str, object]]]:
+    """Keyed on the SQL text: PLAYERS_SQL -> players rows, else the summary."""
+    calls: list[tuple[str, object]] = []
+
+    def fake(sql: str, params: list[object] | None = None) -> pd.DataFrame:
+        calls.append((sql, params))
+        return (
+            players_df
+            if "player_profiles" in sql
+            else summary_df
+            if summary_df is not None
+            else _directory_summary_df()
+        )
+
+    return fake, calls
+
+
+def _directory_summary_df() -> pd.DataFrame:
+    return pd.DataFrame({"latest_match_date": [date(2026, 8, 10)], "total_matches": [123456]})
+
+
+def test_directory_returns_players_and_summary_in_one_envelope():
+    fake, calls = _directory_fake_execute_df(_directory_players_df())
+    with patch("src.serving.service.execute_df", side_effect=fake):
+        resp = client.get("/directory")
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    data = resp.json()["data"]
+    assert [p["player_id"] for p in data["players"]] == ["p1", "p2"]  # SQL row order
+    assert data["players"][0]["iso2"] == "ES"
+    assert data["players"][1]["matches_played"] == 0
+    assert data["players"][1]["current_rank"] is None
+    assert data["latest_match_date"] == "2026-08-10"
+    assert data["total_matches"] == 123456
+    # The canonical PLAYERS_SQL from the directory module drives the request.
+    sql, params = calls[0]
+    assert sql == PLAYERS_SQL
+    assert params is None
+    assert "MAX(match_date)" in calls[1][0]
+    assert "COUNT(DISTINCT match_id)" in calls[1][0]
+
+
+def test_directory_empty_players_and_summary():
+    fake, _calls = _directory_fake_execute_df(pd.DataFrame(), summary_df=pd.DataFrame())
+    with patch("src.serving.service.execute_df", side_effect=fake):
+        resp = client.get("/directory")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["players"] == []
+    assert data["latest_match_date"] is None
+    assert data["total_matches"] == 0
+
+
+def test_directory_database_error_returns_500():
+    with patch("src.serving.service.execute_df", side_effect=RuntimeError("boom")):
+        resp = client.get("/directory")
+    assert resp.status_code == 500
+    assert resp.json()["ok"] is False
+    assert "directory query failed" in resp.json()["error"]
+
+
+def test_directory_info_route_removed():
+    assert client.get("/directory_info").status_code == 404
 
 
 def test_only_players_route_remains_unmounted():

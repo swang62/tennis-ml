@@ -243,11 +243,14 @@ async function get<T>(path: string): Promise<T> {
   return envelope.data as T;
 }
 
-export function getDirectoryInfo(): Promise<{
+export interface DirectoryResponse {
+  players: Player[];
   latest_match_date: string | null;
   total_matches: number;
-}> {
-  return get("/directory_info");
+}
+
+export function getDirectory(): Promise<DirectoryResponse> {
+  return get("/directory");
 }
 
 export function getPlayerProfile(playerId: string): Promise<PlayerProfile> {
