@@ -147,9 +147,11 @@ LEFT JOIN LATERAL (
 ) h ON true
 """
 
+# COUNT(h.match_id), not COUNT(*): the LEFT JOIN LATERAL null-extends pairs
+# with no prior meetings, and COUNT(*) would count that null row as a meeting.
 _H2H_LIFETIME_BULK_SQL = f"""
 SELECT req.player_id AS req_player_id, req.opponent_id AS req_opponent_id,
-       req.as_of_iso, COUNT(*) AS meeting_count
+       req.as_of_iso, COUNT(h.match_id) AS meeting_count
 FROM unnest(%s::text[], %s::text[], %s::date[]) AS req(player_id, opponent_id, as_of_iso)
 LEFT JOIN LATERAL (
     SELECT match_id
