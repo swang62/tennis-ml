@@ -314,13 +314,17 @@ def _lineage_pins(client: Any, production: Any) -> dict[str, dict[str, str]]:
             tag_key = f"{BASE_TAG_PREFIX}{cls}_{key}"
             if tag_key in tags:
                 pins[cls][key] = tags[tag_key]
-    # The GBDT framework picks the native serving adapter (bentoml.xgboost vs
-    # bentoml.lightgbm); detect it once here so the manifest and the
-    # materialization step both know it.
-    cached_framework = _cached_gbdt_framework(pins["gbdt"][LINEAGE_VERSION_KEY])
-    pins["gbdt"][FRAMEWORK_KEY] = cached_framework or _gbdt_framework(
-        pins["gbdt"][LINEAGE_MODEL_URI_KEY]
-    )
+    # Each base's winning framework was recorded on the champion lineage by
+    # 05_evaluate from the tuning notebook; read it directly and fall back to
+    # detection only for GBDT when the tag is absent (legacy champions).
+    for cls in BASE_BENTO_NAMES:
+        framework = tags.get(f"{BASE_TAG_PREFIX}{cls}_framework")
+        if cls == "gbdt" and not framework:
+            framework = _cached_gbdt_framework(
+                pins["gbdt"][LINEAGE_VERSION_KEY]
+            ) or _gbdt_framework(pins["gbdt"][LINEAGE_MODEL_URI_KEY])
+        if framework:
+            pins[cls][FRAMEWORK_KEY] = framework
     return pins
 
 
