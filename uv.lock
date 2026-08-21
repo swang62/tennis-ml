@@ -4135,6 +4135,13 @@ wheels = [
 name = "tennis-ml"
 version = "0.1.0"
 source = { editable = "." }
+dependencies = [
+    { name = "lightgbm" },
+    { name = "lightning" },
+    { name = "scikit-learn" },
+    { name = "torch" },
+    { name = "xgboost" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -4277,6 +4284,13 @@ training = [
 ]
 
 [package.metadata]
+requires-dist = [
+    { name = "lightgbm", specifier = ">=4.6" },
+    { name = "lightning", specifier = ">=2.6" },
+    { name = "scikit-learn", specifier = ">=1.8" },
+    { name = "torch", specifier = ">=2.12" },
+    { name = "xgboost", specifier = ">=3.2" },
+]
 
 [package.metadata.requires-dev]
 dev = [

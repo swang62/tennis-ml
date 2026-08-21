@@ -932,11 +932,27 @@ def _ensure_buildx_builder() -> str:
 
 
 def _write_bento_containerfile(bento: Any) -> Path:
-    """Render the Bento's Containerfile with BentoML's own generator."""
+    """Render BentoML's Containerfile and install the serving uv group."""
     import bentoml
 
     BENTO_CONTAINERFILE.parent.mkdir(parents=True, exist_ok=True)
     bentoml.container.get_containerfile(str(bento.tag), output_path=str(BENTO_CONTAINERFILE))
+    containerfile = BENTO_CONTAINERFILE.read_text()
+    generated_install = (
+        "RUN  --mount=type=cache,sharing=locked,target=/root/.cache/ if [ -d ./src ]; "
+        'then INSTALL_ROOT="./src"; '
+        'else INSTALL_ROOT="./env/python"; '
+        "fi; uv --directory $INSTALL_ROOT pip install -r $BENTO_PATH/env/python/requirements.txt"
+    )
+    uv_install = (
+        "COPY --chown=bentoml:bentoml pyproject.toml uv.lock ./\n"
+        "RUN  --mount=type=cache,sharing=locked,target=/root/.cache/ "
+        "uv export --only-group inference --no-dev --no-emit-project --no-hashes "
+        "-o /tmp/requirements.txt && uv pip install -r /tmp/requirements.txt"
+    )
+    if generated_install not in containerfile:
+        raise RuntimeError("BentoML Containerfile format changed; cannot configure uv export")
+    BENTO_CONTAINERFILE.write_text(containerfile.replace(generated_install, uv_install))
     print(f"Wrote Containerfile: {BENTO_CONTAINERFILE}")
     return BENTO_CONTAINERFILE
 
@@ -955,6 +971,8 @@ def _buildx_context(bento: Any):
     with tempfile.TemporaryDirectory(prefix="bento-buildx-") as tmp:
         context = Path(tmp)
         shutil.copytree(bento.path, context, dirs_exist_ok=True)
+        shutil.copy2(ROOT / "pyproject.toml", context / "pyproject.toml")
+        shutil.copy2(ROOT / "uv.lock", context / "uv.lock")
         models_dir = context / "models"
         models_dir.mkdir(parents=True, exist_ok=True)
         for model in bento.info.all_models:

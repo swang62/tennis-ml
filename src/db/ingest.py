@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import re
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -22,7 +23,7 @@ from src.constants import (
     ROOT,
     get_database_url,
 )
-from src.countries import UNK, valid_ioc
+from src.countries import UNK, normalize_ioc, valid_ioc
 from src.db.client import CONNECT_TIMEOUT_S, connection, to_dataframe
 from src.features.columns import BRONZE_COLUMNS, CANONICAL_SURFACES
 from src.features.validate import run_ingestion_checks
@@ -51,6 +52,31 @@ ATP_PROFILE_COLUMNS = [
     "backhand",
     "ioc",
 ]
+
+# Raw ATP reference columns (the on-disk ATP_player_database.csv contract).
+# Discovery candidate rows must map onto these exact column names/order.
+ATP_DATABASE_COLUMNS = [
+    "id",
+    "player",
+    "atpname",
+    "birthdate",
+    "weight",
+    "height",
+    "turnedpro",
+    "birthplace",
+    "coaches",
+    "hand",
+    "backhand",
+    "ioc",
+]
+
+# Discovery candidate optional typed fields are validated against the same
+# bounds the typed load applies (see load_atp_profiles). Empty/0 stay absent.
+_OPTIONAL_INT_FIELDS = {
+    "weight": (20, 300),
+    "height": (100, 250),
+    "turnedpro": (1900, 2100),
+}
 
 # Columns every raw ATP match row carries (see data/column_glossary.md).
 RAW_ATP_COLUMNS = [
@@ -589,7 +615,138 @@ def load_atp_profiles(
     return inserted
 
 
-# ── Ranking Identity Map ───────────────────────────────────────
+# ── ATP Player Persistence (append-only) ─────────────────────────
+
+
+def _cell(value: object) -> str:
+    """Normalize one CSV cell: '' for missing/NaN, else trimmed text."""
+    if value is None or pd.isna(value):  # type: ignore[arg-type]
+        return ""
+    return str(value).strip()
+
+
+def _read_csv_rows(path: str | Path) -> list[list[str]]:
+    """Read every CSV row (header first) as trimmed string lists."""
+    with open(path, newline="") as f:
+        return [[_cell(cell) for cell in row] for row in csv.reader(f)]
+
+
+def _require_csv_columns(path: str | Path, header: list[str], columns: list[str]) -> None:
+    missing = set(columns) - set(header)
+    if missing:
+        raise ValueError(f"{Path(path).name} missing columns: {sorted(missing)}")
+    if header != columns:
+        raise ValueError(f"{Path(path).name} unexpected column order: {header}")
+
+
+def _csv_row_state(path: str | Path, row: dict[str, str], columns: list[str]) -> str:
+    """Validate a CSV and return "append" or "exists" for `row`.
+
+    `columns` are the header columns; the first is the dedupe key. A malformed
+    file or column-order mismatch raises; a present key with differing data
+    raises ValueError (conflict). Idempotent when an identical row exists.
+    Never writes.
+    """
+    rows = _read_csv_rows(path)
+    if not rows:
+        raise ValueError(f"{Path(path).name} has no header row")
+    header = rows[0]
+    _require_csv_columns(path, header, columns)
+    key_col, key = columns[0], row[columns[0]]
+    for existing in rows[1:]:
+        if existing[header.index(key_col)] != key:
+            continue
+        expected = [row[c] for c in columns]
+        if existing != expected:
+            raise ValueError(
+                f"{Path(path).name} conflict on {key_col}={key}: {existing} != {expected}"
+            )
+        return "exists"
+    return "append"
+
+
+def _append_csv_row(path: str | Path, row: dict[str, str], columns: list[str]) -> None:
+    """Append one fully-quoted row. Callers validate with ``_csv_row_state`` first."""
+    with open(path, "a", newline="") as f:
+        writer = csv.writer(f, quoting=csv.QUOTE_ALL, lineterminator="\r\n")
+        writer.writerow([row[c] for c in columns])
+
+
+def _validate_discovery_candidate(candidate: dict[str, object]) -> dict[str, str]:
+    """Validate a candidate ATP identity against the profile-column contract.
+
+    Raises ValueError on invalid required data or a malformed optional typed
+    field, so a bad candidate is rejected before any file is appended. Returns
+    the candidate with empty cells normalized to '' and a valid IOC code
+    (verified code, or the UNK sentinel for missing/invalid input).
+    """
+    raw = {col: _cell(candidate.get(col, "")) for col in ATP_DATABASE_COLUMNS}
+    if not raw["id"]:
+        raise ValueError("candidate missing ATP player id")
+    if not raw["player"]:
+        raise ValueError("candidate missing display name")
+    if raw["birthdate"] and not re.match(r"^\d{4}\d{2}\d{2}$", raw["birthdate"]):
+        raise ValueError(
+            f"candidate birthdate malformed (expected YYYYMMDD or empty): {raw['birthdate']!r}"
+        )
+    for col, (low, high) in _OPTIONAL_INT_FIELDS.items():
+        if raw[col]:
+            # Reuses the typed-load bounds (rejects garbage, accepts 0/empty).
+            _parse_int(pd.Series([raw[col]]), col, pd.Series([raw["id"]]), low=low, high=high)
+    bounds = raw["birthdate"] and (1900 <= int(raw["birthdate"][:4]) <= 2100)
+    if raw["birthdate"] and not bounds:
+        raise ValueError(
+            f"candidate birthdate out of range (expected 1900-2100): {raw['birthdate']!r}"
+        )
+    raw["ioc"] = valid_ioc(raw["ioc"])
+    return raw
+
+
+def persist_atp_player(
+    candidate: dict[str, object],
+    *,
+    profiles_csv: str | Path = ATP_DATABASE_CSV,
+    map_csv: str | Path = RANKING_PLAYER_MAP_CSV,
+    insert: bool = True,
+) -> int:
+    """Append one validated new ATP identity to the canonical and map CSVs.
+
+    A candidate whose id already exists identically is a no-op (returns 0);
+    an id present with conflicting data, or a map row that conflicts, raises
+    ValueError before anything is written. On success appends one canonical
+    row, one self-mapping row (ranking_player_id == canonical player_id == the
+    ATP id), then — when `insert` — inserts only the new profile into bronze
+    via the idempotent shared loader (never force). Returns the number of DB
+    profiles inserted.
+    """
+    raw = _validate_discovery_candidate(candidate)
+
+    # Self-mapping row: the discovered ATP id is both the ranking source id and
+    # the canonical player_id, so later rankings resolution maps it to itself.
+    # Self-mapping row: the discovered ATP id is both the ranking source id and
+    # the canonical player_id, so later rankings resolution maps it to itself.
+    self_row = {
+        "ranking_player_id": raw["id"],
+        "ranking_name": raw["player"],
+        "player_id": raw["id"],
+    }
+    # Validate both files before writing either, so a conflict in one never
+    # leaves the other half-appended. Each append below is independently
+    # gated, so a prior partial append (one row present, the other absent) is
+    # reconciled with no duplicates or overwrites.
+    profile_state = _csv_row_state(profiles_csv, raw, ATP_DATABASE_COLUMNS)
+    map_state = _csv_row_state(map_csv, self_row, RANKING_MAP_COLUMNS)
+    if profile_state == "append":
+        _append_csv_row(profiles_csv, raw, ATP_DATABASE_COLUMNS)
+    if map_state == "append":
+        _append_csv_row(map_csv, self_row, RANKING_MAP_COLUMNS)
+
+    if insert:
+        # Reuses the shared loader with DO NOTHING idempotency: it inserts the
+        # new profile once and is a no-op on retry, reconciling a prior partial
+        # append that left the profile absent (or already present) in bronze.
+        return load_atp_profiles(profiles_csv, player_ids={raw["id"]}, force=False)
+    return 0
 
 
 def canonical_players(csv_path: str | Path = ATP_DATABASE_CSV) -> dict[str, str]:

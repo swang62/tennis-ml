@@ -343,16 +343,22 @@ export default function ProfileContent({
                       </span>
                     </td>
                     <td className="tourney-td-c num" data-label="Score">
-                      {scoreSegments(
-                        m.score,
-                        m.result === "won" ? "winner" : "loser",
-                      )?.map((s) =>
-                        s.bold ? (
-                          <strong key={s.text}>{s.text}</strong>
-                        ) : (
-                          <span key={s.text}>{s.text}</span>
-                        ),
-                      ) ?? "—"}
+                      {(() => {
+                        let segmentNumber = 0;
+                        return (
+                          scoreSegments(
+                            m.score,
+                            m.result === "won" ? "winner" : "loser",
+                          )?.map((s) => {
+                            const key = `${m.match_id}-${segmentNumber++}`;
+                            return s.bold ? (
+                              <strong key={key}>{s.text}</strong>
+                            ) : (
+                              <span key={key}>{s.text}</span>
+                            );
+                          }) ?? "—"
+                        );
+                      })()}
                     </td>
                     <td className="tourney-td-c" data-label="Result">
                       <span
