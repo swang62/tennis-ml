@@ -7,7 +7,7 @@ from uuid import uuid4
 import pytest
 from prefect.events.actions import RunDeployment
 from prefect.events.schemas.automations import EventTrigger
-from prefect.events.schemas.events import ResourceSpecification
+from prefect.events.schemas.events import Resource, ResourceSpecification
 
 import src.flows.etl as etl
 from src.flows.etl import DBT_BUILD_CMD, etl_flow, run_dbt_build
@@ -275,6 +275,8 @@ def test_scrape_etl_automation_triggers_etl_on_scrape_completion():
     assert automation.name == etl.SCRAPE_ETL_AUTOMATION_NAME
     trigger = cast(EventTrigger, automation.trigger)
     assert trigger.expect == {"prefect.flow-run.Completed"}
+    match = cast(ResourceSpecification, trigger.match)
+    assert match.root == {"prefect.resource.id": "prefect.flow-run.*"}
     match_related = cast(ResourceSpecification, trigger.match_related)
     assert match_related.root == {
         "prefect.resource.role": "flow",
@@ -284,3 +286,61 @@ def test_scrape_etl_automation_triggers_etl_on_scrape_completion():
     action = cast(RunDeployment, automation.actions[0])
     assert action.deployment_id == deployment_id
     assert action.source == "selected"
+
+
+def test_scrape_etl_automation_excludes_drift_and_unrelated_flows():
+    """Behavior check using Prefect's own ResourceSpecification matching: a
+    rankings or matches flow-run completion matches, while a drift-flow (or any
+    other flow) completion does not. The primary-resource constraint
+    (``prefect.flow-run.*``) plus the related-flow-name filter are what keep
+    unrelated completions from firing ETL.
+    """
+    deployment_id = uuid4()
+    automation = etl.build_scrape_etl_automation(deployment_id)
+    trigger = cast(EventTrigger, automation.trigger)
+    primary_match = cast(ResourceSpecification, trigger.match)
+    match_related = cast(ResourceSpecification, trigger.match_related)
+
+    # primary event resource must be a flow run
+    assert primary_match.matches(cast(Resource, {"prefect.resource.id": "prefect.flow-run.<uuid>"}))
+    assert not primary_match.matches(
+        cast(Resource, {"prefect.resource.id": "prefect.task-run.<uuid>"})
+    )
+
+    # related flow resource: only rankings/matches allowed, OR across names
+    assert match_related.matches(
+        cast(
+            Resource,
+            {"prefect.resource.role": "flow", "prefect.resource.name": etl.RANKINGS_FLOW_NAME},
+        )
+    )
+    assert match_related.matches(
+        cast(
+            Resource,
+            {"prefect.resource.role": "flow", "prefect.resource.name": etl.MATCHES_FLOW_NAME},
+        )
+    )
+    # drift flow is excluded
+    assert not match_related.matches(
+        cast(
+            Resource,
+            {"prefect.resource.role": "flow", "prefect.resource.name": "drift-flow"},
+        )
+    )
+    # unrelated flow is excluded even with the flow role
+    assert not match_related.matches(
+        cast(
+            Resource,
+            {"prefect.resource.role": "flow", "prefect.resource.name": "some-other-flow"},
+        )
+    )
+    # wrong role (e.g. a task) never matches, even with a rankings name
+    assert not match_related.matches(
+        cast(
+            Resource,
+            {
+                "prefect.resource.role": "task-run",
+                "prefect.resource.name": etl.RANKINGS_FLOW_NAME,
+            },
+        )
+    )

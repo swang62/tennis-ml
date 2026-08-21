@@ -314,16 +314,21 @@ def build_scrape_etl_automation(etl_deployment_id: UUID) -> Automation:
     """Automation spec: run ETL when a rankings or matches flow completes successfully.
 
     Pure builder (no API calls) so the trigger/action wiring is unit-testable
-    without a Prefect server. The trigger matches ``prefect.flow-run.Completed``
-    events whose related ``flow`` resource is the rankings or the matches flow
-    (one match_related spec with both flow names, i.e. OR across names), so a
-    failed run — or any other flow completing — never fires ETL.
+    without a Prefect server. The trigger requires the primary event resource to
+    be a flow run (``match={"prefect.resource.id": "prefect.flow-run.*"}``) and
+    its related ``flow`` resource to be the rankings or matches flow (one
+    ``match_related`` spec with both flow names, i.e. OR across names). The
+    primary-resource constraint is what keeps unrelated completions out: without
+    it, a single ``match_related`` on the flow name alone can still match events
+    whose primary resource is not a flow run. A failed run — or any other flow
+    completing — never fires ETL.
     """
     return Automation(
         name=SCRAPE_ETL_AUTOMATION_NAME,
         description="Run ETL after a successful rankings or matches flow run.",
         trigger=EventTrigger(
             expect={"prefect.flow-run.Completed"},
+            match={"prefect.resource.id": "prefect.flow-run.*"},
             match_related={
                 "prefect.resource.role": "flow",
                 "prefect.resource.name": [RANKINGS_FLOW_NAME, MATCHES_FLOW_NAME],

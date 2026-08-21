@@ -71,8 +71,8 @@ WORK_POOL_NAME = "tennis-pool"
 # chronological bands with these fractions. The validation fraction also sizes
 # the within-fold early-stopping holdouts in the 02 tuners; the grouped
 # temporal CV folds themselves are not the 94/4/2 split.
-TRAIN_FRACTION = 0.94
-VAL_FRACTION = 0.04
+TRAIN_FRACTION = 0.96
+VAL_FRACTION = 0.02
 TEST_FRACTION = 0.02
 
 # The three bands must partition the date span exactly.
