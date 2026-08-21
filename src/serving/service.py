@@ -215,9 +215,12 @@ LIMIT %s
 """
 
 _DIRECTORY_SUMMARY_SQL = f"""
-SELECT MAX(match_date) AS latest_match_date,
-       (SELECT COUNT(DISTINCT match_id) FROM {SILVER_PLAYER_MATCHES}) AS total_matches
-FROM {BRONZE_MATCHES_TABLE}
+SELECT (
+       SELECT source_watermark
+           FROM bronze.etl_state
+           WHERE pipeline = 'dbt'
+       ) AS latest_match_date,
+       (SELECT COUNT(match_id) FROM {BRONZE_MATCHES_TABLE}) AS total_matches
 """
 
 # BentoML uses the build context's README as the bento doc (OpenAPI
@@ -536,6 +539,7 @@ def _directory(_request: Request) -> JSONResponse:
     return _ok(
         {
             "players": players,
+            "total_players": len(players),
             "latest_match_date": latest_match_date,
             "total_matches": total_matches,
         }

@@ -11,6 +11,13 @@ version = "0.1.0"
 description = "Tennis match prediction pipeline using Prefect, MLflow, and BentoML"
 readme = "README.md"
 requires-python = ">=3.12, <3.13"
+dependencies = [
+  "scikit-learn>=1.8",
+  "xgboost>=3.2",
+  "lightgbm>=4.6",
+  "torch>=2.12",
+  "lightning>=2.6",
+]
 
 [tool.ruff]
 line-length = 100

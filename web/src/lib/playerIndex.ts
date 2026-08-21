@@ -16,6 +16,7 @@ export const MINISEARCH_OPTS = Object.freeze({
 
 export interface PlayerIndexData {
   players: Player[];
+  total_players: number;
   latest_match_date: string | null;
   total_matches: number;
   loadSearch: () => Promise<PlayerSearch>;

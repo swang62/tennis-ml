@@ -89,6 +89,7 @@ def test_directory_returns_players_and_summary_in_one_envelope():
     assert data["players"][0]["iso2"] == "ES"
     assert data["players"][1]["matches_played"] == 0
     assert data["players"][1]["current_rank"] is None
+    assert data["total_players"] == 2
     assert data["latest_match_date"] == "2026-08-10"
     assert data["total_matches"] == 123456
     # Two queries per request: the directory itself plus the summary footer.
@@ -102,6 +103,7 @@ def test_directory_empty_players_and_summary():
     assert resp.status_code == 200
     data = resp.json()["data"]
     assert data["players"] == []
+    assert data["total_players"] == 0
     assert data["latest_match_date"] is None
     assert data["total_matches"] == 0
 

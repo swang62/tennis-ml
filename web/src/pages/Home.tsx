@@ -66,7 +66,11 @@ export default function Home() {
   const coldCache = useRef(directoryQ.dataUpdatedAt === 0).current;
   const infoLoaded = directoryQ.data !== undefined;
   const animate = coldCache && infoLoaded;
-  const playersShown = useCountUp(players.length, animate, coldCache);
+  const playersShown = useCountUp(
+    directoryQ.data?.total_players ?? 0,
+    animate,
+    coldCache,
+  );
   const matchesShown = useCountUp(
     directoryQ.data?.total_matches ?? 0,
     animate,
@@ -191,22 +195,36 @@ export default function Home() {
           Search for an ATP player to view career stats, surface splits, and
           match history.
         </p>
-        {players.length > 0 && (
-          <div className="mt-5 flex flex-wrap gap-x-10 gap-y-4">
-            <div className="stat">
-              <span className="stat-label">Players</span>
-              <span className="stat-num num">
-                {playersShown.toLocaleString("en-US")}
-              </span>
-            </div>
-            <div className="stat">
-              <span className="stat-label">Matches</span>
-              <span className="stat-num num">
-                {matchesShown.toLocaleString("en-US")}
-              </span>
-            </div>
+        <div className="mt-5 flex flex-wrap gap-x-10 gap-y-4">
+          <div className="stat">
+            <span className="stat-label">Players</span>
+            <span className="stat-num num">
+              {directoryQ.isLoading ? (
+                <span
+                  className="stat-skeleton stat-skeleton-players"
+                  role="status"
+                  aria-label="Loading players"
+                />
+              ) : (
+                playersShown.toLocaleString("en-US")
+              )}
+            </span>
           </div>
-        )}
+          <div className="stat">
+            <span className="stat-label">Matches</span>
+            <span className="stat-num num">
+              {directoryQ.isLoading ? (
+                <span
+                  className="stat-skeleton stat-skeleton-matches"
+                  role="status"
+                  aria-label="Loading matches"
+                />
+              ) : (
+                matchesShown.toLocaleString("en-US")
+              )}
+            </span>
+          </div>
+        </div>
       </section>
 
       <div className="toolbar">

@@ -245,6 +245,7 @@ async function get<T>(path: string): Promise<T> {
 
 export interface DirectoryResponse {
   players: Player[];
+  total_players: number;
   latest_match_date: string | null;
   total_matches: number;
 }

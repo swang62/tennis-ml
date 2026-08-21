@@ -424,16 +424,24 @@ def test_write_bento_containerfile_uses_bentoml_generator(monkeypatch, tmp_path)
     containerfile = tmp_path / "Containerfile.bento"
     monkeypatch.setattr(d, "BENTO_CONTAINERFILE", containerfile)
     calls = {}
-    fake_bentoml = SimpleNamespace(
-        container=SimpleNamespace(
-            get_containerfile=lambda tag, **kwargs: calls.update(tag=str(tag), **kwargs) or None
-        )
+    generated = (
+        "RUN  --mount=type=cache,sharing=locked,target=/root/.cache/ if [ -d ./src ]; "
+        'then INSTALL_ROOT="./src"; '
+        'else INSTALL_ROOT="./env/python"; '
+        "fi; uv --directory $INSTALL_ROOT pip install -r $BENTO_PATH/env/python/requirements.txt"
     )
+
+    def get_containerfile(tag, **kwargs):
+        calls.update(tag=str(tag), **kwargs)
+        containerfile.write_text(generated)
+
+    fake_bentoml = SimpleNamespace(container=SimpleNamespace(get_containerfile=get_containerfile))
     monkeypatch.setitem(sys.modules, "bentoml", fake_bentoml)
 
     assert d._write_bento_containerfile(SimpleNamespace(tag="bento:abc")) == containerfile
     assert calls["tag"] == "bento:abc"
     assert calls["output_path"] == str(containerfile)
+    assert "uv export --only-group inference" in containerfile.read_text()
 
 
 def test_buildx_context_copies_bento_and_materializes_models(monkeypatch, tmp_path):

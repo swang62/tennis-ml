@@ -898,10 +898,7 @@ export default function H2H() {
                         m.round)
                       : "";
                     return (
-                      <div
-                        key={`${m.match_date}-${m.winner_id}`}
-                        className="meeting"
-                      >
+                      <div key={m.match_id} className="meeting">
                         <div className="meeting-meta">
                           <span className="meeting-date">{m.match_date}</span>
                           <span className="meeting-surface">
@@ -945,13 +942,19 @@ export default function H2H() {
                             </span>
                             {m.score ? (
                               <span className="meeting-score">
-                                {scoreSegments(m.score, "winner")?.map((s) =>
-                                  s.bold ? (
-                                    <strong key={s.text}>{s.text}</strong>
-                                  ) : (
-                                    <span key={s.text}>{s.text}</span>
-                                  ),
-                                )}
+                                {(() => {
+                                  let segmentNumber = 0;
+                                  return scoreSegments(m.score, "winner")?.map(
+                                    (s) => {
+                                      const key = `${m.match_id}-${segmentNumber++}`;
+                                      return s.bold ? (
+                                        <strong key={key}>{s.text}</strong>
+                                      ) : (
+                                        <span key={key}>{s.text}</span>
+                                      );
+                                    },
+                                  );
+                                })()}
                               </span>
                             ) : null}
                           </span>
