@@ -18,13 +18,14 @@ from typing import TextIO
 
 import papermill as pm
 
+from src.config import ensure_kernel, suppress_insecure_tls_warning
 from src.constants import (
     LOGS,
     OUTPUTS,
     PARAMS,
+    load_env,
 )
 from src.db import training
-from src.utils.config import ensure_kernel, load_env, suppress_insecure_tls_warning
 
 # Training notebooks (00-05), run in order.
 NB_ORDER = [

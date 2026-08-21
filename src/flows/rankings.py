@@ -42,7 +42,7 @@ from typing import Any, cast
 import pandas as pd
 from prefect import flow, task
 
-from src.constants import WORK_POOL_NAME
+from src.constants import WORK_POOL_NAME, load_env
 from src.db.client import connection
 from src.db.ingest import (
     BRONZE_RANKINGS_TABLE,
@@ -53,7 +53,6 @@ from src.db.ingest import (
     load_player_metadata,
     load_ranking_player_map,
 )
-from src.utils.config import load_env
 from src.utils.scrape import (
     PAGE_NAVIGATION_TIMEOUT_MS,
     PLAYER_OVERVIEW_URL,

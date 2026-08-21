@@ -22,11 +22,11 @@ from src.constants import (
     GOLD_MATCHES_TABLE,
     ROOT,
     get_database_url,
+    load_env,
 )
 from src.db.client import CONNECT_TIMEOUT_S, connection, to_dataframe
 from src.features.columns import BRONZE_COLUMNS, CANONICAL_SURFACES
 from src.features.validate import run_ingestion_checks
-from src.utils.config import load_env
 from src.utils.countries import UNK, normalize_ioc, valid_ioc
 
 # ATP data provides player identity; Wikipedia adds missing enrichment.

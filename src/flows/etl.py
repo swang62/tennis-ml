@@ -32,19 +32,20 @@ from prefect.client.orchestration import get_client
 from prefect.events.actions import RunDeployment
 from prefect.events.schemas.automations import EventTrigger
 
-from src import constants
 from src.constants import (
     BRONZE_MATCHES_TABLE,
     GOLD_MATCHES_TABLE,
     GOLD_PROFILES_TABLE,
     LOGS,
+    ROOT,
     SILVER_PLAYER_MATCHES,
     SILVER_ROLLING_FEATURES,
     WORK_POOL_NAME,
+    get_database_url,
+    load_env,
 )
 from src.db.client import CONNECT_TIMEOUT_S
 from src.db.conninfo import dbt_env
-from src.utils.config import load_env
 
 DBT_BUILD_CMD = [
     "uv",
@@ -56,7 +57,7 @@ DBT_BUILD_CMD = [
     "--profiles-dir",
     "dbt",
 ]
-DBT_RUN_RESULTS = constants.ROOT / "dbt" / "target" / "run_results.json"
+DBT_RUN_RESULTS = ROOT / "dbt" / "target" / "run_results.json"
 
 ETL_DEPLOYMENT_NAME = "etl"
 # No cron: ETL is triggered by the "scrape-triggers-etl" automation (see
@@ -86,9 +87,9 @@ def run_dbt_build(
         cmd.extend(["--select", *select])
     if logger is not None:
         logger.info(f"dbt command: {' '.join(shlex.quote(part) for part in cmd)}")
-    env = {**os.environ, **dbt_env(constants.get_database_url())}
+    env = {**os.environ, **dbt_env(get_database_url())}
     if log_file is None:
-        return subprocess.run(cmd, cwd=constants.ROOT, check=True, env=env)
+        return subprocess.run(cmd, cwd=ROOT, check=True, env=env)
     log_file.parent.mkdir(parents=True, exist_ok=True)
     with log_file.open("w") as log:
         log.write(f"$ {' '.join(shlex.quote(part) for part in cmd)}\n")
@@ -103,7 +104,7 @@ def _run_streamed(
 ) -> subprocess.CompletedProcess:
     proc = subprocess.Popen(
         cmd,
-        cwd=constants.ROOT,
+        cwd=ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         env=env,
@@ -150,7 +151,7 @@ def _etl_log_file() -> Path:
 def _incremental_watermarks() -> tuple[datetime | None, datetime | None]:
     """Return the bronze source and last successfully-built watermarks."""
     with (
-        psycopg.connect(constants.get_database_url(), connect_timeout=CONNECT_TIMEOUT_S) as conn,
+        psycopg.connect(get_database_url(), connect_timeout=CONNECT_TIMEOUT_S) as conn,
         conn.cursor() as cur,
     ):
         cur.execute(f"SELECT MAX(ingested_at) FROM {BRONZE_MATCHES_TABLE}")
@@ -170,7 +171,7 @@ def _record_incremental_watermark(watermark: datetime | None) -> None:
     if watermark is None:
         return
     with (
-        psycopg.connect(constants.get_database_url(), connect_timeout=CONNECT_TIMEOUT_S) as conn,
+        psycopg.connect(get_database_url(), connect_timeout=CONNECT_TIMEOUT_S) as conn,
         conn.cursor() as cur,
     ):
         cur.execute(
@@ -211,7 +212,7 @@ def bronze_to_gold(incremental: bool = False) -> int:
     # post-build counts rather than contending with serving's process-local pool.
     with (
         psycopg.connect(
-            constants.get_database_url(),
+            get_database_url(),
             connect_timeout=CONNECT_TIMEOUT_S,
             options="-c statement_timeout=30000",
         ) as conn,

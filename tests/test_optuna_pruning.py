@@ -1,6 +1,6 @@
 """Hermetic regression coverage for the GBDT Optuna reporting/pruning bridge.
 
-Exercises ``src.models.optuna_pruning`` with fake trials and fake callback
+Exercises with fake trials and fake callback
 environments, plus a numeric check that probability-space binary cross-entropy
 and BCE-with-logits agree. No optuna study, model, database, or network is
 spawned.
