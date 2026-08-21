@@ -3,12 +3,45 @@
 No Prefect server, no MLflow, no browser, no external fixture files — just pure logic.
 """
 
+import re
 from datetime import date
 
 import pytest
 
 import src.flows.rankings as scrape
 import src.utils.scrape as scrape_mod
+
+# Real ATP #dateWeek-filter structure (observed on atptour.com): each option's
+# value is the week date (YYYY-MM-DD) or the literal "Current Week" for the
+# latest week; the visible text is YYYY.MM.DD. These helpers let hermetic
+# mocks answer ``_week_in_filter`` with the same logic the real page runs, so
+# the fixtures reflect the actual DOM instead of a stubbed boolean.
+_FILTER_OPTION_RE = re.compile(r'<option[^>]*value="([^"]*)"[^>]*>(.*?)</option>', re.S)
+
+
+def _week_in_filter_real(filter_html: str, wanted: str, latest: str) -> bool:
+    """Mirror ``_week_in_filter``: match on option value OR text, dash or dot format."""
+    wanted_n = re.sub(r"[^0-9]", "", wanted)
+    latest_n = re.sub(r"[^0-9]", "", latest)
+    for value, text in _FILTER_OPTION_RE.findall(filter_html):
+        fields = [value, text.strip()]
+        norms = [re.sub(r"[^0-9]", "", f) for f in fields if f]
+        if wanted_n in norms:
+            return True
+        if "Current Week" in fields and wanted_n == latest_n:
+            return True
+    return False
+
+
+# Realistic #dateWeek-filter markup mirroring atptour.com: the latest week is
+# "Current Week", older weeks carry their date as the option value.
+_REAL_FILTER_HTML = (
+    '<select id="dateWeek-filter">'
+    '<option value="Current Week">2026.08.10</option>'
+    '<option value="2026-08-03">2026.08.03</option>'
+    '<option value="2026-07-27">2026.07.27</option>'
+    "</select>"
+)
 
 
 class _FrozenToday(date):
@@ -199,13 +232,20 @@ def test_fetch_week_navigates_the_shared_page(monkeypatch):
     calls: list[str] = []
 
     class Page:
+        _filter = (
+            '<select id="dateWeek-filter">'
+            '<option value="2026-01-05">2026.01.05</option>'
+            '<option value="2025-12-29">2025.12.29</option>'
+            "</select>"
+        )
+
         def goto(self, _url, **_kwargs):
             calls.append("goto")
 
-        def evaluate(self, _js, wanted):
+        def evaluate(self, _js, arg):
             calls.append("evaluate")
-            # The week is present in the filter.
-            return wanted in ("2026.01.05",)
+            # arg is [wanted, latest]; answer against the real filter structure.
+            return _week_in_filter_real(self._filter, arg[0], arg[1])
 
         def wait_for_selector(self, _selector, **_kwargs):
             calls.append("wait")
@@ -233,6 +273,14 @@ def test_fetch_week_missing_option_after_filter_appears_skips_immediately(monkey
     row_waits = 0
 
     class Page:
+        # 2026-01-12 is absent (no Current Week option either) -> never published.
+        _filter = (
+            '<select id="dateWeek-filter">'
+            '<option value="2026-01-19">2026.01.19</option>'
+            '<option value="2026-01-05">2026.01.05</option>'
+            "</select>"
+        )
+
         def goto(self, _url, **_kwargs):
             pass
 
@@ -241,10 +289,10 @@ def test_fetch_week_missing_option_after_filter_appears_skips_immediately(monkey
             if selector == scrape.RANKINGS_TABLE_SELECTOR:
                 row_waits += 1
 
-        def evaluate(self, _js, wanted):
+        def evaluate(self, _js, arg):
             nonlocal checks
             checks += 1
-            return wanted in ("2026.01.05",)
+            return _week_in_filter_real(self._filter, arg[0], arg[1])
 
         def content(self):
             return ""
@@ -280,16 +328,20 @@ def test_fetch_week_filter_with_option_proceeds(monkeypatch):
     checks = 0
 
     class Page:
+        _filter = (
+            '<select id="dateWeek-filter"><option value="2026-01-05">2026.01.05</option></select>'
+        )
+
         def goto(self, _url, **_kwargs):
             pass
 
         def wait_for_selector(self, _selector, **_kwargs):
             pass
 
-        def evaluate(self, _js, _wanted):
+        def evaluate(self, _js, arg):
             nonlocal checks
             checks += 1
-            return True
+            return _week_in_filter_real(self._filter, arg[0], arg[1])
 
         def content(self):
             return '<a href="/en/players/x/y/overview">x</a>'
@@ -305,13 +357,17 @@ def test_fetch_week_existing_filter_incurs_no_fixed_delay(monkeypatch, capsys):
     checks = 0
 
     class Page:
+        _filter = (
+            '<select id="dateWeek-filter"><option value="2026-01-05">2026.01.05</option></select>'
+        )
+
         def goto(self, _url, **_kwargs):
             pass
 
-        def evaluate(self, _js, _wanted):
+        def evaluate(self, _js, arg):
             nonlocal checks
             checks += 1
-            return True
+            return _week_in_filter_real(self._filter, arg[0], arg[1])
 
         def wait_for_selector(self, _selector, **_kwargs):
             pass
@@ -337,11 +393,15 @@ def test_fetch_week_polls_until_rows_render_or_deadline(monkeypatch):
     waits = 0
 
     class Page:
+        _filter = (
+            '<select id="dateWeek-filter"><option value="2026-01-05">2026.01.05</option></select>'
+        )
+
         def goto(self, _url, **_kwargs):
             pass
 
-        def evaluate(self, _js, wanted):
-            return wanted in ("2026.01.05",)
+        def evaluate(self, _js, arg):
+            return _week_in_filter_real(self._filter, arg[0], arg[1])
 
         def wait_for_selector(self, selector, **_kwargs):
             nonlocal waits
@@ -354,6 +414,43 @@ def test_fetch_week_polls_until_rows_render_or_deadline(monkeypatch):
     html = scrape._fetch_week_html(Page(), "https://example.test/rankings", date(2026, 1, 5))
     assert "<table></table>" not in html
     assert waits >= 3
+
+
+def test_week_in_filter_matches_real_dom():
+    """_week_in_filter matches on option value OR text, dash OR dot format.
+
+    Drives the real function with a fake page whose evaluate mirrors the
+    production JS logic (the same _week_in_filter_real the other mocks use),
+    against realistic #dateWeek-filter markup observed on atptour.com.
+    """
+
+    class Page:
+        def __init__(self, filter_html):
+            self._filter = filter_html
+
+        def evaluate(self, _js, arg):
+            return _week_in_filter_real(self._filter, arg[0], arg[1])
+
+    # Latest week is "Current Week" (date only in its text); older weeks carry
+    # the date as the value, with dot-formatted visible text.
+    real_filter = (
+        '<select id="dateWeek-filter">'
+        '<option value="Current Week">2026.08.10</option>'
+        '<option value="2026-08-03">2026.08.03</option>'
+        '<option value="2026-07-27">2026.07.27</option>'
+        "</select>"
+    )
+    assert scrape._week_in_filter(Page(real_filter), date(2026, 8, 10)) is True
+    assert scrape._week_in_filter(Page(real_filter), date(2026, 8, 3)) is True
+    # A never-published week is absent.
+    assert scrape._week_in_filter(Page(real_filter), date(2026, 8, 20)) is False
+
+    # Flexibility: a filter that uses dash-form text and dot-form values still
+    # matches, and one keyed only by text (no value date) still matches.
+    dash_text = (
+        '<select id="dateWeek-filter"><option value="2026.08.17">2026-08-17</option></select>'
+    )
+    assert scrape._week_in_filter(Page(dash_text), date(2026, 8, 17)) is True
 
 
 # ── HTML parser ──────────────────────────────────────────────────

@@ -256,11 +256,13 @@ def extract_rankings_from_html(html: str) -> list[dict[str, Any]]:
     challenge page or a markup change fails visibly.
     """
     fragments = _TABLE_SPLIT_RE.split(html)
-    for fragment in fragments[1:]:  # skip everything before the first <table
+    for fragment in fragments[1:]:  # skip everything before the first <table>
         rows: list[dict[str, Any]] = []
         for row_html in _ROW_SPLIT_RE.findall(fragment):
             parsed = _parse_row(row_html)
-            if parsed is not None:
+            # Only the top 200 are requested (rankRange=0-200); ATP may render a
+            # fuller table, and the page duplicates the table, so cap by rank.
+            if parsed is not None and 1 <= parsed["rank"] <= 200:
                 rows.append(parsed)
         if rows:
             return rows
@@ -397,17 +399,36 @@ def _week_in_filter(page, week: date) -> bool:
     """Whether ``week`` appears in the page's #dateWeek-filter.
 
     The filter lists every published ranking week; the requested week shows up
-    as an option when it exists. Option values use "Current Week" for the most
-    recent week and YYYY-MM-DD for older ones, but the option TEXT is always
-    YYYY.MM.DD — so matching on text covers both. A week that was never
-    published (e.g. a future Monday) is absent from the filter entirely.
+    as an option when it exists. Each option's ``value`` is the date in
+    YYYY-MM-DD, except the most recent week, whose value is the literal
+    "Current Week" — so the current week matches by value only when it is the
+    latest completed Monday. A week that was never published (e.g. a future
+    Monday) is absent from the filter entirely and returns False.
     """
-    wanted = week.strftime("%Y.%m.%d")
+    wanted = week.strftime("%Y-%m-%d")
+    # The latest completed Monday bounds the request window, so a week beyond it
+    # can never be a valid (published) "Current Week".
+    latest = latest_completed_monday(date.today()).strftime("%Y-%m-%d")
     return page.evaluate(
-        "(wanted) => Array.from("
-        "document.querySelectorAll('#dateWeek-filter option')"
-        ").some(o => o.textContent.trim() === wanted)",
-        wanted,
+        "([wanted, latest]) => {"
+        # Normalize by dropping separators so YYYY-MM-DD and YYYY.MM.DD match,
+        # and check both the option value and its visible text. The current
+        # week's value is the literal "Current Week" but its text carries the
+        # date, so the text normalization already covers it; the explicit
+        # Current Week + latest clause is a safety net for a date-less label.
+        "  const w = wanted.replace(/[^0-9]/g, '');"
+        "  const latestN = latest.replace(/[^0-9]/g, '');"
+        "  return Array.from("
+        "    document.querySelectorAll('#dateWeek-filter option')"
+        "  ).some(o => {"
+        "    const fields = [o.value, o.textContent.trim()];"
+        "    const norms = fields.map(f => f.replace(/[^0-9]/g, '')).filter(Boolean);"
+        "    if (norms.includes(w)) return true;"
+        "    if (fields.includes('Current Week') && w === latestN) return true;"
+        "    return false;"
+        "  });"
+        "}",
+        [wanted, latest],
     )
 
 

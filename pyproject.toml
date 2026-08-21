@@ -12,6 +12,7 @@ description = "Tennis match prediction pipeline using Prefect, MLflow, and Bento
 readme = "README.md"
 requires-python = ">=3.12, <3.13"
 dependencies = [
+  "pip",
   "scikit-learn>=1.8",
   "xgboost>=3.2",
   "lightgbm>=4.6",
@@ -104,6 +105,7 @@ inference = [
 # Model training/tuning: everything notebooks 00-05 and pipeline.py need.
 training = [
   { include-group = "inference" },
+  "pip",
   "mlflow>=3.13",
   "torch>=2.12",
   "onnxscript>=0.1.0",
