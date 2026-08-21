@@ -1,66 +1,78 @@
-# tennis-ml — AGENTS.md
+# tennis-ml agent map
 
-Commands run via `just` (not make). `uv` is the package manager (not pip/poetry).
+## Commands and boundaries
 
-## Overall approach
+- Use `just` recipes, not `make`; use `uv`, not pip or poetry.
+- Recipes call project Python files directly with `uv run python`; preserve
+  passthrough `*args`. Do not add console-script wrappers.
+- Keep training, ETL, and deployment separate: `just train`, the Prefect/dbt
+  ETL flow, and champion-gated deployment are distinct paths.
+- The Prefect worker is a serviceman user agent. Its entrypoint loads the root
+  `.env`, registers deployments, and connects to the pool.
+- Keep the headed rankings browser profile and its single page across weekly
+  navigation so Cloudflare clearance survives runs.
 
-End-to-end MLOps pipeline for tennis match prediction.
+## System map
 
-Data flow: CSV → PostgreSQL bronze → dbt silver (player-perspective matches + post-match rolling snapshots) → dbt gold (canonical training rows) → Papermill notebooks (Optuna tuning across all model classes) → MLflow registry → BentoML serving → Web dashboard.
+CSV -> PostgreSQL bronze -> dbt silver/gold -> Papermill/Optuna -> MLflow
+registry -> BentoML -> React dashboard.
 
-**Model strategy:** the three model classes compete independently via Optuna, then a logistic-regression meta-model stacks their probability outputs. Architected for ~200k match samples.
+- `db/`: PostgreSQL client, ingestion, seeding, and DuckDB snapshots.
+- `features/`: feature definitions, as-of inference, and tour fallbacks.
+- `models/`: grouped CV, neural network, and similarity index.
+- `evaluate/`: calibration, symmetry, metrics, and promotion.
+- `flows/`: ETL, training, monitoring, and deployment orchestration.
+- `serving/`: model-only Bento service; feature derivation belongs in
+  `features/`.
+- `dbt/`: the feature source of truth. `web/`: React/TanStack UI.
 
-**Separation of concerns:**
-- **Training** is standalone — `just train` runs all notebooks in order.
-- **ETL** is a Prefect flow running `dbt build` (one command, dependency-ordered).
-- **Deploy** is gated on the latest promoted model — redeploys only when `@champion` or serving artifacts improve the model (or with `--force`).
+## Non-negotiable data and deployment rules
 
-**Just recipes invoke project `.py` files directly** via `uv run python …`; `*args` recipes pass CLI args through unchanged. Do not add console scripts or generic CLI wrappers.
+- PostgreSQL rolling snapshots are the feature source of truth. Inference
+  selects each player's newest snapshot strictly before `as_of_date`.
+- Cold starts use the single tour-averages row, never ad-hoc aggregates.
+- Preserve player perspective and order: `p(a,b) = 1 - p(b,a)`; never sort or
+  canonicalize endpoint ids.
+- The reviewed ranking identity map uses source ids to canonical ids; names are
+  audit-only. Validate it before writes and report unmapped rows.
+- Base models get numbered versions, not aliases. Promotion pins exact model,
+  run, URI, and immutable artifact hashes on the ensemble, then assigns only
+  `@champion`. Deployment resolves those pins.
+- Similarity assets are outside champion lineage: rebuild FAISS after the
+  selected `DATABASE_URL` snapshot refresh and package them only in Bento.
+- Serving uses ONNX Runtime for neural models, not torch. Bento loads
+  materialized native models and never contacts MLflow at runtime.
+- Keep the single NodePort topology: no ingress, tunnels, or TLS. MLflow is
+  DagsHub-hosted; Bento runs through Docker Compose.
 
-**The host Prefect worker is a serviceman user agent.** Its entrypoint loads the root `.env`, registers deployment, and connects to the pool.
+## Minimalism and testing
 
-**Rankings browser state is persistent.** The Prefect flow uses one headed browser profile and one page per run, navigating across weeks. Retain the profile so Cloudflare clearance cookies survive later runs.
+- Inspect the affected flow and callers before editing. Fix shared causes once;
+  make the smallest correct change and avoid speculative abstractions.
+- Tests specify behavior at public seams. Prefer real outcomes, invariants,
+  and integration boundaries over source text, AST shape, private helpers,
+  constants, exact SQL spelling, call order, or full mock call lists.
+- Delete tests that only protect an implementation choice. Keep tests for
+  user/API behavior, data correctness, security, persistence, lineage,
+  symmetry, failure safety, and operational boundaries.
+- Never add `assert CONSTANT == value` merely to freeze a configurable or
+  internal constant. Assert the observable behavior it influences; retain a
+  literal assertion only for a genuine public/persisted contract.
+- Tests are hermetic: no live DB, network, MLflow, DagsHub, Prefect, or
+  pre-built tables. Use fakes, mocks at external boundaries, and local fixtures.
+- Keep docstrings short: one sentence for public purpose or non-obvious
+  rationale; remove narration that repeats the code. Use comments for why, not
+  what.
+- Comments must explain why, invariants, contracts, or non-obvious behavior;
+  do not add comments that merely repeat constants, settings, parameter
+  values, or immediately visible code. Source/config is the authority for
+  values.
+- Run `just lint` and the narrowest relevant tests, then the full suite before
+  declaring completion. Never commit unless asked.
 
-## Directory layout
+## Change safety
 
-```
-artifacts/       — drift reports, model logs, notebook outputs
-data/            — raw rankings/matches, processed snapshots, identity map, seed data
-dbt/             — silver→gold SQL models + tests (bronze is the PostgreSQL source; the feature single source of truth)
-infra/           — k3d config, static K8s manifests, PostgreSQL init SQL, Prefect worker
-notebooks/
-  eda/           — exploratory analysis notebooks
-  parameters/    — parameterized Papermill training notebooks (00–04)
-scripts/         — dev, test, and web-check helpers (not pipeline code)
-src/
-  db/            — PostgreSQL client, DuckDB training snapshot, seeding/ingestion
-  evaluate/      — promotion gating, model symmetry checks
-  features/      — shared feature definitions, inference builder, tour averages
-  flows/         — ETL (Prefect), standalone training runner, deploy flow
-  models/        — player similarity index, NN architecture
-  serving/       — BentoML service (model-only — no feature derivation)
-tests/           — self-contained pytest suite (no live DB)
-web/             — React + TanStack dashboard (pages, lib, components)
-```
-
-## Big gotchas
-
-**PostgreSQL is the feature single source of truth.** Per-match rolling snapshots drive the training rows and the as-of-dated inference builder. Cold-start fallbacks come from the tour-averages singleton (always one row, full-pool defaults + weighted tour benchmarks), never on-demand aggregates. All data is synced with dbt.
-
-**Exact lineage, one alias.** Base models carry no aliases — each registers a numbered version and records exact name, version, run ID, model URI, and immutable artifact URIs/hashes in the handoffs. Promotion tags the ensemble with those pins, then assigns `@champion`; deploy resolves `@champion` and reads every pin from those tags.
-
-**Artifact boundary.** Champion pins cover only artifacts that affect match probabilities. After an operator refreshes the DuckDB snapshot for the selected `DATABASE_URL`, deploy rebuilds the FAISS similarity assets from that snapshot. These similarity artifacts are never MLflow/champion lineage and are packaged only into the Bento outputs.
-
-**NN servers via ONNX Runtime, not torch.** Deploy exports the pinned PyTorch model to single-file ONNX at deploy time; torch isn't a serving dependency. GBDT may pick XGBoost or LightGBM at Optuna time — the image pins both so whichever wins loads.
-
-**No ingress — a single node port.** Host access is one port mapped to a NodePort service. No ingress objects, port-forwards, or ad hoc tunnels. No TLS. Inside the cluster, services use Kubernetes DNS names. MLflow is DagsHub-hosted. BentoML is via Docker Compose — not a cluster service.
-
-**Ranking identity map** — a reviewed CSV maps ranking-source player id to canonical player id; the name field is audit-only, never a match key. Ingestion validates the map before any write; unmapped rows are skipped and reported, auto name-matched with normalization.
-
-**Tests are self-contained — no live data, no external calls, ever.** Use `just lint` for all lint/typechecks. Tests must never open DB connections or depend on external state — the suite must pass with no PostgreSQL server and no pre-built tables. Tests must also never make external API or network calls, including to MLflow, DagsHub, or Prefect. Any such behavior is asserted hermetically via mocks/fakes or local fixtures (e.g. an in-memory DuckDB fixture, mocked MLflow/Prefect clients).
-
-## Data manipulation
-
-- **Symmetric, order-preserving** — the ensemble satisfies `p_win(a, b) = 1 - p_win(b, a)`; the first-supplied id is the player side. Endpoints report ids in the order supplied — no sorting or canonicalization.
-- **Rolling form lookup** — live inference reads each player's newest snapshot strictly before `as_of_date`.
-- **Bento image data sources** — Bento loads native models materialized at deploy time from the champion's lineage tags; no MLflow at serving time. NN is ONNX Runtime. Bio embeddings are compressed NumPy, not Parquet.
+- Preserve unrelated worktree changes.
+- Do not delete user data, files, databases, or persisted artifacts without
+  explicit approval.
+- Surface uncertainty and verification gaps instead of weakening checks.

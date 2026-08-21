@@ -1,19 +1,10 @@
--- Assert every match_features H2H value is exactly re-derivable from prior
--- meetings, so no row's H2H counts include the current match itself:
---   * meetings strictly before the row's match_date (same-date excluded),
---   * deduped to distinct match_ids (silver has 2 rows per match),
---   * oriented per directional row, keyed on (match_id, player_id).
--- h2h_exposure is the count of the FIVE most recent such meetings (identical
--- for both mirrors); h2h_advantage is the Beta(1,1)-smoothed directional value
--- built from the same bounded recent-five window (match_date DESC, match_id
--- DESC): (row player's prior wins + 1) / (prior meetings + 2) - 0.5 and
--- negates across mirrors. Neither value is truncated by the model, so the
--- derived values are compared at full precision (1e-6 tolerance). Any returned
--- row is a violation.
+-- Assert every match_features H2H value is exactly re-derivable from strictly
+-- prior meetings (same-date excluded), so H2H never includes the current match.
+-- h2h_exposure = count of the five most recent deduped meetings; h2h_advantage =
+-- (prior wins + 1)/(prior meetings + 2) - 0.5 from the same window. Compared at
+-- full precision (1e-6 tolerance). Any returned row is a violation.
 WITH pair_meetings AS (
-    -- One row per distinct match between an unordered pair; a_won is the
-    -- lower-id (LEAST/GREATEST canonicalization for lookup only) side's
-    -- outcome (both perspective rows agree, so MAX is safe).
+    -- One row per distinct unordered pair match; a_won from the lower-id side.
     SELECT
         LEAST(player_id, opponent_id) AS a,
         GREATEST(player_id, opponent_id) AS b,

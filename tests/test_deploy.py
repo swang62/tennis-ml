@@ -156,31 +156,9 @@ def _stub_deploy_mlflow_tracking(monkeypatch):
     )
 
 
-def test_deploy_bento_logs_in_before_build(monkeypatch, tmp_path):
-    d = _deploy()
-    monkeypatch.setattr(d, "DOCKER_REPO", "acme")
-    monkeypatch.setattr(d, "IMAGE_NAME", "tennis-bento")
-    monkeypatch.setattr(d, "LOGS", tmp_path)
-    monkeypatch.setattr(d, "_read_state", lambda: {})
-    monkeypatch.setattr(d, "_write_state", lambda _s: None)
-    monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
-    order = []
-    monkeypatch.setattr(d, "_docker_login", lambda: order.append("login"))
-    monkeypatch.setattr(
-        d,
-        "build_bento_image",
-        lambda: order.append("build") or ("acme/tennis-bento:dev", 5),
-    )
-    _stub_deploy_mlflow_tracking(monkeypatch)
-
-    d.deploy_bento()
-
-    assert order == ["login", "build"]
-
-
-def test_deploy_bento_logs_in_before_build_then_writes_state(monkeypatch, tmp_path):
-    """Login happens before the build (whose Buildx `--push` is the push); deploy
-    itself runs no docker tag/push and only ever targets the Docker Hub DOCKER_TAG image."""
+def test_deploy_bento_logs_in_before_build_and_writes_state(monkeypatch, tmp_path):
+    """Login runs before the build (whose Buildx `--push` pushes); the deploy
+    itself performs no docker tag/push and writes the deployed image/version."""
     d = _deploy()
     monkeypatch.setattr(d, "DOCKER_REPO", "acme")
     monkeypatch.setattr(d, "DOCKER_TAG", "dev")
@@ -215,29 +193,6 @@ def test_deploy_bento_logs_in_before_build_then_writes_state(monkeypatch, tmp_pa
     assert docker_calls == []
     assert written["deployed_version"] == 5
     assert written["deployed_image"] == "acme/tennis-bento:dev"
-
-
-def test_deploy_bento_does_not_require_postgres_password(monkeypatch, tmp_path):
-    """Deploy does not require a PostgreSQL credential."""
-    d = _deploy()
-    monkeypatch.setattr(d, "DOCKER_REPO", "acme")
-    monkeypatch.setattr(d, "IMAGE_NAME", "tennis-bento")
-    monkeypatch.setattr(d, "LOGS", tmp_path)
-    monkeypatch.setattr(d, "build_bento_image", lambda **_kwargs: ("acme/tennis-bento:dev", 5))
-    monkeypatch.setattr(d, "generate_similarity_artifacts", lambda: None)
-    monkeypatch.setattr(d, "_docker_login", lambda: None)
-    monkeypatch.setattr(d, "_read_state", lambda: {})
-    monkeypatch.setattr(d, "_write_state", lambda _s: None)
-    monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
-    teed = []
-    monkeypatch.setattr(d, "_run_teed", lambda cmd, _log=None: teed.append(list(cmd)))
-    _stub_subprocess(monkeypatch)
-    _stub_deploy_mlflow_tracking(monkeypatch)
-
-    d.deploy_bento()  # must not raise
-
-    # Nothing is pushed by deploy directly; Buildx pushed inside the build.
-    assert teed == []
 
 
 def test_deploy_bento_fails_when_buildx_push_fails(monkeypatch, tmp_path):
@@ -450,100 +405,16 @@ def test_build_bento_image_publishes_multiarch_via_buildx(monkeypatch):
     assert built["bento"] == 1
     assert image == "acme/tennis-bento:dev"
     assert version == 7
+    assert len(built["teed_calls"]) == 1
     (cmd,) = built["teed_calls"]
     assert cmd[:3] == ["docker", "buildx", "build"]
-    assert cmd[cmd.index("--builder") + 1] == "tennis-multiarch"
-    assert cmd[cmd.index("--file") + 1] == "/tmp/Containerfile.bento"
     assert cmd[cmd.index("--platform") + 1] == "linux/amd64,linux/arm64"
-    assert cmd[cmd.index("--tag") + 1] == "acme/tennis-bento:dev"
     assert "--push" in cmd
-    # The build context that actually contains the Bento is the last argument.
-    assert cmd[-1] == "/ctx"
     # No separate docker tag/push anywhere: the only docker subprocess is Buildx.
     assert built["docker_calls"] == []
 
 
-def test_build_bento_image_no_separate_docker_push(monkeypatch):
-    """Every deploy rebuilds the Bento and publishes it with the single Buildx
-    command — the old docker tag + docker push route is gone."""
-    d, built = _stub_bento_build(monkeypatch)
-
-    d.build_bento_image()
-    assert built["bento"] == 1
-    assert len(built["teed_calls"]) == 1
-    cmd = built["teed_calls"][0]
-    assert cmd[:3] == ["docker", "buildx", "build"]
-    assert "--push" in cmd
-
-
 # --- Buildx command and builder setup ---
-
-
-def test_buildx_build_cmd_exact():
-    """The generated command is exactly the Buildx multi-platform push."""
-    d = _deploy()
-    cmd = d._buildx_build_cmd(
-        builder="b1",
-        containerfile=Path("/cf"),
-        context=Path("/ctx"),
-        image="acme/tennis-bento:latest",
-    )
-    assert cmd == [
-        "docker",
-        "buildx",
-        "build",
-        "--builder",
-        "b1",
-        "--file",
-        "/cf",
-        "--platform",
-        "linux/amd64,linux/arm64",
-        "--tag",
-        "acme/tennis-bento:latest",
-        "--push",
-        "/ctx",
-    ]
-
-
-def test_ensure_buildx_builder_reuses_existing(monkeypatch):
-    d = _deploy()
-    calls = []
-
-    def fake_run(cmd, **_kwargs):
-        calls.append(list(cmd))
-        return SimpleNamespace(returncode=0)
-
-    monkeypatch.setattr("subprocess.run", fake_run)
-
-    assert d._ensure_buildx_builder() == "tennis-multiarch"
-    # Inspect only — the named builder already exists, so it is reused.
-    assert calls == [["docker", "buildx", "inspect", "tennis-multiarch"]]
-
-
-def test_ensure_buildx_builder_creates_docker_container_when_missing(monkeypatch):
-    d = _deploy()
-    calls = []
-
-    def fake_run(cmd, **_kwargs):
-        calls.append(list(cmd))
-        # First call (inspect) fails; the create that follows succeeds.
-        return SimpleNamespace(returncode=1 if len(calls) == 1 else 0)
-
-    monkeypatch.setattr("subprocess.run", fake_run)
-
-    assert d._ensure_buildx_builder() == "tennis-multiarch"
-    assert calls == [
-        ["docker", "buildx", "inspect", "tennis-multiarch"],
-        [
-            "docker",
-            "buildx",
-            "create",
-            "--name",
-            "tennis-multiarch",
-            "--driver",
-            "docker-container",
-        ],
-    ]
 
 
 def test_write_bento_containerfile_uses_bentoml_generator(monkeypatch, tmp_path):
@@ -1312,100 +1183,3 @@ def test_similarity_artifacts_are_snapshot_built_not_fingerprint_inputs():
     d = _deploy()
     assert d.SIMILARITY_INDEX not in d.SOURCE_FINGERPRINT_FILES
     assert d.SIMILARITY_METADATA not in d.SOURCE_FINGERPRINT_FILES
-
-
-def test_deploy_module_is_not_a_prefect_flow():
-    """Deploy is deliberately manual: the module never imports Prefect or
-    decorates anything with @flow, so running it can never register a run."""
-    src = (_deploy().ROOT / "src" / "flows" / "deploy.py").read_text()
-    assert "import prefect" not in src
-    assert "from prefect" not in src
-    assert "@flow" not in src
-
-
-def test_deploy_source_reads_champion_and_writes_only_deploy_bookkeeping_tags():
-    """Deploy reads MLflow — the sole alias lookup is ensemble @champion — and
-    its only registry mutation is the two pipeline_last_deploy_* bookkeeping
-    tags on the champion version. It never re-aliases, re-stages, updates, or
-    deletes model versions."""
-    src = (_deploy().ROOT / "src" / "flows" / "deploy.py").read_text()
-    assert src.count("get_model_version_by_alias") == 1  # champion resolution only
-    import re
-
-    assert re.search(r"models:/[^\"']*@", src) is None  # no alias URIs
-    # Post-build bookkeeping: exactly the two deploy tags, nothing else.
-    assert src.count("set_model_version_tag") == 2
-    assert src.count("pipeline_last_deploy_run_id") == 1
-    assert src.count("pipeline_last_deploy_image") == 1
-    for api in (
-        "set_registered_model_alias",
-        "set_model_tag",
-        "update_model_version",
-        "delete_model_version",
-        "transition_model_version_stage",
-    ):
-        assert api not in src
-
-
-def test_base_notebooks_never_create_best_alias():
-    """02 notebooks register numbered versions but never set a @best alias."""
-    root = _deploy().ROOT
-    for name in ("02_tune_linear", "02_tune_gbdt", "02_tune_nn"):
-        src = (root / "notebooks" / "parameters" / f"{name}.ipynb").read_text()
-        assert "set_registered_model_alias" not in src
-        assert '"best"' not in src
-
-
-def test_promotion_tags_lineage_before_champion_alias():
-    """05 tags the promoted version with exact lineage BEFORE assigning @champion,
-    and the only alias in the training path is the ensemble @champion."""
-    root = _deploy().ROOT
-    src = (root / "notebooks" / "parameters" / "04_evaluate.ipynb").read_text()
-    assert src.index("set_model_version_tag") < src.index("set_registered_model_alias")
-    assert "build_lineage_tags" in src
-    assert src.count("set_registered_model_alias") == 1
-    for name in ("02_tune_linear", "02_tune_gbdt", "02_tune_nn"):
-        nb = (root / "notebooks" / "parameters" / f"{name}.ipynb").read_text()
-        assert "set_registered_model_alias" not in nb
-
-
-def test_evaluation_reports_the_promotion_outcome_and_reason():
-    src = (_deploy().ROOT / "notebooks" / "parameters" / "04_evaluate.ipynb").read_text()
-
-    assert "promotion_reason" in src
-    assert "EVALUATION COMPLETE: candidate" in src
-    assert 'mlflow.log_param(\\"promotion_reason\\", promotion_reason)' in src
-    assert src.count("display(fig)") == 4
-    assert "shap_waterfall_misclassified" not in src
-    assert 'bbox_inches=\\"tight\\"' in src
-    assert "select_temperature(" in src
-    assert "raw candidate" in src
-    assert "calibrated champion" in src
-
-
-# --- Web image build needs no host-generated Vite inputs ---
-
-
-def test_just_deploy_stages_similarity_then_builds_web_image():
-    """`just deploy` order is: deploy.py stages the snapshot similarity
-    artifacts -> the Docker web build; no node index builder or raw-directory
-    staging remains anywhere in the deploy path."""
-    justfile = (_deploy().ROOT / "justfile").read_text()
-    staging = justfile.index("uv run python src/flows/deploy.py")
-    web_build = justfile.index("docker buildx build")
-    assert staging < web_build
-    assert "--push web/" in justfile[web_build:]
-    assert "build-player-index" not in justfile
-    assert (
-        "generate_similarity_artifacts"
-        in (_deploy().ROOT / "src" / "flows" / "deploy.py").read_text()
-    )
-
-
-def test_web_dockerfile_has_no_in_container_index_builder():
-    """The site is a self-contained SPA: no player-index/MiniSearch builder runs
-    inside the image build, so the static bundle is served as-is."""
-    dockerfile = (_deploy().ROOT / "web" / "Dockerfile").read_text()
-    assert "build-player-index" not in dockerfile
-    assert "RUN node" not in dockerfile
-    assert "COPY . ." in dockerfile

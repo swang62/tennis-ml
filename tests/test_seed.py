@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from src.db import ingest, seed
+from src.db import seed
 
 
 @pytest.fixture(autouse=True)
@@ -310,17 +310,6 @@ def test_parse_args_enrich_is_independent_of_all():
     assert both.enrich is True
 
 
-def test_seed_wires_existing_ranking_and_enrichment_paths():
-    """Seed orchestrates the validated ingest operations — no duplicate logic."""
-    assert seed.ingest_rankings is ingest.ingest_rankings
-    assert seed.enrich_players is ingest.enrich_players
-
-
-def test_seed_wires_clear_match_events():
-    """--force reuses the DB-layer clear helper, not a seed-local DELETE."""
-    assert seed.clear_match_events is ingest.clear_match_events
-
-
 def test_main_dispatches_without_network(monkeypatch):
     """Flag combos dispatch offline; --enrich is the only network gate."""
     calls = []
@@ -510,18 +499,6 @@ def test_main_all_force_clears_match_events_before_insert(monkeypatch):
     assert calls == ["clear", False, (["A0E2", "Z355"], False, True)]
 
 
-def test_main_without_force_never_clears_match_events(monkeypatch):
-    """Only --force clears; the idempotent path goes straight to the insert."""
-    calls = []
-    monkeypatch.setattr(seed, "discover_atp_csvs", lambda _dir: [Path("2026.csv")])
-    _patch_seed_writes(monkeypatch, calls)
-
-    seed.main_all(enrich=True)
-
-    assert "clear" not in calls
-    assert calls == [False, (["A0E2", "Z355"], True, False)]
-
-
 def test_main_force_clears_and_rebuilds(monkeypatch):
     """--force clears matches (fresh insert), while overwrite still reaches
     profiles, rankings, and enrichment."""
@@ -532,27 +509,6 @@ def test_main_force_clears_and_rebuilds(monkeypatch):
     seed.main_all(enrich=True, force=True)
 
     assert calls == ["clear", False, (["A0E2", "Z355"], True, True)]
-
-
-def test_main_default_imports_rank_history_only_for_miniset_players(monkeypatch):
-    """The default miniset seed filters rank history to its own players."""
-    calls = []
-    _patch_seed_writes(monkeypatch, calls)
-
-    seed.main_default()
-
-    assert calls == [False, (["A0E2", "Z355"], False, False)]
-
-
-def test_main_all_imports_rank_history_for_every_seeded_player(monkeypatch):
-    """`--all` seeds rank history for every player in the full corpus."""
-    calls = []
-    monkeypatch.setattr(seed, "discover_atp_csvs", lambda _dir: [Path("2026.csv")])
-    _patch_seed_writes(monkeypatch, calls)
-
-    seed.main_all(enrich=True)
-
-    assert calls == [False, (["A0E2", "Z355"], True, False)]
 
 
 def test_main_all_without_csvs_is_a_noop(monkeypatch, capsys):

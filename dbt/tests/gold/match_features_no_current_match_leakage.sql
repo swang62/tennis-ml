@@ -1,81 +1,36 @@
 -- Assert every snapshot-backed feature of each SAMPLED match_features row comes
--- from the player's PRIOR snapshot only — the latest rolling_features snapshot
--- strictly before the match date (snapshot_date < match_date, the same
--- date-strict semantics match_features and inference use; a same-date snapshot
--- of another match can never supply it) — or, when that prior state is missing
--- (cold start), from the single-row gold.tour_averages singleton. This holds
--- for both sides (row player and opponent) of each directional row; the
--- per-row re-derivation joins on mf.player_id and mf.opponent_id, so both
--- mirrors of a match are checked independently. Any mismatch means the row
--- used a current-match snapshot (leakage), its current-match raw stats, a
--- wrong snapshot, or the wrong default.
+-- from the player's PRIOR snapshot only (latest rolling_features snapshot
+-- strictly before match_date, the same date-strict semantics inference uses) or,
+-- when that prior state is missing (cold start), from the tour_averages singleton.
+-- Both sides of each directional row are checked. Any mismatch = used a
+-- current-match snapshot (leakage) or the wrong default/raw stats.
 --
--- SAMPLED CONTRACT (performance; assertion semantics unchanged): instead of
--- re-deriving every directional row (~400k, ~286s on the full dataset), the
--- test samples a deterministic, bounded set of PHYSICAL match_ids
--- (silver.player_matches holds both directional rows per physical match under
--- one match_id) and re-derives only the directional gold rows of each sampled
--- match — both mirrors always. The sample deliberately covers, each from an
--- ordered, LIMIT-capped stratum so its size is bounded regardless of dataset
--- growth:
---   * earliest history  — first N matches by (match_date, match_id)
---   * latest history    — last N matches
---   * cold starts       — matches where either side has player_match_number 1,
---                         so no strictly-prior snapshot exists
---   * same-date matches — matches where some player played twice on one date;
---                         the strict < guard is what keeps the later match's
---                         prior state from picking up a same-day snapshot
---   * repeated H2H      — matches whose unordered player pair meets in >= 2
---                         distinct matches
---   * uniform coverage  — deterministic md5(match_id)-based ~1/256 sample over
---                         all physical matches
--- The strata are deduped by match_id. md5 is a stable public function, so the
--- sample is identical on every run against the same data. Comparisons carry
--- player_id and join results back on (match_id, player_id), so each comparison
--- row maps to exactly one directional row (no directional multiplication).
+-- SAMPLED for speed: a deterministic, bounded set of physical match_ids is
+-- sampled by (match_date, match_id) from silver.player_matches, then only those
+-- directional gold rows are re-derived (both mirrors always). Strata, one per
+-- LIMIT-capped branch so size stays bounded as data grows: earliest, latest,
+-- cold starts (player_match_number = 1), same-date back-to-backs (the strict <
+-- guard excludes the same-day snapshot), repeated unordered-pair H2H, and a
+-- deterministic md5(match_id) uniform ~1/256 sample.
 --
--- Silver now STORES the Beta(1,1)-smoothed rates ((successes+1)/(opportunities+2)),
--- and match_features consumes those stored values directly, so the
--- re-derived prior values below simply read the same stored smoothed columns
--- (win_rate_10, streak, weighted_form_10, etc.) from the prior snapshot — the
--- comparison holds by construction as long as the prior snapshot join matches.
+-- Silver stores the Beta(1,1)-smoothed rates; match_features consumes them
+-- directly, so prior values re-read the same stored columns. Fallback cells
+-- (prior NULL, imputed from the singleton) are excluded via the guard on each
+-- RAW prior value, because incremental rows keep their build-time pool values
+-- ("existing data remains unchanged"). Most features are DIFFS re-derived from
+-- the two prior snapshots (COALESCE'd to the singleton); as-of-date values come
+-- from the prior snapshot, never current-match raw stats.
 --
--- Fallback cells (prior value NULL, imputed from the singleton) are excluded
--- from comparison: match_features is incremental, so existing rows keep the
--- pool values that were current when they were built ("existing data remains
--- unchanged"), which the current singleton can no longer reproduce. Each
--- comparison is guarded on the RAW prior values it re-derives from; the
--- leakage check still has full teeth wherever a prior snapshot value exists.
---
--- The finalized contract keeps most rolling values as DIFFS (row player minus
--- opponent), so the strongest leakage check re-derives each diff from the
--- two prior snapshots (COALESCE'd to the singleton defaults row) and compares
--- it with the stored value. Per-side absolute values (weighted_form_10,
--- matches_10 exposure) are compared
--- directly against the prior snapshot, again COALESCE'd
--- to the singleton for cold starts. As-of-date values (ranking, rank_points,
--- age, rank_trend) come from the PRIOR snapshot (pre-match known, never from
--- current-match raw stats).
---
--- Precision contract: match_features emits every float at full arithmetic
--- precision (no truncation or rounding at its output boundary), so each
--- re-derived prior_val below is computed plainly and compared with a 1e-6
--- float-round-off tolerance. Leakage shifts a feature by O(0.01), far above
--- that tolerance, so the check keeps full teeth.
+-- match_features emits full arithmetic precision, so plain recomputation and a
+-- 1e-6 float tolerance is compared; real leakage shifts a feature by O(0.01).
 
--- Covered snapshot-backed fields:
---   diff form:      win_rate_diff, streak_diff, surface_form_diff, surface
---                    (via per-side), days_since_last_match_diff
---   diff serve/bk:  ace_rate_diff, first_serve_pct_diff,
---                    break_points_saved_pct_diff, first_serve_win_pct_diff,
---                    second_serve_win_pct_diff, serve_win_pct_diff,
---                    return_points_won_pct_diff, df_rate_diff,
---                    aces_per_svc_game_diff
---   diff strength:  avg_rank_faced_diff, rank_trend_diff
---   per-side:       player/opponent_weighted_form_10,
---                    player/opponent_matches_10 (exposure, from prior snapshot)
---   as-of-date:     player/opponent_ranking, player/opponent_age,
---                    rank_points_diff (prior snapshot)
+-- Covered snapshot-backed fields since they are stored in match_features:
+--   diff:      win_rate, streak, surface_form, days_since_last_match, ace_rate,
+--              first_serve_pct, break_points_saved_pct, first_serve_win_pct,
+--              second_serve_win_pct, serve_win_pct, return_points_won_pct,
+--              df_rate, aces_per_svc_game, avg_rank_faced, rank_trend, rank,
+--              rank_points, age
+--   per-side:  player/opponent_weighted_form_10, player/opponent_matches_10
 {% set sample_sizes = {
     "early": 25, "late": 25, "cold": 50, "same_date": 50, "h2h": 50,
 } %}
@@ -115,16 +70,15 @@ WITH sampled_matches AS (
          ORDER BY match_date DESC, match_id DESC
          LIMIT {{ sample_sizes.late }})
         UNION ALL
-        -- Cold start: either side's first career match has no strictly-prior
-        -- snapshot, so both its feature values fall back to the singleton.
+        -- Cold start: either side's first match has no strictly-prior snapshot.
         (SELECT DISTINCT match_id, match_date
          FROM {{ ref('player_matches') }}
          WHERE player_match_number = 1
          ORDER BY match_date, match_id
          LIMIT {{ sample_sizes.cold }})
         UNION ALL
-        -- Same-date: a player plays twice on one date; the later match's only
-        -- prior snapshot is same-date, which the strict < guard must exclude.
+        -- Same-date back-to-back: the strict < guard must exclude the same-day
+        -- snapshot.
         (SELECT DISTINCT match_id, match_date
          FROM {{ ref('player_matches') }}
          WHERE (player_id, match_date) IN (
@@ -136,7 +90,7 @@ WITH sampled_matches AS (
          ORDER BY match_date, match_id
          LIMIT {{ sample_sizes.same_date }})
         UNION ALL
-        -- Repeated H2H: the unordered player pair meets in two or more matches.
+        -- Repeated unordered-pair H2H (two or more distinct meetings).
         (SELECT DISTINCT match_id, match_date
          FROM {{ ref('player_matches') }}
          WHERE (LEAST(player_id, opponent_id), GREATEST(player_id, opponent_id)) IN (
@@ -148,9 +102,7 @@ WITH sampled_matches AS (
          ORDER BY match_date, match_id
          LIMIT {{ sample_sizes.h2h }})
         UNION ALL
-        -- Uniform coverage: first md5 byte modulo the denominator selects about
-        -- 1/256 of all physical matches, deterministically (md5 is a stable
-        -- public function; the byte value is portable across PostgreSQL).
+        -- Deterministic uniform coverage: md5 byte mod denominator (~1/256).
         (SELECT DISTINCT match_id, match_date
          FROM {{ ref('player_matches') }}
          WHERE get_byte(decode(md5(match_id), 'hex'), 0) % {{ uniform_denom }} = 0)
@@ -176,12 +128,10 @@ prior_snapshot AS (
         mf.surface_form_diff, mf.days_since_last_match_diff,
         -- Stored per-side absolute values
         mf.player_weighted_form_10, mf.opponent_weighted_form_10,
-        -- Prior snapshot inputs (N-1), COALESCE'd to the singleton defaults so
-        -- cold-start rows and NULL cells impute exactly as match_features does.
-        -- Each feature also carries its RAW prior value: comparisons below are
+        -- Prior snapshot inputs (N-1), COALESCE'd to the singleton exactly as
+        -- match_features imputes. Each carries its RAW value: comparison is
         -- guarded on it, because a cell that fell back to the singleton is
-        -- frozen at the build-time pool values ("existing data remains
-        -- unchanged"), which the current singleton can no longer reproduce.
+        -- frozen at build-time pool values the current singleton can't reproduce.
         {% for c in diff_cols %}
         prp.{{ c }} AS player_raw_{{ c }},
         pro.{{ c }} AS opponent_raw_{{ c }},
@@ -258,17 +208,15 @@ prior_snapshot AS (
             WHEN 'hard'  THEN COALESCE(pro.hard_win_rate_10,  fd.hard_win_rate_10)
             ELSE fd.rate_default
         END AS opponent_prior_surface_form,
-        -- Rest: days since the prior snapshot's match; pool median on cold
-        -- start. Capped at 30 before the log transform, exactly as the model.
+        -- Rest: days since the prior snapshot's match; pool median on cold start,
+        -- capped at 30 before the log transform, exactly as the model.
         pm.match_date - prp.snapshot_date AS player_raw_days_since,
         po.match_date - pro.snapshot_date AS opponent_raw_days_since,
         LEAST(30, CASE WHEN prp.player_id IS NULL THEN fd.days_since_default
              ELSE pm.match_date - prp.snapshot_date END) AS player_prior_days_since,
         LEAST(30, CASE WHEN pro.player_id IS NULL THEN fd.days_since_default
              ELSE po.match_date - pro.snapshot_date END) AS opponent_prior_days_since
-    -- Filter BEFORE the lateral expansion: match_features is reduced to the
-    -- sampled physical matches, so the per-row prior lookups run only for
-    -- sampled directional rows.
+    -- Filter before the lateral expansion so prior lookups run only for sampled rows.
     FROM (
         SELECT * FROM {{ ref('match_features') }}
         WHERE match_id IN (SELECT match_id FROM sampled_matches)

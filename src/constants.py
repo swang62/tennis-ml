@@ -70,10 +70,10 @@ WORK_POOL_NAME = "tennis-pool"
 # 01_train_test_split cuts the gold match date range into three contiguous
 # chronological bands with these fractions. The validation fraction also sizes
 # the within-fold early-stopping holdouts in the 02 tuners; the grouped
-# temporal CV folds themselves are not the 90/5/5 split.
-TRAIN_FRACTION = 0.90
-VAL_FRACTION = 0.05
-TEST_FRACTION = 0.05
+# temporal CV folds themselves are not the 94/4/2 split.
+TRAIN_FRACTION = 0.94
+VAL_FRACTION = 0.04
+TEST_FRACTION = 0.02
 
 # The three bands must partition the date span exactly.
 assert abs(TRAIN_FRACTION + VAL_FRACTION + TEST_FRACTION - 1.0) < 1e-9
@@ -161,9 +161,8 @@ EVAL_SPLIT_SIZE_KEY = "metric_eval_split_size"
 EVAL_MAX_DATE_KEY = "metric_eval_max_date"
 
 # --- Promotion gate ---
-# The candidate's ROC-AUC may trail the incumbent's by up to this amount (a
-# strictly lower test log loss is still required) and still be promoted.
-PROMOTION_AUC_TOLERANCE = 0.05
+# Either primary metric may improve while the other trails by up to this amount.
+PROMOTION_TOLERANCE = 0.01
 
 # --- Drift monitoring thresholds (single source of truth for the verdict) ---
 DRIFT_PSI_MODERATE = 0.1

@@ -1,54 +1,27 @@
--- gold.tour_averages: single-row (singleton) imputation defaults + tour benchmarks.
+-- gold.tour_averages: single-row (singleton_id = 1) imputation defaults + tour
+-- benchmarks over all silver snapshots/matches. Plain table rebuilt in full:
+-- a global aggregate, every new match shifts the pool.
 --
--- This materializes EXACTLY ONE row (singleton_id = 1) and is the only shared
--- source for:
---   1. difficult model-feature fallbacks used by gold.match_features and
---      inference; and
---   2. weighted tour-wide rates used for player-profile comparisons.
+-- Fallback semantics (matching the former feature_defaults): rank/streak-like
+-- medians, continuous rates means; an empty pool falls back to explicit
+-- constants (ranking 100, rank points 500, age 26, streak 0, rates/forms 0,
+-- avg ranks 100, days since 365, matches 365d 0, rate 0.5, left-handed 0,
+-- years-pro 8) so every column stays non-null and finite.
 --
--- It replaces the date-keyed gold.feature_defaults table. There are no
--- as_of_date rows and no date-expansion joins. The singleton is a full-pool
--- aggregate over ALL silver.rolling_features snapshots and ALL
--- silver.player_matches rows.
+-- Intended, reported leakage: old cold-start/currently-missing cells use the
+-- same full-pool singleton; verification reports the affected row count.
 --
--- Materialization: plain table, rebuilt in full on every ETL run. This is a
--- global aggregate — every new match shifts the pool, so it is recomputed
--- globally (never incremental) by design.
+-- pool_as_of_date is one day after the latest snapshot, or CURRENT_DATE only
+-- as metadata when the pool is empty. Weighted tour comparisons are SUM()/SUM()
+-- from silver.player_matches (never per-player AVG); NULL only when the
+-- denominator is zero, defaults never NULL.
 --
--- Fallback semantics (identical destinations to the former feature_defaults):
---   - Rank / rank-points / streak-like values use the (rounded) median.
---   - Continuous rates, age, years-pro, and handedness rate use the mean.
---   - An empty snapshot pool falls back to explicit deterministic constants so
---     every fallback column is finite and non-null (ranking 100, rank points
---     500, age 26, streak 0, rates/forms 0, average ranks 100, days since 365,
---     matches in 30d 0, rate 0.5, left-handed 0, years-pro 8).
---
--- Limited historical leakage is intentional and documented: old cold-start or
--- otherwise missing cells use the same full-pool singleton as current rows.
--- Verification reports the affected row/cell count so the accepted bias is
--- visible without introducing another defaults table.
---
--- pool_as_of_date is one day after the latest snapshot for non-empty data;
--- CURRENT_DATE is used only as metadata when the snapshot pool is empty. All
--- fallback values still come from the explicit constants in that case.
---
--- Weighted tour comparison columns are SUM(numerator) / SUM(denominator)
--- ratios from silver.player_matches (NOT unweighted per-player AVG). They may
--- be NULL only when their source denominator is zero; defaults must never be
--- NULL.
---
--- Query shape: pool_stats folds the pool metadata and the full-pool snapshot
--- aggregates into a single scan of silver.rolling_features, and activity
--- reduces the pool to one latest snapshot per player BEFORE joining the
--- 30-day match window — so the window join runs per player, not per snapshot
--- row (previously ~11.5M intermediate rows from 399,802 snapshots × their
--- in-window matches). The per-player 30-day count is now the true match count
--- for that player instead of the snapshot-multiplied join count; the rounded
--- median is unchanged on current data (verified 13347 / 0).
+-- Query shape: pool_stats mixes pool metadata and snapshot aggregates in one
+-- scan of rolling_features; activity reduces to one latest snapshot per player
+-- before the 30-day window join, so it runs per player not per snapshot.
 
 WITH
--- Singleton metadata + full-pool snapshot fallback aggregates, one scan of
--- rolling_features.
+-- Pool metadata + full-pool snapshot fallback aggregates (one scan).
 pool_stats AS (
     SELECT
         COALESCE(MAX(snapshot_date), CURRENT_DATE) + 1 AS pool_as_of_date,
@@ -80,9 +53,7 @@ pool_stats AS (
         AVG(hard_win_rate_10) AS hard_win_rate_10
     FROM {{ ref('rolling_features') }}
 ),
--- One latest snapshot per player: the recency anchor for the cold-start
--- activity defaults. Reduces the 30-day window join from one row per
--- snapshot to one row per player.
+-- One latest snapshot per player: drives the 30-day window join per player.
 latest_snapshots AS (
     SELECT
         player_id,
@@ -90,8 +61,8 @@ latest_snapshots AS (
     FROM {{ ref('rolling_features') }}
     GROUP BY player_id
 ),
--- Cold-start activity defaults: rounded medians of per-player latest-snapshot
--- recency and 30-day pre-pool match count.
+-- Cold-start activity defaults: rounded medians of per-player recency and
+-- 30-day match count.
 activity AS (
     SELECT
         ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY days_since))
@@ -114,9 +85,7 @@ activity AS (
         ) w ON true
     ) per_player
 ),
--- Static profile pool: left-handed rate over known L/R only, time-aware
--- years-pro, and the profile row count. Metadata comes from bronze —
--- gold.player_profiles carries aggregates only.
+-- Static profile pool: left-handed rate over known L/R, time-aware years-pro.
 profile_aggregates AS (
     SELECT
         AVG(CASE WHEN prof.handedness = 'L' THEN 1
@@ -126,8 +95,7 @@ profile_aggregates AS (
     FROM {{ source('bronze', 'player_profiles') }} prof
     CROSS JOIN pool_stats p
 ),
--- Weighted tour benchmarks: SUM(numerator) / SUM(denominator) over ALL
--- silver.player_matches rows. NULL when the denominator is zero.
+-- Weighted tour benchmarks: SUM()/SUM() over all silver.player_matches rows.
 tour_rates AS (
     SELECT
         COUNT(*) AS player_match_rows,
@@ -153,15 +121,13 @@ tour_rates AS (
         CAST(SUM(break_points_faced) AS DOUBLE PRECISION)
             / NULLIF(SUM(service_games), 0)
             AS tour_break_point_opportunities_per_return_game,
-        -- return games won tour-wide: every converted break point ends that
-        -- service game, so (BP faced - BP saved) / service games
+        -- Return games won tour-wide: a converted break point ends the game.
         CAST(SUM(break_points_faced - break_points_saved) AS DOUBLE PRECISION)
             / NULLIF(SUM(service_games), 0)
             AS tour_return_games_won_pct
     FROM {{ ref('player_matches') }}
 )
 SELECT
-    -- Singleton identity + observability.
     1 AS singleton_id,
     p.pool_as_of_date,
     p.snapshot_pool_rows,
@@ -169,7 +135,7 @@ SELECT
     pa.profile_rows,
     tr.player_match_rows,
 
-    -- Rank/streak-like medians, rounded; empty pool falls back to constants.
+    -- Rank/streak-like medians; empty pool falls back to constants.
     ROUND(COALESCE(p.latest_player_ranking, 100)::NUMERIC, 5)::DOUBLE PRECISION
         AS latest_player_ranking,
     ROUND(COALESCE(p.latest_player_rank_points, 500)::NUMERIC, 5)::DOUBLE PRECISION
@@ -212,13 +178,13 @@ SELECT
     ROUND(COALESCE(p.hard_win_rate_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS hard_win_rate_10,
 
-    -- Cold-start activity defaults; pre-rounded whole values.
+    -- Cold-start activity defaults.
     ROUND(COALESCE(a.median_days_since, 365)::NUMERIC, 5)::DOUBLE PRECISION
         AS days_since_default,
     ROUND(COALESCE(a.median_matches_30d, 0)::NUMERIC, 5)::DOUBLE PRECISION
         AS matches_30d_default,
 
-    -- Explicit fixed constants and static profile-pool means.
+    -- Fixed constants and static profile-pool means.
     0.5 AS rate_default,
     ROUND(COALESCE(pa.left_handed_rate, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS left_handed_rate,

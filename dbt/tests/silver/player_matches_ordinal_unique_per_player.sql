@@ -1,7 +1,6 @@
--- Assert each player's player_match_number is unique. A stale ordinal left by
--- an append-only incremental run after a historical bronze insert collides
--- with the newly numbered row; the affected-player rebuild exists to prevent
--- exactly that.
+-- Assert each player's player_match_number is unique; a stale ordinal from an
+-- append-only incremental run after a historical bronze insert would collide
+-- with the newly numbered row.
 SELECT player_id, player_match_number
 FROM {{ ref('player_matches') }}
 GROUP BY player_id, player_match_number

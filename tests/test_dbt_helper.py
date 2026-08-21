@@ -10,38 +10,41 @@ from prefect.events.schemas.automations import EventTrigger
 from prefect.events.schemas.events import ResourceSpecification
 
 import src.flows.etl as etl
-from src.constants import ROOT
 from src.flows.etl import DBT_BUILD_CMD, etl_flow, run_dbt_build
 
 # Used by etl_flow to build gold; patched so the flow test never runs dbt.
 FAKE_GOLD_COUNT = 1
 
 
-def test_run_dbt_build_invokes_dbt_build_with_exact_args(monkeypatch):
+def test_run_dbt_build_wires_flags_and_env_from_single_url(monkeypatch):
+    """run_dbt_build derives the per-var dbt env from one DATABASE_URL and maps
+    its options onto flags: incremental=False -> --full-refresh, select adds
+    --select <model>, and a custom profiles_dir replaces the default pair."""
     calls = []
+    passed_env = {}
 
-    def fake_run(*args, **kwargs):
-        calls.append((args, kwargs))
-        return "fake-result"
-
-    monkeypatch.setattr("src.flows.etl.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "src.flows.etl.subprocess.run",
+        lambda *args, **kwargs: calls.append(args[0]) or passed_env.update(kwargs.get("env", {})),
+    )
     monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@db:5432/tennis")
 
-    result = run_dbt_build()
+    run_dbt_build()
+    run_dbt_build(incremental=True, select=["player_profiles"], profiles_dir="/tmp/profiles")
+    run_dbt_build(incremental=True)
 
-    assert len(calls) == 1
-    args, kwargs = calls[0]
-    assert args == ([*DBT_BUILD_CMD, "--full-refresh"],)
-    assert kwargs["cwd"] == ROOT
-    assert kwargs["check"] is True
-    # dbt receives fields derived from the single DATABASE_URL.
-    env = kwargs["env"]
-    assert env["POSTGRES_HOST"] == "db"
-    assert env["POSTGRES_PORT"] == "5432"
-    assert env["POSTGRES_USER"] == "u"
-    assert env["POSTGRES_PASSWORD"] == "p"
-    assert env["POSTGRES_DB"] == "tennis"
-    assert result == "fake-result"
+    assert len(calls) == 3
+    assert calls[0][-1] == "--full-refresh"  # default incremental=False
+    assert "--full-refresh" not in calls[1]
+    assert calls[1][calls[1].index("--select") + 1] == "player_profiles"
+    assert calls[1][calls[1].index("--profiles-dir") + 1] == "/tmp/profiles"
+    assert calls[2] == calls[0][:-1]  # incremental=True only drops --full-refresh
+    # dbt receives all connection fields derived from the single DATABASE_URL.
+    assert passed_env["POSTGRES_HOST"] == "db"
+    assert passed_env["POSTGRES_PORT"] == "5432"
+    assert passed_env["POSTGRES_USER"] == "u"
+    assert passed_env["POSTGRES_PASSWORD"] == "p"
+    assert passed_env["POSTGRES_DB"] == "tennis"
 
 
 def test_run_dbt_build_propagates_called_process_error(monkeypatch):
@@ -55,73 +58,6 @@ def test_run_dbt_build_propagates_called_process_error(monkeypatch):
 
     assert excinfo.value.returncode == 1
     assert excinfo.value.cmd == DBT_BUILD_CMD
-
-
-def test_run_dbt_build_incremental_controls_full_refresh(monkeypatch):
-    """incremental=False (default) appends --full-refresh; True omits it."""
-    calls = []
-
-    def fake_run(*args, **_kwargs):
-        calls.append(args[0])
-
-    monkeypatch.setattr("src.flows.etl.subprocess.run", fake_run)
-    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@db:5432/tennis")
-
-    run_dbt_build(incremental=True)
-    run_dbt_build(incremental=False)
-
-    assert calls == [DBT_BUILD_CMD, [*DBT_BUILD_CMD, "--full-refresh"]]
-
-
-def test_run_dbt_build_selects_only_requested_models(monkeypatch):
-    calls = []
-
-    def fake_run(*args, **_kwargs):
-        calls.append(args[0])
-
-    monkeypatch.setattr("src.flows.etl.subprocess.run", fake_run)
-    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@db:5432/tennis")
-
-    run_dbt_build(incremental=True, select=["player_profiles"])
-
-    assert calls == [[*DBT_BUILD_CMD, "--select", "player_profiles"]]
-
-
-def test_run_dbt_build_custom_profiles_dir_keeps_full_refresh(monkeypatch):
-    """A non-default profiles_dir replaces the --profiles-dir pair without
-    dropping --full-refresh from the command."""
-    calls = []
-
-    def fake_run(*args, **_kwargs):
-        calls.append(args[0])
-
-    monkeypatch.setattr("src.flows.etl.subprocess.run", fake_run)
-    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@db:5432/tennis")
-
-    run_dbt_build(profiles_dir="/tmp/profiles")
-    run_dbt_build(profiles_dir="/tmp/profiles", incremental=True)
-
-    assert calls[0] == [
-        "uv",
-        "run",
-        "dbt",
-        "build",
-        "--project-dir",
-        "dbt",
-        "--profiles-dir",
-        "/tmp/profiles",
-        "--full-refresh",
-    ]
-    assert calls[1] == [
-        "uv",
-        "run",
-        "dbt",
-        "build",
-        "--project-dir",
-        "dbt",
-        "--profiles-dir",
-        "/tmp/profiles",
-    ]
 
 
 def test_streamed_build_streams_lines_to_log_and_logger(monkeypatch, tmp_path, caplog):

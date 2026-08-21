@@ -333,7 +333,7 @@ def _write_model_info(
 ) -> Path:
     """Write the immutable canonical champion manifest baked into the Bento.
 
-    Built directly from the champion's exact lineage tags (Task 2) plus the
+    Built directly from the champion's exact lineage tags plus the
     non-circular build-input fingerprint: champion identity and creation time,
     exact base and auxiliary-artifact pins, and the fingerprint. It never
     contains the Bento tag, Docker identity, or any hash that includes the

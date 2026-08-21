@@ -1,5 +1,5 @@
--- Assert every player_matches row has exactly one snapshot: rows in
--- player_matches without a matching rolling_features row are orphans.
+-- Assert every player_matches row has exactly one snapshot; rows without a
+-- matching rolling_features row are orphans.
 SELECT pm.player_id, pm.match_id
 FROM {{ ref('player_matches') }} pm
 LEFT JOIN {{ ref('rolling_features') }} pr

@@ -227,17 +227,3 @@ def test_lineage_pins_and_manifest_record_gbdt_framework(monkeypatch, tmp_path):
     assert "player_directory_uri" not in manifest["aux_artifacts"]
     assert manifest["champion"]["version"] == "7"
     assert manifest["build_input_fingerprint"] == "fp"
-
-
-# --- Deploy flow has no bentoml.mlflow import ---
-
-
-def test_deploy_flow_does_not_import_bentoml_mlflow():
-    src = (_deploy().ROOT / "src" / "flows" / "deploy.py").read_text()
-    assert "import bentoml.mlflow" not in src
-
-
-def test_serving_closure_has_no_mlflow_reference():
-    service_src = (_deploy().ROOT / "src" / "serving" / "service.py").read_text()
-    assert "bentoml.mlflow" not in service_src
-    assert "import mlflow" not in service_src

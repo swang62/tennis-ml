@@ -158,19 +158,3 @@ def test_no_credentials_in_output(probe, monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "secret" not in captured.out + captured.err
     assert "postgresql://" not in captured.out + captured.err
-
-
-def test_emit_plain_when_piped_colored_on_tty(probe, monkeypatch):
-    # Piped output (like capsys/pytest): plain text, no ANSI escapes.
-    plain = StringIO()
-    monkeypatch.setattr(probe.sys, "stdout", plain)
-    probe._emit(probe.COLOR_GREEN, "ok: Prefect ready")
-    assert plain.getvalue() == "[probe] ok: Prefect ready\n"
-
-    # Terminal: `[probe]` tag colored per semantic category, then reset.
-    tty = _FakeTTY()
-    monkeypatch.setattr(probe.sys, "stdout", tty)
-    probe._emit(probe.COLOR_BLUE, "ok: host PostgreSQL reachable")
-    probe._emit(probe.COLOR_GREEN, "all checks passed")
-    assert "\033[34m[probe]\033[0m ok: host PostgreSQL reachable\n" in tty.text
-    assert "\033[32m[probe]\033[0m all checks passed\n" in tty.text

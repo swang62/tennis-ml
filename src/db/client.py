@@ -226,10 +226,5 @@ def to_dataframe(sql: str) -> pd.DataFrame:
 
 
 def first_row_dict(df: pd.DataFrame) -> dict[str, Any]:
-    """First row of a result frame as a dict with string keys.
-
-    pandas-stubs types ``DataFrame.to_dict`` as ``dict[Hashable, Any]`` even
-    though the keys are the column names; normalize to str so the result fits
-    the typed ``dict[str, ...]`` parameters downstream.
-    """
+    """First row of a result frame as a dict with string keys."""
     return {str(k): v for k, v in df.iloc[0].to_dict().items()}

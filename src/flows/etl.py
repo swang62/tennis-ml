@@ -5,12 +5,10 @@ silver.player_matches (player-perspective rows) -> silver.rolling_features
 (post-match snapshots) -> gold.match_features (canonical one-row-per-match
 training table) -> gold.player_profiles (derived player-grain aggregates).
 
-Wikipedia bio enrichment happens at seed time via `just seed --enrich`
-(never after ETL); re-run `just etl` to pick up new summaries.
-
-ETL defaults to a full refresh (`dbt build --full-refresh`); pass
-`--incremental` to append only new rows. The scrape-triggered Prefect
-deployment runs incremental.
+Enrichment is a seed-time step (``just seed --enrich``), never post-ETL;
+re-run ``just etl`` to pick up new summaries. ETL defaults to a full refresh
+(``dbt build --full-refresh``); pass ``--incremental`` to append only new rows.
+The scrape-triggered Prefect deployment runs incremental.
 """
 
 import argparse
