@@ -20,12 +20,10 @@ training for later folds.
 functions of ``(match_ids, match_dates, n_splits)``; ``random_state`` is
 accepted for signature parity with sklearn splitters and never used.
 
-Lifecycle: the 01 split notebook creates/replaces ``fold_assignment.parquet``
-exactly once per run; every 02 tuner loads and validates the current
-assignment and never writes it. The persisted frame carries one row per
-physical match — ``match_id``, ``match_date``, ``fold`` (0 = grow-in band,
-never validated; 1..n_splits = the validation fold holding that match out)
-— so a stale file from a previous snapshot fails the load validation.
+Lifecycle: the 01 split notebook persists ``fold_assignment.parquet`` once per
+run (one row per physical match, ``fold`` 0 = never-validated grow-in band,
+1..n_splits = the validation fold); 02 tuners load and validate it, so a stale
+file from a previous snapshot fails the load validation.
 """
 
 from __future__ import annotations

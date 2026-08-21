@@ -1,14 +1,7 @@
--- Assert the tour_averages singleton contract: every fallback default that
--- feeds gold.match_features imputation and live inference is non-null and
--- finite (NULL alone does not catch NaN/Infinity), and the relation holds
--- exactly one row (the yml unique/not_null/accepted_values on singleton_id
--- covers duplicates and identity but passes vacuously on an empty table).
---
--- Unlike the old single-row-of-CASE version (which reported only the first
--- failing column per row), this uses a UNION ALL of one SELECT per fallback
--- column, each uniformly aliasing `column_name`/`value` and filtering its own
--- NULL/NaN/inf condition — so a violation in ANY fallback column returns a
--- row, not just the first checked one. Any returned row is a violation.
+-- Assert the tour_averages singleton contract: every imputation/live-inference
+-- fallback is non-null and finite (NULL alone does not catch NaN/inf), and the
+-- relation holds exactly one row. UNION ALL per fallback column reports every
+-- violation, not just the first checked one. Any returned row is a violation.
 
 {% set fallback_cols = [
     "latest_player_ranking",

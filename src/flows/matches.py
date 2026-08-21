@@ -1,70 +1,15 @@
-"""Prefect flow: ATP match-stats enrichment — discovery parsers (plan Task 2).
+"""Prefect flow: ATP match-stats enrichment.
 
-Pure, fixture-testable parsers for the two ATP page shapes this flow scrapes:
+Parses the ATP results-archive and tournament pages, fetches Hawkeye Complete
+stats on one shared persistent CloakBrowser page (sequential requests), and
+upserts winner-first rows into ``bronze.match_events``. Match ids are stable:
+a canonical ``(match_date, tournament_id, unordered player pair)`` reuses the
+stored row's id, else a deterministic ``YYYY-TOURNAMENT_ID-NNN`` derived from
+the ATP ``msNNN`` sequence. Every page/match failure is a counted skip unless
+no valid page was fetched at all (then the run fails so Prefect retries).
 
-- ``extract_tournaments_from_archive`` parses the results-archive page into
-  tournament discovery rows (slug, tournament_id, name, tier, dates); tier is
-  normalized to the bronze vocabulary from ``src/db/ingest.py`` and left None
-  for non-tier events so the flow can skip/report. ``in_window`` keeps the
-  tournaments whose dates intersect the run window.
-- ``extract_matches_from_results`` parses one tournament outcomes page into
-  per-match discovery rows. Each distinct ``msXXX`` stats link is bound to its
-  own match card through the ``.match-footer``/``.match-cta`` block; player ids
-  and names come from the two ``.player-info`` overview links in that same
-  card, the match date from the enclosing ``.tournament-day`` header, and the
-  score from the set ``.score-item`` cells when reliably aligned.
-
-Later flow code uses these rows to fetch Hawkeye key/match stats into
-``bronze.match_events`` (plan Tasks 3-6). Task 3's identity + fallback
-resolution is implemented here: ``tier_for_tournament`` and
-``resolve_discovered_matches`` turn discovery rows into canonical-bronze
-candidates (player ids via the shared ``resolve_player_id``, tier via
-``tier_from_bronze``), with skip-and-report results for the flow. Task 4's
-Hawkeye side lives here too: ``hawkeye_to_bronze`` maps a saved Complete
-stats payload into one winner-first bronze row (all 18 stat columns), and
-``fetch_hawkeye_match``/``fetch_hawkeye_batch`` fetch payloads through the
-shared ``rankings._launch_browser``/``_jitter`` discipline — one persistent
-page, sequential requests with a randomized 3-8s gap, and a printed skip
-reason per bad match.
-
-Task 5's bronze upsert lives here too: ``find_existing_match`` reads a stored
-row through an injectable query, ``validate_new_bronze_row`` gates complete
-inserts, and ``upsert_bronze_match`` writes through the repository's
-``_copy_df_into`` (temp-stage COPY + ON CONFLICT). An existing match_id is
-skipped by default (no write); only an explicit ``--force`` run replaces the
-stored row across every non-key column so repeated force runs converge.
-``upsert_summary`` folds the per-row records into the counts
-(inserted/updated/skipped/noop + skip reasons) the flow prints at the end of
-a run.
-
-Task 6's flow orchestration lives here too: ``matches_flow`` resolves an
-inclusive date window (explicit dates used exactly; otherwise watermark-driven
-from the last stored ``bronze.match_events`` match_date through today, so a
-bare scheduled run never crawls unbounded history). For every year overlapping
-the window it fetches the results archive on one shared persistent CloakBrowser
-page, keeps window-intersecting tournaments at tier grand_slam/masters/atp_500/
-atp_250 (unknown/non-tier tournaments are skipped and reported), then per
-tournament sleeps generously, fetches the results page, discovers matches,
-resolves player identities through the reviewed ranking map, and fetches
-Hawkeye Complete stats sequentially before upserting each winner-first bronze
-row (existing rows skipped unless forced). Match ids are stable and idempotent:
-the canonical
-physical key is ``(match_date, tournament_id, unordered canonical player ids)``
-— bronze rows for that key always win (their existing match_id is reused,
-orientation-free) — and new ids fall back deterministically from the ATP
-``msNNN`` sequence (``build_match_id``). Repeated physical keys are deduped
-before the Hawkeye fetch, and a proposed id already owned by a different
-physical match is a reported skip, never a merge. Every page/match failure is
-a printed, counted skip —
-never an abort — and a run that fetched no valid page at all fails so Prefect
-retries. ``parse_args``/``main`` provide the standalone CLI (``--start``/
-``--end``), and the deployment registration below (Task 1) is preserved.
-
-The parsers, resolvers, and mapper only read captured HTML/JSON shapes and
-injected maps/rows: no network, no browser, no DB. The DB-touching entry
-points are the upsert helpers (reads via ``execute_df`` or an injected query,
-writes via ``_copy_df_into``) plus the flow's own watermark/bronze-lookup
-reads; they are never invoked by the parsers/mapper.
+Parsers/resolvers/mapper touch no network, browser, or DB; upserts and the
+flow's watermark/bronze reads are the only DB-touching entry points.
 """
 
 from __future__ import annotations
@@ -567,7 +512,7 @@ def resolve_discovered_matches(
     return resolved, skipped
 
 
-# ── Hawkeye fetch + stats mapper (plan Task 4) ─────────────────────
+# ── Hawkeye fetch + stats mapper ───────────────────────────────────
 
 # Match-stats JSON endpoint (raw JSON body) and the two page URLs the flow
 # navigates; later flow code formats all three from its discovery rows.
@@ -776,7 +721,7 @@ def hawkeye_to_bronze(
     matches ``Match.WinningPlayerId``/``Match.Winner`` is the winner and
     supplies the player1 stats, because bronze enforces ``winner_id =
     player1_id``. The winner's canonical id comes from ``discovered_match``
-    (a Task 3 resolved row) when present and consistent with the payload;
+    (a resolved discovery row) when present and consistent with the payload;
     otherwise the payload side ids are used verbatim.
 
     Returns None (after printing a reason) when the identities or winner are
@@ -1254,8 +1199,8 @@ def upsert_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
 
     Folds ``upsert_bronze_match`` records into {inserted, updated, skipped,
     noop, skipped_reasons}; the ``discovered``/``fetched`` counts come from the
-    flow's discovery and fetch phases (plan Task 6) and are not part of this
-    fold. Every skip reason is retained — nothing is swallowed.
+    flow's discovery and fetch phases and are not part of this fold. Every skip
+    reason is retained — nothing is swallowed.
     """
     summary: dict[str, Any] = {
         "inserted": 0,
@@ -1512,7 +1457,7 @@ def append_raw_match_rows(
     return len(new_rows), ids
 
 
-# ── Flow orchestration: window, archive, tournaments, enrichment (plan Task 6) ──
+# ── Flow orchestration: window, archive, tournaments, enrichment ──
 
 # Tier eligibility: only tour-level singles events qualify; everything else
 # (atp_finals, davis_cup, olympics, challengers, unknown badges) is skipped and
@@ -1944,32 +1889,15 @@ def matches_flow(
 ):
     """Discover ATP 250+ tournaments in the window and enrich bronze rows.
 
-    Window is inclusive on both ends: explicit ``start_date``/``end_date`` are
-    used exactly; with no dates the window is watermark-driven — from the last
-    stored ``bronze.match_events`` match_date through today — so a bare
-    scheduled run resumes forward and never crawls unbounded history. An empty
-    bronze table (no watermark) with no explicit start skips with a clear
-    message (``just seed`` first).
-
-    For every year overlapping the window the flow fetches the results archive
-    on one shared persistent CloakBrowser page (``rankings._launch_browser``,
-    humanize enabled), keeps tournaments whose dates intersect the window at
-    tier grand_slam/masters/atp_500/atp_250, and per tournament sleeps
-    generously, fetches the results page, discovers matches, resolves player
-    identities through the reviewed ranking map, and fetches Hawkeye Complete
-    stats sequentially (randomized 3-8s gaps) before upserting each winner-first
-    bronze row — reusing the stored physical match id by the canonical
-    (match_date, tournament_id, unordered player-pair) key, or deriving the
-    deterministic Sackmann id from the strictly-parsed ATP ``msNNN`` sequence
-    (zero-padded; malformed/non-positive ids are skipped). Repeated physical
-    keys are deduped before the Hawkeye fetch, a proposed id already owned by
-    a different physical match is a reported collision skip (never a merge),
-    and an existing bronze row is skipped unless ``force`` is set, in which
-    case it is replaced with the candidate row. Every page/match failure is a
-    printed, counted skip — never an
-    abort — and the browser is always closed in finally. A run that could not
-    access or parse any requested page fails so Prefect retries; a run that
-    fetched valid pages finishes with the summary.
+    Window is inclusive on both ends: explicit dates are used exactly; with no
+    dates the window is watermark-driven (last stored ``bronze.match_events``
+    match_date through today), so a bare scheduled run never crawls unbounded
+    history. Match ids are stable and idempotent: a canonical
+    (match_date, tournament_id, unordered player pair) reuses the stored row's
+    id, else a deterministic id derives from the ATP ``msNNN`` sequence.
+    Existing rows are skipped unless ``force`` is set. Every page/match failure
+    is a counted skip unless no requested page could be fetched/parsed, then
+    the run fails so Prefect retries.
     """
     load_env()
     watermark = matches_watermark()

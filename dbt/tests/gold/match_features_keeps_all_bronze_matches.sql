@@ -1,9 +1,6 @@
--- Assert every bronze match with a usable date produces EXACTLY TWO
--- match_features rows (one directional row per player). Guards against silent
--- row drops — e.g. unranked players (rank NULL after the 0 -> NULL mapping)
--- must never remove a match from training, which is what the old
--- `ranking > 0` filter did — and against an incremental run materializing
--- only one perspective of a match.
+-- Assert every dated bronze match yields exactly two directional rows. Guards
+-- against unranked players (rank NULL) dropping a match from training, and
+-- against an incremental run materializing only one perspective.
 SELECT me.match_id
 FROM {{ source('bronze', 'match_events') }} me
 LEFT JOIN {{ ref('match_features') }} mf

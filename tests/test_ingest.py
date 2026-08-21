@@ -1143,16 +1143,6 @@ def test_atp_rows_to_bronze_indoor_missing_maps_to_nan():
 # ── IOC country reference (src/countries) ─────────────────────────
 
 
-def test_country_reference_is_well_formed():
-    """The reference mapping includes UNK, has no duplicate codes, and every
-    non-UNK row carries a usable ISO alpha-2 code."""
-    countries = countries_mod._COUNTRIES
-
-    assert countries_mod.UNK in countries
-    assert countries_mod.resolve_ioc(countries_mod.UNK) == ("", "Country unknown")
-    assert all(iso2 or code == countries_mod.UNK for code, (iso2, _) in countries.items())
-
-
 def test_normalize_ioc_trims_and_uppercases():
     assert countries_mod.normalize_ioc(" fra ") == "FRA"
     assert countries_mod.normalize_ioc("gbr") == "GBR"

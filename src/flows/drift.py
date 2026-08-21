@@ -1,20 +1,15 @@
 """Production drift monitor against the deployed champion Bento.
 
-Scheduled 30 minutes after the weekly scrape (Monday 06:30 UTC, right after the
-06:00 scrape). Runs dbt build to refresh silver/gold, resolves the MLflow
-champion, and compares two size-matched windows of physical matches from
-bronze.match_events —
-the post-cutoff current window and the most recent pre-cutoff reference
-window, each expanded into both scoring orientations and scored through the
-production Bento — using Evidently's
-DataDriftPreset (per-feature PSI, prediction PSI, drift share). Only the
-numeric bronze serve/point rates (DRIFT_FEATURE_COLS) are compared for
-feature drift; the match-context fields used to score through Bento are never
-part of the drift analysis. Current-window performance is compared against
-the champion's promotion-pinned metric tags, and the combined signals map to
-a healthy / investigate / retrain verdict that is printed and logged to
-MLflow. The full drift summary is printed to stdout so it appears in both
-Prefect logs and the CLI.
+Scheduled 30 minutes after the weekly scrape (Monday 06:30 UTC). Runs dbt build
+to refresh silver/gold, resolves the MLflow champion, and compares two
+size-matched windows of physical matches from bronze.match_events — the
+post-cutoff current window and the most recent pre-cutoff reference window,
+each expanded into both scoring orientations and scored through the production
+Bento. Evidently's DataDriftPreset scores per-feature PSI, prediction PSI, and
+drift share over only the numeric bronze serve/point rates (DRIFT_FEATURE_COLS);
+context fields used to score remain out of the analysis. Current-window
+performance is compared against the champion's promotion-pinned metric tags;
+the combined signals map to a healthy / investigate / retrain verdict.
 """
 
 from __future__ import annotations

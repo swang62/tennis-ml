@@ -1,27 +1,15 @@
--- silver.player_matches: normalized player-perspective match rows.
+-- silver.player_matches: expand each bronze match into two player-perspective
+-- rows (raw player1/player2 orientation, no canonicalization).
 --
--- Expand each bronze match into two raw player perspectives for downstream rolling features.
+-- Activity fields are match ordinal and strictly-prior 30-day count; RANGE
+-- keeps the cutoff relative to each match date. ZERO rank/points/age mean
+-- missing, mapped to NULL. Return points derive from the opponent's raw serve
+-- totals for similarity rates. Surface is copied; the rest of context stays in
+-- bronze.
 --
--- Activity fields are match ordinal and strictly-prior 30-day count. RANGE keeps
--- the cutoff relative to each match date.
---
--- ATP zero rank, points, and age mean missing, not a real value; map to NULL.
---
--- No canonicalization: player/opponent orientation is the raw player1/player2
--- assignment from bronze.
---
--- Context stays in bronze except surface; consumers rebuild both sides from perspectives.
---
--- Return points are derived from the opponent's raw serve totals for similarity rates.
---
--- Incremental boundary: affected-player rebuilds, not append-only. A run
--- materializes every perspective whose (player_id, match_id) is new to the
--- target, but because ordinals and 30-day counts are windowed over the FULL
--- history, any player with a newly inserted match must have ALL of their rows
--- recomputed — including historical bronze inserts that fall before existing
--- matches. Returning every row of each affected player (not just the missing
--- match_ids) refreshes stale player_match_number values in place via the
--- delete+insert on the composite unique key.
+-- Incremental: affected-player rebuild, not append-only. Ordinals and 30-day
+-- counts window over FULL history, so any player with a new match has ALL rows
+-- recomputed via delete+insert on (player_id, match_id).
 
 {{ config(
     materialized="incremental",
@@ -80,9 +68,7 @@ WITH expanded AS (
         CASE WHEN winner_id = player2_id THEN 1 ELSE 0 END AS match_won
     FROM {{ source('bronze', 'match_events') }}
 ),
--- Activity windows over the FULL expanded history: player ordinals and
--- strictly-prior 30-day counts depend on every one of a player's matches, so
--- they must be computed before the incremental filter below trims the output.
+-- Windows over FULL history, so computed before the incremental filter trims.
 numbered AS (
     SELECT
         *,
@@ -96,9 +82,8 @@ numbered AS (
     FROM expanded
 )
 {% if is_incremental() %}
--- Affected players have a missing perspective or a changed window value. The
--- comparisons also recover a partial dbt run where this model committed before
--- a downstream test/model failed.
+-- Affected players: missing or changed window value (also repairs a partial
+-- run where this model committed before a downstream failure).
 , changed_players AS (
     SELECT DISTINCT numbered.player_id
     FROM numbered

@@ -1,17 +1,11 @@
-{# PostgreSQL-safe idempotent post-hook helpers.
+{# Idempotent post-hook helpers safe under dbt-postgres's table rebuild.
 
-dbt-postgres materializes `table` models by swapping a transient backup relation
-into place (rename old -> backup, build new, drop backup) within the model
-transaction. During that window the OLD table's constraint/index names still
-exist in the schema, so a plain `ALTER TABLE ... ADD CONSTRAINT` or
-`CREATE INDEX IF NOT EXISTS` on the freshly-swapped table either collides with
-(stale backup) or is wrongly satisfied by (IF NOT EXISTS skipping against the
-backup) the previous incarnation. `ADD CONSTRAINT` also has no `IF NOT EXISTS`.
-
-These macros clean up the stale object by its name first, then recreate it on
-the target relation, so they are safe on a first build, a plain rebuild, and a
---full-refresh. Constraint and index names are project-unique per model.
-#}
+dbt-postgres swaps table models (rename old -> backup, build new, drop backup)
+within one transaction, so the OLD constraint/index names still exist while the
+new table is created: a plain ADD CONSTRAINT collides with the backup, and
+CREATE INDEX IF NOT EXISTS skips against it. These macros drop the stale object
+by name first, then recreate it on the target. Names are project-unique per
+model. #}
 
 {% macro ensure_primary_key_sql(relation, conname, columns) -%}
 DO $$

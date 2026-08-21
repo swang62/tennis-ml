@@ -1,11 +1,5 @@
--- Contract: every FEATURE_COLS cell of gold.match_features is non-null and
--- finite. Any returned row is a violation. This enforces the finalized
--- model-ready contract: dbt build/test fails when the imputation contract is
--- broken (NULL, NaN, or infinite value in any model feature column).
---
--- The similarity-only appended columns (player/opponent_first_serve_pct_10,
--- ..., player/opponent_return_points_won_pct_10) are intentionally NOT
--- checked: they are not model features.
+-- Contract: every model feature column is non-null and finite; any returned
+-- row is a violation. Similarity-only columns are intentionally not checked.
 {% set feature_cols = [
     "rank_diff",
     "rank_points_diff",

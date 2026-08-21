@@ -9,7 +9,7 @@ is projected into a single antisymmetric logit-space quantity:
 with symmetric clipping at `EPS`. Reversing the pair negates the evidence, so
 `evidence_to_probability(e) + evidence_to_probability(-e) == 1` exactly. This
 module is pure numpy — no database, MLflow, or model imports — so training
-(03/04) and serving (Task 8) share identical code.
+and serving share identical code.
 """
 
 from __future__ import annotations

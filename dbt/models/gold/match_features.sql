@@ -1,53 +1,17 @@
--- gold.match_features: symmetric player-perspective training table.
+-- gold.match_features: training table, TWO directional rows per match keyed
+-- (match_id, player_id), each carrying complementary match_won labels.
+-- Side-level values are imputed BEFORE matchup diffs so every FEATURE_COLS
+-- cell is non-null. Cost of leakage: the prior snapshot is the latest strictly
+-- before match_date; missing cells fall back to the single-row tour_averages
+-- singleton. match_won is the LABEL, not a feature. H2H reads
+-- bronze.match_events bounded to the five most-recent strictly-prior
+-- unordered-pair meetings. Similarity serve/return columns are never
+-- FEATURE_COLS.
 --
--- TWO directional rows per physical match, keyed by (match_id, player_id):
--- one row per player, each in that player's own perspective. The two rows
--- share match_id and the match context, exchange the paired player_*/opponent_*
--- side values, negate the signed differences and the h2h advantage features,
--- and carry
--- complementary match_won labels. Every side-level value (ranking, rank
--- points, age, rolling state, profile, activity) is imputed BEFORE matchup
--- differences are calculated, so every FEATURE_COLS cell is non-null and
--- finite. Rolling values use the player's PRIOR snapshot from
--- silver.rolling_features — the latest snapshot strictly before match_date
--- (snapshot_date < match_date, same-date matches cannot supply it, matching
--- inference), fetched via a per-side lateral join; ranking/rank points/age
--- also come from the prior snapshot, never a same-day one. The prior
--- snapshot's `matches_10` exposure is carried through as player_matches_10 /
--- opponent_matches_10 (0 for cold start). Missing or NULL prior cells fall
--- back to the single-row gold.tour_averages singleton (CROSS JOIN), not a
--- date-keyed defaults row.
---
--- match_won = 1 iff this row's player side won, else 0. It is the LABEL, not
--- a feature.
---
--- H2H reads bronze.match_events (via winner_id, no id canonicalization).
--- h2h_exposure is the count of the FIVE most recent strictly-prior
--- unordered-pair meetings (identical for both mirrors); h2h_advantage and
--- h2h_surface_advantage are Beta(1,1)-smoothed directional advantages built
--- from the same bounded five-meeting window (the surface variant restricted
--- to meetings on the current match's surface) and negate across mirrors.
--- Lookups stay bounded (LIMIT 5 laterals); no lifetime count is kept.
---
--- Player snapshot state stays strictly prior (no current-match leakage);
--- fallback values are intentionally global: the same full-pool singleton is
--- used for old cold-start and currently missing cells, so limited historical
--- leakage into fallback-consuming rows is accepted and reported.
---
--- Similarity-analysis serve/return columns are appended for PlayerSimilarity
--- only; they are never FEATURE_COLS model features.
---
--- Model columns are metadata plus FEATURE_COLS. Height and current-match
--- rates are not model features.
---
--- Incremental boundary: the ETL watermark identifies bronze rows ingested
--- since the last successful dbt build, so each ETL run appends exactly two
--- directional rows per new bronze match without scanning this target. New rows are
--- computed against the FULL silver history (prior snapshots via the
--- date-strict lateral join, H2H over the bounded recent-five meetings, the freshly
--- rebuilt gold.tour_averages singleton), so a new match's rows are exactly
--- what a full rebuild would produce; existing rows are untouched. Re-running
--- with no new bronze matches inserts nothing (idempotent).
+-- Incremental: appends rows for bronze matches after the source_watermark in
+-- bronze.etl_state (pipeline='dbt'), computed against full silver history so
+-- they match a full rebuild; the watermark moves only after the build
+-- succeeds, so a failed build leaves the batch eligible to retry.
 
 {{ config(
     materialized="incremental",
@@ -76,21 +40,18 @@ player_match_enriched AS (
         bron.tournament,
         bron.round,
         pm.surface,
-        -- Indoor context defaults to 0 (outdoor) when unknown.
         COALESCE(bron.is_indoor, 0) AS is_indoor,
         pm.player_id,
         pm.opponent_id,
         pm.match_won,
 
-        -- Strictly-prior ranking/rank points/age (no same-day snapshot),
-        -- imputed from the singleton defaults row.
+        -- Strictly-prior ranking/age (no same-day snapshot), imputed from singleton.
         COALESCE(pr.latest_player_ranking, fd.latest_player_ranking) AS player_ranking,
         COALESCE(pr.latest_player_rank_points, fd.latest_player_rank_points)
             AS player_rank_points,
         COALESCE(pr.latest_player_age, fd.latest_player_age) AS player_age,
 
-        -- Rate-exposure carry: number of prior matches in the 10-match window
-        -- backing the smoothed rates; cold start uses literal 0 (no prior match).
+        -- Rate-exposure carry: prior matches in the 10-match window; cold start = 0.
         CASE WHEN pr.player_id IS NULL THEN 0
              ELSE CAST(pr.matches_10 AS INTEGER)
         END AS matches_10,
@@ -113,7 +74,7 @@ player_match_enriched AS (
         COALESCE(pr.aces_per_svc_game_10, fd.aces_per_svc_game_10)
             AS aces_per_svc_game_10,
 
-        -- Rank trend: prior rolling avg ranking minus prior latest ranking.
+        -- Rank trend: prior rolling avg minus prior latest ranking.
         COALESCE(pr.avg_player_rank_10, fd.avg_player_rank_10)
             - COALESCE(pr.latest_player_ranking, fd.latest_player_ranking)
             AS rank_trend_10,
@@ -123,11 +84,8 @@ player_match_enriched AS (
 
         COALESCE(pr.streak, fd.streak) AS streak,
 
-        -- Surface form on the CURRENT match's surface: the prior snapshot's
-        -- carried per-surface win rate (last 10 on that surface, Beta(1,1)
-        -- smoothed), imputed from its pool mean when the player has never
-        -- played the surface; carpet has no per-surface pool rate, so the
-        -- neutral 0.5 rate_default applies.
+        -- Surface form on the CURRENT match's surface: prior snapshot's carried
+        -- per-surface win rate; carpet has no pool rate, so neutral 0.5 applies.
         CASE pm.surface
             WHEN 'clay'  THEN COALESCE(pr.clay_win_rate_10,  fd.clay_win_rate_10)
             WHEN 'grass' THEN COALESCE(pr.grass_win_rate_10, fd.grass_win_rate_10)
@@ -135,11 +93,9 @@ player_match_enriched AS (
             ELSE fd.rate_default
         END AS surface_form,
 
-        -- Rest: days since the player's immediately preceding match (the
-        -- prior snapshot's date is that match); pool median days-since
-        -- fallback on cold start. Same-date matches cannot supply the prior
-        -- snapshot (strict <), so a same-week back-to-back is at least 1 day.
-        -- Capped at 30 before the downstream ln(1 + days) transform.
+        -- Rest: days since prior match (snapshot date); pool median on cold
+        -- start. Same-date matches can't supply a prior snapshot (strict <),
+        -- so a back-to-back is at least 1 day. Capped at 30 pre-ln(1+days).
         LEAST(30, CASE WHEN pr.player_id IS NULL THEN fd.days_since_default
              ELSE pm.match_date - pr.snapshot_date
         END) AS days_since_last_match,
@@ -178,16 +134,11 @@ player_match_enriched AS (
     LEFT JOIN {{ source('bronze', 'player_profiles') }} prof
         ON prof.player_id = pm.player_id
 ),
--- Strictly-prior unordered-pair meetings per directional row, read directly
--- from bronze.match_events (one row per physical match, so no dedup; winner_id
--- orients each meeting to the row's player without any id canonicalization).
--- Each orientation (player as player1 / player as player2) is an indexed
--- bounded lateral lookup capped at the five newest meetings, so at most ten
--- candidate meetings per directional row reach the window below; the global
--- (match_date DESC, match_id DESC) top five is then identical to the old
--- OR-join over all prior meetings while scanning only the newest meetings.
--- meeting_surface_matches marks meetings on the CURRENT match's surface so the
--- surface advantage can be computed from the same bounded top-five window.
+-- Prior unordered-pair meetings per directional row, read from bronze.
+-- match_events (one row per physical match, no dedup; winner_id, no id
+-- canonicalization). Each orientation is an indexed lateral scan capped at the
+-- five newest meetings; ROW_NUMBER then keeps the global top five, matching the
+-- old OR-join while scanning only the newest meetings.
 pair_meetings AS (
     SELECT match_id, player_id, winner_is_current_player, meeting_surface_matches
     FROM (
@@ -270,7 +221,7 @@ SELECT
     p.surface,
     p.match_won,
 
-    -- ── Matchup differences (imputed row player side minus imputed opponent) ──
+    -- ── Matchup differences (row side minus opponent side) ──
     p.player_ranking - o.player_ranking AS rank_diff,
     p.player_rank_points - o.player_rank_points AS rank_points_diff,
     p.player_age - o.player_age AS age_diff,
@@ -290,15 +241,14 @@ SELECT
     p.avg_rank_faced_10 - o.avg_rank_faced_10 AS avg_rank_faced_diff,
     p.streak - o.streak AS streak_diff,
     p.surface_form - o.surface_form AS surface_form_diff,
-    -- Log-transformed directional rest: ln(1 + player) - ln(1 + opponent),
-    -- both inputs capped at 30 before the transform.
+    -- Rest diff on a log scale; inputs capped at 30 before the transform.
     LN(1.0 + p.days_since_last_match) - LN(1.0 + o.days_since_last_match)
         AS days_since_last_match_diff,
 
-    -- ── Absolute state values where both sides matter ──
+    -- ── Absolute state per side ──
     p.weighted_form_10 AS player_weighted_form_10,
     o.weighted_form_10 AS opponent_weighted_form_10,
-    -- Rate-exposure counts backing the smoothed 10-match rates (0 cold start).
+    -- Exposure backing the smoothed 10-match rates (0 cold start).
     p.matches_10            AS player_matches_10,
     o.matches_10            AS opponent_matches_10,
     p.is_left_handed        AS player_is_left_handed,
@@ -306,8 +256,7 @@ SELECT
     p.years_pro AS player_years_pro,
     o.years_pro AS opponent_years_pro,
 
-    -- ── Pair-level head-to-head: recent-5 exposure + signed advantages
-    --    (overall and current-surface) from the bounded meeting window ──
+    -- ── Pair-level H2H: recent-5 exposure + signed advantages ──
     COALESCE(h.recent_meetings, 0) AS h2h_exposure,
     ((COALESCE(h.wins_for_player, 0) + 1.0)
         / (COALESCE(h.recent_meetings, 0) + 2.0) - 0.5)
@@ -330,9 +279,7 @@ SELECT
         WHEN 'qf' THEN 5 WHEN 'sf' THEN 6 WHEN 'f' THEN 7 ELSE 0
     END AS SMALLINT) AS round_encoded,
 
-    -- ── Similarity-analysis serve/return percentages (NOT model features) ──
-    -- Appended style signals for PlayerSimilarity, never FEATURE_COLS. They
-    -- share the same defaults imputation but are documented as non-model.
+    -- ── Similarity-analysis serve/return columns (NOT model features, FEATURE_COLS) ──
     p.first_serve_pct_10 AS player_first_serve_pct_10,
     o.first_serve_pct_10 AS opponent_first_serve_pct_10,
     p.first_serve_win_pct_10 AS player_first_serve_win_pct_10,

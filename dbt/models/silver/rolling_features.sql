@@ -1,51 +1,20 @@
--- silver.rolling_features: post-match player snapshots.
+-- silver.rolling_features: post-match player snapshots. Downstream reads the
+-- prior one; windows are post-match and never include future matches.
 --
--- One post-match snapshot per player and match; downstream reads the prior one.
--- Windows are post-match, inclusive, and never include future matches.
+-- [0,1] probability rates are Beta(1,1)-smoothed, (successes + 1) /
+-- (opportunities + 2), so a first-match window = 0.5 and a zero-opportunity
+-- window is never NULL; `matches_10` exposes the backing match count. Surface
+-- rates smooth the same way but stay NULL for unseen surfaces.
+-- aces_per_svc_game_10, weighted_form_10, streak, and rank averages are NOT
+-- probabilities and are left unsmoothed; the training source never zero-fills.
+-- Per-surface windows carry forward with conditional MAX (no LAST_VALUE IGNORE
+-- NULLS in PostgreSQL). Streak is the signed current win/loss run including
+-- this match. match_features derives rank trend; AVG skips NULL rankings.
 --
--- Partial windows use available matches. Every [0,1] probability rate is
--- smoothed with a fixed Beta(1,1) prior, (successes + 1) / (opportunities + 2),
--- so a first-match window yields the neutral 0.5 and a zero-opportunity window
--- is never NULL; `matches_10` exposes how many matches actually back the
--- 10-match rates (1 for the first match, up to 10). Surface rates are smoothed
--- the same way; they remain NULL for unseen surfaces (no surface match yet).
--- aces_per_svc_game_10, weighted_form_10, streak, and the
--- rank averages are NOT probabilities and are deliberately left unsmoothed.
--- The training source never silently zero-fills.
---
--- Per-surface windows are carried forward with conditional MAX because
--- PostgreSQL lacks LAST_VALUE IGNORE NULLS.
---
--- Query shape: the rolling 10-match rates and the signed streak share one
--- player-ordered window pass; the per-surface carries ride the snapshot
--- builder's own player-ordered pass; surface rates use their own (player,
--- surface) window; and the weighted-form decay uses POW(0.9, max_match_number
--- - player_match_number), where max_match_number is a full-history partition
--- MAX over the player's ascending match ordinals — mathematically the reverse
--- row-number gap, computed without any reversed sort pass.
---
--- Streak is the signed current win/loss run, including this match.
---
--- match_features derives rank trend; AVG skips unranked NULL values.
---
--- The smoothed rates use `+ 1.0`/`+ 2.0` numeric literals, so no integer
--- division applies; only the unsmoothed aces_per_svc_game_10 keeps its
--- explicit CAST + NULLIF guard.
---
--- Only gold/inference inputs remain; activity and current-match rates are derived on demand.
---
--- Incremental boundary: affected-player rebuilds, not append-only. A snapshot
--- depends on matches up to its own (match_date, match_id), so a historical
--- bronze insert that lands before existing matches changes the rolling values
--- of every later snapshot for that player. A run therefore recomputes the FULL
--- history and returns every row of each player whose (player_id, match_id) set
--- differs from the target; the delete+insert on the composite unique key then
--- replaces all stale snapshots for those players in place.
---
--- The window CTEs are always evaluated over the FULL player_matches history, so
--- each returned snapshot carries exactly the values a full rebuild gives.
--- player_matches is scanned once by the snapshot builder and once (indexed) by
--- the surface-rate windows; the carries ride the snapshot window pass.
+-- Incremental: affected-player rebuild. A snapshot depends on matches up to its
+-- own (match_date, match_id), so a historical insert changes every later
+-- snapshot for that player; the run returns the FULL history of affected
+-- players and delete+insert replaces stale snapshots in place.
 
 {{ config(
     materialized="incremental",
@@ -55,9 +24,8 @@
 
 WITH
 {% if is_incremental() %}
--- Affected players have a missing snapshot or a changed ordinal. Checking the
--- ordinal makes the model recover when player_matches committed successfully
--- but a later model/test failed before rolling_features could be rebuilt.
+-- Affected players have a missing or changed-ordinal snapshot; checking the
+-- ordinal recovers when player_matches committed but rolling_features didn't.
 changed_players AS (
     SELECT DISTINCT pm.player_id
     FROM {{ ref('player_matches') }} pm
@@ -69,8 +37,7 @@ changed_players AS (
 ),
 {% endif %}
 player_surface_matches AS (
-    -- Inclusive 10-match rate on each match's own surface, Beta(1,1)-smoothed:
-    -- (SUM(match_won) + 1) / (COUNT(*) + 2); a first surface match yields 0.5.
+    -- Inclusive 10-match rate on each surface, Beta(1,1)-smoothed.
     SELECT
         player_id,
         match_id,
@@ -87,11 +54,8 @@ player_surface_matches AS (
         ) + 2.0) AS surface_win_rate_10
     FROM {{ ref('player_matches') }}
 ),
--- Every snapshot is computed here over the FULL player_matches history:
--- window values and surface carries for a row depend on all of a player's
--- matches up to that row, so filtering earlier would silently corrupt the
--- new rows' values. The incremental filter is applied only in the outermost
--- SELECT, after every window has been evaluated.
+-- Windows always evaluate over the FULL player_matches history; the incremental
+-- filter applies only in the outermost SELECT so rows carry full-rebuild values.
 snapshots AS (
     SELECT
         pm.player_id,
@@ -115,17 +79,14 @@ snapshots AS (
         pm.break_points_faced,
         pm.return_points_won,
         pm.return_points_available,
-        -- Latest match ordinal in the player's full history. The gap
-        -- max_match_number - player_match_number feeds the weighted-form
-        -- decay (newest match is 0, oldest is n - 1) without a reversed
-        -- sort pass: the partition MAX needs no ORDER BY.
+        -- Latest ordinal in the player's full history; the gap to this row feeds the
+-- weighted-form decay (newest = 0, oldest = n-1) without a reversed sort.
         MAX(pm.player_match_number) OVER (
             PARTITION BY pm.player_id
         ) AS player_max_match_number,
-        -- Latest match number per surface at each snapshot (0 if unseen),
-        -- carried forward with conditional MAX because PostgreSQL lacks
-        -- LAST_VALUE IGNORE NULLS. Computed here, not in a separate scan of
-        -- player_matches, so the surface-rate join keys exist as plain columns.
+        -- Latest ordinal per surface at each snapshot (0 if unseen), carried
+        -- forward via conditional MAX (no LAST_VALUE IGNORE NULLS); computed
+        -- here so the surface-rate join keys exist as plain columns.
         MAX(CASE WHEN pm.surface = 'clay'  THEN pm.player_match_number ELSE 0 END) OVER (
             PARTITION BY pm.player_id
             ORDER BY pm.match_date, pm.match_id
@@ -141,8 +102,7 @@ snapshots AS (
             ORDER BY pm.match_date, pm.match_id
             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
         ) AS hard_last_match_number,
-        -- Last loss/win match numbers feed the signed streak below; they share
-        -- the same full-history window pass as the surface carries.
+        -- Last loss/win ordinals feed the signed streak; same window pass as carries.
         MAX(CASE WHEN pm.match_won = 0 THEN pm.player_match_number ELSE 0 END) OVER (
             PARTITION BY pm.player_id
             ORDER BY pm.match_date, pm.match_id
@@ -168,81 +128,53 @@ SELECT
     s.player_rank_points AS latest_player_rank_points,
     s.player_age AS latest_player_age,
 
-    -- Exponentially-decayed 10-match win rate; newest weight is 1. The decay
-    -- exponent is the gap between the player's max match ordinal and this
-    -- row's ascending ordinal, so the ascending frame needs no reversed
-    -- sort pass.
+    -- Exponentially-decayed 10-match win rate; newest weight 1, decay exponent
+    -- is the ordinal gap to the player's max, so no reversed sort pass.
     SUM(s.match_won * POW(0.9, s.player_max_match_number - s.player_match_number)) OVER w10
         / NULLIF(SUM(POW(0.9, s.player_max_match_number - s.player_match_number)) OVER w10, 0)
         AS weighted_form_10,
 
-    -- Rolling win rate over the last 10 matches, including this one, smoothed
-    -- with the fixed Beta(1,1) prior: (wins + 1) / (matches + 2). The first
-    -- match yields the neutral 0.5, never 0 or 1.
+    -- Beta(1,1)-smoothed rates over the last 10 matches incl. this one:
+    -- (x + 1) / (denominator + 2); first match = 0.5, zero-denominator never NULL.
     (SUM(s.match_won) OVER w10 + 1.0) / (COUNT(*) OVER w10 + 2.0)
         AS win_rate_10,
-
-    -- Ace rate: (aces + 1) / (first serves made + 2), last 10 incl. this one.
-    -- Smoothed so a zero-opportunity window is never NULL (>= 2 denominator).
     (SUM(s.aces) OVER w10 + 1.0) / (SUM(s.first_serves_made) OVER w10 + 2.0)
         AS ace_rate_10,
-
-    -- First-serve percentage: (first serves made + 1) / (total serve points + 2)
     (SUM(s.first_serves_made) OVER w10 + 1.0)
         / (SUM(s.total_serve_points) OVER w10 + 2.0)
         AS first_serve_pct_10,
-
-    -- Break-point save rate: (saved + 1) / (faced + 2), last 10 incl. this one
     (SUM(s.break_points_saved) OVER w10 + 1.0)
         / (SUM(s.break_points_faced) OVER w10 + 2.0)
         AS break_points_saved_pct_10,
-
-    -- First-serve win rate: (first-serve points won + 1) / (first serves made + 2)
     (SUM(s.first_serve_points_won) OVER w10 + 1.0)
         / (SUM(s.first_serves_made) OVER w10 + 2.0)
         AS first_serve_win_pct_10,
-
-    -- Second-serve win rate: (second-serve points won + 1) / (second serves
-    -- made + 2), where second serves made = total serve points - first serves
     (SUM(s.second_serve_points_won) OVER w10 + 1.0)
         / (SUM(s.total_serve_points - s.first_serves_made) OVER w10 + 2.0)
         AS second_serve_win_pct_10,
-
-    -- Serve win rate: ((first + second serve points won) + 1) / (total + 2)
     (SUM(s.first_serve_points_won + s.second_serve_points_won) OVER w10 + 1.0)
         / (SUM(s.total_serve_points) OVER w10 + 2.0)
         AS serve_win_pct_10,
-
-    -- Return points won: (return_points_won + 1) / (return_points_available + 2)
     (SUM(s.return_points_won) OVER w10 + 1.0)
         / (SUM(s.return_points_available) OVER w10 + 2.0)
         AS return_points_won_pct_10,
-
-    -- Double-fault rate: (double faults + 1) / (total serve points + 2)
     (SUM(s.double_faults) OVER w10 + 1.0)
         / (SUM(s.total_serve_points) OVER w10 + 2.0)
         AS df_rate_10,
 
-    -- Number of matches in the last-10 window backing the smoothed rates;
-    -- 1 for the first match, up to 10. Carried to gold as matches_10 exposure.
+    -- Matches backing the smoothed rates (1 for the first, up to 10);
+    -- carried to gold as matches_10 exposure.
     COUNT(*) OVER w10 AS matches_10,
 
-    -- Aces per service game, 10
+    -- Unsmoothed rates (not probabilities): aces per service game and rolling
+    -- average ranks; AVG skips NULL opponent rankings.
     CAST(SUM(s.aces) OVER w10 AS DOUBLE PRECISION)
         / NULLIF(SUM(s.service_games) OVER w10, 0)
         AS aces_per_svc_game_10,
-
-    -- Rolling average player rank over the last 10 (rank_trend derived
-    -- downstream in match_features, not here)
     AVG(s.player_ranking) OVER w10 AS avg_player_rank_10,
-
-    -- Rolling average opponent rank (strength of schedule) over the last 10;
-    -- AVG skips NULL opponent rankings, so unranked opponents inside the
-    -- window never pollute the average
     AVG(s.opponent_ranking) OVER w10 AS avg_rank_faced_10,
 
-    -- Signed current win/loss run, computed in the FROM subquery from the
-    -- snapshot pass's last-loss/last-win ordinals.
+    -- Signed current win/loss run, from the snapshot pass's ordinals.
     s.streak,
 
     -- Per-surface rates carried forward from the latest surface match.
@@ -251,10 +183,8 @@ SELECT
     psm_hard.surface_win_rate_10  AS hard_win_rate_10
 
 FROM (
-    -- The signed streak is built here from the full-history pass's
-    -- last-loss/last-win ordinals. The join keys for the surface-rate joins
-    -- below must live here: window results are not visible to the FROM/JOIN
-    -- clauses that use them.
+    -- Streak is derived here because window results aren't visible to the
+    -- JOIN clauses that use the surface-rate keys.
     SELECT s.*,
         CASE WHEN s.match_won = 1
             THEN s.player_match_number - s.last_loss_match_number
@@ -278,9 +208,8 @@ WINDOW
     w10 AS (PARTITION BY s.player_id ORDER BY s.snapshot_date, s.match_id
             ROWS BETWEEN 9 PRECEDING AND CURRENT ROW)
 )
--- Trim to the affected players' full histories; every window above was
--- evaluated over the full history, so these rows carry exactly the values a
--- full rebuild gives and the temp relation holds unique (player_id, match_id)s.
+-- Trim to affected players' full histories; every window above was evaluated
+-- over full history, so returned rows carry full-rebuild values.
 SELECT * FROM computed
 {% if is_incremental() %}
 WHERE player_id IN (SELECT player_id FROM changed_players)

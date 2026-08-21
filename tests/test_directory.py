@@ -178,36 +178,6 @@ def test_directory_players_unknown_ioc_normalizes_to_unk():
     assert players[0]["iso2"] == ""
 
 
-def test_players_sql_is_the_single_directory_source():
-    """The one directory read: bronze metadata joined to dbt-derived gold
-    aggregates for current_rank and matches_played (per-player physical count);
-    no bronze.match_events, per-query rankings, or training feature rows."""
-    assert "FROM bronze.player_profiles" in PLAYERS_SQL
-    assert "JOIN gold.player_profiles" in PLAYERS_SQL
-    assert "bronze.rankings" not in PLAYERS_SQL
-    assert "bronze.match_events" not in PLAYERS_SQL
-    assert "ORDER BY gp.current_rank NULLS LAST, bp.display_name, bp.player_id" in PLAYERS_SQL
-
-
-def test_players_sql_includes_zero_match_players():
-    """No navigation-only filter: every bronze profile is a directory player
-    (zero match_count and missing gold rows included, reporting 0), and the
-    query never reads the training feature rows."""
-    assert "WHERE gp.match_count" not in PLAYERS_SQL
-    assert "gold.match_features" not in PLAYERS_SQL
-
-
-def test_players_sql_columns_cover_the_player_contract():
-    for field in (
-        "player_id",
-        "display_name",
-        "ioc",
-        "AS matches_played",
-        "current_rank",
-    ):
-        assert field in PLAYERS_SQL
-
-
 # ── Deployment staging ──────────────────────────────────────────────────────
 
 

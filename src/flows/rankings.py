@@ -1,60 +1,31 @@
 """Prefect flow: weekly ATP rankings catch-up.
 
 The database is the self-healing watermark (``MAX(bronze.rankings.ranking_date)``).
-``rankings_flow`` runs with no params to fetch every missing Monday from the
-watermark through the most recent completed Monday. Manual backfills pass
-``--param end_date=YYYY-MM-DD`` to fetch missing Mondays after the watermark
-through that date, or both ``--param start_date`` and ``--param end_date`` to
-fetch every Monday in that explicit range regardless of the watermark. Safety
-guarantees for every path: a ranking week already present in
-``bronze.rankings`` is never re-scraped (presence is the only completeness
-test — partial prior ingests are not refetched), the scan never reaches
-earlier than the Monday after the stored watermark nor earlier than Jan 1 of
-the current year, and never later than the most recent completed Monday.
-Weeks are fetched from the ATP Tour site with the CloakBrowser Python library
-(an interactive stealth-Chromium Playwright wrapper) — never the CloakBrowser
-MCP server.
+With no params it fetches every missing Monday from the watermark through the
+most recent completed Monday; explicit ``--param start_date``/``end_date``
+override the range. Guarantees for every path: a stored ranking week is never
+re-scraped, the effective start never precedes the Monday after the watermark
+nor Jan 1 of the current year, and the effective end never follows the most
+recent completed Monday.
 
-Identity is resolved only through the approved ranking identity map
-(``load_ranking_player_map``): the page exposes each player's canonical
-ATP_Database id in the profile URL slug (e.g. ``/en/players/jannik-sinner/s0ag/overview``),
-which must be present as a value in the reviewed map to be stored. Raw
-numeric ranking source ids never reach the database, and unmapped players are
-skipped and reported.
+Weeks are fetched with the CloakBrowser Python library (never the MCP server),
+using one persistent browser/page for the whole run so the profile's Cloudflare
+clearance and humanized-jitter discipline carry across every week. A process
+that exits without a clean ``browser.close()`` wedges that session server-side,
+so the ``finally`` always closes page and browser. Identity resolves only
+through the approved ranking identity map (``load_ranking_player_map``): raw
+ranking source ids never reach the database and unmapped players are skipped
+and reported.
 
-This module also hosts the browser discipline (``_launch_browser``/``_jitter``)
-and the shared identity/tier fallbacks (``resolve_player_id``,
-``tier_from_bronze``) reused by the match-stats flow (``src/flows/matches.py``):
-one persistent CloakBrowser profile, one identity convention, and one bronze
-fallback for every ATP site scrape.
+A week that fails to load or parse is skipped so the backfill continues; but a
+run that could not access or parse the site for any of its weeks fails (and is
+retried) instead of succeeding on no data. Each successful week commits
+independently.
 
-Session discipline (CloakBrowser free tier tracks sessions server-side; a
-process that exits without a clean ``browser.close()`` permanently wedges that
-session id): the flow launches exactly ONE persistent browser for the whole
-run, navigates a single page across every missing week inside a try block, and
-the ``finally`` block always closes the page and browser before the process can
-exit. The persistent profile retains Cloudflare clearance cookies between runs,
-and humanized navigation inserts random jitter so page moves are not detected
-as a bot.
-
-A week whose page fails to load or carries no parseable rankings table is
-logged and skipped so the backfill continues past it — a Cloudflare challenge,
-a missing rankings page for that week, or a markup change all move on to the
-next week instead of aborting the backfill. But rankings are posted every
-week, so a backfill that could not access or parse the site for any of its
-weeks is a failure: the run is marked failed (and retried) rather than silently
-succeeding on no data. Finding a parseable page is success even when its rows
-are already stored. Each successful week commits independently.
-
-Run once (manual/local):  ``just rankings``
-Backfill to a date:       ``just rankings --end YYYY-MM-DD``
-Backfill a range:         ``just rankings --start YYYY-MM-DD --end YYYY-MM-DD``
-
-Rankings and matches are independent Prefect flows: ``rankings-flow/rankings``
-(Monday 06:00 UTC) and ``matches-flow/matches`` (Monday 06:30 UTC), and a
-successful rankings or matches run triggers the incremental ETL deployment
-(see ``src/flows/etl.py``). There is no combined scrape flow; ``rankings.py``
-and ``matches.py`` are standalone commands (``just rankings`` / ``just matches``).
+Rankings and matches are separate deployments (``rankings-flow/rankings``
+Monday 06:00 UTC, ``matches-flow/matches`` 06:30 UTC); a successful run of
+either triggers the incremental ETL deployment. There is no combined scrape
+flow; both modules are standalone commands (``just rankings`` / ``just matches``).
 """
 
 from __future__ import annotations

@@ -89,7 +89,7 @@ def test_force_overrides_idempotency():
     assert _decide(cand, prod, champion_run_id="run1", candidate_run_id="run1", force=True) == 1
 
 
-# ── probability-first gate: strict log loss, bounded AUC decline ──
+# ── primary-metric gate: either metric may improve within the tolerance ──
 
 
 def test_promotes_when_log_loss_improves_and_auc_holds():
@@ -98,9 +98,9 @@ def test_promotes_when_log_loss_improves_and_auc_holds():
     assert _decide(cand, prod) == 1
 
 
-def test_requires_strict_log_loss_improvement():
-    # Equal log loss is not an improvement; a higher AUC cannot compensate.
-    cand = _metrics(log_loss=0.5, roc_auc=0.9)
+def test_rejects_equal_metrics():
+    # Neither metric improves, so the candidate is not promoted.
+    cand = _metrics(log_loss=0.5, roc_auc=0.5)
     prod = _metrics()
     assert _decide(cand, prod) == 0
 
@@ -112,8 +112,8 @@ def test_rejects_worse_log_loss_even_with_much_better_auc():
 
 
 def test_auc_can_decline_exactly_at_tolerance():
-    # ROC-AUC may trail by exactly PROMOTION_AUC_TOLERANCE when log loss improves.
-    cand = _metrics(log_loss=0.4, roc_auc=0.5 - promotion.PROMOTION_AUC_TOLERANCE)
+    # ROC-AUC may trail by exactly PROMOTION_TOLERANCE when log loss improves.
+    cand = _metrics(log_loss=0.4, roc_auc=0.5 - promotion.PROMOTION_TOLERANCE)
     prod = _metrics()
     assert _decide(cand, prod) == 1
 
@@ -121,8 +121,20 @@ def test_auc_can_decline_exactly_at_tolerance():
 def test_rejects_auc_decline_beyond_tolerance():
     cand = _metrics(
         log_loss=0.4,
-        roc_auc=0.5 - promotion.PROMOTION_AUC_TOLERANCE - 1e-9,
+        roc_auc=0.5 - promotion.PROMOTION_TOLERANCE - 1e-9,
     )
+    prod = _metrics()
+    assert _decide(cand, prod) == 0
+
+
+def test_promotes_when_auc_improves_and_log_loss_is_within_tolerance():
+    cand = _metrics(log_loss=0.5 + promotion.PROMOTION_TOLERANCE, roc_auc=0.6)
+    prod = _metrics()
+    assert _decide(cand, prod) == 1
+
+
+def test_rejects_when_auc_is_not_strictly_better_and_log_loss_is_worse():
+    cand = _metrics(log_loss=0.5 + promotion.PROMOTION_TOLERANCE, roc_auc=0.5)
     prod = _metrics()
     assert _decide(cand, prod) == 0
 
@@ -139,9 +151,8 @@ def test_promotes_on_calibrated_log_loss_improvement():
 
 
 def test_rejects_plateau_calibrated_log_loss():
-    # Equal calibrated log loss is not an improvement; a higher AUC cannot
-    # compensate. Documents that calibration cannot force a tie into a win.
-    cand = _metrics(log_loss=0.42, roc_auc=0.9)
+    # Equal calibrated metrics cannot force a tie into a win.
+    cand = _metrics(log_loss=0.42, roc_auc=0.5)
     prod = _metrics(log_loss=0.42)
     assert _decide(cand, prod) == 0
 
@@ -197,3 +208,64 @@ def test_missing_champion_contract_promotes():
         )
         == 1
     )
+
+
+# ── read_champion_metrics: incumbent metrics come from champion version tags ──
+
+
+class _Champion:
+    def __init__(self, version="1", run_id="run1", tags=None):
+        self.version = version
+        self.run_id = run_id
+        self._tags = tags or {}
+
+
+class _Version:
+    def __init__(self, tags):
+        self.tags = tags
+
+
+class _FakeClient:
+    def __init__(self, tags):
+        self._tags = tags
+
+    def get_model_version(self, name, version):
+        assert (name, version) == (promotion.PRODUCTION_MODEL, "1")
+        return _Version(self._tags)
+
+
+def _full_tags(**overrides):
+    tags = {f"{promotion.METRIC_PREFIX}{m}": str(0.5) for m in promotion.METRIC_NAMES}
+    tags.update(overrides)
+    return tags
+
+
+def test_read_champion_metrics_returns_all_four_gate_metrics():
+    tags = _full_tags(metric_roc_auc="0.72")
+    metrics = promotion.read_champion_metrics(_FakeClient(tags), _Champion())
+    assert set(metrics) == set(promotion.METRIC_NAMES)
+    assert metrics["roc_auc"] == pytest.approx(0.72)
+
+
+def test_read_champion_metrics_requires_every_metric_tag():
+    tags = _full_tags()
+    del tags["metric_brier"]
+    with pytest.raises(RuntimeError, match=r"missing metric tag.*metric_brier"):
+        promotion.read_champion_metrics(_FakeClient(tags), _Champion())
+
+
+def test_read_champion_metrics_rejects_malformed_tag():
+    tags = _full_tags(metric_log_loss="not-a-number")
+    with pytest.raises(RuntimeError, match=r"metric_log_loss.*malformed"):
+        promotion.read_champion_metrics(_FakeClient(tags), _Champion())
+
+
+def test_read_champion_metrics_rejects_non_finite_tag():
+    tags = _full_tags(metric_log_loss="inf")
+    with pytest.raises(RuntimeError, match=r"metric_log_loss.*not finite"):
+        promotion.read_champion_metrics(_FakeClient(tags), _Champion())
+
+
+def test_read_champion_metrics_fails_without_champion():
+    with pytest.raises(RuntimeError, match="without a champion"):
+        promotion.read_champion_metrics(_FakeClient({}), None)
