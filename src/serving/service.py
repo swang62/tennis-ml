@@ -43,6 +43,7 @@ from src.constants import (
     SILVER_PLAYER_MATCHES,
     STACK_ORDER,
     TOUR_AVERAGES_TABLE,
+    load_env,
 )
 from src.db.client import execute_df, first_row_dict
 from src.evaluate.calibration import apply_temperature
@@ -55,7 +56,6 @@ from src.features.inference import (
 )
 from src.serving.directory import PLAYERS_SQL, directory_players
 from src.training.similarity import PlayerSimilarity
-from src.utils.config import load_env
 from src.utils.countries import resolve_ioc, valid_ioc
 
 # Canonical champion manifest baked at deploy time (written by deploy.py from

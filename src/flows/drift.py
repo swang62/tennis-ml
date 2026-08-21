@@ -32,6 +32,7 @@ from evidently.presets.drift import DataDriftPreset
 from mlflow.tracking import MlflowClient
 from prefect import flow
 
+from src.config import suppress_insecure_tls_warning
 from src.constants import (
     ARTIFACTS,
     BATCH_MAX_SIZE_ROWS,
@@ -57,6 +58,7 @@ from src.constants import (
     PRODUCTION_MODEL,
     TRAIN_DATA_MAX_DATE_KEY,
     WORK_POOL_NAME,
+    load_env,
 )
 from src.db.client import execute_df
 from src.evaluate.promotion import (
@@ -70,7 +72,6 @@ from src.serving.service import (
     Surface,
     TournamentLevel,
 )
-from src.utils.config import load_env, suppress_insecure_tls_warning
 
 LOCK_FILE = ARTIFACTS / ".check_drift.lock"
 EXPERIMENT_NAME = "drift-monitor"

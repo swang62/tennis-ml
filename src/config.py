@@ -6,7 +6,7 @@ import sys
 import warnings
 from pathlib import Path
 
-from src.constants import IMAGE_NAME, ROOT, load_env
+from src.constants import IMAGE_NAME, ROOT
 
 # Sentinel kept for monkeypatch in tests; actual path computed in ensure_kernel().
 KERNEL_DIR: Path | None = None

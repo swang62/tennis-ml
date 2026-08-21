@@ -2,9 +2,7 @@
 
 Defined here (not inside the training notebook) so the MLflow-logged
 `nn_best` artifact unpickles outside the notebook kernel: torch.save
-records the class by module path, and the BentoML service must be able to
-import `src.models.nn.TabularBioMLP` at load time.
-"""
+records the class by module path"""
 
 from typing import override
 

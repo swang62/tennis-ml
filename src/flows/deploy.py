@@ -17,6 +17,7 @@ from typing import Any, TextIO
 
 import pandas as pd
 
+from src.config import suppress_insecure_tls_warning
 from src.constants import (
     AUX_TAG_PREFIX,
     BASE_TAG_PREFIX,
@@ -53,7 +54,6 @@ from src.constants import (
     load_env,
 )
 from src.features.columns import FEATURE_COLS
-from src.utils.config import suppress_insecure_tls_warning
 
 # --- Deploy-only paths and names ---
 TEMPLATE_BENTOFILE = ROOT / "bentofile.yaml"

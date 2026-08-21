@@ -28,7 +28,7 @@ from typing import Any, cast
 import pandas as pd
 from prefect import flow
 
-from src.constants import BRONZE_MATCHES_TABLE, ROOT, WORK_POOL_NAME
+from src.constants import BRONZE_MATCHES_TABLE, ROOT, WORK_POOL_NAME, load_env
 from src.db.client import connection, execute_df, first_row_dict
 from src.db.ingest import (
     LEVEL_MAP,
@@ -47,7 +47,6 @@ from src.features.columns import (
     CANONICAL_SURFACES,
 )
 from src.flows import rankings
-from src.utils.config import load_env
 
 MATCHES_DEPLOYMENT_NAME = "matches"
 MATCHES_CRON = "30 22 * * 1"
