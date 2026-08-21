@@ -128,6 +128,12 @@ CALIBRATION_HASH_TAG = "calibration_hash"
 CALIBRATION_STATE = DATA_PROCESSED / CALIBRATION_ARTIFACT
 PLOTS = ARTIFACTS / "plots"
 
+# Champion reference curve points (ROC/PR/calibration) frozen on promotion so
+# later evaluations overlay the incumbent without loading the champion artifact.
+CHAMPION_CURVE_ARTIFACT = "champion_curves.json"
+CHAMPION_CURVE_URI_TAG = "champion_curve_uri"
+CHAMPION_CURVE_HASH_TAG = "champion_curve_hash"
+
 
 def build_lineage_tags(
     base_pins: dict[str, dict[str, str]], aux_pins: dict[str, str]
