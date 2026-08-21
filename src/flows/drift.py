@@ -70,7 +70,7 @@ from src.serving.service import (
     Surface,
     TournamentLevel,
 )
-from src.utils import load_env, suppress_insecure_tls_warning
+from src.utils.config import load_env, suppress_insecure_tls_warning
 
 LOCK_FILE = ARTIFACTS / ".check_drift.lock"
 EXPERIMENT_NAME = "drift-monitor"

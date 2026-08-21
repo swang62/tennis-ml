@@ -47,7 +47,7 @@ from src.features.columns import (
     CANONICAL_SURFACES,
 )
 from src.flows import rankings
-from src.utils import load_env
+from src.utils.config import load_env
 
 MATCHES_DEPLOYMENT_NAME = "matches"
 MATCHES_CRON = "30 22 * * 1"
@@ -311,7 +311,8 @@ def extract_matches_from_results(html: str, tournament_id: str, year: int) -> li
     One row per distinct ``msXXX`` stats link, bound to the card that carries it
     (the ``.match-footer``/``.match-cta`` block of that card, never paired with
     links from other cards): ``match_id`` (msXXX), ``round`` (bronze vocabulary),
-    ``player1_id``/``player2_id``/``player1_name``/``player2_name`` from the two
+    ``player1_id``/``player2_id`` (uppercased) plus their ``player1_slug``/
+    ``player2_slug`` and ``player1_name``/``player2_name`` from the two
     ``.player-info`` overview links, ``winner_id`` (the player-info holding the
     winner checkmark), ``match_date`` from the enclosing ``.tournament-day``
     header, and ``score`` when the set cells align reliably (else None).
@@ -366,7 +367,9 @@ def extract_matches_from_results(html: str, tournament_id: str, year: int) -> li
                 "match_id": stats_link.group(3),
                 "round": _normalize_round(round_match.group(1)) if round_match else None,
                 "player1_id": player1.group(2).upper() if player1 else None,
+                "player1_slug": player1.group(1) if player1 else None,
                 "player2_id": player2.group(2).upper() if player2 else None,
+                "player2_slug": player2.group(1) if player2 else None,
                 "player1_name": player1.group(3).strip() if player1 else None,
                 "player2_name": player2.group(3).strip() if player2 else None,
                 "winner_id": (
@@ -1797,6 +1800,42 @@ def _process_tournament(
             f"Tournament {tournament_id}: discovered=0 fetched=0 inserted=0 updated=0 noop=0 skipped=0"
         )
         return result
+
+    # The flow always passes the live maps; None callers (direct/fixture use)
+    # fall back to the reference tables so discovery never crashes, refreshing
+    # the local maps instead of the caller's.
+    if canonical is None:
+        canonical = canonical_players()
+    if profiles is None:
+        profiles = load_player_metadata()
+
+    # All players appearing on the tournament page, deduplicated by id, so each
+    # DB-missing player is discovered once on the run's shared page. Successful
+    # discoveries refresh canonical/rank_map/profiles, making them resolvable
+    # this run; failures become per-match unresolved reasons via resolve_player_id.
+    page_candidates: dict[str, dict[str, Any]] = {}
+    for match in matches:
+        for key in ("player1", "player2"):
+            pid = str(match.get(f"{key}_id") or "").upper()
+            name = str(match.get(f"{key}_name") or "")
+            slug = str(match.get(f"{key}_slug") or "")
+            if pid and pid not in page_candidates:
+                page_candidates[pid] = {"id": pid, "slug": slug, "player": name}
+    discovered = rankings.discover_players(
+        page,
+        list(page_candidates.values()),
+        canonical=canonical,
+        rank_map=rank_map,
+        profiles=profiles,
+    )
+    print(
+        f"Tournament {tournament_id}: profile discovery "
+        f"known={discovered['known']} discovered={discovered['discovered']} "
+        f"failed={len(discovered['failed'])}"
+    )
+    if discovered["failed"]:
+        for failed in discovered["failed"]:
+            print(f"  Tournament {tournament_id}: profile discovery failed {failed}")
 
     resolved, unresolved = resolve_discovered_matches(matches, rank_map, canonical, tier)
     for skipped in unresolved:

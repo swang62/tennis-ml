@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 from src.constants import BRONZE_PROFILES_TABLE, GOLD_PROFILES_TABLE
-from src.countries import resolve_ioc, valid_ioc
+from src.utils.countries import resolve_ioc, valid_ioc
 
 # Directory read: bronze metadata (name/IOC) joined to the dbt-derived gold
 # current_rank, with matches_played equal to gold.player_profiles.match_count

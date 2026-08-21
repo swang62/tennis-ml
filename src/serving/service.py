@@ -44,7 +44,6 @@ from src.constants import (
     STACK_ORDER,
     TOUR_AVERAGES_TABLE,
 )
-from src.countries import resolve_ioc, valid_ioc
 from src.db.client import execute_df, first_row_dict
 from src.evaluate.calibration import apply_temperature
 from src.evaluate.symmetry import antisymmetric_evidence, evidence_to_probability
@@ -54,9 +53,10 @@ from src.features.inference import (
     _to_date,
     build_inference_features_bulk,
 )
-from src.models.similarity import PlayerSimilarity
 from src.serving.directory import PLAYERS_SQL, directory_players
-from src.utils import load_env
+from src.training.similarity import PlayerSimilarity
+from src.utils.config import load_env
+from src.utils.countries import resolve_ioc, valid_ioc
 
 # Canonical champion manifest baked at deploy time (written by deploy.py from
 # the champion's exact lineage tags; packaged via bentofile.yaml).

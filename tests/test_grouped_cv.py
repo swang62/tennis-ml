@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.models.grouped_cv import (
+from src.training.grouped_cv import (
     assert_groups_intact,
     create_fold_assignment,
     fold_assignment_frame,

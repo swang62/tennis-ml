@@ -44,7 +44,7 @@ from src.constants import (
 )
 from src.db.client import CONNECT_TIMEOUT_S
 from src.db.conninfo import dbt_env
-from src.utils import load_env
+from src.utils.config import load_env
 
 DBT_BUILD_CMD = [
     "uv",

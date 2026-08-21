@@ -24,7 +24,7 @@ from src.constants import (
     PARAMS,
 )
 from src.db import training
-from src.utils import ensure_kernel, load_env, suppress_insecure_tls_warning
+from src.utils.config import ensure_kernel, load_env, suppress_insecure_tls_warning
 
 # Training notebooks (00-05), run in order.
 NB_ORDER = [

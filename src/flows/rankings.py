@@ -50,9 +50,22 @@ from src.db.ingest import (
     _copy_df_into,
     _normalize_name_variants,
     canonical_players,
+    load_player_metadata,
     load_ranking_player_map,
 )
-from src.utils import load_env
+from src.utils.config import load_env
+from src.utils.scrape import (
+    PAGE_NAVIGATION_TIMEOUT_MS,
+    PLAYER_OVERVIEW_URL,
+    DiscoverError,
+    _discover_player,
+    _fetch_overview_html,
+    _ioc_from_overview,
+    _jitter,
+    _known_profile_ids,
+    discover_players,
+    parse_player_overview,
+)
 
 RANKINGS_URL = "https://www.atptour.com/en/rankings/singles?rankRange=0-200&dateWeek={date}"
 
@@ -83,8 +96,6 @@ CHALLENGE_RESOLVE_BUDGET_S = 30
 # option is checked exactly once — a missing option means the week was never
 # published, with no further waiting.
 FILTER_VERIFY_BUDGET_S = 15
-# Per-navigation page-load budget for the rankings URL (goto, not row render).
-PAGE_NAVIGATION_TIMEOUT_MS = 60_000
 
 CLOAKBROWSER_PROFILE_DIR = (
     Path.home() / ".local" / "share" / "tennis-prefect-worker" / "cloakbrowser"
@@ -96,7 +107,9 @@ CLOAKBROWSER_PROFILE_DIR = (
 # the current mobile/desktop table variants; the empty <li class="rank"> move
 # indicator inside the player cell never matches the rank regex because it
 # carries no bare digits.
-_PLAYER_LINK_RE = re.compile(r"/en/players/[^/]+/([^/]+)/overview")
+# The slug group is captured so each parsed row can feed profile discovery.
+_SLUG_RE = r"[^/]+"
+_PLAYER_LINK_RE = re.compile(rf"/en/players/({_SLUG_RE})/([^/]+)/overview")
 _RANK_CELL_RE = re.compile(r'class="rank\b[^"]*"[^>]*>\s*(\d+)\s*<', re.S)
 _POINTS_CELL_RE = re.compile(r'class="points\b[^"]*"[^>]*>(.*?)</td>', re.S)
 # First table in the page whose rows carry player links is the rankings table.
@@ -201,11 +214,6 @@ def missing_ranking_mondays(
     return watermark, weeks
 
 
-def _jitter() -> None:
-    """Human-like random pause between navigation steps (bot-detection resistance)."""
-    time.sleep(random.uniform(0.8, 2.5))
-
-
 # ── HTML parsing (fixture-testable, no network) ──────────────────
 
 
@@ -215,11 +223,12 @@ def _cell_text(cell_html: str) -> str:
 
 
 def _parse_row(row_html: str) -> dict[str, Any] | None:
-    """One rankings row -> {rank, points, name, player_id}; None when not a player row."""
+    """One rankings row -> {rank, points, name, player_id, slug}; None when not a player row."""
     link = _PLAYER_LINK_RE.search(row_html)
     if link is None:
         return None
-    player_id = link.group(1).upper()
+    slug = link.group(1)
+    player_id = link.group(2).upper()
     anchor_start = row_html.rfind("<a", 0, link.start())
     text_start = row_html.find(">", anchor_start) + 1
     name = _cell_text(row_html[text_start : row_html.find("</a>", text_start)])
@@ -230,7 +239,13 @@ def _parse_row(row_html: str) -> dict[str, Any] | None:
     points_match = _POINTS_CELL_RE.search(row_html)
     points_text = _cell_text(points_match.group(1)) if points_match else ""
     points = int(points_text.replace(",", "")) if points_text else None
-    return {"rank": rank, "points": points, "name": name, "player_id": player_id}
+    return {
+        "rank": rank,
+        "points": points,
+        "name": name,
+        "player_id": player_id,
+        "slug": slug,
+    }
 
 
 def extract_rankings_from_html(html: str) -> list[dict[str, Any]]:
@@ -453,17 +468,33 @@ def _fetch_week_html(page, url: str, week: date) -> str:
     return html
 
 
-def fetch_and_upsert_week(page, week: date, rank_map: dict[str, str]) -> int | None:
+def fetch_and_upsert_week(
+    page,
+    week: date,
+    rank_map: dict[str, str],
+    *,
+    canonical: dict[str, str] | None = None,
+    profiles: dict[str, dict[str, str]] | None = None,
+) -> int | None:
     """Fetch one weekly ranking page and upsert its mapped rows.
 
     Uses the run's shared browser page (never launches its own — the flow owns
-    the page and closes it in finally). Commits independently
-    (``_copy_df_into`` runs in one transaction). Returns the number of rows
-    written, or ``None`` when the page could not be accessed or parsed
-    (Cloudflare challenge, missing rankings week, markup change) — a signal the
-    caller reads to distinguish "found no data" (a failure) from "found data but
-    nothing new to write" (``0``).
+    the page and closes it in finally). Before the identity-map filter it
+    discovers ATP profiles for ranking players missing from bronze, so a valid
+    new player is ingestible this week; a discovery failure only skips that
+    player's row (via the identity filter, since it never entered the maps).
+    ``canonical``/``profiles`` default to the reference tables, so direct calls
+    without them (e.g. fixtures) still discovery against bronze. Commits
+    independently (``_copy_df_into`` runs in one transaction). Returns the
+    number of rows written, or ``None`` when the page could not be accessed or
+    parsed (Cloudflare challenge, missing rankings week, markup change) — a
+    signal the caller reads to distinguish "found no data" (a failure) from
+    "found data but nothing new to write" (``0``).
     """
+    if canonical is None:
+        canonical = canonical_players()
+    if profiles is None:
+        profiles = load_player_metadata()
     url = RANKINGS_URL.format(date=week.isoformat())
     print(f"Week {week.isoformat()}: fetching {url}")
     try:
@@ -472,6 +503,19 @@ def fetch_and_upsert_week(page, week: date, rank_map: dict[str, str]) -> int | N
     except Exception as exc:
         print(f"Week {week.isoformat()}: skipped (could not load or parse): {exc}")
         return None
+
+    candidates = [
+        {"id": row["player_id"], "slug": row["slug"], "player": row["name"]} for row in rows
+    ]
+    discovered = discover_players(
+        page, candidates, canonical=canonical, rank_map=rank_map, profiles=profiles
+    )
+    print(
+        f"Week {week.isoformat()}: profile discovery "
+        f"known={discovered['known']} discovered={discovered['discovered']} "
+        f"failed={len(discovered['failed'])}"
+    )
+    fail_reasons = {item["id"].upper(): item["reason"] for item in discovered["failed"]}
 
     frame, skipped = translate_rank_rows(rows, rank_map)
     frame = (
@@ -488,10 +532,9 @@ def fetch_and_upsert_week(page, week: date, rank_map: dict[str, str]) -> int | N
             update_cols=["rank", "points"],
         )
     for s in skipped:
-        print(
-            f"  skipped: player_id={s['player_id']} name={s['name']!r} "
-            f"rank={s['rank']} points={s['points']}"
-        )
+        reason = fail_reasons.get(str(s["player_id"]).upper())
+        detail = f"points={s['points']}" if reason is None else f"reason={reason}"
+        print(f"  skipped: player_id={s['player_id']} name={s['name']!r} rank={s['rank']} {detail}")
     print(f"Week {week.isoformat()}: succeeded: {len(frame)} rows stored, {len(skipped)} skipped")
     return len(frame)
 
@@ -545,6 +588,8 @@ def rankings_flow(start_date: date | None = None, end_date: date | None = None):
     )
 
     rank_map = load_ranking_player_map()
+    canonical = canonical_players()
+    profiles = load_player_metadata()
     browser = _launch_browser()
     page = None
     stored = 0
@@ -553,7 +598,13 @@ def rankings_flow(start_date: date | None = None, end_date: date | None = None):
         page = browser.new_page()
         print("Browser session open: navigating one page across all weeks")
         for week in weeks:
-            rows = fetch_and_upsert_week(page, week, rank_map)
+            rows = fetch_and_upsert_week(
+                page,
+                week,
+                rank_map,
+                canonical=canonical,
+                profiles=profiles,
+            )
             if rows is not None:
                 found_data = True
                 stored += rows

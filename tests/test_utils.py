@@ -5,14 +5,14 @@ import warnings
 
 import urllib3
 
-from src.utils import ensure_kernel, load_env, suppress_insecure_tls_warning
+from src.utils.config import ensure_kernel, load_env, suppress_insecure_tls_warning
 
 
 def test_ensure_kernel_registers_repo_local_kernelspec(monkeypatch, tmp_path):
     kernel_dir = tmp_path / "kernels"
-    monkeypatch.setattr("src.utils.KERNEL_DIR", kernel_dir)
+    monkeypatch.setattr("src.utils.config.KERNEL_DIR", kernel_dir)
     monkeypatch.setenv("JUPYTER_PATH", "/existing/path")
-    monkeypatch.setattr("src.utils.IMAGE_NAME", "test-image")
+    monkeypatch.setattr("src.utils.config.IMAGE_NAME", "test-image")
 
     name = ensure_kernel()
 
@@ -26,9 +26,9 @@ def test_ensure_kernel_registers_repo_local_kernelspec(monkeypatch, tmp_path):
 
 def test_ensure_kernel_sets_jupyter_path_when_unset(monkeypatch, tmp_path):
     kernel_dir = tmp_path / "kernels"
-    monkeypatch.setattr("src.utils.KERNEL_DIR", kernel_dir)
+    monkeypatch.setattr("src.utils.config.KERNEL_DIR", kernel_dir)
     monkeypatch.delenv("JUPYTER_PATH", raising=False)
-    monkeypatch.setattr("src.utils.IMAGE_NAME", "test-image")
+    monkeypatch.setattr("src.utils.config.IMAGE_NAME", "test-image")
 
     ensure_kernel()
 

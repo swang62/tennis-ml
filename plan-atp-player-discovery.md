@@ -23,7 +23,7 @@ When either ATP scrape encounters a player ID missing from `bronze.player_profil
 
 ## Tasks
 
-### [ ] Task 1: Add validated append-only player persistence
+### [x] Task 1: Add validated append-only player persistence
 
 - **Description**: In `src/db/ingest.py`, add the small persistence seam for newly discovered ATP identities. It must validate the candidate against the existing ATP profile-column contract and IOC normalizer; reject an ID already associated with conflicting canonical/profile or map data; append a deduplicated full canonical row to `data/ATP_player_database.csv`; append the self-mapping `ranking_player_id`, ATP display name, and canonical `player_id` to `data/ranking_player_map.csv`; then reuse `load_atp_profiles(..., player_ids={...}, force=False)` to insert only the new DB profile. Validate every affected file and candidate before any append.
 - **Files**: `src/db/ingest.py`, `data/ATP_player_database.csv`, `data/ranking_player_map.csv`, `tests/test_ingest.py`
@@ -34,7 +34,7 @@ When either ATP scrape encounters a player ID missing from `bronze.player_profil
   - A prior partial append can be retried safely and reconciles the missing idempotent step without duplicate rows.
 - **Guardrails**: Do not use name matching as the write key; do not call the enrichment path; do not use `force=True`; do not rewrite the CSVs or edit old rows.
 
-### [ ] Task 2: Implement the shared ATP-profile discovery helper
+### [x] Task 2: Implement the shared ATP-profile discovery helper
 
 - **Description**: Extend the shared `src/flows/rankings.py` identity layer with one helper used by both flows. Given a run's existing browser page and unique candidate `{ATP ID, slug, displayed name}` values, query `bronze.player_profiles` once for known IDs, process only missing players, navigate the same persistent page to `https://www.atptour.com/en/players/{slug}/{id}/overview`, parse its identity fields, require ID/name/IOC, and call Task 1's persistence seam. Update the in-memory canonical player map, ranking map, and profile metadata map for each success. Batch/deduplicate candidates within the run and return successes plus structured failure reasons; a failed profile must not abort the scrape.
 - **Files**: `src/flows/rankings.py`, `src/db/ingest.py`, `tests/test_scrape_flow.py`
@@ -45,7 +45,7 @@ When either ATP scrape encounters a player ID missing from `bronze.player_profil
   - Successful discoveries immediately resolve using the refreshed in-memory maps; existing database players never cause a profile-page fetch or write.
 - **Guardrails**: Preserve the existing headed persistent page and jitter discipline; do not add caching infrastructure or a separate web-search client; do not weaken the reviewed-map validation for pre-existing identities.
 
-### [ ] Task 3: Wire rankings discovery before ranking translation
+### [x] Task 3: Wire rankings discovery before ranking translation
 
 - **Description**: Preserve the ATP profile slug alongside each parsed rankings row in `src/flows/rankings.py`. Before `translate_rank_rows` filters against the identity map, invoke the shared helper for the parsed page's candidates. Feed the updated map into the existing translation/upsert path, and emit concise success/failure counts plus player-specific skip reasons.
 - **Files**: `src/flows/rankings.py`, `tests/test_scrape_flow.py`
@@ -55,7 +55,7 @@ When either ATP scrape encounters a player ID missing from `bronze.player_profil
   - A failed discovery skips only that player’s ranking row while the rest of the week is stored.
 - **Guardrails**: Do not change watermark behavior, weekly scheduling, or the current retry semantics for whole unavailable ranking pages.
 
-### [ ] Task 4: Wire matches discovery before match identity resolution
+### [x] Task 4: Wire matches discovery before match identity resolution
 
 - **Description**: Preserve each player’s ATP profile slug when `extract_matches_from_results` builds discovery rows in `src/flows/matches.py`. Before `resolve_discovered_matches` performs canonical resolution, invoke the same shared helper for all players from the tournament page, then resolve against refreshed maps. Propagate discovery failures into the existing per-match unresolved reason/reporting path so a match with either unresolved player is skipped before Hawkeye fetch and bronze/CSV writes.
 - **Files**: `src/flows/matches.py`, `src/flows/rankings.py`, `tests/test_scrape_flow.py`

@@ -8,6 +8,7 @@ from datetime import date
 import pytest
 
 import src.flows.rankings as scrape
+import src.utils.scrape as scrape_mod
 
 
 class _FrozenToday(date):
@@ -384,8 +385,20 @@ _MEGA_TABLE_HTML = """<table class="mega-table"><tbody>
 def test_extract_rankings_parses_table():
     rows = scrape.extract_rankings_from_html(_MEGA_TABLE_HTML)
     assert len(rows) == 2
-    assert rows[0] == {"rank": 1, "points": 12030, "name": "J. Sinner", "player_id": "S0AG"}
-    assert rows[1] == {"rank": 2, "points": 1000, "name": "C. Alcaraz", "player_id": "A0E2"}
+    assert rows[0] == {
+        "rank": 1,
+        "points": 12030,
+        "name": "J. Sinner",
+        "player_id": "S0AG",
+        "slug": "jannik-sinner",
+    }
+    assert rows[1] == {
+        "rank": 2,
+        "points": 1000,
+        "name": "C. Alcaraz",
+        "player_id": "A0E2",
+        "slug": "carlos-alcaraz",
+    }
 
 
 def test_extract_rankings_raises_on_challenge_page():
@@ -446,3 +459,262 @@ def test_backfill_that_cannot_access_the_site_fails():
 def test_backfill_that_found_data_does_not_fail():
     # Even a week that parsed but wrote 0 rows (already present) found data.
     scrape._fail_if_no_data_found(True, [date(2026, 1, 12)])
+
+
+# ── Player-profile discovery (shared by rankings and matches) ──────
+
+
+def _overview_html(profile_id="XQ999", ioc="ITA", **overrides):
+    body = "background\n"
+    if "ids" not in overrides:
+        body += f'\n<a href="/en/players/test-slug/{profile_id.lower()}/overview">overview</a>'
+    if "dob" not in overrides:
+        body += "\nAge 30 (1996/04/12)"
+    if "weight" not in overrides:
+        body += "\nWeight 185lb (84kg)"
+    if "height" not in overrides:
+        body += "\nHeight (183cm)"
+    if "pro" not in overrides:
+        body += "\nTurned pro 2018"
+    if "plays" not in overrides:
+        body += "\nPlays Right-handed, Two-handed Backhand"
+    if ioc:  # no flag sprite -> IOC resolves to the UNK sentinel
+        body += f'\n<use href="/images/flags.svg#flag-{ioc.lower()}">'
+    for key, value in overrides.items():
+        body += f"\n{key}: {value}"
+    return body
+
+
+class _FakePage:
+    """Shared browser page double: serves canned HTML and records navigation."""
+
+    def __init__(self, html=""):
+        self._html = html
+        self.gotos: list[str] = []
+
+    def goto(self, url, **_kwargs):
+        self.gotos.append(url)
+
+    def content(self):
+        return self._html
+
+
+def test_parse_player_overview_valid_page():
+    """A valid overview yields a full candidate, id uppercased and IOC parsed."""
+    parsed, reason = scrape_mod.parse_player_overview(
+        _overview_html(), "xq999", {"player": "Test Player"}
+    )
+    assert reason == ""
+    assert parsed is not None
+    assert parsed["id"] == "XQ999"
+    assert parsed["player"] == "Test Player"
+    assert parsed["birthdate"] == "19960412"
+    assert parsed["weight"] == "84"
+    assert parsed["height"] == "183"
+    assert parsed["turnedpro"] == "2018"
+    assert parsed["hand"] == "R"
+    assert parsed["backhand"] == "2H"
+    assert parsed["ioc"] == "ITA"
+
+
+def test_parse_player_overview_missing_display_name():
+    parsed, reason = scrape_mod.parse_player_overview(_overview_html(), "XQ999", {"player": ""})
+    assert parsed is None
+    assert "missing display name" in reason
+
+
+def test_parse_player_overview_profile_id_mismatch():
+    """The page must render the player we navigated to: an embedded id that
+    disagrees with the link id is a mismatch, never a discovery."""
+    parsed, reason = scrape_mod.parse_player_overview(
+        _overview_html(ids="\n<a href='/en/players/other/AAAAAA/overview'>x</a>"),
+        "XQ999",
+        {"player": "Test Player"},
+    )
+    assert parsed is None
+    assert "does not match link id XQ999" in reason
+
+
+def test_parse_player_overview_unknown_ioc_becomes_unk():
+    """No flag sprite -> IOC resolves to the UNK sentinel, not a failure."""
+    parsed, reason = scrape_mod.parse_player_overview(
+        _overview_html(ioc=""), "XQ999", {"player": "Test Player"}
+    )
+    assert reason == ""
+    assert parsed is not None
+    assert parsed["ioc"] == "UNK"
+
+
+def test_fetch_overview_html_new_player_uses_slug(monkeypatch):
+    """Discovery navigates the shared page to the candidate's profile URL."""
+    monkeypatch.setattr(scrape_mod, "_jitter", lambda: None)
+    page = _FakePage(_overview_html())
+
+    html, err = scrape_mod._fetch_overview_html(page, "test-slug", "XQ999")
+
+    assert err == ""
+    assert html  # the canned page body
+    assert len(page.gotos) == 1
+    assert "test-slug" in page.gotos[0] and "XQ999" in page.gotos[0]
+
+
+def test_discover_players_existing_player_never_navigates(monkeypatch):
+    """A player already in bronze is skipped: no navigation, no write."""
+    monkeypatch.setattr(scrape_mod, "_known_profile_ids", lambda: {"XQ999"})
+    monkeypatch.setattr(scrape_mod, "persist_atp_player", lambda *_, **__: 0)
+    page = _FakePage(_overview_html())
+
+    result = scrape_mod.discover_players(
+        page,
+        [{"id": "XQ999", "slug": "test-slug", "player": "Test Player"}],
+        canonical={},
+        rank_map={},
+        profiles={},
+    )
+
+    assert result == {"known": 1, "discovered": 0, "failed": []}
+    assert page.gotos == []  # never navigated
+
+
+def test_discover_players_valid_new_player(monkeypatch):
+    """A DB-missing player is fetched once, validated, persisted, and made
+    resolvable for the rest of the run."""
+    monkeypatch.setattr(scrape_mod, "_known_profile_ids", lambda: set())
+    persisted = []
+    monkeypatch.setattr(scrape_mod, "persist_atp_player", lambda *a, **_k: persisted.append(a) or 0)
+    page = _FakePage(_overview_html("XQ999"))
+
+    canonical, rank_map, profiles = {}, {}, {}
+    result = scrape_mod.discover_players(
+        page,
+        [{"id": "XQ999", "slug": "test-slug", "player": "Test Player"}],
+        canonical=canonical,
+        rank_map=rank_map,
+        profiles=profiles,
+    )
+
+    assert result["discovered"] == 1
+    assert result["failed"] == []
+    assert len(page.gotos) == 1  # exactly one overview navigation
+    assert len(persisted) == 1  # exactly one persistence attempt
+    assert persisted[0][0]["id"] == "XQ999"  # uppercased canonical id
+    # The new identity is resolvable for the rest of this run.
+    assert canonical["XQ999"] == "Test Player"
+    assert rank_map["XQ999"] == "XQ999"
+    assert profiles["XQ999"]["ioc"] == "ITA"
+
+
+def test_discover_players_repeated_player_discovered_once(monkeypatch):
+    """A player appearing many times on pages is fetched exactly once."""
+    monkeypatch.setattr(scrape_mod, "_known_profile_ids", lambda: set())
+    persisted = []
+    monkeypatch.setattr(scrape_mod, "persist_atp_player", lambda *a, **_k: persisted.append(a) or 0)
+    page = _FakePage(_overview_html("XQ999"))
+    canonical, rank_map, profiles = {}, {}, {}
+
+    result = scrape_mod.discover_players(
+        page,
+        [
+            {"id": "XQ999", "slug": "test-slug", "player": "Test Player"},
+            {"id": "xq999", "slug": "test-slug", "player": "Test Player"},
+        ],
+        canonical=canonical,
+        rank_map=rank_map,
+        profiles=profiles,
+    )
+
+    assert result["discovered"] == 1
+    assert len(persisted) == 1  # one lookup, one persistence
+    assert len(page.gotos) == 1  # one navigation
+
+
+def test_discover_players_missing_identity_fails_without_write(monkeypatch):
+    """A candidate with no display name fails structurally before any
+    navigation or persistence."""
+    monkeypatch.setattr(scrape_mod, "_known_profile_ids", lambda: set())
+    monkeypatch.setattr(scrape_mod, "persist_atp_player", lambda *_, **__: 0)
+    page = _FakePage(_overview_html("XQ999"))
+    canonical, rank_map, profiles = {}, {}, {}
+
+    result = scrape_mod.discover_players(
+        page,
+        [{"id": "XQ999", "slug": "test-slug", "player": ""}],
+        canonical=canonical,
+        rank_map=rank_map,
+        profiles=profiles,
+    )
+
+    assert result["discovered"] == 0
+    assert result["failed"] == [
+        {"id": "XQ999", "player": "", "reason": "missing id or display name"}
+    ]
+    assert page.gotos == []  # never navigated
+    assert canonical == {} and rank_map == {} and profiles == {}
+
+
+def test_discover_players_failed_discovery_writes_nothing(monkeypatch):
+    """A navigation failure is per-player: nothing is persisted and the failure
+    is reported, not raised."""
+    monkeypatch.setattr(scrape_mod, "_known_profile_ids", lambda: set())
+    monkeypatch.setattr(scrape_mod, "persist_atp_player", lambda *_, **__: 0)
+    monkeypatch.setattr(
+        scrape_mod,
+        "_fetch_overview_html",
+        lambda _page, _slug, _pid: ("", "navigation failed (TimeoutError: timed out)"),
+    )
+    page = _FakePage(_overview_html("XQ999"))
+    canonical, rank_map, profiles = {}, {}, {}
+
+    result = scrape_mod.discover_players(
+        page,
+        [{"id": "XQ999", "slug": "test-slug", "player": "Test Player"}],
+        canonical=canonical,
+        rank_map=rank_map,
+        profiles=profiles,
+    )
+
+    assert result["discovered"] == 0
+    assert len(result["failed"]) == 1
+    assert "navigation failed" in result["failed"][0]["reason"]
+    # Nothing became resolvable and nothing was written.
+    assert canonical == {} and rank_map == {} and profiles == {}
+
+
+def _ranked_row(rank, player_id, slug, name, points):
+    return (
+        f'<tr><td class="rank">{rank}</td>'
+        f'<td class="player"><a href="/en/players/{slug}/{player_id.lower()}/overview">'
+        f"{name}</a></td>"
+        f'<td class="points">{points}</td></tr>'
+    )
+
+
+def test_fetch_and_upsert_week_includes_newly_discovered_player(monkeypatch):
+    """A newly discovered top-200 player is stored as a ranking row the same
+    week: discovery refreshes rank_map so the identity filter keeps it."""
+    week = date(2026, 1, 5)
+    html = (
+        "<table><tbody>"
+        + _ranked_row(1, "S0AG", "jannik-sinner", "J. Sinner", 12030)
+        + _ranked_row(5, "XQ999", "test-slug", "T. Test", 4500)
+        + "</tbody></table>"
+    )
+    monkeypatch.setattr(scrape, "_fetch_week_html", lambda _p, _url, _w: html)
+    monkeypatch.setattr(scrape_mod, "_known_profile_ids", lambda: {"S0AG"})  # XQ999 missing
+    monkeypatch.setattr(scrape_mod, "persist_atp_player", lambda *_, **__: 0)
+    copied = []
+    monkeypatch.setattr(scrape, "_copy_df_into", lambda *a, **k: copied.append((a, k)) or 1)
+    page = _FakePage(_overview_html("XQ999"))
+
+    written = scrape.fetch_and_upsert_week(
+        page,
+        week,
+        {"S0AG": "S0AG"},
+        canonical={"S0AG": "Jannik Sinner"},
+        profiles={},
+    )
+
+    assert written == 2  # the known player plus the newly discovered one
+    frame = copied[0][0][1]  # (table, df, ...) positional args to _copy_df_into
+    assert sorted(frame["player_id"].tolist()) == ["S0AG", "XQ999"]
+    assert frame[frame["player_id"] == "XQ999"]["rank"].iloc[0] == 5

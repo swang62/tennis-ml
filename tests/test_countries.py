@@ -1,6 +1,6 @@
 """Hermetic tests for the static IOC country reference."""
 
-import src.countries as countries_mod
+import src.utils.countries as countries_mod
 
 UNKNOWN = ("", "Country unknown")
 
