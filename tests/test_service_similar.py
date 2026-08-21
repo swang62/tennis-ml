@@ -6,7 +6,7 @@ import pytest
 from starlette.testclient import TestClient
 
 import src.serving.service as service
-from src.models.similarity import PlayerSimilarity
+from src.training.similarity import PlayerSimilarity
 
 
 def _hand_built_finder() -> PlayerSimilarity:

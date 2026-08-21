@@ -1,6 +1,6 @@
 import torch
 
-from src.models.nn import TabularBioMLP
+from src.training.nn import TabularBioMLP
 
 
 def _small_model(**kwargs) -> TabularBioMLP:

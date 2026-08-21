@@ -12,7 +12,7 @@ import numpy as np
 import optuna
 import pytest
 
-from src.models.optuna_pruning import (
+from src.training.optuna_pruning import (
     make_lightgbm_pruning_callback,
     make_xgboost_pruning_callback,
     report_and_maybe_prune,

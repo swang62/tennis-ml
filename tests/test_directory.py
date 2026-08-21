@@ -16,8 +16,8 @@ import pandas as pd
 import pytest
 
 from src.constants import ROOT
-from src.models.similarity import PLAYER_LIFETIME_SQL
 from src.serving.directory import PLAYERS_SQL, directory_players
+from src.training.similarity import PLAYER_LIFETIME_SQL
 
 
 def _directory_df() -> pd.DataFrame:
@@ -225,7 +225,7 @@ def _patch_similarity_staging(monkeypatch, d, tmp_path, profiles, lifetime, simi
     queries = {PLAYERS_SQL: profiles, PLAYER_LIFETIME_SQL: lifetime}
     monkeypatch.setattr("src.db.training.to_dataframe", lambda sql: queries[sql])
     fake = _FakeSimilarity(similarity_players)
-    monkeypatch.setattr("src.models.similarity.PlayerSimilarity", lambda: fake)
+    monkeypatch.setattr("src.training.similarity.PlayerSimilarity", lambda: fake)
     return sim_index, sim_meta, state, fake
 
 
@@ -453,7 +453,7 @@ def _stage_sim_build(
             kwargs["index_path"].write_bytes(b"fresh-index")
             kwargs["metadata_path"].write_text(json.dumps(self.players))
 
-    monkeypatch.setattr("src.models.similarity.PlayerSimilarity", _RecordingSimilarity)
+    monkeypatch.setattr("src.training.similarity.PlayerSimilarity", _RecordingSimilarity)
     return sim_index, sim_meta, state, builds
 
 

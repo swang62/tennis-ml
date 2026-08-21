@@ -53,7 +53,7 @@ from src.constants import (
     load_env,
 )
 from src.features.columns import FEATURE_COLS
-from src.utils import suppress_insecure_tls_warning
+from src.utils.config import suppress_insecure_tls_warning
 
 # --- Deploy-only paths and names ---
 TEMPLATE_BENTOFILE = ROOT / "bentofile.yaml"
@@ -76,8 +76,8 @@ SIMILARITY_STATE_FILE = DATA_PROCESSED / "similarity_artifacts_state.json"
 # exact values are fingerprinted, not the whole file.
 SIMILARITY_SOURCE_FILES = [
     ROOT / "src" / "serving" / "directory.py",
-    ROOT / "src" / "models" / "similarity.py",
-    ROOT / "src" / "countries.py",
+    ROOT / "src" / "training" / "similarity.py",
+    ROOT / "src" / "utils" / "countries.py",
 ]
 
 # Multi-architecture publishing: one Docker Hub manifest list for both platforms.
@@ -127,13 +127,13 @@ SOURCE_FINGERPRINT_FILES = [
     ROOT / "src" / "features" / "tour_averages.py",
     ROOT / "src" / "constants.py",
     # Rest of the runtime source closure shipped in the Bento image.
-    ROOT / "src" / "countries.py",
+    ROOT / "src" / "utils" / "countries.py",
     ROOT / "src" / "db" / "client.py",
     ROOT / "src" / "db" / "migrate_db.py",
     ROOT / "infra" / "postgres" / "schema.sql",
-    ROOT / "src" / "utils.py",
-    ROOT / "src" / "models" / "similarity.py",
-    ROOT / "src" / "models" / "nn.py",
+    ROOT / "src" / "utils" / "config.py",
+    ROOT / "src" / "training" / "similarity.py",
+    ROOT / "src" / "training" / "nn.py",
 ]
 
 # .env is loaded by src.constants before the inline settings are read.
@@ -652,7 +652,7 @@ def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
     import torch
 
     # Needed so torch.load can resolve the class — torch.save records the path.
-    from src.models.nn import TabularBioMLP  # type: ignore[reportUnusedImport]
+    from src.training.nn import TabularBioMLP  # type: ignore[reportUnusedImport]
 
     # The MLP uses standard ONNX ops; suppress unrelated exporter warnings.
     logging.getLogger("torch.onnx").setLevel(logging.ERROR)
@@ -1046,8 +1046,8 @@ def generate_similarity_artifacts() -> Path:
     rebuilds them.
     """
     from src.db import training
-    from src.models.similarity import PLAYER_LIFETIME_SQL, PlayerSimilarity
     from src.serving.directory import PLAYERS_SQL, directory_players
+    from src.training.similarity import PLAYER_LIFETIME_SQL, PlayerSimilarity
 
     profiles = training.to_dataframe(PLAYERS_SQL)
     if profiles.empty:

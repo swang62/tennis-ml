@@ -150,3 +150,97 @@ def test_hawkeye_to_bronze_swaps_seeds_when_winner_is_side_b():
     assert row["draw_size"] == 96
     assert row["best_of"] == 3
     assert row["minutes"] == 84  # MatchTime 01:24:27
+
+
+# ── Discovery → resolution: match-level skip propagation ────────────
+
+
+def test_resolve_discovered_matches_keeps_tier_and_skips_unresolved_player():
+    """A match whose player identity cannot be resolved is skipped with a
+    per-match reason; a resolvable match is kept, canonicalized, and stamped
+    with the bronze tournament tier."""
+    rows = [
+        {
+            "match_id": "ms001",
+            "player1_id": "S0S1",
+            "player1_name": "Ben Shelton",
+            "player2_id": "N0AE",
+            "player2_name": "Brandon Nakashima",
+            "winner_id": "S0S1",
+        },
+        {
+            "match_id": "ms002",
+            "player1_id": "AAAAAA",
+            "player1_name": "Nobody",
+            "player2_id": "S0S1",
+            "player2_name": "Ben Shelton",
+            "winner_id": "S0S1",
+        },
+    ]
+    rank_map = {"S0S1": "S0S1", "N0AE": "N0AE"}
+    canonical = {"S0S1": "Ben Shelton", "N0AE": "Brandon Nakashima"}
+
+    resolved, skipped = matches.resolve_discovered_matches(rows, rank_map, canonical, "masters")
+
+    assert len(resolved) == 1
+    assert resolved[0]["match_id"] == "ms001"
+    assert resolved[0]["player1_id"] == "S0S1"
+    assert resolved[0]["winner_id"] == "S0S1"
+    assert resolved[0]["tournament"] == "masters"
+    assert skipped[0]["match_id"] == "ms002"
+    assert "unresolved player" in skipped[0]["reason"]
+
+
+def test_process_tournament_discovery_failure_writes_nothing(monkeypatch):
+    """When every discovered identity fails, every match is skipped and no
+    Hawkeye fetch (for a match), bronze upsert, or raw CSV append happens."""
+    html = Path("tests/fixtures/montreal_results_2026.html").read_text()
+    monkeypatch.setattr(matches, "_fetch_page", lambda _page, _url, _label: (html, ""))
+    monkeypatch.setattr(rankings, "_jitter", lambda: None)
+    monkeypatch.setattr(matches.time, "sleep", lambda _: None)
+
+    def fail_discovery(_page, candidates, **_kwargs):
+        return {
+            "known": 0,
+            "discovered": 0,
+            "failed": [
+                {"id": c["id"], "player": c["player"], "reason": "navigation failed"}
+                for c in candidates
+            ],
+        }
+
+    monkeypatch.setattr(rankings, "discover_players", fail_discovery)
+
+    upsert_calls = []
+    monkeypatch.setattr(
+        matches, "upsert_bronze_match", lambda *a, **k: upsert_calls.append((a, k)) or {}
+    )
+    append_calls = []
+    monkeypatch.setattr(
+        matches, "append_raw_match_rows", lambda *a, **k: append_calls.append((a, k)) or (0, set())
+    )
+    monkeypatch.setattr(matches, "fetch_hawkeye_batch", lambda resolved, **_kw: list(resolved))
+
+    result = matches._process_tournament(
+        _Page(""),
+        {"tournament_id": "421", "slug": "montreal", "name": "Montreal", "year": "2026"},
+        2026,
+        tier="masters",
+        surface="hard",
+        physical={},
+        known_ids={},
+        claimed={},
+        rank_points={},
+        ages={},
+        rank_map={},
+        canonical={},
+        profiles={},
+    )
+
+    assert result["discovered"] == 94  # every match on the page was parsed
+    assert result["skipped"] == 94  # every one failed resolution
+    assert result["fetched"] == 0
+    assert result["inserted"] == result["updated"] == result["noop"] == 0
+    assert result["csv_appended"] == 0
+    assert upsert_calls == []  # no bronze write
+    assert append_calls == []  # no raw CSV write

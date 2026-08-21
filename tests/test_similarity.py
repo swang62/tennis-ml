@@ -12,8 +12,8 @@ import pandas as pd
 import pytest
 
 from src.db import client, training
-from src.models import similarity
-from src.models.similarity import (
+from src.training import similarity
+from src.training.similarity import (
     BLOCK_WEIGHTS,
     LIFETIME_PLAYSTYLE_COLS,
     REPUTATION_BLOCK_COLS,
