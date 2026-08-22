@@ -528,9 +528,6 @@ def test_predict_from_ids_preserves_caller_order():
     pred.gbdt = _ProbaModel(0.8)
     pred.production = _ProbaModel(0.9)
     pred.nn_session = _ONNXSession()
-    pred.bio_feature_cols = ["bio_0"]
-    pred.bio_by_player = {}
-    pred.bio_array = np.zeros((0, 1), dtype=np.float32)
 
     with (
         patch("src.features.inference.execute_df", side_effect=_fake_execute_df),

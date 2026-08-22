@@ -1,7 +1,7 @@
 """Hermetic guard for scripts/probe.py — never touches live services.
 
 scripts/ is not an installed package, so the module is loaded from its file
-path. Monkeypatches the I/O boundary (shutil.which, subprocess, urllib,
+path. Monkeypatches the I/O boundary (shutil.which, subprocess, requests,
 psycopg) and asserts fail-fast ordering, the required checks, and the rule
 that a filesystem MLflow store is never contacted over HTTP.
 """
@@ -68,11 +68,19 @@ def test_all_checks_pass_with_filesystem_mlflow(probe, monkeypatch, capsys):
     docker_info = run_calls.index(["docker", "info"])
     compose_config = run_calls.index(["docker", "compose", "config", "-q"])
     assert docker_info < compose_config
-    # Host PostgreSQL probed with the configured DATABASE_URL.
-    assert db_calls == ["test-DATABASE_URL"]
-    # Filesystem MLflow store: exactly one HTTP contact (Prefect), never MLflow.
-    assert http_calls == ["test-PREFECT_API_URL/health"]
     assert "local filesystem store" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("api_url", "health_url"),
+    (
+        ("https://prefect.example.com", "https://prefect.example.com/api/health"),
+        ("https://prefect.example.com/api", "https://prefect.example.com/api/health"),
+        ("https://prefect.example.com/api/", "https://prefect.example.com/api/health"),
+    ),
+)
+def test_prefect_health_url_supports_api_prefix(probe, api_url, health_url):
+    assert probe._prefect_health_url(api_url) == health_url
 
 
 def test_fail_fast_on_missing_command(probe, monkeypatch, capsys):

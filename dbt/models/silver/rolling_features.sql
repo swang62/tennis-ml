@@ -5,6 +5,8 @@
 -- (opportunities + 2), so a first-match window = 0.5 and a zero-opportunity
 -- window is never NULL; `matches_10` exposes the backing match count. Surface
 -- rates smooth the same way but stay NULL for unseen surfaces.
+-- dominance is a lifetime (unbounded) Dominance Ratio over the player's full
+-- history, not a 10-match window.
 -- aces_per_svc_game_10, weighted_form_10, streak, and rank averages are NOT
 -- probabilities and are left unsmoothed; the training source never zero-fills.
 -- Per-surface windows carry forward with conditional MAX (no LAST_VALUE IGNORE
@@ -158,6 +160,16 @@ SELECT
     (SUM(s.return_points_won) OVER w10 + 1.0)
         / (SUM(s.return_points_available) OVER w10 + 2.0)
         AS return_points_won_pct_10,
+    -- Lifetime (unbounded) Dominance Ratio: return strength per unit of serve
+    -- weakness, Beta(1,1)-smoothed over the player's full history (w_life).
+    -- Both inputs are smoothed rates below 1, so the denominator is never
+    -- zero; emitted as the raw calculated numeric (no truncation).
+    (
+        (SUM(s.return_points_won) OVER w_life + 1.0)
+            / (SUM(s.return_points_available) OVER w_life + 2.0)
+        / (1.0 - (SUM(s.first_serve_points_won + s.second_serve_points_won) OVER w_life + 1.0)
+                   / (SUM(s.total_serve_points) OVER w_life + 2.0))
+    )::NUMERIC AS dominance,
     (SUM(s.double_faults) OVER w10 + 1.0)
         / (SUM(s.total_serve_points) OVER w10 + 2.0)
         AS df_rate_10,
@@ -206,7 +218,9 @@ LEFT JOIN player_surface_matches psm_hard
    AND psm_hard.player_match_number = s.hard_last_match_number
 WINDOW
     w10 AS (PARTITION BY s.player_id ORDER BY s.snapshot_date, s.match_id
-            ROWS BETWEEN 9 PRECEDING AND CURRENT ROW)
+            ROWS BETWEEN 9 PRECEDING AND CURRENT ROW),
+    w_life AS (PARTITION BY s.player_id ORDER BY s.snapshot_date, s.match_id
+               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
 )
 -- Trim to affected players' full histories; every window above was evaluated
 -- over full history, so returned rows carry full-rebuild values.

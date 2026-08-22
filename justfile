@@ -3,6 +3,17 @@
 # still overrides via env_var_or_default.
 set dotenv-filename := "web/.env"
 
+# Run another recipe and notify on failure; preserves the original exit code.
+notify-failure *args:
+    #!/usr/bin/env bash
+    set +e
+    just {{ args }}
+    status=$?
+    if (( status != 0 )); then
+        osascript -e 'display notification "just {{ args }} failed" with title "tennis-ml" sound name "Glass"'
+    fi
+    exit $status
+
 # Tag for published application images. Shell env wins, then root .env
 # (not covered by the web/.env dotenv above); default dev.
 DOCKER_TAG := env_var_or_default('DOCKER_TAG', shell('grep -q "^DOCKER_TAG=" .env 2>/dev/null && sed -n "s/^DOCKER_TAG=//p" .env | head -n1 || printf dev'))
@@ -53,7 +64,10 @@ etl *args:
     uv run python src/flows/etl.py {{ args }}
 
 # End-to-end pipeline, targets the .env DATABASE_URL currently set
-full-pipeline *args: deps lint test cluster-create probe migrate
+full-pipeline *args:
+    just notify-failure _full-pipeline {{ args }}
+
+_full-pipeline *args: deps lint test cluster-create probe migrate
     just seed {{ args }}
     just etl {{ args }}
     just snapshot

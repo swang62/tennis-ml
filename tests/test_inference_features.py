@@ -19,8 +19,16 @@ import pytest
 
 from src.constants import SILVER_ROLLING_FEATURES
 from src.features import inference
-from src.features.columns import CONTEXT_COLS, DIFF_COLS, FEATURE_COLS, TOUR_AVERAGES_FALLBACK_COLS
-from src.features.inference import build_inference_features, build_inference_features_bulk
+from src.features.columns import (
+    CONTEXT_COLS,
+    DIFF_COLS,
+    FEATURE_COLS,
+    TOUR_AVERAGES_FALLBACK_COLS,
+)
+from src.features.inference import (
+    build_inference_features,
+    build_inference_features_bulk,
+)
 from src.features.tour_averages import load_tour_averages
 
 # All fixture matches are in 2026 (2026-01-04 .. 2026-07-12); a fixed as-of
@@ -43,7 +51,9 @@ def _translate_unnest(sql: str) -> str:
         columns = ", ".join(
             f"UNNEST({arg.upper()}) AS {name.strip()}"
             for arg, name in zip(
-                match.group("args").split(", "), match.group("names").split(","), strict=True
+                match.group("args").split(", "),
+                match.group("names").split(","),
+                strict=True,
             )
         )
         return f"(SELECT {columns}) AS {match.group('alias')}"
@@ -81,6 +91,7 @@ _S0AG = (
     0.55,
     0.63,
     0.42,
+    1.13513,
     0.05,
     0.4,
     3,
@@ -103,6 +114,7 @@ _Z355 = (
     0.5,
     0.55,
     0.4,
+    0.88888,
     0.03,
     0.3,
     1,
@@ -125,6 +137,7 @@ _MINOR = (
     0.5,
     0.58,
     0.42,
+    1.0,
     0.04,
     0.35,
     2,
@@ -148,6 +161,7 @@ _SNAP_COLS = (
     "second_serve_win_pct_10",
     "serve_win_pct_10",
     "return_points_won_pct_10",
+    "dominance",
     "df_rate_10",
     "aces_per_svc_game_10",
     "streak",
@@ -209,7 +223,7 @@ _PARITY_GOLD = (
     "S0AG",
     "Z355",
     "hard",
-    # 18 matchup diffs (S0AG side minus Z355)
+    # 19 matchup diffs (S0AG side minus Z355)
     -2.0,
     6945.0,
     -4.42,
@@ -220,8 +234,9 @@ _PARITY_GOLD = (
     0.1,
     0.05,
     0.08,
-    0.02,  # return_points_won_pct_diff: 0.42 - 0.40
-    0.02,  # df_rate_diff: 0.05 - 0.03
+    0.02,
+    0.24625,
+    0.02,
     0.1,
     0.0,
     -5.0,
@@ -258,7 +273,7 @@ _PARITY_GOLD_BA = (
     "Z355",
     "S0AG",
     "hard",
-    # 18 matchup diffs (Z355 side minus S0AG = negated)
+    # 19 matchup diffs (Z355 side minus S0AG = negated)
     2.0,
     -6945.0,
     4.42,
@@ -270,6 +285,7 @@ _PARITY_GOLD_BA = (
     -0.05,
     -0.08,
     -0.02,
+    -0.24625,  # dominance_diff (lifetime): 0.88888 - 1.13513
     -0.02,
     -0.1,
     0.0,
@@ -354,7 +370,7 @@ def _seed(con: duckdb.DuckDBPyConnection) -> None:
     )
 
     con.executemany(
-        f"INSERT INTO silver.rolling_features VALUES ({', '.join(['?'] * 26)})",
+        f"INSERT INTO silver.rolling_features VALUES ({', '.join(['?'] * 27)})",
         _snap_rows(),
     )
     # The only seeded pair meeting is pm-s6 (S0AG beat Z355 on 2026-07-12),
@@ -394,6 +410,7 @@ def _seed(con: duckdb.DuckDBPyConnection) -> None:
         "second_serve_win_pct_10": 0.5,
         "serve_win_pct_10": 0.58,
         "return_points_won_pct_10": 0.42,
+        "dominance": 1.0,  # pool lifetime dominance mean: TRUNC(0.42 / (1 - 0.58), 5)
         "df_rate_10": 0.04,
         "aces_per_svc_game_10": 0.35,
         "avg_player_rank_10": 15.0,
@@ -588,7 +605,11 @@ def test_materialized_defaults_return_expected_values():
     assert row["win_rate_diff"] == 0
     assert row["ace_rate_diff"] == 0
     # The removed per-side features are absent from the finalized contract.
-    for col in ("player_days_since_last_match", "player_matches_30d", "player_surface_win_rate_10"):
+    for col in (
+        "player_days_since_last_match",
+        "player_matches_30d",
+        "player_surface_win_rate_10",
+    ):
         assert col not in row
     assert row["player_is_left_handed"] == pytest.approx(float(defaults["left_handed_rate"]))
     assert row["player_years_pro"] == pytest.approx(float(defaults["avg_years_pro"]))
@@ -1127,7 +1148,9 @@ def test_h2h_reversed_raw_ids_mirror():
     exposure stays equal, and the full row satisfies the mirror property."""
     a, b = "H2H_J", "H2H_K"
     _insert_prior_meetings(
-        a, b, [("h2h-rv1", "2026-04-10", 1, "hard"), ("h2h-rv2", "2026-05-10", 0, "hard")]
+        a,
+        b,
+        [("h2h-rv1", "2026-04-10", 1, "hard"), ("h2h-rv2", "2026-05-10", 0, "hard")],
     )
     row_ab = build_inference_features(a, b, "hard", as_of_date=date(2026, 6, 1))
     row_ba = build_inference_features(b, a, "hard", as_of_date=date(2026, 6, 1))
@@ -1217,12 +1240,92 @@ def test_new_contract_features_present_and_finite():
     assert "return_points_won_pct_diff" in out.columns
     assert "player_matches_10" in out.columns
     assert "opponent_matches_10" in out.columns
-    for col in ("return_points_won_pct_diff", "player_matches_10", "opponent_matches_10"):
+    for col in (
+        "return_points_won_pct_diff",
+        "player_matches_10",
+        "opponent_matches_10",
+    ):
         assert math.isfinite(row[col]), f"{col} not finite: {row[col]!r}"
     # Latest snapshots at this as-of are S0AG s6 / Z355 z4.
     assert row["return_points_won_pct_diff"] == pytest.approx(0.42 - 0.40)
     assert row["player_matches_10"] == 6
     assert row["opponent_matches_10"] == 4
+
+
+# ── Lifetime dominance (Dominance Ratio, unbounded history) ──
+#
+# SQL materializes lifetime `dominance` = return_points_won_pct /
+# (1 - serve_win_pct) per snapshot at full precision (no truncation); the
+# builder reads the stored value and emits `dominance_diff` (signed, negates
+# on side swap). It never recomputes from the rounded 10-match rates. The
+# pool fallback is the materialized tour-average lifetime mean.
+
+
+def _lifetime_dominance(return_pts_won: float, serve_pts_won: float) -> float:
+    """Reproduce the pipeline's (untruncated) lifetime Dominance Ratio formula."""
+    return return_pts_won / (1.0 - serve_pts_won)
+
+
+def test_dominance_diff_formula_and_finite():
+    """dominance_diff reproduces the lifetime Dominance Ratio, not last-10.
+
+    Both known players carry stored dominance; the diff must equal
+    formula(S0AG) - formula(Z355), and the value must be finite. The test
+    fails if dominance is missing or non-finite (the diff would be NaN).
+    """
+    out = build_inference_features("S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
+    row = out.iloc[0]
+    expected = _lifetime_dominance(0.42, 0.63) - _lifetime_dominance(0.40, 0.55)
+    assert math.isfinite(row["dominance_diff"]), "dominance_diff not finite"
+    assert row["dominance_diff"] == pytest.approx(expected, abs=1e-5)
+    # The stored snapshot value itself reproduces the formula (cross-check the
+    # fixture materialization).
+    snap = execute_df(
+        "SELECT dominance FROM silver.rolling_features "
+        "WHERE player_id = %s AND snapshot_date < %s::date "
+        "ORDER BY player_match_number DESC LIMIT 1",
+        ["S0AG", "2026-09-01"],
+    ).iloc[0]
+    assert float(snap["dominance"]) == pytest.approx(_lifetime_dominance(0.42, 0.63), abs=1e-5)
+
+
+def test_dominance_diff_mirror_negates():
+    """Swapping the ids negates dominance_diff (lifetime, not last-10)."""
+    out_ab = build_inference_features("S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
+    out_ba = build_inference_features("Z355", "S0AG", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
+    assert out_ba.iloc[0]["dominance_diff"] == pytest.approx(-out_ab.iloc[0]["dominance_diff"])
+    assert math.isfinite(out_ba.iloc[0]["dominance_diff"])
+
+
+def test_dominance_cold_start_two_unknown_neutral():
+    """Two unknown players fall back to the pool lifetime dominance mean, so
+    dominance_diff is exactly 0 and finite (cold start)."""
+    out = build_inference_features("ZZZZ", "YYYY", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
+    row = out.iloc[0]
+    assert math.isfinite(row["dominance_diff"])
+    assert row["dominance_diff"] == 0
+    # The pool mean is the documentated lifetime dominance for the pool rates
+    # (0.42 / (1 - 0.58) == 1.0), materialized as the cold-start fallback.
+    pool = cast(dict[str, float], load_tour_averages())
+    assert float(pool["dominance"]) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_dominance_one_known_one_unknown_fallback():
+    """One known player keeps its stored lifetime dominance; the unknown side is
+    pool-imputed. dominance_diff is finite and reflects the fallback (non-zero
+    because the known player's dominance differs from the pool mean)."""
+
+    out = build_inference_features("S0AG", "UNKNOWN_ID", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
+    row = out.iloc[0]
+    assert math.isfinite(row["dominance_diff"])
+    pool = cast(dict[str, float], load_tour_averages())
+    expected = _lifetime_dominance(0.42, 0.63) - float(pool["dominance"])
+    assert row["dominance_diff"] == pytest.approx(expected, abs=1e-5)
+    # Reversed: mirror -> negated.
+    out_rev = build_inference_features(
+        "UNKNOWN_ID", "S0AG", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES
+    )
+    assert out_rev.iloc[0]["dominance_diff"] == pytest.approx(-row["dominance_diff"])
 
 
 # ── surface_form_diff and days_since_last_match_diff ──

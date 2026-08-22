@@ -70,6 +70,8 @@ player_match_enriched AS (
         COALESCE(pr.serve_win_pct_10, fd.serve_win_pct_10) AS serve_win_pct_10,
         COALESCE(pr.return_points_won_pct_10, fd.return_points_won_pct_10)
             AS return_points_won_pct_10,
+        -- Lifetime Dominance Ratio, imputed from the singleton fallback.
+        COALESCE(pr.dominance, fd.dominance) AS dominance,
         COALESCE(pr.df_rate_10, fd.df_rate_10) AS df_rate_10,
         COALESCE(pr.aces_per_svc_game_10, fd.aces_per_svc_game_10)
             AS aces_per_svc_game_10,
@@ -235,6 +237,7 @@ SELECT
     p.serve_win_pct_10 - o.serve_win_pct_10 AS serve_win_pct_diff,
     p.return_points_won_pct_10 - o.return_points_won_pct_10
         AS return_points_won_pct_diff,
+    p.dominance - o.dominance AS dominance_diff,
     p.df_rate_10 - o.df_rate_10 AS df_rate_diff,
     p.aces_per_svc_game_10 - o.aces_per_svc_game_10 AS aces_per_svc_game_diff,
     p.rank_trend_10 - o.rank_trend_10 AS rank_trend_diff,

@@ -28,10 +28,9 @@ from src.constants import (
     BRONZE_PROFILES_TABLE,
     BULK_MAX_ROWS,
     SILVER_ROLLING_FEATURES,
-    TOUR_AVERAGES_TABLE,
 )
 from src.db.client import execute_df, first_row_dict
-from src.features.columns import CANONICAL_SURFACES, FEATURE_COLS, TOUR_AVERAGES_FALLBACK_COLS
+from src.features.columns import CANONICAL_SURFACES, FEATURE_COLS
 from src.features.tour_averages import load_tour_averages
 
 # The four canonical surfaces only; unknown source values are normalized to
@@ -222,6 +221,7 @@ def _side_values(
         "second_serve_win_pct_10": cell("second_serve_win_pct_10", "second_serve_win_pct_10"),
         "serve_win_pct_10": cell("serve_win_pct_10", "serve_win_pct_10"),
         "return_points_won_pct_10": cell("return_points_won_pct_10", "return_points_won_pct_10"),
+        "dominance": cell("dominance", "dominance"),
         "df_rate_10": cell("df_rate_10", "df_rate_10"),
         "aces_per_svc_game_10": cell("aces_per_svc_game_10", "aces_per_svc_game_10"),
         "rank_trend_10": avg_rank_10 - ranking,
@@ -415,6 +415,7 @@ def _assemble_row(
     row["return_points_won_pct_diff"] = (
         player_side["return_points_won_pct_10"] - opponent_side["return_points_won_pct_10"]
     )
+    row["dominance_diff"] = player_side["dominance"] - opponent_side["dominance"]
     row["df_rate_diff"] = player_side["df_rate_10"] - opponent_side["df_rate_10"]
     row["aces_per_svc_game_diff"] = (
         player_side["aces_per_svc_game_10"] - opponent_side["aces_per_svc_game_10"]
@@ -425,7 +426,6 @@ def _assemble_row(
     )
     row["streak_diff"] = player_side["streak"] - opponent_side["streak"]
     row["surface_form_diff"] = player_side["surface_form"] - opponent_side["surface_form"]
-    # Log-transformed directional rest (parity with gold's LN(1 + capped days)).
     row["days_since_last_match_diff"] = math.log(
         1.0 + player_side["days_since_last_match"]
     ) - math.log(1.0 + opponent_side["days_since_last_match"])
@@ -682,7 +682,11 @@ def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame
     for rec in h2h_rows.to_dict("records"):
         if rec["match_id"] is None:  # pair with no prior meetings
             continue
-        key = (rec["req_player_id"], rec["req_opponent_id"], _to_date(rec["as_of_iso"]).isoformat())
+        key = (
+            rec["req_player_id"],
+            rec["req_opponent_id"],
+            _to_date(rec["as_of_iso"]).isoformat(),
+        )
         h2h.setdefault(key, []).append(
             (str(rec["match_id"]), str(rec["winner_id"]), str(rec["surface"]))
         )

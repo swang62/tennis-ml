@@ -13,11 +13,11 @@ import os
 import shutil
 import subprocess
 import sys
-import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
 import psycopg
+import requests
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -58,10 +58,15 @@ def run(cmd: list[str]) -> int:
 
 def http_is_ok(url: str) -> bool:
     try:
-        with urllib.request.urlopen(url, timeout=HTTP_TIMEOUT) as response:
-            return response.status == 200
-    except OSError:
+        response = requests.get(
+            url,
+            headers={"User-Agent": "tennis-ml-probe/1.0"},
+            timeout=HTTP_TIMEOUT,
+        )
+    except requests.RequestException:
         return False
+    else:
+        return response.status_code == 200
 
 
 def _safe_url(url: str) -> str:
@@ -71,6 +76,13 @@ def _safe_url(url: str) -> str:
     if parts.port:
         netloc = f"{netloc}:{parts.port}"
     return f"{parts.scheme}://{netloc}"
+
+
+def _prefect_health_url(url: str) -> str:
+    """Build the health URL whether the API URL includes the `/api` prefix."""
+    base = url.rstrip("/")
+    path = urlparse(base).path.rstrip("/")
+    return f"{base}/health" if path.endswith("/api") else f"{base}/api/health"
 
 
 def db_ok(url: str) -> str | None:
@@ -108,8 +120,11 @@ def _probe() -> None:
     _emit(COLOR_BLUE, "ok: host PostgreSQL reachable")
 
     prefect_url = os.getenv("PREFECT_API_URL") or ""
-    if not http_is_ok(f"{prefect_url}/health"):
-        fail(f"Prefect not ready at {_safe_url(prefect_url)}/health")
+    prefect_health_url = _prefect_health_url(prefect_url)
+    if not http_is_ok(prefect_health_url):
+        fail(
+            f"Prefect not ready at {_safe_url(prefect_health_url)}{urlparse(prefect_health_url).path}"
+        )
     _emit(COLOR_GREEN, "ok: Prefect ready")
 
     mlflow_uri = os.getenv("MLFLOW_TRACKING_URI")
