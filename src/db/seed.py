@@ -125,7 +125,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="enrich the selected players' profiles with Wikipedia bios (default/--all stay offline)",
     )
     parser.add_argument(
-        "--force",
+        "--reset",
         action="store_true",
         help="clear and rebuild bronze.match_events, and overwrite rankings, profiles, bios",
     )
@@ -139,15 +139,15 @@ def main(argv: list[str] | None = None) -> None:
     if cancelled or terminated:
         print(f"Cleared {len(cancelled)} active queries and {len(terminated)} idle transactions")
     if args.all:
-        main_all(enrich=args.enrich, force=args.force)
+        main_all(enrich=args.enrich, reset=args.reset)
     else:
-        main_default(enrich=args.enrich, force=args.force)
+        main_default(enrich=args.enrich, reset=args.reset)
 
 
 def seed_rankings_and_enrichment(
     player_ids: list[str],
     enrich: bool,
-    force: bool,
+    reset: bool,
     match_rows: list[dict[str, Any]] | None = None,
 ) -> None:
     """Import local official rank history for seeded players; enrich when asked.
@@ -160,12 +160,12 @@ def seed_rankings_and_enrichment(
     unresolved identities. ATP_player_database.csv stays the primary IOC source;
     the ranking-source atp_players.csv fallback fills only seeded profiles still
     missing an IOC (NULL/empty/UNK) and never overwrites a verified one.
-    Wikipedia enrichment is gated on --enrich and idempotent unless --force is
+    Wikipedia enrichment is gated on --enrich and idempotent unless --reset is
     given: profiles that already have a summary are skipped, never overwritten.
     """
     if not player_ids:
         return
-    summary = ingest_rankings(player_ids=set(player_ids), force=force, match_rows=match_rows)
+    summary = ingest_rankings(player_ids=set(player_ids), force=reset, match_rows=match_rows)
     coverage = (summary or {}).get("coverage")
     if coverage:
         print(
@@ -175,10 +175,10 @@ def seed_rankings_and_enrichment(
         )
     if enrich:
         # enrich_players emits its own per-player lines and batch summary.
-        enrich_players(player_ids, force=force)
+        enrich_players(player_ids, force=reset)
 
 
-def main_default(enrich: bool = False, force: bool = False) -> None:
+def main_default(enrich: bool = False, reset: bool = False) -> None:
     matches = sorted(
         load_raw_atp_rows(RAW_YEAR),
         key=lambda m: (int(m["tourney_date"]), m["tourney_id"], m["match_num"]),
@@ -197,14 +197,14 @@ def main_default(enrich: bool = False, force: bool = False) -> None:
         f"{distinct_players} players"
     )
 
-    # Idempotent by default (DO NOTHING on an existing match_id); --force
+    # Idempotent by default (DO NOTHING on an existing match_id); --reset
     # clears bronze.match_events first so the corpus inserts into an empty
     # table instead of overwriting selected rows.
-    if force:
+    if reset:
         clear_match_events()
         print(f"Cleared {BRONZE_MATCHES_TABLE} for a clean rebuild")
     inserted = insert_bronze_rows(bronze, overwrite=False)
-    if force:
+    if reset:
         print(f"Inserted {inserted} rows into {BRONZE_MATCHES_TABLE} (clean rebuild)")
     else:
         print(
@@ -213,12 +213,12 @@ def main_default(enrich: bool = False, force: bool = False) -> None:
         )
 
     player_ids = sorted(set(bronze["player1_id"]) | set(bronze["player2_id"]))
-    load_profiles_for(player_ids, "seeded", force=force)
-    seed_rankings_and_enrichment(player_ids, enrich, force, match_rows=matches)
+    load_profiles_for(player_ids, "seeded", force=reset)
+    seed_rankings_and_enrichment(player_ids, enrich, reset, match_rows=matches)
 
 
-def main_all(enrich: bool = False, force: bool = False) -> None:
-    """Seed every ATP CSV; --force clears bronze.match_events first so the full
+def main_all(enrich: bool = False, reset: bool = False) -> None:
+    """Seed every ATP CSV; --reset clears bronze.match_events first so the full
     corpus is rebuilt cleanly."""
     csv_paths = discover_atp_csvs(RAW_DIR)
     if not csv_paths:
@@ -233,11 +233,11 @@ def main_all(enrich: bool = False, force: bool = False) -> None:
         f"{distinct_players} players"
     )
 
-    if force:
+    if reset:
         clear_match_events()
         print(f"Cleared {BRONZE_MATCHES_TABLE} for a clean rebuild")
     inserted = insert_bronze_rows(bronze, overwrite=False)
-    if force:
+    if reset:
         print(f"Inserted {inserted} rows into {BRONZE_MATCHES_TABLE} (clean rebuild)")
     else:
         print(
@@ -246,8 +246,8 @@ def main_all(enrich: bool = False, force: bool = False) -> None:
         )
 
     player_ids = sorted(set(bronze["player1_id"]) | set(bronze["player2_id"]))
-    load_profiles_for(player_ids, "seeded", force=force)
-    seed_rankings_and_enrichment(player_ids, enrich, force, match_rows=matches)
+    load_profiles_for(player_ids, "seeded", force=reset)
+    seed_rankings_and_enrichment(player_ids, enrich, reset, match_rows=matches)
 
 
 if __name__ == "__main__":

@@ -80,6 +80,7 @@ export interface TourAverages {
 }
 
 export type Surface = "clay" | "grass" | "hard" | "carpet";
+export type BestOf = 1 | 3 | 5;
 export type TournamentTier =
   | "grand_slam"
   | "masters"
@@ -290,6 +291,7 @@ export interface PredictInput {
   player_id: string;
   opponent_id: string;
   surface: Surface;
+  best_of: BestOf;
   tournament?: TournamentTier;
   round?: MatchRound;
   as_of_date?: string;

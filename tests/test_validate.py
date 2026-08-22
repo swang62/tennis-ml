@@ -190,3 +190,27 @@ def test_validate_bronze_row_accepts_valid_is_indoor_values():
         row = _valid_row()
         row["is_indoor"] = val
         assert validate_bronze_row(row) == [], f"is_indoor={val} should be valid"
+
+
+def test_validate_bronze_row_accepts_valid_best_of_values():
+    for val in (1, 3, 5):
+        row = _valid_row()
+        row["best_of"] = val
+        assert validate_bronze_row(row) == [], f"best_of={val} should be valid"
+
+
+def test_validate_bronze_row_accepts_null_best_of():
+    """best_of is nullable: legacy/seed rows without it are valid."""
+    row = _valid_row()
+    row["best_of"] = None
+
+    assert validate_bronze_row(row) == []
+
+
+def test_validate_bronze_row_flags_invalid_best_of():
+    row = _valid_row()
+    row["best_of"] = 2
+
+    issues = validate_bronze_row(row)
+
+    assert "best_of must be 1, 3, or 5: 2" in issues

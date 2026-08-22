@@ -15,11 +15,13 @@ from src.features.columns import (
     BRONZE_COLUMNS_INT32,
 )
 
-# Unknown indoor status is valid at ingest.
+# Unknown indoor status is valid at ingest. best_of (best-of-N format) may be
+# NULL for legacy/seed rows whose source did not carry it.
 BRONZE_COLUMNS_NULLABLE: tuple[str, ...] = (
     "is_indoor",
     "tournament_name",
     "score",
+    "best_of",
     "player1_ranking",
     "player2_ranking",
 )
@@ -87,6 +89,10 @@ def validate_bronze_row(row: Mapping[str, Any]) -> list[str]:
         issues.append("player1_id equals player2_id")
     if row.get("winner_id") != row.get("player1_id"):
         issues.append("winner_id must equal player1_id")
+
+    best_of = row.get("best_of")
+    if best_of is not None and best_of not in (1, 3, 5):
+        issues.append(f"best_of must be 1, 3, or 5: {best_of}")
 
     for side in ("player1", "player2"):
         ranking = _as_number(row.get(f"{side}_ranking"))

@@ -197,6 +197,7 @@ def _raw_row(match_num=1, tourney_date="20260105", level="G") -> dict[str, objec
         "round": "QF",
         "surface": "Hard",
         "score": "6-4 7-6(4)",
+        "best_of": 3,
         "indoor": "O",
         "w_ace": 5,
         "w_df": 2,
@@ -393,6 +394,7 @@ def _raw_atp_df() -> pd.DataFrame:
                 "round": "QF",
                 "surface": "Hard",
                 "score": "6-4 7-6(4)",
+                "best_of": 3,
                 "indoor": "O",
                 "w_ace": 1,
                 "w_df": 0,
@@ -565,7 +567,7 @@ def test_insert_bronze_rows_returns_db_affected_count(fake_ingest_conn):
 
 
 def test_clear_match_events_deletes_all_rows_in_one_transaction(fake_ingest_conn):
-    """seed --force wipes bronze.match_events (never the table/schema) inside
+    """seed --reset wipes bronze.match_events (never the table/schema) inside
     the same transaction pattern as the COPY-based inserts."""
     ingest.clear_match_events()
 
@@ -1138,6 +1140,47 @@ def test_atp_rows_to_bronze_indoor_missing_maps_to_nan():
     row["indoor"] = None
     df = ingest.atp_rows_to_bronze([row])
     assert pd.isna(df.iloc[0]["is_indoor"])
+
+
+# ── best_of normalization ────────────────────────────────────────
+
+
+def test_normalize_best_of_accepts_valid_source_values():
+    for raw in (1, 3, 5, "5", "3"):
+        assert ingest.normalize_best_of(raw) in (1, 3, 5)
+        assert isinstance(ingest.normalize_best_of(raw), int)
+
+
+def test_normalize_best_of_falls_back_to_fixed_precedence():
+    # missing / zero / malformed / unsupported all leave the fallback path.
+    assert ingest.normalize_best_of(None, level="masters", score="6-4 7-6 6-3") == 3
+    assert ingest.normalize_best_of(0, level="masters", score="6-4 7-6 6-3") == 3
+    assert ingest.normalize_best_of("abc", level="masters", score="6-4 7-6 6-3") == 3
+    assert ingest.normalize_best_of(2, level="masters", score="6-4 7-6 6-3") == 3
+    # round-robin -> 1, whatever the score.
+    assert ingest.normalize_best_of(None, round_value="rr") == 1
+    # grand_slam -> 5 even with a three-set score.
+    assert ingest.normalize_best_of(None, level="grand_slam", score="6-4 7-6 6-3") == 5
+    # score with >=4 completed sets -> 5.
+    assert ingest.normalize_best_of(None, level="masters", score="6-4 7-6 6-3 7-5") == 5
+    # a three-set non-Grand-Slam score never implies five.
+    assert ingest.normalize_best_of(None, level="masters", score="6-4 7-6 6-3") == 3
+
+
+def test_atp_rows_to_bronze_normalizes_best_of_from_source_and_fallback():
+    src = _raw_row()
+    src["best_of"] = 5
+    assert ingest.atp_rows_to_bronze([src]).iloc[0]["best_of"] == 5
+
+    # grand_slam without a source best_of falls back to 5.
+    gs = _raw_row(level="G")
+    gs.pop("best_of", None)
+    assert ingest.atp_rows_to_bronze([gs]).iloc[0]["best_of"] == 5
+
+    # masters without a source best_of falls back to 3.
+    masters = _raw_row(level="M")
+    masters.pop("best_of", None)
+    assert ingest.atp_rows_to_bronze([masters]).iloc[0]["best_of"] == 3
 
 
 # ── IOC country reference (src/countries) ─────────────────────────

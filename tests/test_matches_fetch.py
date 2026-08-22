@@ -152,6 +152,28 @@ def test_hawkeye_to_bronze_swaps_seeds_when_winner_is_side_b():
     assert row["minutes"] == 84  # MatchTime 01:24:27
 
 
+def test_hawkeye_to_bronze_falls_back_best_of_for_grand_slam():
+    """Fixture ms001 has NumberOfSets=3; with it removed the source is absent and
+    the tournament tier drives the fallback: grand_slam -> 5 (score-independent)."""
+    payload = _hw_payload("hawkeye_ms001")
+    payload["Match"].pop("NumberOfSets", None)
+
+    row = matches.hawkeye_to_bronze(
+        payload,
+        {
+            "match_id": "2026-421-001",
+            "match_date": "2026-08-10",
+            "player1_id": "S0S1",
+            "player2_id": "N0AE",
+            "winner_id": "S0S1",
+            "tournament": "grand_slam",
+            "round": "f",
+        },
+    )
+    assert row is not None
+    assert row["best_of"] == 5  # grand_slam fallback
+
+
 # ── Discovery → resolution: match-level skip propagation ────────────
 
 

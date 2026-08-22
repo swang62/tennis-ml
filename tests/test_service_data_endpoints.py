@@ -15,6 +15,7 @@ from src.constants import STACK_ORDER
 from src.features.columns import FEATURE_COLS, TOUR_AVERAGES_FALLBACK_COLS
 from src.serving.service import (
     DATA_APP,
+    BestOf,
     PredictFromIdsRow,
     Round,
     Surface,
@@ -534,10 +535,20 @@ def test_predict_from_ids_preserves_caller_order():
         patch("src.features.tour_averages.execute_df", side_effect=_fake_execute_df),
     ):
         ab = pred.predict_from_ids(
-            PredictFromIdsRow(player_id="S0AG", opponent_id="Z355", surface=Surface.HARD)
+            PredictFromIdsRow(
+                player_id="S0AG",
+                opponent_id="Z355",
+                surface=Surface.HARD,
+                best_of=BestOf.BO3,
+            )
         )
         ba = pred.predict_from_ids(
-            PredictFromIdsRow(player_id="Z355", opponent_id="S0AG", surface=Surface.HARD)
+            PredictFromIdsRow(
+                player_id="Z355",
+                opponent_id="S0AG",
+                surface=Surface.HARD,
+                best_of=BestOf.BO3,
+            )
         )
 
     assert ab["player_id"] == "S0AG"
@@ -553,10 +564,13 @@ def test_predict_from_ids_schema_derives_context_and_defaults():
         player_id="S0AG",
         opponent_id="Z355",
         surface=Surface.HARD,
+        best_of=BestOf.BO3,
         tournament=TournamentLevel.GRAND_SLAM,
         round=Round.F,
     )
 
+    assert row.best_of == BestOf.BO3
+    assert row.best_of.value == 3
     assert row.tournament == TournamentLevel.GRAND_SLAM
     assert row.round == Round.F
     assert row.is_indoor == 0
@@ -572,6 +586,7 @@ def test_predict_from_ids_schema_rejects_numeric_context_fields():
                 "player_id": "S0AG",
                 "opponent_id": "Z355",
                 "surface": Surface.HARD,
+                "best_of": 3,
                 "tournament_level": 0,
             }
         )
@@ -581,7 +596,78 @@ def test_predict_from_ids_schema_rejects_numeric_context_fields():
                 "player_id": "S0AG",
                 "opponent_id": "Z355",
                 "surface": Surface.HARD,
+                "best_of": 3,
                 "round_encoded": 0,
+            }
+        )
+
+
+# ── best_of contract (required, 1/3/5 only, bool + extras rejected) ─────────
+
+
+def test_best_of_accepts_only_canonical_lengths():
+    from pydantic import ValidationError
+
+    for value in (1, 3, 5):
+        row = PredictFromIdsRow.model_validate(
+            {"player_id": "S0AG", "opponent_id": "Z355", "surface": "hard", "best_of": value}
+        )
+        assert row.best_of == BestOf(value)
+        assert row.best_of.value == value
+
+
+def test_best_of_required_field_rejects_omitted():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        PredictFromIdsRow.model_validate(
+            {"player_id": "S0AG", "opponent_id": "Z355", "surface": "hard"}
+        )
+
+
+@pytest.mark.parametrize("bad", [0, 2, 4, 7, "3", 3.0, None])
+def test_best_of_rejects_unsupported_values(bad):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        PredictFromIdsRow.model_validate(
+            {
+                "player_id": "S0AG",
+                "opponent_id": "Z355",
+                "surface": "hard",
+                "best_of": bad,
+            }
+        )
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_best_of_rejects_bool(flag):
+    from pydantic import ValidationError
+
+    # bool is a subclass of int, but it is never a best_of length; reject it
+    # explicitly so True/False cannot slip through as 1/0.
+    with pytest.raises(ValidationError):
+        PredictFromIdsRow.model_validate(
+            {
+                "player_id": "S0AG",
+                "opponent_id": "Z355",
+                "surface": "hard",
+                "best_of": flag,
+            }
+        )
+
+
+def test_best_of_rejects_extra_fields():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        PredictFromIdsRow.model_validate(
+            {
+                "player_id": "S0AG",
+                "opponent_id": "Z355",
+                "surface": "hard",
+                "best_of": 3,
+                "tournament_level": 0,
             }
         )
 
@@ -629,13 +715,13 @@ def test_surface_accepts_exactly_the_four_canonicals():
     assert {s.value for s in Surface} == {"clay", "grass", "hard", "carpet"}
     for surface in ("clay", "grass", "hard", "carpet"):
         PredictFromIdsRow.model_validate(
-            {"player_id": "S0AG", "opponent_id": "Z355", "surface": surface}
+            {"player_id": "S0AG", "opponent_id": "Z355", "surface": surface, "best_of": 3}
         )
     # The legacy "0" unknown-surface marker is no longer accepted.
     for surface in ("0", 0, None):
         with pytest.raises(ValidationError):
             PredictFromIdsRow.model_validate(
-                {"player_id": "S0AG", "opponent_id": "Z355", "surface": surface}
+                {"player_id": "S0AG", "opponent_id": "Z355", "surface": surface, "best_of": 3}
             )
 
 

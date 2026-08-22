@@ -1,6 +1,7 @@
 """Single source of truth for shared paths, names, and environment settings."""
 
 import os
+from enum import StrEnum
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -192,3 +193,40 @@ SIM_EXPERIENCE_K = 100.0
 # BentoML model-metadata key shared by the deploy flow (write) and the serving
 # manifest (read back as `bases.<name>.framework`).
 FRAMEWORK_KEY = "framework"
+
+
+class LinearFramework(StrEnum):
+    LOGISTIC_REGRESSION = "logistic_regression"
+    GAUSSIAN_NAIVE_BAYES = "gaussian_naive_bayes"
+
+
+class GBDTFramework(StrEnum):
+    XGBOOST = "xgboost"
+    LIGHTGBM = "lightgbm"
+
+
+def normalize_linear_framework(value: str) -> LinearFramework:
+    """Return a canonical linear framework, accepting legacy tags."""
+    aliases = {
+        "lr": LinearFramework.LOGISTIC_REGRESSION,
+        "nb": LinearFramework.GAUSSIAN_NAIVE_BAYES,
+    }
+    try:
+        return LinearFramework(value)
+    except ValueError:
+        try:
+            return aliases[value]
+        except KeyError as exc:
+            raise ValueError(f"unsupported linear framework: {value!r}") from exc
+
+
+def normalize_gbdt_framework(value: str) -> GBDTFramework:
+    """Return a canonical GBDT framework, accepting legacy tags."""
+    aliases = {"xgb": GBDTFramework.XGBOOST, "lgbm": GBDTFramework.LIGHTGBM}
+    try:
+        return GBDTFramework(value)
+    except ValueError:
+        try:
+            return aliases[value]
+        except KeyError as exc:
+            raise ValueError(f"unsupported GBDT framework: {value!r}") from exc

@@ -1,5 +1,6 @@
 """Build the promoted Bento and publish it to Docker Hub for multiple platforms."""
 
+import argparse
 import contextlib
 import hashlib
 import json
@@ -48,7 +49,9 @@ from src.constants import (
     SIM_REPUTATION_WEIGHT,
     SIM_SURFACE_SHRINK_K,
     SIM_SURFACE_WEIGHT,
+    GBDTFramework,
     load_env,
+    normalize_gbdt_framework,
 )
 from src.features.columns import FEATURE_COLS
 
@@ -312,6 +315,8 @@ def _lineage_pins(client: Any, production: Any) -> dict[str, dict[str, str]]:
             framework = _cached_gbdt_framework(
                 pins["gbdt"][LINEAGE_VERSION_KEY]
             ) or _gbdt_framework(pins["gbdt"][LINEAGE_MODEL_URI_KEY])
+        if cls == "gbdt" and framework:
+            framework = normalize_gbdt_framework(framework).value
         if framework:
             pins[cls][FRAMEWORK_KEY] = framework
     return pins
@@ -364,7 +369,7 @@ def _write_model_info(
     return MODEL_INFO_FILE
 
 
-def _download_aux_artifacts(client: Any, tags: dict[str, str]) -> float:
+def _download_aux_artifacts(client: Any, tags: dict[str, str], no_cache: bool = False) -> float:
     """Download the champion's lineage-pinned artifacts into DEPLOY_ARTIFACTS.
 
     Returns the resolved calibration temperature (pinned value for a tagged
@@ -374,11 +379,12 @@ def _download_aux_artifacts(client: Any, tags: dict[str, str]) -> float:
     The fitted linear scaler (base lineage) is pinned on the champion model
     version via URI+hash lineage tags; its content hash is verified before the
     build proceeds. A local copy is reused when its content hash already
-    matches the pin; otherwise the artifact is downloaded from its exact URI
-    (one retry on a transient download failure). The temperature-scaling
-    calibration artifact is materialized separately by _materialize_calibration
-    (optional for legacy champions). Similarity artifacts are rebuilt from the
-    DuckDB snapshot at deploy time and are never champion-pinned.
+    matches the pin and ``no_cache`` is False; otherwise the artifact is
+    downloaded fresh from its exact URI (one retry on a transient download
+    failure). The temperature-scaling calibration artifact is materialized
+    separately by _materialize_calibration (optional for legacy champions).
+    Similarity artifacts are rebuilt from the DuckDB snapshot at deploy time and
+    are never champion-pinned.
     """
     import mlflow
 
@@ -394,7 +400,7 @@ def _download_aux_artifacts(client: Any, tags: dict[str, str]) -> float:
                 "re-promote from a full training run (`just train`)"
             )
         local = DEPLOY_ARTIFACTS / filename
-        if local.exists() and _file_hash(local) == tags[hash_tag]:
+        if not no_cache and local.exists() and _file_hash(local) == tags[hash_tag]:
             if filename == "linear_scaler.pkl":
                 _validate_scaler_file(local)
             print(f"Reusing {filename} (hash ok)")
@@ -424,7 +430,7 @@ def _download_aux_artifacts(client: Any, tags: dict[str, str]) -> float:
         if filename == "linear_scaler.pkl":
             _validate_scaler_file(local)
         print(f"Downloaded {filename} from {tags[uri_tag]} (sha256 ok)")
-    return _materialize_calibration(client, tags)
+    return _materialize_calibration(client, tags, no_cache=no_cache)
 
 
 def _validate_calibration_file(path: Path) -> float:
@@ -447,14 +453,15 @@ def _validate_calibration_file(path: Path) -> float:
     return float(temperature)
 
 
-def _materialize_calibration(client: Any, tags: dict[str, str]) -> float:  # noqa: ARG001 — client kept for caller contract
+def _materialize_calibration(client: Any, tags: dict[str, str], no_cache: bool = False) -> float:  # noqa: ARG001 — client kept for caller contract
     """Resolve and verify the calibration temperature from the champion's tags.
 
     New champions carry CALIBRATION_URI_TAG/CALIBRATION_HASH_TAG lineage tags
     pinning the temperature-scaling artifact; it is downloaded and hash-verified
     like the aux artifacts, and its temperature is returned for embedding in
     model_info.json. Legacy champions carry no tags: return the explicit no-op
-    1.0 — never a failure, never an invented champion pin.
+    1.0 — never a failure, never an invented champion pin. When ``no_cache`` is
+    True a matching local copy is ignored and the artifact is downloaded fresh.
     """
     import mlflow
 
@@ -471,7 +478,7 @@ def _materialize_calibration(client: Any, tags: dict[str, str]) -> float:  # noq
         return 1.0
     local = DEPLOY_ARTIFACTS / CALIBRATION_ARTIFACT
     DEPLOY_ARTIFACTS.mkdir(parents=True, exist_ok=True)
-    if local.exists() and _file_hash(local) == hash_tag:
+    if not no_cache and local.exists() and _file_hash(local) == hash_tag:
         temperature = _validate_calibration_file(local)
         print("Reusing calibration_t.json (hash ok)")
         return temperature
@@ -535,9 +542,12 @@ def _cached_gbdt_framework(version: str) -> str | None:
     if metadata.get(MLFLOW_VERSION_META_KEY) != str(version):
         return None
     framework = metadata.get(FRAMEWORK_KEY)
-    return (
-        framework if isinstance(framework, str) and framework in {"xgboost", "lightgbm"} else None
-    )
+    if not isinstance(framework, str):
+        return None
+    try:
+        return normalize_gbdt_framework(framework).value
+    except ValueError:
+        return None
 
 
 def _is_sklearn_estimator(model: Any) -> bool:
@@ -546,15 +556,16 @@ def _is_sklearn_estimator(model: Any) -> bool:
 
 
 def _materialize_native_model(
-    pin: dict[str, Any], framework: str | None = None
+    pin: dict[str, Any], framework: str | None = None, no_cache: bool = False
 ) -> tuple[Any, str | None]:
     """Save a pinned MLflow version as a native BentoML model.
 
     Linear and the ensemble (sklearn estimators) go through
     bentoml.sklearn.save_model; the GBDT goes through bentoml.xgboost or
     bentoml.lightgbm depending on the detected framework. Returns the saved
-    BentoModel (reused when the pinned version is already materialized) and
-    the GBDT framework ("xgboost"/"lightgbm", else None).
+    BentoModel (reused when the pinned version is already materialized and
+    ``no_cache`` is False) and the GBDT framework ("xgboost"/"lightgbm", else
+    None).
     """
     import bentoml
     import mlflow
@@ -562,16 +573,26 @@ def _materialize_native_model(
     registered_name = pin[LINEAGE_MODEL_NAME_KEY]
     version = str(pin[LINEAGE_VERSION_KEY])
     uri = f"models:/{registered_name}/{version}"
+    if registered_name == BASE_BENTO_NAMES["gbdt"] and framework is not None:
+        framework = normalize_gbdt_framework(framework).value
     try:
         stored = bentoml.models.get(registered_name)
     except Exception:
         stored = None
     metadata = stored.info.metadata if stored is not None else {}
     same_version = metadata.get(MLFLOW_VERSION_META_KEY) == version
-    same_framework = (
-        registered_name != BASE_BENTO_NAMES["gbdt"] or metadata.get(FRAMEWORK_KEY) == framework
-    )
-    if stored is not None and same_version and same_framework:
+    if registered_name == BASE_BENTO_NAMES["gbdt"]:
+        stored_framework = metadata.get(FRAMEWORK_KEY)
+        try:
+            same_framework = (
+                isinstance(stored_framework, str)
+                and normalize_gbdt_framework(stored_framework).value == framework
+            )
+        except ValueError:
+            same_framework = False
+    else:
+        same_framework = True
+    if not no_cache and stored is not None and same_version and same_framework:
         _log("bento", f"reusing {registered_name} ({stored.tag}, MLflow v{version})")
         return stored, framework
 
@@ -583,7 +604,11 @@ def _materialize_native_model(
             MLFLOW_VERSION_META_KEY: version,
             FRAMEWORK_KEY: framework,
         }
-        save = bentoml.xgboost.save_model if framework == "xgboost" else bentoml.lightgbm.save_model
+        save = (
+            bentoml.xgboost.save_model
+            if framework == GBDTFramework.XGBOOST
+            else bentoml.lightgbm.save_model
+        )
         return save(registered_name, raw, metadata=metadata), framework
     if not _is_sklearn_estimator(raw):
         raise RuntimeError(f"{registered_name} is not an sklearn estimator: {type(raw).__name__}")
@@ -597,7 +622,7 @@ def _materialize_native_model(
     )
 
 
-def _mlflow_import_or_reuse(pin: dict[str, Any]) -> Any:
+def _mlflow_import_or_reuse(pin: dict[str, Any], no_cache: bool = False) -> Any:
     """Import or reuse a pinned MLflow version by exact version, never alias."""
     import bentoml
 
@@ -608,7 +633,11 @@ def _mlflow_import_or_reuse(pin: dict[str, Any]) -> Any:
         stored = bentoml.models.get(registered_name)
     except Exception:
         stored = None
-    if stored is not None and stored.info.metadata.get(MLFLOW_VERSION_META_KEY) == version:
+    if (
+        not no_cache
+        and stored is not None
+        and stored.info.metadata.get(MLFLOW_VERSION_META_KEY) == version
+    ):
         _log("bento", f"reusing {registered_name} ({stored.tag}, MLflow v{version})")
         return stored
     stored = bentoml.mlflow.import_model(
@@ -620,7 +649,9 @@ def _mlflow_import_or_reuse(pin: dict[str, Any]) -> Any:
     return stored
 
 
-def _import_or_reuse(pin: dict[str, Any], framework: str | None = None) -> Any:
+def _import_or_reuse(
+    pin: dict[str, Any], framework: str | None = None, no_cache: bool = False
+) -> Any:
     """Materialize a pinned MLflow version as a native BentoML model.
 
     The nn_best pin is the exception: it is exported to ONNX and never becomes
@@ -628,8 +659,8 @@ def _import_or_reuse(pin: dict[str, Any], framework: str | None = None) -> Any:
     _materialize_nn_onnx relies on.
     """
     if pin[LINEAGE_MODEL_NAME_KEY] == BASE_BENTO_NAMES["nn"]:
-        return _mlflow_import_or_reuse(pin)
-    return _materialize_native_model(pin, framework)[0]
+        return _mlflow_import_or_reuse(pin, no_cache=no_cache)
+    return _materialize_native_model(pin, framework, no_cache=no_cache)[0]
 
 
 def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
@@ -659,7 +690,7 @@ def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
     raw = pyfunc.get_raw_model()  # TabularMLP
     raw.eval()
 
-    tab_dim = raw.tab_mlp[0].in_features
+    tab_dim = raw.hparams["tab_dim"]
     dummy_tab = torch.zeros(1, tab_dim, dtype=torch.float32)
 
     NN_ONNX_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -687,9 +718,19 @@ def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
     _log("bento", f"wrote nn_best ONNX: {NN_ONNX_FILE} ({NN_ONNX_FILE.stat().st_size} bytes)")
 
 
-def _reuse_or_materialize_nn_onnx(state: dict[str, Any], nn_pin: dict[str, Any]) -> bool:
-    """Reuse an ONNX export only when it came from the exact pinned NN model."""
-    if NN_ONNX_FILE.exists() and state.get("nn_onnx_model_uri") == nn_pin[LINEAGE_MODEL_URI_KEY]:
+def _reuse_or_materialize_nn_onnx(
+    state: dict[str, Any], nn_pin: dict[str, Any], no_cache: bool = False
+) -> bool:
+    """Reuse an ONNX export only when it came from the exact pinned NN model.
+
+    When ``no_cache`` is True the existing export is regenerated regardless of
+    the stored model URI.
+    """
+    if (
+        not no_cache
+        and NN_ONNX_FILE.exists()
+        and state.get("nn_onnx_model_uri") == nn_pin[LINEAGE_MODEL_URI_KEY]
+    ):
         _log("bento", f"reusing nn_best ONNX for {nn_pin[LINEAGE_MODEL_URI_KEY]}")
         return True
     _materialize_nn_onnx(nn_pin)
@@ -757,17 +798,18 @@ def build_input_fingerprint(client: Any, production: Any) -> str:
     return "\n".join(parts)
 
 
-def _import_models(pins: dict[str, dict[str, Any]]) -> dict[str, str]:
+def _import_models(pins: dict[str, dict[str, Any]], no_cache: bool = False) -> dict[str, str]:
     """Materialize each pinned MLflow version as a native BentoModel; return tags.
 
     Reuse is version-keyed via `_import_or_reuse` — the BentoML store name
     alone cannot gate reuse, so the pinned MLflow version is stored in the
-    saved model's metadata.
+    saved model's metadata. When ``no_cache`` is True each model is
+    rematerialized even if its pinned version is already imported.
     """
     tags: dict[str, str] = {}
     for key, pin in pins.items():
         framework = pin.get(FRAMEWORK_KEY) if key == "gbdt" else None
-        tags[key] = str(_import_or_reuse(pin, framework).tag)
+        tags[key] = str(_import_or_reuse(pin, framework, no_cache=no_cache).tag)
     return tags
 
 
@@ -858,17 +900,24 @@ def _run_teed(
     return subprocess.CompletedProcess(cmd, returncode)
 
 
-def _buildx_build_cmd(*, builder: str, containerfile: Path, context: Path, image: str) -> list[str]:
+def _buildx_build_cmd(
+    *, builder: str, containerfile: Path, context: Path, image: str, no_cache: bool = False
+) -> list[str]:
     """The exact `docker buildx build` invocation publishing the image.
 
     The Buildx image is tagged with DOCKER_TAG (default dev) and pushed via
     `--push` as part of the build, so the image is never separately tagged or
-    pushed afterwards.
+    pushed afterwards. When ``no_cache`` is True the docker layer cache is
+    bypassed with `--no-cache`.
     """
-    return [
+    cmd = [
         "docker",
         "buildx",
         "build",
+    ]
+    if no_cache:
+        cmd.append("--no-cache")
+    cmd += [
         "--builder",
         builder,
         "--file",
@@ -880,6 +929,7 @@ def _buildx_build_cmd(*, builder: str, containerfile: Path, context: Path, image
         "--push",
         str(context),
     ]
+    return cmd
 
 
 def _ensure_buildx_builder() -> str:
@@ -922,11 +972,17 @@ def _write_bento_containerfile(bento: Any) -> Path:
     BENTO_CONTAINERFILE.parent.mkdir(parents=True, exist_ok=True)
     bentoml.container.get_containerfile(str(bento.tag), output_path=str(BENTO_CONTAINERFILE))
     containerfile = BENTO_CONTAINERFILE.read_text()
-    generated_install = (
+    generated_installs = (
+        (
+            "RUN  --mount=type=cache,sharing=locked,target=/root/.cache/ if [ -d ./src ]; "
+            'then INSTALL_ROOT="./src"; '
+            'else INSTALL_ROOT="./env/python"; '
+            "fi; uv --directory $INSTALL_ROOT pip install -r $BENTO_PATH/env/python/requirements.txt"
+        ),
         "RUN  --mount=type=cache,sharing=locked,target=/root/.cache/ if [ -d ./src ]; "
-        'then INSTALL_ROOT="./src"; '
-        'else INSTALL_ROOT="./env/python"; '
-        "fi; uv --directory $INSTALL_ROOT pip install -r $BENTO_PATH/env/python/requirements.txt"
+        '\\\n    then INSTALL_ROOT="./src"; \\\n    '
+        'else INSTALL_ROOT="./env/python"; \\\n    '
+        "fi; uv --directory $INSTALL_ROOT pip install -r $BENTO_PATH/env/python/requirements.txt",
     )
     uv_install = (
         "COPY --chown=bentoml:bentoml pyproject.toml uv.lock ./\n"
@@ -934,7 +990,8 @@ def _write_bento_containerfile(bento: Any) -> Path:
         "uv export --only-group inference --no-dev --no-emit-project --no-hashes "
         "-o /tmp/requirements.txt && uv pip install -r /tmp/requirements.txt"
     )
-    if generated_install not in containerfile:
+    generated_install = next((item for item in generated_installs if item in containerfile), None)
+    if generated_install is None:
         raise RuntimeError("BentoML Containerfile format changed; cannot configure uv export")
     BENTO_CONTAINERFILE.write_text(containerfile.replace(generated_install, uv_install))
     print(f"Wrote Containerfile: {BENTO_CONTAINERFILE}")
@@ -966,8 +1023,13 @@ def _buildx_context(bento: Any):
         yield context
 
 
-def build_bento_image() -> tuple[str, int]:
-    """Build the promoted Bento and publish the multi-arch Docker Hub image."""
+def build_bento_image(no_cache: bool = False) -> tuple[str, int]:
+    """Build the promoted Bento and publish the multi-arch Docker Hub image.
+
+    When ``no_cache`` is True every deploy artifact is refreshed: MLflow
+    artifact downloads (scaler, calibration, aux), the ONNX NN export, the
+    similarity index, the Bento models, and the Docker Buildx layer cache.
+    """
     import bentoml
     from mlflow.tracking.client import MlflowClient
 
@@ -978,14 +1040,14 @@ def build_bento_image() -> tuple[str, int]:
 
     state = _read_state()
     pins = _lineage_pins(client, production)
-    _reuse_or_materialize_nn_onnx(state, pins["nn"])
+    _reuse_or_materialize_nn_onnx(state, pins["nn"], no_cache=no_cache)
     version_tags = client.get_model_version(PRODUCTION_MODEL, production.version).tags
-    calibration_temperature = _download_aux_artifacts(client, version_tags)
-    generate_similarity_artifacts()
+    calibration_temperature = _download_aux_artifacts(client, version_tags, no_cache=no_cache)
+    generate_similarity_artifacts(no_cache=no_cache)
     fingerprint = build_input_fingerprint(client, production)
     _write_model_info(client, production, pins, fingerprint, calibration_temperature)
 
-    tags = _import_models(pins)
+    tags = _import_models(pins, no_cache=no_cache)
     pinned = _write_pinned_bentofile(tags)
     bento = bentoml.bentos.build_bentofile(bentofile=str(pinned), build_ctx=str(ROOT))
     tag = str(bento.tag)
@@ -1007,13 +1069,17 @@ def build_bento_image() -> tuple[str, int]:
     with _buildx_context(bento) as context:
         _run_teed(
             _buildx_build_cmd(
-                builder=builder, containerfile=containerfile, context=context, image=image
+                builder=builder,
+                containerfile=containerfile,
+                context=context,
+                image=image,
+                no_cache=no_cache,
             )
         )
     return image, int(production.version)
 
 
-def generate_similarity_artifacts() -> Path:
+def generate_similarity_artifacts(no_cache: bool = False) -> Path:
     """Build and stage the FAISS similarity assets from the local DuckDB snapshot.
 
     Stages ``data/deploy/player_similarity.index`` and
@@ -1026,8 +1092,8 @@ def generate_similarity_artifacts() -> Path:
     them (player-list SQL/shaping, similarity vector/embedding/PCA/weights,
     country mapping) is unchanged since the last staging and the staged
     similarity artifacts still exist, the artifacts are reused. Any input
-    change, source/config change, missing artifact, or missing/legacy state
-    rebuilds them.
+    change, source/config change, missing artifact, missing/legacy state, or
+    ``no_cache`` rebuilds them.
     """
     from src.db import training
     from src.serving.directory import PLAYERS_SQL, directory_players
@@ -1038,7 +1104,7 @@ def generate_similarity_artifacts() -> Path:
         raise RuntimeError("training snapshot has no player profiles; refresh it before deploy")
     inputs_hash = _similarity_inputs_hash(profiles, training.to_dataframe(PLAYER_LIFETIME_SQL))
     source_hash = _similarity_source_hash()
-    if (
+    if not no_cache and (
         inputs_hash == _read_similarity_inputs_hash()
         and source_hash == _read_similarity_source_hash()
         and all(path.exists() for path in (SIMILARITY_INDEX, SIMILARITY_METADATA))
@@ -1074,13 +1140,14 @@ def generate_similarity_artifacts() -> Path:
     return SIMILARITY_INDEX
 
 
-def deploy_bento() -> None:
+def deploy_bento(no_cache: bool = False) -> None:
     """Authenticate, then build and publish the multi-arch image with Buildx.
 
     Build output streams to the console and to a single deploy_<timestamp>.log
     opened before the build, so a failed build still leaves a log of the
     attempt. Docker login runs before the build because Buildx's `--push` is
-    part of the build command.
+    part of the build command. When ``no_cache`` is True every deploy artifact
+    is refreshed (see ``build_bento_image``).
     """
     LOGS.mkdir(parents=True, exist_ok=True)
     deploy_log = LOGS / f"deploy_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
@@ -1091,7 +1158,7 @@ def deploy_bento() -> None:
             redirect_stderr(_Tee(sys.stderr, log)),
         ):
             _docker_login()
-            _image, production_version = build_bento_image()
+            _image, production_version = build_bento_image(no_cache=no_cache)
     except subprocess.CalledProcessError as exc:
         print(
             f"Deploy step failed ({exc}); image was not published: "
@@ -1128,5 +1195,20 @@ def deploy_bento() -> None:
     print(f"Published {image} to Docker Hub")
 
 
+def parse_deploy_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse deploy CLI flags; ``--no-cache`` forces a full artifact refresh."""
+    parser = argparse.ArgumentParser(
+        description="Build and publish the promoted Bento Docker image."
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        dest="no_cache",
+        help="Force a fresh download of MLflow artifacts, ONNX, similarity "
+        "index, Bento models, and a cache-less Docker buildx build.",
+    )
+    return parser.parse_args(argv)
+
+
 if __name__ == "__main__":
-    deploy_bento()
+    deploy_bento(no_cache=parse_deploy_args().no_cache)

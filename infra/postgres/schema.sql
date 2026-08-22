@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS bronze.match_events (
     tournament                 VARCHAR NOT NULL,
     tournament_name            VARCHAR,
     round                      VARCHAR,
+    best_of                    SMALLINT,
     surface                    VARCHAR NOT NULL,
     score                      VARCHAR,
     is_indoor                  SMALLINT,
@@ -98,7 +99,8 @@ CREATE TABLE IF NOT EXISTS bronze.match_events (
         AND player2_break_points_saved BETWEEN 0 AND 20000 AND player2_break_points_faced BETWEEN 0 AND 20000
     ),
     CONSTRAINT match_events_check_indoor CHECK (is_indoor IS NULL OR is_indoor IN (0, 1)),
-    CONSTRAINT match_events_check_surface CHECK (surface IN ('clay', 'grass', 'hard', 'carpet'))
+    CONSTRAINT match_events_check_surface CHECK (surface IN ('clay', 'grass', 'hard', 'carpet')),
+    CONSTRAINT match_events_check_best_of CHECK (best_of IS NULL OR best_of IN (1, 3, 5))
 );
 
 -- Existing databases need the append watermark too. New and existing rows are
@@ -173,6 +175,15 @@ UPDATE bronze.match_events SET surface = 'hard'
 ALTER TABLE bronze.match_events DROP CONSTRAINT IF EXISTS match_events_check_surface;
 ALTER TABLE bronze.match_events ADD CONSTRAINT match_events_check_surface CHECK (
     surface IN ('clay', 'grass', 'hard', 'carpet')
+);
+
+-- Persist best_of (the best-of-N format: 1, 3, or 5 sets). New inserts carry
+-- it from the source payload; legacy/seed rows may be NULL until re-ingested,
+-- so the column is nullable and the CHECK allows NULL.
+ALTER TABLE bronze.match_events ADD COLUMN IF NOT EXISTS best_of SMALLINT;
+ALTER TABLE bronze.match_events DROP CONSTRAINT IF EXISTS match_events_check_best_of;
+ALTER TABLE bronze.match_events ADD CONSTRAINT match_events_check_best_of CHECK (
+    best_of IS NULL OR best_of IN (1, 3, 5)
 );
 
 -- Secondary indexes for the common gold-layer expansion/rolling query

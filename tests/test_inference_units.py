@@ -101,6 +101,20 @@ def test_invalid_is_indoor_raises(is_indoor):
         build_inference_features("A", "B", "clay", is_indoor=is_indoor)
 
 
+@pytest.mark.parametrize("best_of", [0, 2, 4, 7, True, False, None, "3", 3.0])
+def test_invalid_best_of_raises(best_of):
+    with pytest.raises((ValueError, TypeError)):
+        build_inference_features("A", "B", "clay", best_of=best_of)
+
+
+@pytest.mark.parametrize("best_of", [1, 3, 5])
+def test_valid_best_of_accepted_with_empty_pool(best_of, empty_pool):  # noqa: ARG001
+    """best_of in {1,3,5} builds successfully and is emitted verbatim."""
+    out = build_inference_features("A", "B", "clay", best_of=best_of)
+    assert out.iloc[0]["best_of"] == best_of
+    assert not out.isnull().to_numpy().any()
+
+
 def test_valid_is_indoor_accepted_with_empty_pool(empty_pool):  # noqa: ARG001 — fixture applied for its side effects only
     """is_indoor=0/1 build successfully (no pre-DB ValueError)."""
     out = build_inference_features("A", "B", "clay", is_indoor=0)

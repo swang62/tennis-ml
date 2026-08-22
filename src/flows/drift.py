@@ -124,6 +124,7 @@ _BRONZE_WINDOW_COLUMNS: tuple[str, ...] = (
     "surface",
     "tournament",
     "round",
+    "best_of",
     "COALESCE(is_indoor, 0) AS is_indoor",
     "CAST(player1_first_serves_made AS DOUBLE PRECISION) / NULLIF(player1_total_serve_points, 0) AS player1_first_serve_pct",
     "CAST(player1_first_serve_points_won + player1_second_serve_points_won AS DOUBLE PRECISION) / NULLIF(player1_total_serve_points, 0) AS player1_serve_win_pct",
@@ -430,6 +431,7 @@ def _observation_contexts(window: pd.DataFrame) -> list[dict[str, object]]:
                 "as_of_date": match_date.isoformat(),
                 "tournament": rec["tournament"] or None,
                 "round": None if pd.isna(rec["round"]) else rec["round"],
+                "best_of": int(rec["best_of"]),
                 "is_indoor": int(rec["is_indoor"]),
             }
         )
@@ -473,6 +475,7 @@ def _validated_contexts(contexts: list[dict[str, object]]) -> list[dict[str, str
                 "surface": row.surface.value,
                 "tournament": row.tournament.value if row.tournament else None,
                 "round": row.round.value if row.round else None,
+                "best_of": row.best_of.value,
                 "as_of_date": row.as_of_date.isoformat(),
                 "is_indoor": row.is_indoor,
             }

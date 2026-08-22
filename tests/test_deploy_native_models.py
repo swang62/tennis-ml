@@ -24,7 +24,7 @@ def _pin(name="gbdt_best", version="2"):
     }
 
 
-def _materialize(raw_model, monkeypatch, name="gbdt_best"):
+def _materialize(raw_model, monkeypatch, name="gbdt_best", framework=None):
     """Run _materialize_native_model with faked bentoml/mlflow; return (model, framework, calls)."""
     import sys
 
@@ -48,8 +48,8 @@ def _materialize(raw_model, monkeypatch, name="gbdt_best"):
     monkeypatch.setitem(sys.modules, "bentoml", fake_bentoml)
     monkeypatch.setitem(sys.modules, "mlflow", fake_mlflow)
 
-    model, framework = _deploy()._materialize_native_model(_pin(name))
-    return model, framework, calls
+    model, resolved_framework = _deploy()._materialize_native_model(_pin(name), framework)
+    return model, resolved_framework, calls
 
 
 def test_materialize_native_model_detects_xgboost(monkeypatch):
@@ -66,6 +66,15 @@ def test_materialize_native_model_detects_lightgbm(monkeypatch):
     _model, framework, calls = _materialize(lightgbm.LGBMClassifier(), monkeypatch)
     assert framework == "lightgbm"
     assert calls["name"] == "gbdt_best"
+    assert calls["metadata"]["framework"] == "lightgbm"
+
+
+def test_materialize_native_model_normalizes_lgbm_tag(monkeypatch):
+    _model, framework, calls = _materialize(
+        lightgbm.LGBMClassifier(), monkeypatch, framework="lgbm"
+    )
+
+    assert framework == "lightgbm"
     assert calls["metadata"]["framework"] == "lightgbm"
 
 

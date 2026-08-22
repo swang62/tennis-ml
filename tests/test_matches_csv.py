@@ -153,6 +153,16 @@ def test_raw_match_row_fills_source_metadata_columns():
     assert raw["minutes"] == "87"
 
 
+def test_bronze_row_to_raw_match_writes_normalized_best_of():
+    """The raw CSV carries the normalized best_of verbatim, never the raw source."""
+    row = _bronze_row()
+    row["best_of"] = 5
+
+    raw = matches.bronze_row_to_raw_match(row)
+
+    assert raw["best_of"] == "5"
+
+
 def test_raw_match_row_leaves_unknown_metadata_blank_and_prefers_profile_name():
     row = _bronze_row()
     row["player1_name"] = "Ben Shelton"

@@ -163,6 +163,19 @@ def validate_snapshot(path: Path) -> None:
             raise SnapshotError(
                 f"{GOLD_MATCHES_TABLE} has {bad_row[0]} NULL or non-finite model feature cells"
             )
+
+        # best_of domain contract: the best-of-N format is exactly 1, 3, or 5
+        # (enforced at bronze ingest and imputed to 3 when NULL in gold). Any
+        # other value is a broken contract that would poison the model feature.
+        bad_best_of = con.execute(
+            f"SELECT COUNT(*) FROM {GOLD_MATCHES_TABLE} WHERE best_of NOT IN (1, 3, 5)"
+        ).fetchone()
+        assert bad_best_of is not None
+        if bad_best_of[0]:
+            raise SnapshotError(
+                f"{GOLD_MATCHES_TABLE} has {bad_best_of[0]} rows with best_of outside "
+                "the 1/3/5 domain"
+            )
     finally:
         con.close()
 

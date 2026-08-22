@@ -34,6 +34,7 @@
     "is_grass",
     "is_hard",
     "is_indoor",
+    "best_of",
     "tournament_level",
     "round_encoded",
 ] %}

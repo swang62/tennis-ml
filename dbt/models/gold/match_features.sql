@@ -41,6 +41,10 @@ player_match_enriched AS (
         bron.round,
         pm.surface,
         COALESCE(bron.is_indoor, 0) AS is_indoor,
+        -- Best-of-N format (1/3/5); legacy/seed rows lacking it fall back to 3,
+        -- the most common format and the ingest default for non-Grand-Slam,
+        -- non-round-robin matches.
+        COALESCE(bron.best_of, 3) AS best_of,
         pm.player_id,
         pm.opponent_id,
         pm.match_won,
@@ -273,6 +277,7 @@ SELECT
     CAST(CASE WHEN p.surface = 'grass' THEN 1 ELSE 0 END AS SMALLINT) AS is_grass,
     CAST(CASE WHEN p.surface = 'hard'  THEN 1 ELSE 0 END AS SMALLINT) AS is_hard,
     p.is_indoor,
+    CAST(p.best_of AS SMALLINT) AS best_of,
     CAST(CASE p.tournament
         WHEN 'grand_slam' THEN 4 WHEN 'masters' THEN 3
         WHEN 'atp_500' THEN 2 WHEN 'atp_250' THEN 1 ELSE 0
