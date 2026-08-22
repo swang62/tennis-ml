@@ -90,6 +90,18 @@ BENTO_CONTAINERFILE = DEPLOY_ARTIFACTS / "Containerfile.bento"
 # nn_best is exported to ONNX and included as an artifact, not a BentoModel.
 BASE_BENTO_NAMES = {"linear": "linear_best", "gbdt": "gbdt_best", "nn": "nn_best"}
 
+# Keep native BLAS/OpenMP runtimes single-threaded during deployment. PyTorch,
+# FAISS, LightGBM, and XGBoost share native runtimes, and their thread pools can
+# conflict when loaded in one long-lived process.
+NATIVE_THREAD_ENV = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "BLIS_NUM_THREADS",
+)
+
 # BentoML model-metadata keys; only deploy.py writes them, so they stay local
 # (the shared FRAMEWORK_KEY comes from src.constants for the serving manifest).
 MLFLOW_URI_META_KEY = "mlflow_uri"
@@ -674,6 +686,8 @@ def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
     # Needed so torch.load can resolve the class — torch.save records the path.
     from src.training.nn import TabularMLP  # type: ignore[reportUnusedImport]
 
+    torch.set_num_threads(1)
+
     # The MLP uses standard ONNX ops; suppress unrelated exporter warnings.
     logging.getLogger("torch.onnx").setLevel(logging.ERROR)
     warnings.filterwarnings("ignore", category=UserWarning, module="torch.*")
@@ -692,6 +706,7 @@ def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
 
     tab_dim = raw.hparams["tab_dim"]
     dummy_tab = torch.zeros(1, tab_dim, dtype=torch.float32)
+    batch = torch.export.Dim("batch")
 
     NN_ONNX_FILE.parent.mkdir(parents=True, exist_ok=True)
     with torch.inference_mode():
@@ -702,10 +717,7 @@ def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
             input_names=["tab"],
             output_names=["logit"],
             opset_version=18,
-            dynamic_axes={
-                "tab": {0: "batch"},
-                "logit": {0: "batch"},
-            },
+            dynamic_shapes={"tab": {0: batch}},
             # Single-file artifact: keep weights inline so ONNX Runtime needs
             # no nn_best.onnx.data sidecar in the image.
             external_data=False,
@@ -966,34 +978,13 @@ def _ensure_buildx_builder() -> str:
 
 
 def _write_bento_containerfile(bento: Any) -> Path:
-    """Render BentoML's Containerfile and install the serving uv group."""
+    """Render BentoML's Containerfile from the service image specification."""
     import bentoml
 
     BENTO_CONTAINERFILE.parent.mkdir(parents=True, exist_ok=True)
     bentoml.container.get_containerfile(str(bento.tag), output_path=str(BENTO_CONTAINERFILE))
-    containerfile = BENTO_CONTAINERFILE.read_text()
-    generated_installs = (
-        (
-            "RUN  --mount=type=cache,sharing=locked,target=/root/.cache/ if [ -d ./src ]; "
-            'then INSTALL_ROOT="./src"; '
-            'else INSTALL_ROOT="./env/python"; '
-            "fi; uv --directory $INSTALL_ROOT pip install -r $BENTO_PATH/env/python/requirements.txt"
-        ),
-        "RUN  --mount=type=cache,sharing=locked,target=/root/.cache/ if [ -d ./src ]; "
-        '\\\n    then INSTALL_ROOT="./src"; \\\n    '
-        'else INSTALL_ROOT="./env/python"; \\\n    '
-        "fi; uv --directory $INSTALL_ROOT pip install -r $BENTO_PATH/env/python/requirements.txt",
-    )
-    uv_install = (
-        "COPY --chown=bentoml:bentoml pyproject.toml uv.lock ./\n"
-        "RUN  --mount=type=cache,sharing=locked,target=/root/.cache/ "
-        "uv export --only-group inference --no-dev --no-emit-project --no-hashes "
-        "-o /tmp/requirements.txt && uv pip install -r /tmp/requirements.txt"
-    )
-    generated_install = next((item for item in generated_installs if item in containerfile), None)
-    if generated_install is None:
-        raise RuntimeError("BentoML Containerfile format changed; cannot configure uv export")
-    BENTO_CONTAINERFILE.write_text(containerfile.replace(generated_install, uv_install))
+    # Keep BentoML's generated requirements. The project lock is restricted to
+    # the local development platform and omits Linux wheels from the image.
     print(f"Wrote Containerfile: {BENTO_CONTAINERFILE}")
     return BENTO_CONTAINERFILE
 
@@ -1012,8 +1003,6 @@ def _buildx_context(bento: Any):
     with tempfile.TemporaryDirectory(prefix="bento-buildx-") as tmp:
         context = Path(tmp)
         shutil.copytree(bento.path, context, dirs_exist_ok=True)
-        shutil.copy2(ROOT / "pyproject.toml", context / "pyproject.toml")
-        shutil.copy2(ROOT / "uv.lock", context / "uv.lock")
         models_dir = context / "models"
         models_dir.mkdir(parents=True, exist_ok=True)
         for model in bento.info.all_models:
@@ -1030,6 +1019,9 @@ def build_bento_image(no_cache: bool = False) -> tuple[str, int]:
     artifact downloads (scaler, calibration, aux), the ONNX NN export, the
     similarity index, the Bento models, and the Docker Buildx layer cache.
     """
+    for name in NATIVE_THREAD_ENV:
+        os.environ[name] = "1"
+
     import bentoml
     from mlflow.tracking.client import MlflowClient
 
@@ -1095,9 +1087,13 @@ def generate_similarity_artifacts(no_cache: bool = False) -> Path:
     change, source/config change, missing artifact, missing/legacy state, or
     ``no_cache`` rebuilds them.
     """
+    import faiss
+
     from src.db import training
     from src.serving.directory import PLAYERS_SQL, directory_players
     from src.training.similarity import PLAYER_LIFETIME_SQL, PlayerSimilarity
+
+    faiss.omp_set_num_threads(1)
 
     profiles = training.to_dataframe(PLAYERS_SQL)
     if profiles.empty:

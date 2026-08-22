@@ -441,7 +441,7 @@ def test_write_bento_containerfile_uses_bentoml_generator(monkeypatch, tmp_path)
     assert d._write_bento_containerfile(SimpleNamespace(tag="bento:abc")) == containerfile
     assert calls["tag"] == "bento:abc"
     assert calls["output_path"] == str(containerfile)
-    assert "uv export --only-group inference" in containerfile.read_text()
+    assert containerfile.read_text() == generated
 
 
 def test_buildx_context_copies_bento_and_materializes_models(monkeypatch, tmp_path):
