@@ -217,13 +217,30 @@ def test_missing_weeks_start_only_presence_based(monkeypatch):
     assert weeks == [date(2026, 1, 12), date(2026, 1, 19)]
 
 
+def test_force_backfill_includes_stored_and_missing_weeks(monkeypatch):
+    monkeypatch.setattr(
+        scrape,
+        "stored_ranking_mondays",
+        lambda: {date(2026, 5, 4), date(2026, 5, 18)},
+    )
+    _FrozenToday._today = date(2026, 5, 20)
+    monkeypatch.setattr(scrape, "date", _FrozenToday)
+
+    watermark, weeks = scrape.missing_ranking_mondays.fn(
+        start_date=date(2026, 5, 1), end_date=date(2026, 5, 18), force=True
+    )
+
+    assert watermark is None
+    assert weeks == [date(2026, 5, 4), date(2026, 5, 11), date(2026, 5, 18)]
+
+
 def test_fetch_week_skips_on_failure(monkeypatch, capsys):
     def fail_fetch(*_):
         raise TimeoutError("selector timed out")
 
     monkeypatch.setattr(scrape, "_fetch_week_html", fail_fetch)
 
-    assert scrape.fetch_and_upsert_week(None, date(2026, 1, 5), {}) is None
+    assert scrape.fetch_and_upsert_week(None, date(2026, 1, 5)) is None
     assert "Week 2026-01-05: skipped (could not load or parse)" in capsys.readouterr().out
 
 
@@ -524,17 +541,16 @@ def test_extract_rankings_skips_header_rows():
 # ── Identity translation ─────────────────────────────────────────
 
 
-def test_translate_keeps_mapped_drops_unmapped():
-    rank_map = {"S0AG": "S0AG", "A0E2": "A0E2"}
+def test_translate_keeps_live_atp_ids_without_legacy_map():
     rows = [
         {"player_id": "S0AG", "rank": 1, "points": 1000, "name": "J. Sinner"},
         {"player_id": "ZZ99", "rank": 2, "points": 900, "name": "Nobody"},
         {"player_id": "A0E2", "rank": 3, "points": 800, "name": "C. Alcaraz"},
         {"player_id": "S0AG", "rank": 201, "points": 1, "name": "Dup"},
     ]
-    frame, skipped = scrape.translate_rank_rows(rows, rank_map)
-    assert frame["player_id"].tolist() == ["S0AG", "A0E2"]
-    assert len(skipped) == 2
+    frame, skipped = scrape.translate_rank_rows(rows)
+    assert frame["player_id"].tolist() == ["S0AG", "ZZ99", "A0E2"]
+    assert len(skipped) == 1
 
 
 # ── Backfill failure guard ───────────────────────────────────────
@@ -592,6 +608,9 @@ class _FakePage:
     def goto(self, url, **_kwargs):
         self.gotos.append(url)
 
+    def wait_for_function(self, _script, **_kwargs):
+        pass
+
     def content(self):
         return self._html
 
@@ -612,6 +631,50 @@ def test_parse_player_overview_valid_page():
     assert parsed["hand"] == "R"
     assert parsed["backhand"] == "2H"
     assert parsed["ioc"] == "ITA"
+
+
+def test_parse_player_overview_extracts_rendered_bio_fields():
+    html = """
+    <title>Max Alcala Gurri | Overview | ATP Tour | Tennis</title>
+    <a href="/en/players/max-alcala-gurri/a0ea/overview">x</a>
+    <span>Age</span><span>23</span><span>(2002/09/11)</span>
+    <span>Weight</span><span>149 lbs (68kg)</span>
+    <span>Height</span><span>5'10\" (178cm)</span>
+    <span>Birthplace</span><span>Barcelona</span>
+    <span>Plays</span><span>Right-Handed, Two-Handed Backhand</span>
+    <use href="/images/flags.svg#flag-esp">
+    """
+
+    parsed, reason = scrape_mod.parse_player_overview(html, "A0EA", {"player": "M. Alcala Gurri"})
+
+    assert reason == ""
+    assert parsed == {
+        "id": "A0EA",
+        "player": "Max Alcala Gurri",
+        "atpname": "Max Alcala Gurri",
+        "slug": "",
+        "birthdate": "20020911",
+        "weight": "68",
+        "height": "178",
+        "turnedpro": "",
+        "hand": "R",
+        "backhand": "2H",
+        "birthplace": "Barcelona",
+        "coaches": "",
+        "ioc": "ESP",
+    }
+
+
+def test_parse_player_overview_does_not_take_footer_year_for_missing_turned_pro():
+    parsed, reason = scrape_mod.parse_player_overview(
+        _overview_html(pro="") + "\nTurned pro Follow player\n© Copyright 1994 - 2026 ATP Tour",
+        "XQ999",
+        {"player": "Test Player"},
+    )
+
+    assert reason == ""
+    assert parsed is not None
+    assert parsed["turnedpro"] == ""
 
 
 def test_parse_player_overview_missing_display_name():
@@ -655,6 +718,22 @@ def test_fetch_overview_html_new_player_uses_slug(monkeypatch):
     assert "test-slug" in page.gotos[0] and "XQ999" in page.gotos[0]
 
 
+def test_fetch_overview_waits_for_player_details(monkeypatch):
+    monkeypatch.setattr(scrape_mod, "_jitter", lambda: None)
+    calls = []
+
+    class Page(_FakePage):
+        def wait_for_function(self, script, **kwargs):
+            calls.append((script, kwargs["arg"]))
+
+    html, err = scrape_mod._fetch_overview_html(Page(_overview_html()), "test-slug", "XQ999")
+
+    assert err == ""
+    assert html
+    assert calls[0][1] == "XQ999"
+    assert "Age" in calls[0][0]
+
+
 def test_discover_players_existing_player_never_navigates(monkeypatch):
     """A player already in bronze is skipped: no navigation, no write."""
     monkeypatch.setattr(scrape_mod, "_known_profile_ids", lambda: {"XQ999"})
@@ -665,7 +744,6 @@ def test_discover_players_existing_player_never_navigates(monkeypatch):
         page,
         [{"id": "XQ999", "slug": "test-slug", "player": "Test Player"}],
         canonical={},
-        rank_map={},
         profiles={},
     )
 
@@ -681,12 +759,11 @@ def test_discover_players_valid_new_player(monkeypatch):
     monkeypatch.setattr(scrape_mod, "persist_atp_player", lambda *a, **_k: persisted.append(a) or 0)
     page = _FakePage(_overview_html("XQ999"))
 
-    canonical, rank_map, profiles = {}, {}, {}
+    canonical, profiles = {}, {}
     result = scrape_mod.discover_players(
         page,
         [{"id": "XQ999", "slug": "test-slug", "player": "Test Player"}],
         canonical=canonical,
-        rank_map=rank_map,
         profiles=profiles,
     )
 
@@ -697,7 +774,6 @@ def test_discover_players_valid_new_player(monkeypatch):
     assert persisted[0][0]["id"] == "XQ999"  # uppercased canonical id
     # The new identity is resolvable for the rest of this run.
     assert canonical["XQ999"] == "Test Player"
-    assert rank_map["XQ999"] == "XQ999"
     assert profiles["XQ999"]["ioc"] == "ITA"
 
 
@@ -707,7 +783,7 @@ def test_discover_players_repeated_player_discovered_once(monkeypatch):
     persisted = []
     monkeypatch.setattr(scrape_mod, "persist_atp_player", lambda *a, **_k: persisted.append(a) or 0)
     page = _FakePage(_overview_html("XQ999"))
-    canonical, rank_map, profiles = {}, {}, {}
+    canonical, profiles = {}, {}
 
     result = scrape_mod.discover_players(
         page,
@@ -716,7 +792,6 @@ def test_discover_players_repeated_player_discovered_once(monkeypatch):
             {"id": "xq999", "slug": "test-slug", "player": "Test Player"},
         ],
         canonical=canonical,
-        rank_map=rank_map,
         profiles=profiles,
     )
 
@@ -731,13 +806,12 @@ def test_discover_players_missing_identity_fails_without_write(monkeypatch):
     monkeypatch.setattr(scrape_mod, "_known_profile_ids", lambda: set())
     monkeypatch.setattr(scrape_mod, "persist_atp_player", lambda *_, **__: 0)
     page = _FakePage(_overview_html("XQ999"))
-    canonical, rank_map, profiles = {}, {}, {}
+    canonical, profiles = {}, {}
 
     result = scrape_mod.discover_players(
         page,
         [{"id": "XQ999", "slug": "test-slug", "player": ""}],
         canonical=canonical,
-        rank_map=rank_map,
         profiles=profiles,
     )
 
@@ -746,7 +820,7 @@ def test_discover_players_missing_identity_fails_without_write(monkeypatch):
         {"id": "XQ999", "player": "", "reason": "missing id or display name"}
     ]
     assert page.gotos == []  # never navigated
-    assert canonical == {} and rank_map == {} and profiles == {}
+    assert canonical == {} and profiles == {}
 
 
 def test_discover_players_failed_discovery_writes_nothing(monkeypatch):
@@ -760,13 +834,12 @@ def test_discover_players_failed_discovery_writes_nothing(monkeypatch):
         lambda _page, _slug, _pid: ("", "navigation failed (TimeoutError: timed out)"),
     )
     page = _FakePage(_overview_html("XQ999"))
-    canonical, rank_map, profiles = {}, {}, {}
+    canonical, profiles = {}, {}
 
     result = scrape_mod.discover_players(
         page,
         [{"id": "XQ999", "slug": "test-slug", "player": "Test Player"}],
         canonical=canonical,
-        rank_map=rank_map,
         profiles=profiles,
     )
 
@@ -774,7 +847,7 @@ def test_discover_players_failed_discovery_writes_nothing(monkeypatch):
     assert len(result["failed"]) == 1
     assert "navigation failed" in result["failed"][0]["reason"]
     # Nothing became resolvable and nothing was written.
-    assert canonical == {} and rank_map == {} and profiles == {}
+    assert canonical == {} and profiles == {}
 
 
 def _ranked_row(rank, player_id, slug, name, points):
@@ -806,7 +879,6 @@ def test_fetch_and_upsert_week_includes_newly_discovered_player(monkeypatch):
     written = scrape.fetch_and_upsert_week(
         page,
         week,
-        {"S0AG": "S0AG"},
         canonical={"S0AG": "Jannik Sinner"},
         profiles={},
     )
@@ -815,3 +887,26 @@ def test_fetch_and_upsert_week_includes_newly_discovered_player(monkeypatch):
     frame = copied[0][0][1]  # (table, df, ...) positional args to _copy_df_into
     assert sorted(frame["player_id"].tolist()) == ["S0AG", "XQ999"]
     assert frame[frame["player_id"] == "XQ999"]["rank"].iloc[0] == 5
+
+
+def test_fetch_and_upsert_week_appends_live_atp_ids_to_current_csv(monkeypatch, tmp_path):
+    week = date(2026, 1, 5)
+    html = (
+        "<table><tbody>"
+        + _ranked_row(1, "S0AG", "jannik-sinner", "J. Sinner", 12030)
+        + "</tbody></table>"
+    )
+    current = tmp_path / "atp_rankings_current.csv"
+    current.write_text("ranking_date,rank,player,points\n")
+    monkeypatch.setattr(scrape, "CURRENT_RANKINGS_CSV", current)
+    monkeypatch.setattr(scrape, "_fetch_week_html", lambda _p, _url, _w: html)
+    monkeypatch.setattr(scrape_mod, "_known_profile_ids", lambda: {"S0AG"})
+    monkeypatch.setattr(scrape, "_copy_df_into", lambda *_args, **_kwargs: 1)
+
+    scrape.fetch_and_upsert_week(_FakePage(), week, canonical={}, profiles={})
+    scrape.fetch_and_upsert_week(_FakePage(), week, canonical={}, profiles={})
+
+    assert current.read_text().splitlines() == [
+        "ranking_date,rank,player,points",
+        "20260105,1,S0AG,12030",
+    ]

@@ -1280,7 +1280,7 @@ def _write_map_csv(tmp_path: Path, rows: list[dict[str, str]]) -> Path:
     return csv
 
 
-# ── ATP player persistence (append-only) ─────────────────────────
+# ── ATP player persistence ───────────────────────────────────────
 
 
 def _valid_candidate() -> dict[str, object]:
@@ -1317,14 +1317,11 @@ def _init_persist_files(tmp_path: Path) -> tuple[Path, Path]:
     return profiles, map_csv
 
 
-def test_persist_atp_player_appends_one_row_each_and_inserts(fake_ingest_conn, tmp_path):
-    """A valid unseen identity yields one canonical row, one map row, and one
-    bronze insert (via the idempotent shared loader)."""
-    profiles, map_csv = _init_persist_files(tmp_path)
+def test_persist_atp_player_appends_one_row_and_inserts(fake_ingest_conn, tmp_path):
+    """A valid unseen identity yields one canonical row and bronze insert."""
+    profiles, _ = _init_persist_files(tmp_path)
 
-    assert (
-        ingest.persist_atp_player(_valid_candidate(), profiles_csv=profiles, map_csv=map_csv) == 1
-    )
+    assert ingest.persist_atp_player(_valid_candidate(), profiles_csv=profiles) == 1
 
     canonical = pd.read_csv(profiles)
     assert len(canonical) == 2  # header + one new row, existing untouched
@@ -1332,46 +1329,39 @@ def test_persist_atp_player_appends_one_row_each_and_inserts(fake_ingest_conn, t
     assert new_row["player"] == "Test Player"
     assert new_row["ioc"] == "FRA"  # normalized, uppercased
 
-    ranking_map = pd.read_csv(map_csv)
-    self_row = ranking_map[ranking_map["ranking_player_id"] == "XQ999"].iloc[0]
-    assert self_row["ranking_name"] == "Test Player"
-    assert self_row["player_id"] == "XQ999"  # self-mapping canonical id
-
-    # One bronze profile insert routed through load_atp_profiles (DO NOTHING).
+    # One bronze profile upsert routed through load_atp_profiles.
     insert_sql = next(
         s
         for s, _ in fake_ingest_conn.statements
         if s.startswith(f"INSERT INTO {ingest.BRONZE_PROFILES_TABLE}")
     )
-    assert "ON CONFLICT (player_id) DO NOTHING" in insert_sql
+    assert "ON CONFLICT (player_id) DO UPDATE SET" in insert_sql
     assert len(fake_ingest_conn.copied_rows) == 1
     assert fake_ingest_conn.copied_rows[0][0] == "XQ999"
 
 
-def test_persist_atp_player_repeat_is_noop_and_does_not_mutate(fake_ingest_conn, tmp_path):
-    """A repeat of the same identity writes nothing and leaves existing data
-    byte-for-byte intact (no new rows, no overwrites)."""
-    profiles, map_csv = _init_persist_files(tmp_path)
+def test_persist_atp_player_repeat_updates_existing_id(fake_ingest_conn, tmp_path):
+    """A live ATP row replaces the canonical record and bronze identity by id."""
+    profiles, _ = _init_persist_files(tmp_path)
     candidate = _valid_candidate()
-    first = ingest.persist_atp_player(candidate, profiles_csv=profiles, map_csv=map_csv)
+    first = ingest.persist_atp_player(candidate, profiles_csv=profiles)
     assert first == 1
 
-    canonical = pd.read_csv(profiles)
-    map_df = pd.read_csv(map_csv)
     fake_ingest_conn.copied_rows.clear()
     fake_ingest_conn.statements.clear()
-    fake_ingest_conn.rowcount = 0  # DB skips the existing PK (DO NOTHING)
 
-    assert ingest.persist_atp_player(candidate, profiles_csv=profiles, map_csv=map_csv) == 0
+    changed = dict(candidate, player="Updated Player")
+    assert ingest.persist_atp_player(changed, profiles_csv=profiles) == 1
 
-    assert len(pd.read_csv(profiles)) == len(canonical)  # no duplicate canonical row
-    assert len(pd.read_csv(map_csv)) == len(map_df)  # no duplicate map row
+    canonical = pd.read_csv(profiles)
+    assert len(canonical) == 2
+    assert canonical.loc[canonical["id"] == "XQ999", "player"].item() == "Updated Player"
 
 
 def test_persist_atp_player_rejects_invalid_candidate_before_any_write(tmp_path):
     """Invalid required data or malformed optional typed data is rejected with
     a reason before any dependent row is appended."""
-    profiles, map_csv = _init_persist_files(tmp_path)
+    profiles, _ = _init_persist_files(tmp_path)
 
     for bad, pattern in [
         (dict(_valid_candidate(), id=""), "candidate missing ATP player id"),
@@ -1382,82 +1372,34 @@ def test_persist_atp_player_rejects_invalid_candidate_before_any_write(tmp_path)
         (dict(_valid_candidate(), birthdate="18991231"), "birthdate out of range"),
     ]:
         with pytest.raises(ValueError, match=pattern):
-            ingest.persist_atp_player(bad, profiles_csv=profiles, map_csv=map_csv)
+            ingest.persist_atp_player(bad, profiles_csv=profiles)
 
     # Nothing was written for any rejected candidate.
     assert len(pd.read_csv(profiles)) == 1
-    assert len(pd.read_csv(map_csv)) == 1
 
 
-def test_persist_atp_player_rejects_existing_conflicting_id(tmp_path):
-    """A candidate whose id already exists with different data is rejected and
-    nothing is appended (never overwrites an existing row)."""
-    profiles, map_csv = _init_persist_files(tmp_path)
-    conflicting = dict(_valid_candidate(), id="P001", player="Different Name")
-
-    with pytest.raises(ValueError, match="conflict on"):
-        ingest.persist_atp_player(conflicting, profiles_csv=profiles, map_csv=map_csv)
-
-    assert len(pd.read_csv(profiles)) == 1
-    assert len(pd.read_csv(map_csv)) == 1
-
-
-def test_persist_atp_player_reconciles_prior_partial_append(
+def test_persist_atp_player_existing_id_replaces_canonical_record(
     fake_ingest_conn,
     tmp_path,
 ):
-    """A prior partial append (only the map row written, profile absent) is
-    safely completed on retry without duplicating either row."""
-    del fake_ingest_conn  # fixture patches the DB connection; not referenced directly
+    assert fake_ingest_conn is not None
     profiles, map_csv = _init_persist_files(tmp_path)
-    candidate = _valid_candidate()
-    self_row = {
-        "ranking_player_id": "XQ999",
-        "ranking_name": "Test Player",
-        "player_id": "XQ999",
-    }
-    with open(map_csv, "a") as f:
-        import csv as _csv
+    conflicting = dict(_valid_candidate(), id="P001", player="Different Name")
 
-        _csv.writer(f, quoting=_csv.QUOTE_ALL).writerow(
-            [self_row[c] for c in ingest.RANKING_MAP_COLUMNS]
-        )
-
-    assert ingest.persist_atp_player(candidate, profiles_csv=profiles, map_csv=map_csv) == 1
+    assert ingest.persist_atp_player(conflicting, profiles_csv=profiles) == 1
 
     canonical = pd.read_csv(profiles)
-    map_df = pd.read_csv(map_csv)
-    assert len(canonical) == 2  # profile row now appended
-    assert canonical[canonical["id"] == "XQ999"].iloc[0]["player"] == "Test Player"
-    # The map row is not duplicated despite already being present.
-    assert len(map_df[map_df["ranking_player_id"] == "XQ999"]) == 1
-
-
-def test_persist_atp_player_rejects_map_conflict(tmp_path):
-    """An existing self-map row mapping the id to a different canonical target
-    is rejected before any append; nothing is written."""
-    profiles, map_csv = _init_persist_files(tmp_path)
-    # Map the candidate's ranking id to an unrelated canonical id (not itself).
-    with open(map_csv, "a") as f:
-        import csv as _csv
-
-        _csv.writer(f, quoting=_csv.QUOTE_ALL).writerow(["XQ999", "Test Player", "P001"])
-
-    with pytest.raises(ValueError, match="conflict"):
-        ingest.persist_atp_player(_valid_candidate(), profiles_csv=profiles, map_csv=map_csv)
-
-    assert len(pd.read_csv(profiles)) == 1  # canonical appended untouched
-    assert len(pd.read_csv(map_csv)) == 2  # no duplicate map row
+    assert len(canonical) == 1
+    assert canonical.loc[0, "player"] == "Different Name"
+    assert len(pd.read_csv(map_csv)) == 1
 
 
 def test_persist_atp_player_rejects_missing_column(tmp_path):
-    profiles, map_csv = _init_persist_files(tmp_path)
+    profiles, _ = _init_persist_files(tmp_path)
     profiles.write_text('id,player\r\n"X","Y"\r\n')
 
     with pytest.raises(ValueError, match="missing columns"):
-        ingest.persist_atp_player(_valid_candidate(), profiles_csv=profiles, map_csv=map_csv)
-
-    assert len(pd.read_csv(map_csv)) == 1  # map untouched on structural failure
+        ingest.persist_atp_player(_valid_candidate(), profiles_csv=profiles)
 
 
 def test_canonical_players_loads_id_to_name_reference():
@@ -1769,12 +1711,64 @@ def test_load_ranking_rows_rejects_malformed_rank(tmp_path, rank):
         ingest.load_ranking_rows([csv])
 
 
-@pytest.mark.parametrize("player", ["abc", ""])
+@pytest.mark.parametrize("player", ["abc", "A0!A", ""])
 def test_load_ranking_rows_rejects_malformed_player(tmp_path, player):
     csv = _write_ranking_csv(tmp_path, "atp_rankings_00s.csv", [["20260105", 1, player, "1"]])
 
     with pytest.raises(ValueError, match="player malformed"):
         ingest.load_ranking_rows([csv])
+
+
+def test_ingest_rankings_uses_canonical_atp_id_without_legacy_map(
+    fake_ingest_conn, monkeypatch, tmp_path
+):
+    _write_ranking_csv(tmp_path, "atp_rankings_current.csv", [["20260504", 1, "A0EA", "12050"]])
+    pd.DataFrame(columns=ingest.RANKING_MAP_COLUMNS).to_csv(
+        tmp_path / "ranking_player_map.csv", index=False
+    )
+    _write_players_csv(tmp_path, [])
+    monkeypatch.setattr(ingest, "canonical_players", lambda: {"A0EA": "Max Alcala Gurri"})
+
+    summary = ingest.ingest_rankings(
+        tmp_path,
+        map_csv=tmp_path / "ranking_player_map.csv",
+        players_csv=tmp_path / "atp_players.csv",
+    )
+
+    assert summary["unmapped"] == summary["auto_mapped"] == summary["unresolved"] == 0
+    assert fake_ingest_conn.copied_rows[0][1] == "A0EA"
+
+
+def test_ingest_rankings_mixes_legacy_and_canonical_atp_ids(
+    fake_ingest_conn, monkeypatch, tmp_path
+):
+    _write_ranking_csv(
+        tmp_path,
+        "atp_rankings_current.csv",
+        [["20260504", 1, "207989", "12050"], ["20260504", 2, "A0EA", "12000"]],
+    )
+    _write_map_csv(
+        tmp_path,
+        [{"ranking_player_id": "207989", "ranking_name": "Carlos Alcaraz", "player_id": "A0E2"}],
+    )
+    _write_players_csv(
+        tmp_path,
+        [{"player_id": "207989", "name_first": "Carlos", "name_last": "Alcaraz", "ioc": "ESP"}],
+    )
+    monkeypatch.setattr(
+        ingest,
+        "canonical_players",
+        lambda: {"A0E2": "Carlos Alcaraz", "A0EA": "Max Alcala Gurri"},
+    )
+
+    summary = ingest.ingest_rankings(
+        tmp_path,
+        map_csv=tmp_path / "ranking_player_map.csv",
+        players_csv=tmp_path / "atp_players.csv",
+    )
+
+    assert summary["unmapped"] == summary["auto_mapped"] == summary["unresolved"] == 0
+    assert {row[1] for row in fake_ingest_conn.copied_rows} == {"A0E2", "A0EA"}
 
 
 def test_load_ranking_rows_rejects_malformed_points(tmp_path):

@@ -177,10 +177,7 @@ def test_hawkeye_to_bronze_falls_back_best_of_for_grand_slam():
 # ── Discovery → resolution: match-level skip propagation ────────────
 
 
-def test_resolve_discovered_matches_keeps_tier_and_skips_unresolved_player():
-    """A match whose player identity cannot be resolved is skipped with a
-    per-match reason; a resolvable match is kept, canonicalized, and stamped
-    with the bronze tournament tier."""
+def test_resolve_discovered_matches_keeps_live_atp_ids_without_legacy_map():
     rows = [
         {
             "match_id": "ms001",
@@ -199,23 +196,17 @@ def test_resolve_discovered_matches_keeps_tier_and_skips_unresolved_player():
             "winner_id": "S0S1",
         },
     ]
-    rank_map = {"S0S1": "S0S1", "N0AE": "N0AE"}
-    canonical = {"S0S1": "Ben Shelton", "N0AE": "Brandon Nakashima"}
+    resolved, skipped = matches.resolve_discovered_matches(rows, "masters")
 
-    resolved, skipped = matches.resolve_discovered_matches(rows, rank_map, canonical, "masters")
-
-    assert len(resolved) == 1
+    assert len(resolved) == 2
     assert resolved[0]["match_id"] == "ms001"
     assert resolved[0]["player1_id"] == "S0S1"
     assert resolved[0]["winner_id"] == "S0S1"
     assert resolved[0]["tournament"] == "masters"
-    assert skipped[0]["match_id"] == "ms002"
-    assert "unresolved player" in skipped[0]["reason"]
+    assert skipped == []
 
 
-def test_process_tournament_discovery_failure_writes_nothing(monkeypatch):
-    """When every discovered identity fails, every match is skipped and no
-    Hawkeye fetch (for a match), bronze upsert, or raw CSV append happens."""
+def test_process_tournament_discovery_failure_does_not_drop_live_matches(monkeypatch):
     html = Path("tests/fixtures/montreal_results_2026.html").read_text()
     monkeypatch.setattr(matches, "_fetch_page", lambda _page, _url, _label: (html, ""))
     monkeypatch.setattr(rankings, "_jitter", lambda: None)
@@ -233,15 +224,13 @@ def test_process_tournament_discovery_failure_writes_nothing(monkeypatch):
 
     monkeypatch.setattr(rankings, "discover_players", fail_discovery)
 
-    upsert_calls = []
-    monkeypatch.setattr(
-        matches, "upsert_bronze_match", lambda *a, **k: upsert_calls.append((a, k)) or {}
-    )
-    append_calls = []
-    monkeypatch.setattr(
-        matches, "append_raw_match_rows", lambda *a, **k: append_calls.append((a, k)) or (0, set())
-    )
-    monkeypatch.setattr(matches, "fetch_hawkeye_batch", lambda resolved, **_kw: list(resolved))
+    fetched = []
+
+    def fail_hawkeye(resolved, **_kwargs):
+        fetched.extend(resolved)
+        return [{**match, "hawkeye_error": "unavailable"} for match in resolved]
+
+    monkeypatch.setattr(matches, "fetch_hawkeye_batch", fail_hawkeye)
 
     result = matches._process_tournament(
         _Page(""),
@@ -254,15 +243,10 @@ def test_process_tournament_discovery_failure_writes_nothing(monkeypatch):
         claimed={},
         rank_points={},
         ages={},
-        rank_map={},
         canonical={},
         profiles={},
     )
 
-    assert result["discovered"] == 94  # every match on the page was parsed
-    assert result["skipped"] == 94  # every one failed resolution
+    assert result["discovered"] == 94
+    assert len(fetched) == 94
     assert result["fetched"] == 0
-    assert result["inserted"] == result["updated"] == result["noop"] == 0
-    assert result["csv_appended"] == 0
-    assert upsert_calls == []  # no bronze write
-    assert append_calls == []  # no raw CSV write

@@ -11,6 +11,7 @@ from __future__ import annotations
 import random
 import re
 import time
+from html import unescape
 from typing import Any, cast
 
 import pandas as pd
@@ -30,6 +31,8 @@ PLAYER_OVERVIEW_URL = "https://www.atptour.com/en/players/{slug}/{player_id}/ove
 # links as /en/players/<slug>/<ID>/overview; a mismatched or absent id means
 # the page did not render the player we navigated to.
 _OVERVIEW_ID_RE = re.compile(r"/en/players/[^/]+/([a-z0-9]+)/overview", re.I)
+_OVERVIEW_TITLE_RE = re.compile(r"<title>\s*(.*?)\s*\|\s*Overview\b", re.I | re.S)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 # Personal-details values (Age / Weight / Height / Turned pro / Plays / Country)
 # render in the module-"...-details" block; labels are title-cased and values
@@ -37,10 +40,13 @@ _OVERVIEW_ID_RE = re.compile(r"/en/players/[^/]+/([a-z0-9]+)/overview", re.I)
 _OVERVIEW_DOB_RE = re.compile(r"\bAge\s*\d{1,3}\s*\(\s*(\d{4})/(\d{2})/(\d{2})\s*\)")
 _OVERVIEW_WEIGHT_RE = re.compile(r"\bWeight\b[^()]*?\((\d{2,3})\s*kg\)", re.I)
 _OVERVIEW_HEIGHT_RE = re.compile(r"\bHeight\b[^()]*?\((\d{3})\s*cm\)", re.I)
-_OVERVIEW_PRO_RE = re.compile(r"\bTurned\s+pro\b[^0-9]*(\d{4})", re.I)
+_OVERVIEW_PRO_RE = re.compile(r"\bTurned\s+pro\s*(\d{4})\b", re.I)
 _OVERVIEW_PLAYS_RE = re.compile(
     r"\bPlays?\b\s*([A-Za-z\-]+?)\s*,\s*([A-Za-z\-]+?)\s*Backhand",
     re.I,
+)
+_OVERVIEW_BIRTHPLACE_RE = re.compile(
+    r"\bBirthplace\s+(.+?)(?=\s+(?:Plays|Coach|Latest\s+news|Follow\s+player)\b)", re.I
 )
 # Three-letter IOC code drawn from the page's country flag sprite reference
 # (<use href="...flags.svg#flag-<ioc>">), the strongest IOC signal on the page.
@@ -60,6 +66,19 @@ def _fetch_overview_html(page: Any, slug: str, player_id: str) -> tuple[str, str
         page.goto(url, wait_until="domcontentloaded", timeout=PAGE_NAVIGATION_TIMEOUT_MS)
     except Exception as exc:
         return "", f"navigation failed ({type(exc).__name__}: {exc})"
+    try:
+        page.wait_for_function(
+            """playerId => {
+                const id = `/${playerId}/overview`.toLowerCase();
+                const hasPlayer = [...document.querySelectorAll("a[href]")]
+                    .some(link => link.href.toLowerCase().includes(id));
+                return hasPlayer && /\\bAge\\b/.test(document.body?.innerText || "");
+            }""",
+            arg=player_id,
+            timeout=PAGE_NAVIGATION_TIMEOUT_MS,
+        )
+    except Exception as exc:
+        return "", f"overview did not render ({type(exc).__name__}: {exc})"
     try:
         body = page.content()
     except Exception as exc:
@@ -82,9 +101,13 @@ def parse_player_overview(
     fields (birthdate, weight, height, turned pro, handedness, backhand) are
     extracted when the page has them and left empty otherwise.
     """
+    title = _OVERVIEW_TITLE_RE.search(html)
+    display_name = unescape(_HTML_TAG_RE.sub(" ", title.group(1))).strip() if title else ""
     raw = {
         "id": profile_id.upper(),
-        "player": (candidate.get("player") and str(candidate["player"]).strip()) or "",
+        "player": display_name
+        or ((candidate.get("player") and str(candidate["player"]).strip()) or ""),
+        "atpname": display_name,
         "slug": (candidate.get("slug") and str(candidate["slug"]).strip()) or "",
         "birthdate": "",
         "weight": "",
@@ -92,6 +115,8 @@ def parse_player_overview(
         "turnedpro": "",
         "hand": "",
         "backhand": "",
+        "birthplace": "",
+        "coaches": "",
         "ioc": "",
     }
     if not raw["player"]:
@@ -103,19 +128,20 @@ def parse_player_overview(
     if profile_id.upper() not in ids:
         return None, (f"page player id {sorted(ids)} does not match link id {profile_id.upper()}")
 
-    dob = _OVERVIEW_DOB_RE.search(html)
+    text = re.sub(r"\s+", " ", unescape(_HTML_TAG_RE.sub(" ", html)))
+    dob = _OVERVIEW_DOB_RE.search(text)
     if dob:
         raw["birthdate"] = f"{dob.group(1)}{dob.group(2)}{dob.group(3)}"
-    weight = _OVERVIEW_WEIGHT_RE.search(html)
+    weight = _OVERVIEW_WEIGHT_RE.search(text)
     if weight:
         raw["weight"] = weight.group(1)
-    height = _OVERVIEW_HEIGHT_RE.search(html)
+    height = _OVERVIEW_HEIGHT_RE.search(text)
     if height:
         raw["height"] = height.group(1)
-    pro = _OVERVIEW_PRO_RE.search(html)
+    pro = _OVERVIEW_PRO_RE.search(text)
     if pro:
         raw["turnedpro"] = pro.group(1)
-    plays = _OVERVIEW_PLAYS_RE.search(html)
+    plays = _OVERVIEW_PLAYS_RE.search(text)
     if plays:
         raw["hand"] = {
             "right-handed": "R",
@@ -126,6 +152,10 @@ def parse_player_overview(
             "two-handed": "2H",
             "one-handed": "1H",
         }.get(plays.group(2).lower(), plays.group(2).lower())
+
+    birthplace = _OVERVIEW_BIRTHPLACE_RE.search(text)
+    if birthplace:
+        raw["birthplace"] = birthplace.group(1).strip()
 
     ioc = _ioc_from_overview(html)
     raw["ioc"] = ioc
@@ -175,7 +205,6 @@ def discover_players(
     candidates: list[dict[str, Any]],
     *,
     canonical: dict[str, str],
-    rank_map: dict[str, str],
     profiles: dict[str, dict[str, str]],
 ) -> dict[str, Any]:
     """Discover and persist ATP profiles for player ids missing from bronze.
@@ -185,8 +214,8 @@ def discover_players(
     (never navigated, never written); each DB-missing id is fetched once on the
     run's shared ``page``, validated (page id == link id, name and IOC present),
     and persisted through ``ingest.persist_atp_player``. Successful discoveries
-    immediately refresh the caller's in-memory ``canonical``, ``rank_map``, and
-    ``profiles`` so downstream resolution sees them this run. Failures are
+    immediately refresh the caller's in-memory ``canonical`` and ``profiles``
+    so downstream resolution sees them this run. Failures are
     per-player and non-fatal: navigation, parsing, identity, and persistence
     errors become structured reasons that never abort the scrape.
 
@@ -232,7 +261,6 @@ def discover_players(
         assert parsed is not None  # _discover_player raises instead of returning None
         # Success: make the new identity resolvable for the rest of this run.
         canonical[player_id] = name
-        rank_map[player_id] = player_id
         profiles.setdefault(player_id, {}).update(
             {
                 "display_name": name,

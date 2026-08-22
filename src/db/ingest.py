@@ -148,11 +148,11 @@ ATP_PLAYERS_CSV = RANKINGS_DIR / "atp_players.csv"
 # Only atp_rankings_*.csv are discovered; atp_players.csv is metadata.
 RANKINGS_GLOB = "atp_rankings_*.csv"
 
-# Documented raw ranking shape. `player` is the ATP ranking source id; `points`
-# is empty (NULL) in early eras.
+# Documented raw ranking shape. `player` is either a legacy numeric source id
+# or a canonical ATP id; `points` is empty (NULL) in early eras.
 RANKINGS_COLUMNS = ["ranking_date", "rank", "player", "points"]
 RANKING_TARGET_COLUMNS = ["ranking_date", "player_id", "rank", "points"]
-PLAYER_ID_RE = re.compile(r"^\d+$")
+PLAYER_ID_RE = re.compile(r"^(?:\d+|[A-Za-z0-9]{4,})$")
 
 load_env()
 
@@ -715,6 +715,29 @@ def _append_csv_row(path: str | Path, row: dict[str, str], columns: list[str]) -
         writer.writerow([row[c] for c in columns])
 
 
+def _upsert_csv_row(path: str | Path, row: dict[str, str], columns: list[str]) -> None:
+    """Replace the row with the same first-column key, or append it."""
+    rows = _read_csv_rows(path)
+    if not rows:
+        raise ValueError(f"{Path(path).name} has no header row")
+    _require_csv_columns(path, rows[0], columns)
+    key = row[columns[0]]
+    replacement = [row[column] for column in columns]
+    replaced = False
+    output = [rows[0]]
+    for existing in rows[1:]:
+        if existing[0] == key:
+            if not replaced:
+                output.append(replacement)
+                replaced = True
+        else:
+            output.append(existing)
+    if not replaced:
+        output.append(replacement)
+    with open(path, "w", newline="") as f:
+        csv.writer(f, quoting=csv.QUOTE_ALL, lineterminator="\r\n").writerows(output)
+
+
 def _validate_discovery_candidate(candidate: dict[str, object]) -> dict[str, str]:
     """Validate a candidate ATP identity against the profile-column contract.
 
@@ -749,46 +772,14 @@ def persist_atp_player(
     candidate: dict[str, object],
     *,
     profiles_csv: str | Path = ATP_DATABASE_CSV,
-    map_csv: str | Path = RANKING_PLAYER_MAP_CSV,
     insert: bool = True,
 ) -> int:
-    """Append one validated new ATP identity to the canonical and map CSVs.
-
-    A candidate whose id already exists identically is a no-op (returns 0);
-    an id present with conflicting data, or a map row that conflicts, raises
-    ValueError before anything is written. On success appends one canonical
-    row, one self-mapping row (ranking_player_id == canonical player_id == the
-    ATP id), then — when `insert` — inserts only the new profile into bronze
-    via the idempotent shared loader (never force). Returns the number of DB
-    profiles inserted.
-    """
+    """Upsert one validated ATP identity into the canonical CSV and bronze."""
     raw = _validate_discovery_candidate(candidate)
-
-    # Self-mapping row: the discovered ATP id is both the ranking source id and
-    # the canonical player_id, so later rankings resolution maps it to itself.
-    # Self-mapping row: the discovered ATP id is both the ranking source id and
-    # the canonical player_id, so later rankings resolution maps it to itself.
-    self_row = {
-        "ranking_player_id": raw["id"],
-        "ranking_name": raw["player"],
-        "player_id": raw["id"],
-    }
-    # Validate both files before writing either, so a conflict in one never
-    # leaves the other half-appended. Each append below is independently
-    # gated, so a prior partial append (one row present, the other absent) is
-    # reconciled with no duplicates or overwrites.
-    profile_state = _csv_row_state(profiles_csv, raw, ATP_DATABASE_COLUMNS)
-    map_state = _csv_row_state(map_csv, self_row, RANKING_MAP_COLUMNS)
-    if profile_state == "append":
-        _append_csv_row(profiles_csv, raw, ATP_DATABASE_COLUMNS)
-    if map_state == "append":
-        _append_csv_row(map_csv, self_row, RANKING_MAP_COLUMNS)
+    _upsert_csv_row(profiles_csv, raw, ATP_DATABASE_COLUMNS)
 
     if insert:
-        # Reuses the shared loader with DO NOTHING idempotency: it inserts the
-        # new profile once and is a no-op on retry, reconciling a prior partial
-        # append that left the profile absent (or already present) in bronze.
-        return load_atp_profiles(profiles_csv, player_ids={raw["id"]}, force=False)
+        return load_atp_profiles(profiles_csv, player_ids={raw["id"]}, force=True)
     return 0
 
 
@@ -1127,7 +1118,7 @@ def load_ranking_rows(
         offenders = ", ".join(
             f"{i}: {v!r}" for i, v in zip(raw.index[bad_player], player_s[bad_player], strict=True)
         )
-        raise ValueError(f"player malformed (expected integer id): {offenders}")
+        raise ValueError(f"player malformed (expected numeric source or ATP id): {offenders}")
 
     pts_s = raw["points"]
     pts_num = pd.to_numeric(pts_s.mask(pts_s.eq("")), errors="coerce")
@@ -1248,9 +1239,9 @@ def ingest_rankings(
 
     Discover -> validate -> filter rank <= 200 -> map to canonical ids -> upsert.
     Only the archive's top-200 rows are read (ranks > 200 are ignored). Raw
-    ranking source ids never reach the table: player_id is resolved through the
-    approved identity map, and source ids absent from the map are auto-mapped by
-    normalized name (deterministic: unique candidate, else greatest match
+    ranking source ids never reach the table: canonical ATP ids are retained
+    directly; legacy numeric ids are resolved through the approved identity map,
+    then auto-mapped by normalized name (deterministic: unique candidate, else greatest match
     activity, then lower best rank, then lexicographic player_id, using
     match_rows for the activity/rank tie-break). Explicit map entries always
     win; auto-mapping only chooses identity and never invents ranking values —
@@ -1291,11 +1282,16 @@ def ingest_rankings(
     top200_count = len(top200)
 
     rank_map = load_ranking_player_map(map_csv)
-    source_names = _atp_players_names(players_csv)
     canonical_ref = canonical_players()
-    # Auto-map source ids absent from the approved map. Explicit entries are
-    # never re-resolved: auto-mapping fills gaps only, for identity choice.
-    missing = sorted({str(x).strip() for x in top200["player_id"]} - set(rank_map))
+    source_ids = {str(x).strip() for x in top200["player_id"]}
+    direct_atp = {
+        source_id: source_id.upper()
+        for source_id in source_ids
+        if source_id.upper() in canonical_ref
+    }
+    # Auto-map legacy source ids absent from the approved map or ATP reference.
+    missing = sorted(source_ids - set(rank_map) - set(direct_atp))
+    source_names = _atp_players_names(players_csv) if missing else {}
     auto_map = (
         resolve_ranking_identities(
             missing,
@@ -1306,14 +1302,14 @@ def ingest_rankings(
         if missing
         else {}
     )
-    resolve = {**rank_map, **auto_map}
+    resolve = {**rank_map, **auto_map, **direct_atp}
 
     # The filtered seed path is scoped to the seeded set: archive rows outside
     # it are not imports and are never reported. The global unmapped report is
     # a full-import (player_ids=None) concern.
     unmapped: list[dict[str, Any]] = []
-    if player_ids is None:
-        unmapped = _unmapped_report(top200, rank_map, players_csv)
+    if player_ids is None and missing:
+        unmapped = _unmapped_report(top200, {**rank_map, **direct_atp}, players_csv)
 
     canonical = top200["player_id"].map(resolve)
     mapped = cast(pd.DataFrame, top200.loc[canonical.notna()]).copy()
@@ -1360,8 +1356,10 @@ def ingest_rankings(
     # ids when supplied, otherwise every mapped canonical id (full import). It
     # only fills NULL/empty/UNK profile IOCs — a verified IOC is never
     # overwritten.
-    ioc_player_ids = player_ids if player_ids is not None else set(resolve.values())
-    backfill_profile_iocs(resolve, ioc_player_ids, players_csv)
+    ioc_map = {**rank_map, **auto_map}
+    if ioc_map:
+        ioc_player_ids = player_ids if player_ids is not None else set(ioc_map.values())
+        backfill_profile_iocs(ioc_map, ioc_player_ids, players_csv)
 
     skipped_existing = 0 if force else len(mapped) - upserted
     summary: dict[str, object] = {

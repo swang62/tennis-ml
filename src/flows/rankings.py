@@ -31,6 +31,7 @@ flow; both modules are standalone commands (``just rankings`` / ``just matches``
 from __future__ import annotations
 
 import argparse
+import csv
 import random
 import re
 import time
@@ -47,11 +48,11 @@ from src.db.client import connection
 from src.db.ingest import (
     BRONZE_RANKINGS_TABLE,
     RANKING_TARGET_COLUMNS,
+    RANKINGS_COLUMNS,
+    RANKINGS_DIR,
     _copy_df_into,
-    _normalize_name_variants,
     canonical_players,
     load_player_metadata,
-    load_ranking_player_map,
 )
 from src.utils.scrape import (
     PAGE_NAVIGATION_TIMEOUT_MS,
@@ -67,6 +68,7 @@ from src.utils.scrape import (
 )
 
 RANKINGS_URL = "https://www.atptour.com/en/rankings/singles?rankRange=0-200&dateWeek={date}"
+CURRENT_RANKINGS_CSV = RANKINGS_DIR / "atp_rankings_current.csv"
 
 # Rankings table anchor, stable across ATP Tour page versions (both the mobile
 # and the desktop rankings table carry this class; the parser uses only the
@@ -167,15 +169,16 @@ def stored_ranking_mondays() -> set[date]:
 def missing_ranking_mondays(
     start_date: date | None = None,
     end_date: date | None = None,
+    force: bool = False,
 ) -> tuple[date | None, list[date]]:
-    """Weeks to fetch: every missing Monday in the requested range.
+    """Weeks to fetch, optionally ignoring stored ranking dates.
 
     Returns ``(watermark, weeks)``; ``watermark`` is None when the table is
     empty and ``weeks`` is then empty because the flow must not scrape history
     from scratch (run ``just seed`` first).
 
-    Presence is the only completeness gate: a ranking Monday already in
-    ``stored_ranking_mondays()`` is never re-scraped, whatever its row count.
+    Presence is the only completeness gate unless ``force`` is true. Forced
+    runs schedule every Monday in the requested range and upsert the rows again.
     With no ``start_date`` the scan starts one week after the watermark (the
     max stored Monday); with an explicit ``start_date`` it starts there (snapped
     forward to the next Monday). The upper bound is ``end_date`` when given,
@@ -187,17 +190,27 @@ def missing_ranking_mondays(
     completed Monday — so an explicit historical ``start_date`` can never
     backfill before this year and stored weeks are never touched.
     """
+    today = date.today()
+    last_completed = latest_completed_monday(today)
+    end = min(end_date or last_completed, last_completed)
+    if force:
+        start = start_date or date(today.year, 1, 1)
+        start += timedelta(days=(7 - start.weekday()) % 7)
+        weeks = []
+        monday = start
+        while monday <= end:
+            weeks.append(monday)
+            monday += timedelta(days=7)
+        return None, weeks
+
     stored = stored_ranking_mondays()
     if not stored:
         return None, []
     watermark = max(stored)
-    today = date.today()
-    last_completed = latest_completed_monday(today)
     if start_date is None:
         start = watermark + timedelta(days=7)
     else:
         start = start_date + timedelta(days=(7 - start_date.weekday()) % 7)
-    end = min(end_date or last_completed, last_completed)
     # Safety floors: never earlier than the Monday after the watermark, never
     # earlier than Jan 1 of the current year, never later than the most recent
     # completed Monday. The start is snapped to a Monday to keep the weekly step.
@@ -272,20 +285,12 @@ def extract_rankings_from_html(html: str) -> list[dict[str, Any]]:
 # ── Identity translation + upsert ────────────────────────────────
 
 
-def translate_rank_rows(
-    rows: list[dict[str, Any]], rank_map: dict[str, str]
-) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
-    """Keep only page rows whose canonical id is approved by the identity map.
-
-    The map validates identity: a player whose canonical id is not a map value
-    is skipped (and returned for reporting), never silently ingested. Raw
-    ranking source ids are irrelevant here — the page exposes canonical ids.
-    """
-    approved = set(rank_map.values())
+def translate_rank_rows(rows: list[dict[str, Any]]) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
+    """Convert every parsed live ATP ranking row to a bronze row."""
     kept: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     for row in rows:
-        if row["player_id"] in approved and 1 <= row["rank"] <= 200:
+        if row["player_id"] and 1 <= row["rank"] <= 200:
             kept.append(row)
         else:
             skipped.append(row)
@@ -294,49 +299,6 @@ def translate_rank_rows(
     frame = pd.DataFrame(kept)[["player_id", "rank", "points"]]
     frame["player_id"] = frame["player_id"].astype(str)
     return cast(pd.DataFrame, frame), skipped
-
-
-def resolve_player_id(
-    name: str,
-    source_id: str,
-    rank_map: dict[str, str],
-    canonical: dict[str, str] | None = None,
-) -> str | None:
-    """Resolve a page player to a canonical bronze player id, or None to skip.
-
-    Exact map entry wins (the reviewed ranking map), then an exact canonical-id
-    match (matches pages carry the canonical ATP_Database id in the profile
-    URL), then a deterministic normalized-name match against the canonical
-    player reference. A name that matches no canonical player, or more than one,
-    resolves to None and the caller skips + reports — the reviewed map is never
-    modified here and the name field is audit-only, never a match key.
-    """
-    src = str(source_id).strip().upper()
-    if src in rank_map:
-        return rank_map[src]
-    if canonical is None:
-        canonical = canonical_players()
-    for pid in canonical:
-        if str(pid).strip().upper() == src:
-            return pid
-    norm_index: dict[str, list[str]] = {}
-    for pid, cname in canonical.items():
-        norm = _normalize_name(cname)
-        if norm:
-            norm_index.setdefault(norm, []).append(pid)
-    candidates: list[str] = []
-    for variant in _normalize_name_variants(name or ""):
-        candidates = norm_index.get(variant, [])
-        if candidates:
-            break
-    if len(set(candidates)) == 1:
-        return candidates[0]
-    return None
-
-
-def _normalize_name(name: str) -> str:
-    """Deterministic normalized name for review-only candidate matching."""
-    return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
 def tier_from_bronze(
@@ -491,7 +453,6 @@ def _fetch_week_html(page, url: str, week: date) -> str:
 def fetch_and_upsert_week(
     page,
     week: date,
-    rank_map: dict[str, str],
     *,
     canonical: dict[str, str] | None = None,
     profiles: dict[str, dict[str, str]] | None = None,
@@ -524,20 +485,7 @@ def fetch_and_upsert_week(
         print(f"Week {week.isoformat()}: skipped (could not load or parse): {exc}")
         return None
 
-    candidates = [
-        {"id": row["player_id"], "slug": row["slug"], "player": row["name"]} for row in rows
-    ]
-    discovered = discover_players(
-        page, candidates, canonical=canonical, rank_map=rank_map, profiles=profiles
-    )
-    print(
-        f"Week {week.isoformat()}: profile discovery "
-        f"known={discovered['known']} discovered={discovered['discovered']} "
-        f"failed={len(discovered['failed'])}"
-    )
-    fail_reasons = {item["id"].upper(): item["reason"] for item in discovered["failed"]}
-
-    frame, skipped = translate_rank_rows(rows, rank_map)
+    frame, skipped = translate_rank_rows(rows)
     frame = (
         frame.assign(ranking_date=week)[RANKING_TARGET_COLUMNS]
         .drop_duplicates(subset=["ranking_date", "player_id"], keep="last")
@@ -551,16 +499,55 @@ def fetch_and_upsert_week(
             conflict_col="ranking_date, player_id",
             update_cols=["rank", "points"],
         )
+        _append_current_rankings(frame)
+    candidates = [
+        {"id": row["player_id"], "slug": row["slug"], "player": row["name"]} for row in rows
+    ]
+    discovered = discover_players(page, candidates, canonical=canonical, profiles=profiles)
+    print(
+        f"Week {week.isoformat()}: profile discovery "
+        f"known={discovered['known']} discovered={discovered['discovered']} "
+        f"failed={len(discovered['failed'])}"
+    )
+    for failed in discovered["failed"]:
+        print(f"  profile discovery failed: {failed}")
     for s in skipped:
-        reason = fail_reasons.get(str(s["player_id"]).upper())
-        detail = f"points={s['points']}" if reason is None else f"reason={reason}"
-        print(f"  skipped: player_id={s['player_id']} name={s['name']!r} rank={s['rank']} {detail}")
+        print(
+            f"  skipped invalid ranking row: player_id={s['player_id']} "
+            f"name={s['name']!r} rank={s['rank']} points={s['points']}"
+        )
     print(f"Week {week.isoformat()}: succeeded: {len(frame)} rows stored, {len(skipped)} skipped")
     return len(frame)
 
 
+def _append_current_rankings(frame: pd.DataFrame) -> None:
+    """Append unseen live ATP-id ranking rows to the current raw CSV."""
+    with open(CURRENT_RANKINGS_CSV, newline="") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames != RANKINGS_COLUMNS:
+            raise ValueError(f"{CURRENT_RANKINGS_CSV.name}: expected columns {RANKINGS_COLUMNS}")
+        existing = {(row["ranking_date"], row["player"]) for row in reader}
+    with open(CURRENT_RANKINGS_CSV, "a", newline="") as f:
+        writer = csv.writer(f, lineterminator="\n")
+        for row in frame.to_dict(orient="records"):
+            key = (pd.Timestamp(row["ranking_date"]).strftime("%Y%m%d"), str(row["player_id"]))
+            if key not in existing:
+                writer.writerow(
+                    [
+                        key[0],
+                        int(row["rank"]),
+                        key[1],
+                        "" if pd.isna(row["points"]) else int(row["points"]),
+                    ]
+                )
+
+
 @flow(log_prints=True, retries=1)
-def rankings_flow(start_date: date | None = None, end_date: date | None = None):
+def rankings_flow(
+    start_date: date | None = None,
+    end_date: date | None = None,
+    force: bool = False,
+):
     """Scrape missing ranking weeks: watermark-to-today (no params) or a date range.
 
     With no params every missing Monday from the watermark through the most
@@ -590,24 +577,34 @@ def rankings_flow(start_date: date | None = None, end_date: date | None = None):
     if start_date is not None and start_date < date(today.year, 1, 1):
         print(
             f"WARNING: start_date {start_date.isoformat()} is before Jan 1 {today.year}; "
-            "the scan is clamped to this year and never reaches weeks before the stored watermark."
+            "the scan is clamped to this year."
         )
-    watermark, weeks = missing_ranking_mondays(start_date, end_date)
-    if watermark is None:
+    watermark, weeks = missing_ranking_mondays(start_date, end_date, force)
+    if watermark is None and not force:
         print(
             "bronze.rankings is empty — initial seed not complete; "
             "run `just seed` first. Skipping browser work."
         )
         return
     if not weeks:
-        print(f"Rankings are current through {watermark.isoformat()} — no missing weeks.")
+        if force:
+            print("No ranking weeks in the forced range.")
+        else:
+            assert watermark is not None
+            print(f"Rankings are current through {watermark.isoformat()} — no missing weeks.")
         return
-    print(
-        f"Watermark {watermark.isoformat()}: fetching {len(weeks)} missing week(s), "
-        f"oldest first: {weeks[0].isoformat()} .. {weeks[-1].isoformat()}"
-    )
+    if force:
+        print(
+            f"Force enabled: fetching {len(weeks)} ranking week(s), including stored weeks, "
+            f"oldest first: {weeks[0].isoformat()} .. {weeks[-1].isoformat()}"
+        )
+    else:
+        assert watermark is not None
+        print(
+            f"Watermark {watermark.isoformat()}: fetching {len(weeks)} missing week(s), "
+            f"oldest first: {weeks[0].isoformat()} .. {weeks[-1].isoformat()}"
+        )
 
-    rank_map = load_ranking_player_map()
     canonical = canonical_players()
     profiles = load_player_metadata()
     browser = _launch_browser()
@@ -621,7 +618,6 @@ def rankings_flow(start_date: date | None = None, end_date: date | None = None):
             rows = fetch_and_upsert_week(
                 page,
                 week,
-                rank_map,
                 canonical=canonical,
                 profiles=profiles,
             )
@@ -673,12 +669,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=date.fromisoformat,
         help="inclusive window end (YYYY-MM-DD); defaults to today",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="re-scrape and upsert every Monday in the requested range, ignoring DB presence",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    rankings_flow(start_date=args.start, end_date=args.end)
+    rankings_flow(start_date=args.start, end_date=args.end, force=args.force)
 
 
 if __name__ == "__main__":

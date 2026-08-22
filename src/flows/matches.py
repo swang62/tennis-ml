@@ -37,7 +37,6 @@ from src.db.ingest import (
     canonical_match_id,
     canonical_players,
     load_player_metadata,
-    load_ranking_player_map,
     normalize_best_of,
 )
 from src.features.columns import (
@@ -456,39 +455,21 @@ def surface_for_tournament(
 
 
 def resolve_discovered_matches(
-    matches: list[dict[str, Any]],
-    rank_map: dict[str, str],
-    canonical: dict[str, str] | None = None,
-    tier: str | None = None,
+    matches: list[dict[str, Any]], tier: str | None = None
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Resolve discovery rows to canonical bronze match rows; skip + report the rest.
+    """Convert live ATP match rows to bronze rows; report malformed identities.
 
-    A row (``extract_matches_from_results`` output) resolves when the tournament
-    ``tier`` is set and both player ids resolve via ``rankings.resolve_player_id``
-    — exact reviewed-map id, exact canonical id, or a unique normalized-name
-    variant. Resolved rows replace the page ids with canonical ids, keep the
-    winner id consistent with the original page orientation, and stamp the
-    bronze ``tournament`` tier. Every rejected row is returned with a ``reason``
-    (unknown tournament tier, unresolved/ambiguous player) so the flow counts,
-    skips, and reports — the reviewed identity map is never auto-updated here.
+    Live ATP result pages provide canonical player ids directly. Missing profiles
+    are backfilled separately, so a valid id is retained even when absent from
+    the legacy CSV identity map.
     """
     if not tier:
         return [], [{**match, "reason": "unknown tournament tier"} for match in matches]
     resolved: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     for match in matches:
-        player1 = rankings.resolve_player_id(
-            str(match.get("player1_name") or ""),
-            str(match.get("player1_id") or ""),
-            rank_map,
-            canonical,
-        )
-        player2 = rankings.resolve_player_id(
-            str(match.get("player2_name") or ""),
-            str(match.get("player2_id") or ""),
-            rank_map,
-            canonical,
-        )
+        player1 = str(match.get("player1_id") or "").strip().upper() or None
+        player2 = str(match.get("player2_id") or "").strip().upper() or None
         if player1 is None or player2 is None:
             skipped.append(
                 {
@@ -1746,7 +1727,6 @@ def _process_tournament(
     claimed: dict[str, PhysicalKey],
     rank_points: dict[str, int],
     ages: dict[str, float],
-    rank_map: dict[str, str],
     canonical: dict[str, str] | None,
     profiles: dict[str, dict[str, str]] | None = None,
     csv_ids: dict[int, set[str]] | None = None,
@@ -1755,7 +1735,7 @@ def _process_tournament(
     """Discover, enrich, upsert, and CSV-append one tournament's matches.
 
     Fetches the results page after a generous 3-8s gap, parses per-match msXXX
-    rows, resolves player identities (skip + report on failure), dedupes
+    rows, preserves live ATP player identities, dedupes
     repeated physical keys before the Hawkeye fetch, then fetches Hawkeye stats
     sequentially, upserts each winner-first bronze row — reusing the stored
     physical match's id by the canonical (date, tournament, player-pair) key or
@@ -1806,43 +1786,9 @@ def _process_tournament(
         )
         return result
 
-    # The flow always passes the live maps; None callers (direct/fixture use)
-    # fall back to the reference tables so discovery never crashes, refreshing
-    # the local maps instead of the caller's.
-    if canonical is None:
-        canonical = canonical_players()
-    if profiles is None:
-        profiles = load_player_metadata()
+    profiles = profiles if profiles is not None else load_player_metadata()
 
-    # All players appearing on the tournament page, deduplicated by id, so each
-    # DB-missing player is discovered once on the run's shared page. Successful
-    # discoveries refresh canonical/rank_map/profiles, making them resolvable
-    # this run; failures become per-match unresolved reasons via resolve_player_id.
-    page_candidates: dict[str, dict[str, Any]] = {}
-    for match in matches:
-        for key in ("player1", "player2"):
-            pid = str(match.get(f"{key}_id") or "").upper()
-            name = str(match.get(f"{key}_name") or "")
-            slug = str(match.get(f"{key}_slug") or "")
-            if pid and pid not in page_candidates:
-                page_candidates[pid] = {"id": pid, "slug": slug, "player": name}
-    discovered = rankings.discover_players(
-        page,
-        list(page_candidates.values()),
-        canonical=canonical,
-        rank_map=rank_map,
-        profiles=profiles,
-    )
-    print(
-        f"Tournament {tournament_id}: profile discovery "
-        f"known={discovered['known']} discovered={discovered['discovered']} "
-        f"failed={len(discovered['failed'])}"
-    )
-    if discovered["failed"]:
-        for failed in discovered["failed"]:
-            print(f"  Tournament {tournament_id}: profile discovery failed {failed}")
-
-    resolved, unresolved = resolve_discovered_matches(matches, rank_map, canonical, tier)
+    resolved, unresolved = resolve_discovered_matches(matches, tier)
     for skipped in unresolved:
         print(
             f"  Tournament {tournament_id} {skipped.get('match_id')}: skipped ({skipped['reason']})"
@@ -1915,6 +1861,27 @@ def _process_tournament(
         }
     )
     result["skipped"] += summary["skipped"]
+    page_candidates: dict[str, dict[str, Any]] = {}
+    for match in matches:
+        for key in ("player1", "player2"):
+            player_id = str(match.get(f"{key}_id") or "").upper()
+            if player_id and player_id not in page_candidates:
+                page_candidates[player_id] = {
+                    "id": player_id,
+                    "slug": str(match.get(f"{key}_slug") or ""),
+                    "player": str(match.get(f"{key}_name") or ""),
+                }
+    canonical = canonical if canonical is not None else canonical_players()
+    discovered = rankings.discover_players(
+        page, list(page_candidates.values()), canonical=canonical, profiles=profiles
+    )
+    print(
+        f"Tournament {tournament_id}: profile discovery "
+        f"known={discovered['known']} discovered={discovered['discovered']} "
+        f"failed={len(discovered['failed'])}"
+    )
+    for failed in discovered["failed"]:
+        print(f"  Tournament {tournament_id}: profile discovery failed {failed}")
     print(
         f"Tournament {tournament_id}: discovered={result['discovered']} "
         f"fetched={result['fetched']} inserted={result['inserted']} "
@@ -1971,7 +1938,6 @@ def matches_flow(
     known_ids = _known_match_ids(rows)
     claimed: dict[str, PhysicalKey] = {}
     rank_points, ages = _latest_rank_points_and_ages(rows)
-    rank_map = load_ranking_player_map()
     canonical = canonical_players()
     profiles = load_player_metadata()
 
@@ -2035,7 +2001,6 @@ def matches_flow(
                     claimed=claimed,
                     rank_points=rank_points,
                     ages=ages,
-                    rank_map=rank_map,
                     canonical=canonical,
                     profiles=profiles,
                     csv_ids=csv_ids,
