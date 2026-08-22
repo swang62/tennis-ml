@@ -522,7 +522,7 @@ def test_extract_rankings_raises_on_challenge_page():
 
 
 def test_extract_rankings_raises_on_missing_rank_cell():
-    html = """<table><tr><td class="player-cell">
+    html = """<table class="mega-table"><tr><td class="player-cell">
 <a href="/en/players/carlos-alcaraz/a0e2/overview">Carlos Alcaraz</a>
 </td></tr></table>"""
     with pytest.raises(scrape.RankingsParseError, match="missing rank cell"):
@@ -536,6 +536,23 @@ def test_extract_rankings_skips_header_rows():
     rows = scrape.extract_rankings_from_html(html)
     assert len(rows) == 1
     assert rows[0]["player_id"] == "D643"
+
+
+def test_extract_rankings_ignores_ads_and_invalid_player_ids():
+    html = """
+    <table class="ad-table"><tr><td class="rank">1</td>
+      <td><a href="/en/players/ad-player/xq999/overview">Ad</a></td></tr></table>
+    <table class="mega-table"><tbody>
+      <tr><td class="rank">1</td><td><a href="/en/players/valid/s0ag/overview">Valid</a></td>
+      <td class="points">12030</td></tr>
+      <tr><td class="rank">5</td><td><a href="/en/players/invalid/xq999/overview">Invalid</a></td>
+      <td class="points">4500</td></tr>
+    </tbody></table>
+    """
+
+    rows = scrape.extract_rankings_from_html(html)
+
+    assert [row["player_id"] for row in rows] == ["S0AG"]
 
 
 # ── Identity translation ─────────────────────────────────────────
@@ -859,22 +876,25 @@ def _ranked_row(rank, player_id, slug, name, points):
     )
 
 
-def test_fetch_and_upsert_week_includes_newly_discovered_player(monkeypatch):
+def test_fetch_and_upsert_week_includes_newly_discovered_player(monkeypatch, tmp_path):
     """A newly discovered top-200 player is stored as a ranking row the same
     week: discovery refreshes rank_map so the identity filter keeps it."""
     week = date(2026, 1, 5)
     html = (
-        "<table><tbody>"
+        '<table class="mega-table"><tbody>'
         + _ranked_row(1, "S0AG", "jannik-sinner", "J. Sinner", 12030)
-        + _ranked_row(5, "XQ999", "test-slug", "T. Test", 4500)
+        + _ranked_row(5, "XQ99", "test-slug", "T. Test", 4500)
         + "</tbody></table>"
     )
+    current = tmp_path / "atp_rankings_current.csv"
+    current.write_text("ranking_date,rank,player,points\n")
+    monkeypatch.setattr(scrape, "CURRENT_RANKINGS_CSV", current)
     monkeypatch.setattr(scrape, "_fetch_week_html", lambda _p, _url, _w: html)
-    monkeypatch.setattr(scrape_mod, "_known_profile_ids", lambda: {"S0AG"})  # XQ999 missing
+    monkeypatch.setattr(scrape_mod, "_known_profile_ids", lambda: {"S0AG"})  # XQ99 missing
     monkeypatch.setattr(scrape_mod, "persist_atp_player", lambda *_, **__: 0)
     copied = []
     monkeypatch.setattr(scrape, "_copy_df_into", lambda *a, **k: copied.append((a, k)) or 1)
-    page = _FakePage(_overview_html("XQ999"))
+    page = _FakePage(_overview_html("XQ99"))
 
     written = scrape.fetch_and_upsert_week(
         page,
@@ -885,14 +905,14 @@ def test_fetch_and_upsert_week_includes_newly_discovered_player(monkeypatch):
 
     assert written == 2  # the known player plus the newly discovered one
     frame = copied[0][0][1]  # (table, df, ...) positional args to _copy_df_into
-    assert sorted(frame["player_id"].tolist()) == ["S0AG", "XQ999"]
-    assert frame[frame["player_id"] == "XQ999"]["rank"].iloc[0] == 5
+    assert sorted(frame["player_id"].tolist()) == ["S0AG", "XQ99"]
+    assert frame[frame["player_id"] == "XQ99"]["rank"].iloc[0] == 5
 
 
 def test_fetch_and_upsert_week_appends_live_atp_ids_to_current_csv(monkeypatch, tmp_path):
     week = date(2026, 1, 5)
     html = (
-        "<table><tbody>"
+        '<table class="mega-table"><tbody>'
         + _ranked_row(1, "S0AG", "jannik-sinner", "J. Sinner", 12030)
         + "</tbody></table>"
     )
@@ -910,3 +930,122 @@ def test_fetch_and_upsert_week_appends_live_atp_ids_to_current_csv(monkeypatch, 
         "ranking_date,rank,player,points",
         "20260105,1,S0AG,12030",
     ]
+
+
+def test_sort_current_rankings_csv_orders_date_then_rank(monkeypatch, tmp_path):
+    current = tmp_path / "atp_rankings_current.csv"
+    current.write_text(
+        "ranking_date,rank,player,points\n"
+        "20260810,2,S0AG,12030\n"
+        "20260105,5,A0E2,4500\n"
+        "20260105,5,12345,4500\n"
+        "20260810,1,D643,13000\n"
+    )
+    monkeypatch.setattr(scrape, "CURRENT_RANKINGS_CSV", current)
+
+    scrape.sort_current_rankings_csv()
+
+    # The numeric legacy id (12345) is retained over the duplicate ATP id A0E2;
+    # XQ99-style 4-char ATP web ids are valid and are not removed by the dedupe.
+    assert current.read_text().splitlines() == [
+        "ranking_date,rank,player,points",
+        "20260105,5,12345,4500",
+        "20260810,1,D643,13000",
+        "20260810,2,S0AG,12030",
+    ]
+
+
+# ── --dry-run mode ───────────────────────────────────────────────
+
+
+def test_parse_args_dry_run_flag():
+    args = scrape.parse_args(
+        ["--start", "2026-08-10", "--end", "2026-08-10", "--force", "--dry-run"]
+    )
+    assert args.start == date(2026, 8, 10)
+    assert args.end == date(2026, 8, 10)
+    assert args.force is True
+    assert args.dry_run is True
+
+
+def test_parse_args_default_has_no_dry_run():
+    args = scrape.parse_args(["--start", "2026-08-10"])
+    assert args.dry_run is False
+
+
+def test_fetch_and_upsert_week_dry_run_skips_writes_and_discovery(monkeypatch, tmp_path, capsys):
+    week = date(2026, 8, 10)
+    html = (
+        '<table class="mega-table"><tbody>'
+        + _ranked_row(1, "S0AG", "jannik-sinner", "J. Sinner", 12030)
+        + "</tbody></table>"
+    )
+    current = tmp_path / "atp_rankings_current.csv"
+    current.write_text("ranking_date,rank,player,points\n")
+    monkeypatch.setattr(scrape, "CURRENT_RANKINGS_CSV", current)
+    monkeypatch.setattr(scrape, "_fetch_week_html", lambda _p, _url, _w: html)
+    copied = []
+    monkeypatch.setattr(scrape, "_copy_df_into", lambda *a, **k: copied.append((a, k)))
+    appended = []
+    monkeypatch.setattr(scrape, "_append_current_rankings", lambda f: appended.append(f))
+    discovered = []
+    monkeypatch.setattr(scrape_mod, "discover_players", lambda *a, **k: discovered.append((a, k)))
+    # Dry-run must not even load the reference tables.
+    monkeypatch.setattr(
+        scrape, "canonical_players", lambda: pytest.fail("canonical_players called")
+    )
+    monkeypatch.setattr(
+        scrape, "load_player_metadata", lambda: pytest.fail("load_player_metadata called")
+    )
+
+    result = scrape.fetch_and_upsert_week(
+        _FakePage(), week, canonical={}, profiles={}, dry_run=True
+    )
+
+    assert result == 1  # parsed count is still returned
+    assert copied == []
+    assert appended == []
+    assert discovered == []
+    # No CSV mutation in dry-run.
+    assert current.read_text() == "ranking_date,rank,player,points\n"
+    assert "[dry-run]" in capsys.readouterr().out
+
+
+def test_rankings_flow_dry_run_skips_sort_and_csv_writes(monkeypatch, tmp_path):
+    week = date(2026, 8, 10)
+    html = (
+        '<table class="mega-table"><tbody>'
+        + _ranked_row(1, "S0AG", "jannik-sinner", "J. Sinner", 12030)
+        + "</tbody></table>"
+    )
+
+    class _FakePageClose(_FakePage):
+        def close(self):
+            pass
+
+    class _FakeBrowser:
+        def new_page(self):
+            return _FakePageClose()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(scrape, "missing_ranking_mondays", lambda *_, **__: (None, [week]))
+    monkeypatch.setattr(scrape, "canonical_players", lambda: {})
+    monkeypatch.setattr(scrape, "load_player_metadata", lambda: {})
+    launched = []
+    monkeypatch.setattr(scrape, "_launch_browser", lambda: launched.append(1) or _FakeBrowser())
+    monkeypatch.setattr(scrape, "_fetch_week_html", lambda _p, _url, _w: html)
+    current = tmp_path / "atp_rankings_current.csv"
+    current.write_text("ranking_date,rank,player,points\n")
+    monkeypatch.setattr(scrape, "CURRENT_RANKINGS_CSV", current)
+    sort_calls = []
+    monkeypatch.setattr(scrape, "sort_current_rankings_csv", lambda: sort_calls.append(1))
+
+    scrape.rankings_flow.fn(start_date=week, end_date=week, force=True, dry_run=True)
+
+    # Dry-run still reaches the browser-launch path (no writes after).
+    assert launched == [1]
+    # Dry-run never rewrites the CSV (no append, no sort).
+    assert sort_calls == []
+    assert current.read_text() == "ranking_date,rank,player,points\n"

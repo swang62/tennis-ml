@@ -34,8 +34,8 @@ print(f"Connecting worker to Prefect API at {api_url}")
 def _register_deployments() -> None:
     """Register host-run scheduled deployments (idempotent upserts by name).
 
-    Independent Monday deployments for rankings (``rankings-flow/rankings``,
-    06:00 UTC) and matches (``matches-flow/matches``, 06:30 UTC), plus the
+    Independent Sunday deployments for rankings (``rankings-flow/rankings``,
+    22:00 UTC) and matches (``matches-flow/matches``, 22:30 UTC), plus the
     automation-triggered ETL and drift deployments, all live on the host work
     pool, so they are created/updated whenever this worker starts and stay
     manually triggerable from the Prefect UI or `prefect deployment run`.

@@ -44,6 +44,9 @@ registry -> BentoML -> React dashboard.
   materialized native models and never contacts MLflow at runtime.
 - Keep the single NodePort topology: no ingress, tunnels, or TLS. MLflow is
   DagsHub-hosted; Bento runs through Docker Compose.
+- Every rankings and match scrape/fetch, including dry runs and validation, must
+  use the existing persistent CloakBrowser session and its single page. Direct
+  `curl`, `requests`, or other HTTP fetches are not an acceptable scrape path.
 
 ## Minimalism and testing
 

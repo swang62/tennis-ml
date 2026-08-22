@@ -47,9 +47,10 @@ from src.features.columns import (
     CANONICAL_SURFACES,
 )
 from src.flows import rankings
+from src.flows.rankings import scrape_run_name
 
 MATCHES_DEPLOYMENT_NAME = "matches"
-MATCHES_CRON = "30 22 * * 1"
+MATCHES_CRON = "30 22 * * 0"
 
 # ── Tournament discovery parsers (fixture-testable, no network) ──
 
@@ -1929,7 +1930,18 @@ def _process_tournament(
     return result
 
 
-@flow(log_prints=True, retries=1)
+def _scrape_flow_run_name() -> str:
+    """Prefect ``flow_run_name`` callable: resolve the name from the run's params."""
+    from prefect.runtime import flow_run as flow_run_runtime
+
+    try:
+        params = flow_run_runtime.get_parameters()
+    except Exception:
+        params = {}
+    return scrape_run_name(params.get("start_date"), params.get("end_date"))
+
+
+@flow(log_prints=True, retries=1, flow_run_name=_scrape_flow_run_name)
 def matches_flow(
     start_date: date | None = None,
     end_date: date | None = None,
@@ -2116,7 +2128,7 @@ if __name__ == "__main__":
 
 
 def register_deployment() -> None:
-    """Create/update the Monday-scheduled matches deployment (idempotent by name).
+    """Create/update the Sunday-scheduled matches deployment (idempotent by name).
 
     Registers on the host ``tennis-pool`` work pool like the other host flows.
     Scheduled production runs use this independent deployment; rankings and

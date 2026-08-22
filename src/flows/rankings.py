@@ -23,7 +23,7 @@ retried) instead of succeeding on no data. Each successful week commits
 independently.
 
 Rankings and matches are separate deployments (``rankings-flow/rankings``
-Monday 06:00 UTC, ``matches-flow/matches`` 06:30 UTC); a successful run of
+Sunday 22:00 UTC, ``matches-flow/matches`` 22:30 UTC); a successful run of
 either triggers the incremental ETL deployment. There is no combined scrape
 flow; both modules are standalone commands (``just rankings`` / ``just matches``).
 """
@@ -111,10 +111,14 @@ CLOAKBROWSER_PROFILE_DIR = (
 # The slug group is captured so each parsed row can feed profile discovery.
 _SLUG_RE = r"[^/]+"
 _PLAYER_LINK_RE = re.compile(rf"/en/players/({_SLUG_RE})/([^/]+)/overview")
+_ATP_PLAYER_ID_RE = re.compile(r"^[A-Za-z0-9]{4}$")
 _RANK_CELL_RE = re.compile(r'class="rank\b[^"]*"[^>]*>\s*(\d+)\s*<', re.S)
 _POINTS_CELL_RE = re.compile(r'class="points\b[^"]*"[^>]*>(.*?)</td>', re.S)
 # First table in the page whose rows carry player links is the rankings table.
-_TABLE_SPLIT_RE = re.compile(r"<table\b", re.I)
+_RANKINGS_TABLE_RE = re.compile(
+    r'<table\b[^>]*\bclass=["\'][^"\']*\bmega-table\b[^"\']*["\'][^>]*>(.*?)</table>',
+    re.I | re.S,
+)
 _ROW_SPLIT_RE = re.compile(r"<tr\b[^>]*>(.*?)</tr>", re.S)
 _TEXT_TAG_RE = re.compile(r"<[^>]+>")
 
@@ -241,6 +245,8 @@ def _parse_row(row_html: str) -> dict[str, Any] | None:
         return None
     slug = link.group(1)
     player_id = link.group(2).upper()
+    if _ATP_PLAYER_ID_RE.fullmatch(player_id) is None:
+        return None
     anchor_start = row_html.rfind("<a", 0, link.start())
     text_start = row_html.find(">", anchor_start) + 1
     name = _cell_text(row_html[text_start : row_html.find("</a>", text_start)])
@@ -268,8 +274,7 @@ def extract_rankings_from_html(html: str) -> list[dict[str, Any]]:
     Raises RankingsParseError when no table with player links is found, so a
     challenge page or a markup change fails visibly.
     """
-    fragments = _TABLE_SPLIT_RE.split(html)
-    for fragment in fragments[1:]:  # skip everything before the first <table>
+    for fragment in _RANKINGS_TABLE_RE.findall(html):
         rows: list[dict[str, Any]] = []
         for row_html in _ROW_SPLIT_RE.findall(fragment):
             parsed = _parse_row(row_html)
@@ -456,6 +461,7 @@ def fetch_and_upsert_week(
     *,
     canonical: dict[str, str] | None = None,
     profiles: dict[str, dict[str, str]] | None = None,
+    dry_run: bool = False,
 ) -> int | None:
     """Fetch one weekly ranking page and upsert its mapped rows.
 
@@ -472,10 +478,6 @@ def fetch_and_upsert_week(
     signal the caller reads to distinguish "found no data" (a failure) from
     "found data but nothing new to write" (``0``).
     """
-    if canonical is None:
-        canonical = canonical_players()
-    if profiles is None:
-        profiles = load_player_metadata()
     url = RANKINGS_URL.format(date=week.isoformat())
     print(f"Week {week.isoformat()}: fetching {url}")
     try:
@@ -492,6 +494,17 @@ def fetch_and_upsert_week(
         .reset_index(drop=True)
     )
 
+    if dry_run:
+        # Non-mutating preview: report what would be written, but skip the
+        # reference-table loads, every DB upsert, CSV append, profile
+        # discovery, and CSV sort/write.
+        _report_dry_run(week, frame, rows, skipped)
+        return len(frame)
+
+    if canonical is None:
+        canonical = canonical_players()
+    if profiles is None:
+        profiles = load_player_metadata()
     if not frame.empty:
         _copy_df_into(
             BRONZE_RANKINGS_TABLE,
@@ -520,6 +533,34 @@ def fetch_and_upsert_week(
     return len(frame)
 
 
+def _report_dry_run(
+    week: date,
+    frame: pd.DataFrame,
+    rows: list[dict[str, Any]],
+    skipped: list[dict[str, Any]],
+) -> None:
+    """Read-only dry-run report of what fetch_and_upsert_week would write.
+
+    Performs no DB, CSV, or profile writes — purely diagnostic output so a
+    dry run can be checked without touching any persisted state.
+    """
+    print(
+        f"[dry-run] Week {week.isoformat()}: {len(rows)} row(s) parsed, "
+        f"{len(frame)} would be upserted, {len(skipped)} would be skipped"
+    )
+    for row in frame.itertuples(index=False):
+        print(
+            f"[dry-run]   would upsert player_id={row.player_id} "
+            f"rank={row.rank} points={row.points}"
+        )
+    for s in skipped:
+        print(
+            f"[dry-run]   would skip invalid row: "
+            f"player_id={s['player_id']} name={s['name']!r} rank={s['rank']} points={s['points']}"
+        )
+    print(f"[dry-run] Week {week.isoformat()}: no writes performed")
+
+
 def _append_current_rankings(frame: pd.DataFrame) -> None:
     """Append unseen live ATP-id ranking rows to the current raw CSV."""
     with open(CURRENT_RANKINGS_CSV, newline="") as f:
@@ -542,11 +583,58 @@ def _append_current_rankings(frame: pd.DataFrame) -> None:
                 )
 
 
-@flow(log_prints=True, retries=1)
+def sort_current_rankings_csv() -> None:
+    """Prefer legacy ids for duplicate date/rank rows, then sort the CSV."""
+    with open(CURRENT_RANKINGS_CSV, newline="") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames != RANKINGS_COLUMNS:
+            raise ValueError(f"{CURRENT_RANKINGS_CSV.name}: expected columns {RANKINGS_COLUMNS}")
+        rows = list(reader)
+    numeric_keys = {(row["ranking_date"], row["rank"]) for row in rows if row["player"].isdigit()}
+    rows = [
+        row
+        for row in rows
+        if row["player"].isdigit() or (row["ranking_date"], row["rank"]) not in numeric_keys
+    ]
+    rows.sort(key=lambda row: (int(row["ranking_date"]), int(row["rank"])))
+    with open(CURRENT_RANKINGS_CSV, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=RANKINGS_COLUMNS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def scrape_run_name(start_date: date | None, end_date: date | None) -> str:
+    """Flow-run name for a scrape flow: a dated range when explicit, else 'latest'.
+
+    Distinguishes omitted params from explicit values: ``scrape-{start}-{end}``
+    when both are given, ``scrape-latest`` when neither is, and a clear partial
+    form (``scrape-{start}-latest`` / ``scrape-latest-{end}``) for one-sided
+    overrides. ISO dates keep the name sortable and unambiguous.
+    """
+    start = start_date.isoformat() if start_date is not None else "latest"
+    end = end_date.isoformat() if end_date is not None else "latest"
+    if start == "latest" and end == "latest":
+        return "scrape-latest"
+    return f"scrape-{start}-{end}"
+
+
+def _scrape_flow_run_name() -> str:
+    """Prefect ``flow_run_name`` callable: resolve the name from the run's params."""
+    from prefect.runtime import flow_run as flow_run_runtime
+
+    try:
+        params = flow_run_runtime.get_parameters()
+    except Exception:
+        params = {}
+    return scrape_run_name(params.get("start_date"), params.get("end_date"))
+
+
+@flow(log_prints=True, retries=1, flow_run_name=_scrape_flow_run_name)
 def rankings_flow(
     start_date: date | None = None,
     end_date: date | None = None,
     force: bool = False,
+    dry_run: bool = False,
 ):
     """Scrape missing ranking weeks: watermark-to-today (no params) or a date range.
 
@@ -585,6 +673,8 @@ def rankings_flow(
             "bronze.rankings is empty — initial seed not complete; "
             "run `just seed` first. Skipping browser work."
         )
+        if not dry_run:
+            sort_current_rankings_csv()
         return
     if not weeks:
         if force:
@@ -592,6 +682,8 @@ def rankings_flow(
         else:
             assert watermark is not None
             print(f"Rankings are current through {watermark.isoformat()} — no missing weeks.")
+        if not dry_run:
+            sort_current_rankings_csv()
         return
     if force:
         print(
@@ -620,6 +712,7 @@ def rankings_flow(
                 week,
                 canonical=canonical,
                 profiles=profiles,
+                dry_run=dry_run,
             )
             if rows is not None:
                 found_data = True
@@ -634,6 +727,8 @@ def rankings_flow(
             page.close()
         browser.close()
     _fail_if_no_data_found(found_data, weeks)
+    if not dry_run:
+        sort_current_rankings_csv()
     print(f"Scrape complete: {stored} rows stored")
 
 
@@ -674,12 +769,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="re-scrape and upsert every Monday in the requested range, ignoring DB presence",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="fetch and parse every week but skip all DB upserts, CSV writes, and "
+        "profile discovery; report what would be written",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    rankings_flow(start_date=args.start, end_date=args.end, force=args.force)
+    rankings_flow(
+        start_date=args.start,
+        end_date=args.end,
+        force=args.force,
+        dry_run=args.dry_run,
+    )
 
 
 if __name__ == "__main__":
@@ -689,11 +795,11 @@ if __name__ == "__main__":
 # ── Deployment ─────────────────────────────────────────────────────
 
 RANKINGS_DEPLOYMENT_NAME = "rankings"
-RANKINGS_CRON = "0 22 * * 1"
+RANKINGS_CRON = "0 22 * * 0"
 
 
 def register_deployment() -> None:
-    """Create/update the Monday-scheduled rankings deployment (idempotent by name).
+    """Create/update the Sunday-scheduled rankings deployment (idempotent by name).
 
     Scheduled production runs use this independent deployment; rankings and
     matches are separate deployments — there is no combined scrape flow.
