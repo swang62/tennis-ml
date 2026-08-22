@@ -8,10 +8,11 @@
 -- unordered-pair meetings. Similarity serve/return columns are never
 -- FEATURE_COLS.
 --
--- Incremental: appends rows for bronze matches after the source_watermark in
--- bronze.etl_state (pipeline='dbt'), computed against full silver history so
--- they match a full rebuild; the watermark moves only after the build
--- succeeds, so a failed build leaves the batch eligible to retry.
+-- Incremental: rebuilds new matches and later matches for pairs touched by a
+-- newly ingested meeting. That keeps H2H correct when a legitimate historical
+-- match arrives after a later match already exists. The watermark moves only
+-- after the build succeeds, so a failed build leaves the batch eligible to
+-- retry.
 
 {{ config(
     materialized="incremental",
@@ -21,16 +22,30 @@
 
 WITH
 {% if is_incremental() %}
--- New bronze rows since the last successful dbt build. The source watermark is
+-- Bronze rows since the last successful dbt build. The source watermark is
 -- recorded only after the whole build succeeds, so a failed downstream model
 -- leaves the batch eligible for the next run.
-new_match_ids AS (
-    SELECT match_id
+new_matches AS (
+    SELECT match_id, player1_id, player2_id, match_date
     FROM {{ source('bronze', 'match_events') }}
     WHERE ingested_at > COALESCE(
         (SELECT source_watermark FROM bronze.etl_state WHERE pipeline = 'dbt'),
         '-infinity'::TIMESTAMPTZ
     )
+),
+-- A newly ingested historical meeting changes H2H for every later meeting of
+-- the same unordered pair. Include the new matches themselves so both
+-- directional rows (winner and loser) are rebuilt too.
+changed_match_ids AS (
+    SELECT match_id
+    FROM new_matches
+    UNION
+    SELECT pm.match_id
+    FROM {{ ref('player_matches') }} pm
+    JOIN new_matches nm
+      ON LEAST(pm.player_id, pm.opponent_id) = LEAST(nm.player1_id, nm.player2_id)
+     AND GREATEST(pm.player_id, pm.opponent_id) = GREATEST(nm.player1_id, nm.player2_id)
+     AND pm.match_date > nm.match_date
 ),
 {% endif %}
 player_match_enriched AS (
@@ -121,8 +136,8 @@ player_match_enriched AS (
 
     FROM {{ ref('player_matches') }} pm
 {% if is_incremental() %}
-    JOIN new_match_ids nm
-        ON nm.match_id = pm.match_id
+    JOIN changed_match_ids cm
+        ON cm.match_id = pm.match_id
 {% endif %}
     LEFT JOIN LATERAL (
         SELECT * FROM {{ ref('rolling_features') }} rf
