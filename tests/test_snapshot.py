@@ -167,6 +167,54 @@ def test_validate_rejects_null_model_features(tmp_path) -> None:
         snapshot.validate_snapshot(p)
 
 
+def test_validate_rejects_null_best_of(tmp_path) -> None:
+    """best_of is a FEATURE_COLS context column; a NULL fails the contract."""
+    p = tmp_path / "snap.duckdb"
+    _write_valid_snapshot(p)
+    con = duckdb.connect(str(p))
+    con.execute("UPDATE gold.match_features SET best_of = NULL")
+    con.close()
+    with pytest.raises(snapshot.SnapshotError, match="NULL or non-finite model feature"):
+        snapshot.validate_snapshot(p)
+
+
+def test_validate_rejects_invalid_best_of_domain(tmp_path) -> None:
+    """best_of must be exactly 1, 3, or 5; any other value is a broken contract."""
+    p = tmp_path / "snap.duckdb"
+    _write_valid_snapshot(p)
+    con = duckdb.connect(str(p))
+    con.execute("UPDATE gold.match_features SET best_of = 2")
+    con.close()
+    with pytest.raises(snapshot.SnapshotError, match="best_of outside"):
+        snapshot.validate_snapshot(p)
+
+
+def test_validate_rejects_missing_best_of_column(tmp_path) -> None:
+    """A gold match_features table missing the best_of contract column fails the
+    exact-column-order contract."""
+    p = tmp_path / "snap.duckdb"
+    columns = tuple(c for c in EXPECTED_FEATURE_ORDER if c != "best_of")
+    con = duckdb.connect(str(p))
+    try:
+        con.execute("CREATE SCHEMA gold")
+        con.execute("CREATE SCHEMA bronze")
+        col_sql = ", ".join(f'"{c}" INTEGER' for c in columns)
+        con.execute(f"CREATE TABLE gold.match_features ({col_sql})")
+        con.execute("CREATE TABLE gold.player_profiles (player_id VARCHAR PRIMARY KEY)")
+        con.execute("CREATE TABLE bronze.player_profiles (player_id VARCHAR PRIMARY KEY)")
+        placeholders = ", ".join(["?"] * len(columns))
+        con.executemany(
+            f"INSERT INTO gold.match_features VALUES ({placeholders})",
+            [_feature_row(1, 1, 2, 1, columns), _feature_row(1, 2, 1, 0, columns)],
+        )
+        con.execute("INSERT INTO gold.player_profiles (player_id) VALUES ('p1')")
+        con.execute("INSERT INTO bronze.player_profiles (player_id) VALUES ('p1')")
+    finally:
+        con.close()
+    with pytest.raises(snapshot.SnapshotError, match="do not match"):
+        snapshot.validate_snapshot(p)
+
+
 def test_refresh_failure_preserves_previous_snapshot(tmp_path, monkeypatch) -> None:
     """A failed refresh leaves the previous snapshot byte-for-byte intact."""
     p = tmp_path / "snap.duckdb"

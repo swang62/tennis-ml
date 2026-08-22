@@ -13,7 +13,7 @@ import pickle
 from collections.abc import Callable
 from datetime import date, datetime
 from decimal import Decimal
-from enum import Enum, StrEnum
+from enum import Enum, IntEnum, StrEnum
 from time import perf_counter
 from typing import Any, cast
 
@@ -24,7 +24,7 @@ import pandas as pd
 import psycopg.errors as _pg_errors
 from bentoml.exceptions import InvalidArgument
 from bentoml.images import Image
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
@@ -43,7 +43,9 @@ from src.constants import (
     SILVER_PLAYER_MATCHES,
     STACK_ORDER,
     TOUR_AVERAGES_TABLE,
+    GBDTFramework,
     load_env,
+    normalize_gbdt_framework,
 )
 from src.db.client import execute_df, first_row_dict
 from src.evaluate.calibration import apply_temperature
@@ -110,6 +112,7 @@ _NORMALIZE_KEYS = frozenset(
         "player_id",
         "opponent_id",
         "surface",
+        "best_of",
         "as_of_date",
         "tournament_level",
         "round_encoded",
@@ -240,6 +243,7 @@ to today. The first-supplied player_id is the canonical player side and used for
 Scalar ids-based prediction.
 - `player_id`, `opponent_id` — required `str`
 - `surface` — required `str` (`clay` / `grass` / `hard` / `carpet`)
+- `best_of` — required `int` (`1` / `3` / `5`); best-of-N match format
 - `tournament` — optional enum (`grand_slam` / `masters` / `atp_500` / `atp_250` / `davis_cup` / `atp_finals` / `olympics` / `professional`)
 - `round` — optional enum (`r128` / `r64` / `r32` / `r16` / `qf` / `sf` / `f`)
 - `as_of_date` — optional `date`, default today
@@ -461,6 +465,14 @@ class Surface(StrEnum):
     CARPET = "carpet"
 
 
+class BestOf(IntEnum):
+    """Best-of-N match format; exactly one of the three canonical lengths."""
+
+    BO1 = 1
+    BO3 = 3
+    BO5 = 5
+
+
 class PredictFromIdsRow(BaseModel):
     """One row of the bulk prediction envelope; mirrors `predict_from_ids` fields."""
 
@@ -469,10 +481,20 @@ class PredictFromIdsRow(BaseModel):
     player_id: str
     opponent_id: str
     surface: Surface
+    best_of: BestOf
     tournament: TournamentLevel | None = None
     round: Round | None = None
     as_of_date: date = Field(default_factory=date.today)
     is_indoor: int = 0
+
+    @field_validator("best_of", mode="before")
+    @classmethod
+    def _require_best_of(cls, value: object) -> object:
+        # bool is rejected explicitly: python treats True/False as 1/0 but a
+        # booleann is never a best_of length.
+        if isinstance(value, bool) or not isinstance(value, int) or value not in (1, 3, 5):
+            raise ValueError(f"best_of must be exactly 1, 3, or 5, got {value!r}")
+        return value
 
 
 def _predict_from_ids_bulk_impl(
@@ -1039,13 +1061,13 @@ class TennisPredictor:
             )
         # Fixed evidence stack order shared by training and serving.
         self._stack_order: list[str] = list(STACK_ORDER)
-        gbdt_framework = manifest["bases"]["gbdt"][FRAMEWORK_KEY]
+        gbdt_framework = normalize_gbdt_framework(manifest["bases"]["gbdt"][FRAMEWORK_KEY])
         # xgboost/lightgbm use OpenMP, which can deadlock inside BentoML's
         # forked worker processes. Force single-threaded during model load.
         _old_omp = os.environ.get("OMP_NUM_THREADS")
         os.environ["OMP_NUM_THREADS"] = "1"
         try:
-            if gbdt_framework == "xgboost":
+            if gbdt_framework == GBDTFramework.XGBOOST:
                 self.gbdt: Any = bentoml.xgboost.load_model(self.bento_gbdt)
             else:
                 # bentoml.lightgbm.load_model returns a Booster (no predict_proba);
@@ -1181,6 +1203,7 @@ class TennisPredictor:
                 round=row.round,
                 as_of_date=row.as_of_date,
                 is_indoor=row.is_indoor,
+                best_of=row.best_of.value,
             )
             row_ba, _meta_ba = _build_inference_features_with_meta(
                 row.opponent_id,
@@ -1190,6 +1213,7 @@ class TennisPredictor:
                 round=row.round,
                 as_of_date=row.as_of_date,
                 is_indoor=row.is_indoor,
+                best_of=row.best_of.value,
             )
             # Reuse the shared prediction path (no nested HTTP - see _predict_proba).
             out_df = self._predict_proba(row_ab, row_ba)

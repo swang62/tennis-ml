@@ -284,6 +284,7 @@ class _RowContext(NamedTuple):
     tournament_level: int
     round_encoded: int
     is_indoor: int
+    best_of: int
     player_id: str
     opponent_id: str
 
@@ -299,6 +300,7 @@ def _normalize_inputs(
     tournament: str | None = None,
     round: str | None = None,
     is_indoor: int | None = None,
+    best_of: int = 3,
 ) -> _RowContext:
     """Validate one request; shared by both builders.
 
@@ -336,6 +338,8 @@ def _normalize_inputs(
         is_indoor is not None and (not isinstance(is_indoor, int) or is_indoor not in (0, 1))
     ):
         raise ValueError(f"is_indoor must be exactly 0 or 1, got {is_indoor!r}")
+    if isinstance(best_of, bool) or not isinstance(best_of, int) or best_of not in (1, 3, 5):
+        raise ValueError(f"best_of must be exactly 1, 3, or 5, got {best_of!r}")
     if not isinstance(player_id, str) or not player_id.strip():
         raise ValueError(f"player_id must be a non-empty string, got {player_id!r}")
     if not isinstance(opponent_id, str) or not opponent_id.strip():
@@ -360,6 +364,7 @@ def _normalize_inputs(
         tournament_level=tournament_level,
         round_encoded=round_encoded,
         is_indoor=is_indoor if is_indoor is not None else 0,
+        best_of=best_of,
         player_id=player_id,
         opponent_id=opponent_id,
     )
@@ -456,6 +461,7 @@ def _assemble_row(
     row["is_grass"] = int(ctx.surface == "grass")
     row["is_hard"] = int(ctx.surface == "hard")
     row["is_indoor"] = ctx.is_indoor
+    row["best_of"] = ctx.best_of
     row["tournament_level"] = ctx.tournament_level
     row["round_encoded"] = ctx.round_encoded
 
@@ -476,6 +482,7 @@ def _build_inference_features_with_meta(
     tournament: str | None = None,
     round: str | None = None,
     is_indoor: int | None = None,
+    best_of: int = 3,
 ) -> tuple[pd.DataFrame, dict[str, object]]:
     """Build one NaN-free directional row in the FEATURE_COLS contract."""
     started_at = perf_counter()
@@ -489,6 +496,7 @@ def _build_inference_features_with_meta(
         tournament=tournament,
         round=round,
         is_indoor=is_indoor,
+        best_of=best_of,
     )
 
     # ── Materialized tour-averages singleton (no on-demand aggregates) ──
@@ -607,6 +615,7 @@ def build_inference_features(
     tournament: str | None = None,
     round: str | None = None,
     is_indoor: int | None = None,
+    best_of: int = 3,
 ) -> pd.DataFrame:
     out, _meta = _build_inference_features_with_meta(
         player_id,
@@ -618,6 +627,7 @@ def build_inference_features(
         tournament=tournament,
         round=round,
         is_indoor=is_indoor,
+        best_of=best_of,
     )
     return out
 

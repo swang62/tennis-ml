@@ -227,6 +227,7 @@ def test_load_all_raw_atp_rows_sorts_chronologically(tmp_path):
         "surface",
         "score",
         "indoor",
+        "best_of",
         "w_ace",
         "w_df",
         "w_svpt",
@@ -310,6 +311,14 @@ def test_parse_args_enrich_is_independent_of_all():
     assert both.enrich is True
 
 
+def test_parse_args_reset_is_independent_of_all_and_enrich():
+    """--reset (formerly --force) parses standalone and with --all/--enrich."""
+    assert parse_args([]).reset is False
+    assert parse_args(["--reset"]).reset is True
+    combo = parse_args(["--all", "--enrich", "--reset"])
+    assert (combo.all, combo.enrich, combo.reset) == (True, True, True)
+
+
 def test_main_dispatches_without_network(monkeypatch):
     """Flag combos dispatch offline; --enrich is the only network gate."""
     calls = []
@@ -317,10 +326,10 @@ def test_main_dispatches_without_network(monkeypatch):
     monkeypatch.setattr(
         seed,
         "main_default",
-        lambda enrich=False, force=False: calls.append(("default", enrich, force)),
+        lambda enrich=False, reset=False: calls.append(("default", enrich, reset)),
     )
     monkeypatch.setattr(
-        seed, "main_all", lambda enrich=False, force=False: calls.append(("all", enrich, force))
+        seed, "main_all", lambda enrich=False, reset=False: calls.append(("all", enrich, reset))
     )
 
     seed.main([])
@@ -339,11 +348,11 @@ def test_main_dispatches_without_network(monkeypatch):
     assert calls == [("all", True, False)]
 
     calls.clear()
-    seed.main(["--force"])
+    seed.main(["--reset"])
     assert calls == [("default", False, True)]
 
     calls.clear()
-    seed.main(["--all", "--force", "--enrich"])
+    seed.main(["--all", "--reset", "--enrich"])
     assert calls == [("all", True, True)]
 
 
@@ -355,7 +364,7 @@ def test_seed_rankings_and_enrichment_imports_only_seeded_players(monkeypatch):
         seed, "enrich_players", lambda _ids, _force=False: calls.append("enrich") or 0
     )
 
-    seed.seed_rankings_and_enrichment(["A0E2", "Z355"], enrich=False, force=False)
+    seed.seed_rankings_and_enrichment(["A0E2", "Z355"], enrich=False, reset=False)
 
     # The seed scopes the rankings import (and its IOC fallback) to exactly its
     # match-corpus player set; the fallback is not suppressed.
@@ -370,20 +379,20 @@ def test_seed_rankings_and_enrichment_enriches_only_when_flag(monkeypatch):
         seed, "enrich_players", lambda ids, force=False: calls.append(("enrich", ids, force)) or 2
     )
 
-    seed.seed_rankings_and_enrichment(["A0E2"], enrich=True, force=False)
+    seed.seed_rankings_and_enrichment(["A0E2"], enrich=True, reset=False)
 
     assert calls == ["rankings", ("enrich", ["A0E2"], False)]
 
 
-def test_seed_rankings_and_enrichment_force_propagates(monkeypatch):
-    """--force reaches both rankings and enrichment."""
+def test_seed_rankings_and_enrichment_reset_propagates(monkeypatch):
+    """--reset reaches both rankings and enrichment."""
     calls = []
     monkeypatch.setattr(seed, "ingest_rankings", lambda **kwargs: calls.append(kwargs) or {})
     monkeypatch.setattr(
         seed, "enrich_players", lambda ids, force=False: calls.append(("enrich", ids, force)) or 2
     )
 
-    seed.seed_rankings_and_enrichment(["A0E2"], enrich=True, force=True)
+    seed.seed_rankings_and_enrichment(["A0E2"], enrich=True, reset=True)
 
     assert calls == [
         {"player_ids": {"A0E2"}, "force": True, "match_rows": None},
@@ -396,7 +405,7 @@ def test_seed_rankings_and_enrichment_skips_empty_corpus(monkeypatch):
     monkeypatch.setattr(seed, "ingest_rankings", lambda **_: calls.append(1))
     monkeypatch.setattr(seed, "enrich_players", lambda _ids, force=False: calls.append(2) or force)
 
-    seed.seed_rankings_and_enrichment([], enrich=True, force=False)
+    seed.seed_rankings_and_enrichment([], enrich=True, reset=False)
 
     assert calls == []
 
@@ -413,7 +422,7 @@ def test_seed_enrich_output_is_the_batch_summary_only(monkeypatch, capsys):
 
     monkeypatch.setattr(seed, "enrich_players", fake_enrich)
 
-    seed.seed_rankings_and_enrichment(["A0E2"], enrich=True, force=False)
+    seed.seed_rankings_and_enrichment(["A0E2"], enrich=True, reset=False)
 
     out = capsys.readouterr().out
     assert (
@@ -451,7 +460,7 @@ def _patch_seed_writes(monkeypatch, calls):
     monkeypatch.setattr(
         seed,
         "seed_rankings_and_enrichment",
-        lambda ids, enrich, force, **_: calls.append((ids, enrich, force)),
+        lambda ids, enrich, reset, **_: calls.append((ids, enrich, reset)),
     )
 
 
@@ -466,7 +475,7 @@ def test_main_default_skips_existing_rows_by_default(monkeypatch):
 
 
 def test_main_all_skips_existing_rows_by_default(monkeypatch):
-    """`--all` seed is also idempotent without --force."""
+    """`--all` seed is also idempotent without --reset."""
     calls = []
     monkeypatch.setattr(seed, "discover_atp_csvs", lambda _dir: [Path("2026.csv")])
     _patch_seed_writes(monkeypatch, calls)
@@ -476,37 +485,37 @@ def test_main_all_skips_existing_rows_by_default(monkeypatch):
     assert calls == [False, (["A0E2", "Z355"], True, False)]
 
 
-def test_main_default_force_clears_match_events_before_insert(monkeypatch):
-    """--force on the default miniset clears bronze.match_events, then inserts
+def test_main_default_reset_clears_match_events_before_insert(monkeypatch):
+    """--reset on the default miniset clears bronze.match_events, then inserts
     the corpus fresh (overwrite=False) instead of overwriting rows."""
     calls = []
     _patch_seed_writes(monkeypatch, calls)
 
-    seed.main_default(force=True)
+    seed.main_default(reset=True)
 
     assert calls == ["clear", False, (["A0E2", "Z355"], False, True)]
 
 
-def test_main_all_force_clears_match_events_before_insert(monkeypatch):
-    """--force on --all clears bronze.match_events, then inserts the full
+def test_main_all_reset_clears_match_events_before_insert(monkeypatch):
+    """--reset on --all clears bronze.match_events, then inserts the full
     corpus fresh (overwrite=False)."""
     calls = []
     monkeypatch.setattr(seed, "discover_atp_csvs", lambda _dir: [Path("2026.csv")])
     _patch_seed_writes(monkeypatch, calls)
 
-    seed.main_all(force=True)
+    seed.main_all(reset=True)
 
     assert calls == ["clear", False, (["A0E2", "Z355"], False, True)]
 
 
-def test_main_force_clears_and_rebuilds(monkeypatch):
-    """--force clears matches (fresh insert), while overwrite still reaches
+def test_main_reset_clears_and_rebuilds(monkeypatch):
+    """--reset clears matches (fresh insert), while overwrite still reaches
     profiles, rankings, and enrichment."""
     calls = []
     monkeypatch.setattr(seed, "discover_atp_csvs", lambda _dir: [Path("2026.csv")])
     _patch_seed_writes(monkeypatch, calls)
 
-    seed.main_all(enrich=True, force=True)
+    seed.main_all(enrich=True, reset=True)
 
     assert calls == ["clear", False, (["A0E2", "Z355"], True, True)]
 
@@ -532,7 +541,7 @@ def test_main_default_prints_actual_inserted_and_skipped_counts(monkeypatch, cap
     monkeypatch.setattr(seed, "insert_bronze_rows", lambda _df, **kwargs: 1)  # noqa: ARG005
     monkeypatch.setattr(seed, "load_profiles_for", lambda _ids, _src, **_kwargs: None)
     monkeypatch.setattr(
-        seed, "seed_rankings_and_enrichment", lambda _ids, _enrich, _force, **_: None
+        seed, "seed_rankings_and_enrichment", lambda _ids, _enrich, _reset, **_: None
     )
 
     seed.main_default()
@@ -542,8 +551,8 @@ def test_main_default_prints_actual_inserted_and_skipped_counts(monkeypatch, cap
     )
 
 
-def test_main_force_prints_clear_and_rebuild_count(monkeypatch, capsys):
-    """--force reports the cleared table and the rebuilt inserted count."""
+def test_main_reset_prints_clear_and_rebuild_count(monkeypatch, capsys):
+    """--reset reports the cleared table and the rebuilt inserted count."""
     monkeypatch.setattr(seed, "discover_atp_csvs", lambda _dir: [Path("2026.csv")])
     monkeypatch.setattr(seed, "load_all_raw_atp_rows", lambda _paths: [])
     monkeypatch.setattr(seed, "atp_rows_to_bronze", _fake_bronze)
@@ -551,10 +560,10 @@ def test_main_force_prints_clear_and_rebuild_count(monkeypatch, capsys):
     monkeypatch.setattr(seed, "insert_bronze_rows", lambda _df, **kwargs: 2)  # noqa: ARG005
     monkeypatch.setattr(seed, "load_profiles_for", lambda _ids, _src, **_kwargs: None)
     monkeypatch.setattr(
-        seed, "seed_rankings_and_enrichment", lambda _ids, _enrich, _force, **_: None
+        seed, "seed_rankings_and_enrichment", lambda _ids, _enrich, _reset, **_: None
     )
 
-    seed.main_all(enrich=True, force=True)
+    seed.main_all(enrich=True, reset=True)
 
     out = capsys.readouterr().out
     assert "Cleared bronze.match_events for a clean rebuild" in out

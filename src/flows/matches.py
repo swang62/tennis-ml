@@ -38,6 +38,7 @@ from src.db.ingest import (
     canonical_players,
     load_player_metadata,
     load_ranking_player_map,
+    normalize_best_of,
 )
 from src.features.columns import (
     BRONZE_COLUMNS,
@@ -851,7 +852,12 @@ def hawkeye_to_bronze(
         "loser_seed": _field_text(loser_identity.get("SeedPlayerTeam")),
         "loser_entry": _field_text(loser_identity.get("EntryStatusPlayerTeam")),
         "draw_size": _payload_int(tournament.get("Singles")),
-        "best_of": _payload_int(match.get("NumberOfSets")),
+        "best_of": normalize_best_of(
+            _payload_int(match.get("NumberOfSets")),
+            level=tier,
+            round_value=round_value,
+            score=score,
+        ),
         "minutes": _match_minutes(match.get("MatchTime") or match.get("MatchTimeTotal")),
     }
     if discovered_match:

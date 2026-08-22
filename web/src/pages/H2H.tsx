@@ -4,6 +4,7 @@ import type { EChartsOption } from "echarts";
 import { format } from "echarts/core";
 import { useEffect, useState } from "react";
 import {
+  type BestOf,
   getHeadToHead,
   getPlayerProfile,
   type MatchRound,
@@ -35,6 +36,11 @@ import { h2hRoute } from "../routes";
 import { useTheme } from "../theme";
 
 const SURFACES: Surface[] = ["clay", "grass", "hard", "carpet"];
+const BEST_OF: { value: BestOf; label: string }[] = [
+  { value: 3, label: "Best of 3" },
+  { value: 5, label: "Best of 5" },
+  { value: 1, label: "Best of 1" },
+];
 const TOURNAMENT_TIERS: { value: TournamentTier; label: string }[] = [
   { value: "grand_slam", label: "Grand Slam" },
   { value: "masters", label: "Masters" },
@@ -108,6 +114,7 @@ export default function H2H() {
   const [playerA, setPlayerA] = useState<string | null>(searchPlayerA ?? null);
   const [playerB, setPlayerB] = useState<string | null>(searchPlayerB ?? null);
   const [surface, setSurface] = useState<Surface>("hard");
+  const [bestOf, setBestOf] = useState<BestOf>(3);
   const [tournament, setTournament] = useState<TournamentTier | "">("");
   const [round, setRound] = useState<MatchRound | "">("");
   const [asOfDate, setAsOfDate] = useState(today);
@@ -410,6 +417,20 @@ export default function H2H() {
                 </select>
               </label>
               <label className="field">
+                <span className="field-label">Format</span>
+                <select
+                  value={bestOf}
+                  onChange={(e) => setBestOf(Number(e.target.value) as BestOf)}
+                  className="select"
+                >
+                  {BEST_OF.map((bo) => (
+                    <option key={bo.value} value={bo.value}>
+                      {bo.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
                 <span className="field-label">Venue</span>
                 <select
                   value={isIndoor}
@@ -478,6 +499,7 @@ export default function H2H() {
                     player_id: requireId(playerA),
                     opponent_id: requireId(playerB),
                     surface,
+                    best_of: bestOf,
                     ...(tournament ? { tournament } : {}),
                     ...(round ? { round } : {}),
                     ...(asOfDate ? { as_of_date: asOfDate } : {}),

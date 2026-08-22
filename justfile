@@ -36,11 +36,16 @@ db-reset:
     uv run python src/db/migrate_db.py reset
 
 # Build and push all production docker images, bento and web images.
+# Pass --no-cache to force a full refresh of every deploy artifact (including
+# the web image's Docker Buildx layer cache).
 deploy *args:
-    uv run python src/flows/deploy.py
+    uv run python src/flows/deploy.py {{ args }}
+    @cache_flag=""; \
+    case " {{ args }} " in *" --no-cache "*) cache_flag="--no-cache";; esac; \
     docker buildx build --builder tennis-multiarch --platform linux/amd64,linux/arm64 \
         --build-arg VITE_SITE_URL={{ env_var_or_default('VITE_SITE_URL', '') }} \
         --build-arg VITE_SITE_ID={{ env_var_or_default('VITE_SITE_ID', '') }} \
+        $cache_flag \
         --tag swang62/tennis-web:{{ DOCKER_TAG }} --push web/
 
 # Install Python dependencies.
@@ -98,7 +103,7 @@ probe:
 rankings *args:
     uv run python src/flows/rankings.py {{ args }}
 
-# Seed deterministic raw matches. --all (every match) --enrich (Wikipedia bios) --force (overwrite existing rows).
+# Seed deterministic raw matches. --all (every match) --enrich (Wikipedia bios) --reset (overwrite existing rows).
 seed *args:
     uv run python src/db/seed.py {{ args }}
 

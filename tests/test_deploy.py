@@ -181,7 +181,7 @@ def test_deploy_bento_logs_in_before_build_and_writes_state(monkeypatch, tmp_pat
     monkeypatch.setattr(
         d,
         "build_bento_image",
-        lambda: order.append("build") or ("acme/tennis-bento:dev", 5),
+        lambda *_a, **_k: order.append("build") or ("acme/tennis-bento:dev", 5),
     )
     _stub_deploy_mlflow_tracking(monkeypatch)
 
@@ -201,7 +201,7 @@ def test_deploy_bento_fails_when_buildx_push_fails(monkeypatch, tmp_path):
     monkeypatch.setattr(d, "generate_similarity_artifacts", lambda: None)
     monkeypatch.setattr(d, "_docker_login", lambda: None)
 
-    def fail_build():
+    def fail_build(*_a, **_k):
         raise subprocess.CalledProcessError(1, ["docker", "buildx", "build"])
 
     monkeypatch.setattr(d, "build_bento_image", fail_build)
@@ -238,7 +238,7 @@ def test_deploy_bento_logs_build_and_buildx_to_single_file(monkeypatch, tmp_path
 
     build_output = {}
 
-    def fake_build():
+    def fake_build(*_a, **_k):
         build_output["log_at_build_start"] = sorted(p.name for p in tmp_path.glob("deploy_*.log"))
         print("building bento image")
         # The Buildx build streams its output through _run_teed into the open log.
@@ -265,7 +265,7 @@ def test_deploy_bento_leaves_log_when_build_fails(monkeypatch, tmp_path):
     monkeypatch.setattr(d, "LOGS", tmp_path)
     monkeypatch.setattr(d, "generate_similarity_artifacts", lambda: None)
 
-    def fail_build():
+    def fail_build(*_a, **_k):
         print("champion missing lineage tags")
         raise RuntimeError("no champion to build")
 
@@ -336,13 +336,13 @@ def _stub_bento_build(monkeypatch):
             k: {"model_uri": f"models:/{k}/7"} for k in ("nn", "linear", "gbdt", "production")
         },
     )
-    monkeypatch.setattr(d, "_reuse_or_materialize_nn_onnx", lambda _state, _nn: False)
-    monkeypatch.setattr(d, "_download_aux_artifacts", lambda _client, _tags: None)
-    monkeypatch.setattr(d, "generate_similarity_artifacts", lambda: None)
+    monkeypatch.setattr(d, "_reuse_or_materialize_nn_onnx", lambda *_a, **_k: False)
+    monkeypatch.setattr(d, "_download_aux_artifacts", lambda *_a, **_k: None)
+    monkeypatch.setattr(d, "generate_similarity_artifacts", lambda *_a, **_k: None)
     monkeypatch.setattr(d, "build_input_fingerprint", lambda _client, _prod: "fp")
     monkeypatch.setattr(d, "_read_state", lambda: {"fingerprint": "fp"})
     monkeypatch.setattr(
-        d, "_import_models", lambda _pins: {"linear": "l", "gbdt": "g", "production": "p"}
+        d, "_import_models", lambda *_a, **_k: {"linear": "l", "gbdt": "g", "production": "p"}
     )
     monkeypatch.setattr(d, "_write_pinned_bentofile", lambda _tags: "pinned")
     monkeypatch.setattr(d, "_write_state", lambda _s: None)
@@ -1182,3 +1182,201 @@ def test_similarity_artifacts_are_snapshot_built_not_fingerprint_inputs():
     d = _deploy()
     assert d.SIMILARITY_INDEX not in d.SOURCE_FINGERPRINT_FILES
     assert d.SIMILARITY_METADATA not in d.SOURCE_FINGERPRINT_FILES
+
+
+# --- --no-cache flag: argparse, command construction, and propagation ---
+
+
+def test_parse_deploy_args_defaults_no_cache_false():
+    d = _deploy()
+    assert d.parse_deploy_args([]).no_cache is False
+
+
+def test_parse_deploy_args_recognizes_no_cache_flag():
+    d = _deploy()
+    assert d.parse_deploy_args(["--no-cache"]).no_cache is True
+
+
+def test_buildx_build_cmd_default_has_no_no_cache():
+    d = _deploy()
+    cmd = d._buildx_build_cmd(
+        builder="b", containerfile=Path("/c"), context=Path("/ctx"), image="img:dev"
+    )
+    assert "--no-cache" not in cmd
+    assert cmd[:3] == ["docker", "buildx", "build"]
+
+
+def test_buildx_build_cmd_includes_no_cache_when_set():
+    d = _deploy()
+    cmd = d._buildx_build_cmd(
+        builder="b",
+        containerfile=Path("/c"),
+        context=Path("/ctx"),
+        image="img:dev",
+        no_cache=True,
+    )
+    assert "--no-cache" in cmd
+    # --no-cache sits right after the build subcommand.
+    assert cmd[cmd.index("build") + 1] == "--no-cache"
+
+
+def test_download_aux_artifacts_no_cache_forces_download(monkeypatch, tmp_path):
+    """With no_cache a matching local artifact is re-downloaded, not reused."""
+    d = _deploy()
+    _specs, tags, downloaded, artifacts_dir = _aux_tags_and_files(
+        monkeypatch, tmp_path, d, pre_populate=True
+    )
+    monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", artifacts_dir)
+
+    d._download_aux_artifacts(None, tags, no_cache=True)
+
+    assert sorted(downloaded) == sorted(tags[uri_tag] for uri_tag, _, _ in _specs)
+
+
+def test_materialize_calibration_no_cache_forces_download(monkeypatch, tmp_path):
+    """A matching local calibration file is reused by default but re-downloaded
+    when no_cache is set."""
+    import src.constants as c
+
+    d = _deploy()
+    _specs, tags, downloaded, artifacts_dir = _aux_tags_and_files(
+        monkeypatch, tmp_path, d, pre_populate=True
+    )
+    _pin_calibration(tmp_path, tags, temperature=1.7)
+    (artifacts_dir / c.CALIBRATION_ARTIFACT).write_text(
+        (tmp_path / "remote" / c.CALIBRATION_ARTIFACT).read_text()
+    )
+    monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", artifacts_dir)
+
+    assert d._materialize_calibration(None, tags) == 1.7  # reused, no download
+    assert downloaded == []
+
+    downloaded.clear()
+    assert d._materialize_calibration(None, tags, no_cache=True) == 1.7  # forced
+    assert tags[c.CALIBRATION_URI_TAG] in downloaded
+
+
+def test_reuse_or_materialize_nn_onnx_no_cache_forces_materialize(monkeypatch, tmp_path):
+    """A matching existing ONNX export is reused by default but regenerated when
+    no_cache is set (even though the pinned model URI is unchanged)."""
+    d = _deploy()
+    onnx_file = tmp_path / "nn_best.onnx"
+    onnx_file.write_bytes(b"onnx")
+    monkeypatch.setattr(d, "NN_ONNX_FILE", onnx_file)
+    materialized = []
+    monkeypatch.setattr(d, "_materialize_nn_onnx", lambda pin: materialized.append(pin))
+    pin = {"model_uri": "models:/nn_best/7"}
+
+    assert d._reuse_or_materialize_nn_onnx({"nn_onnx_model_uri": pin["model_uri"]}, pin)
+    assert materialized == []
+
+    assert not d._reuse_or_materialize_nn_onnx(
+        {"nn_onnx_model_uri": pin["model_uri"]}, pin, no_cache=True
+    )
+    assert materialized == [pin]
+
+
+def test_generate_similarity_artifacts_no_cache_forces_rebuild(monkeypatch, tmp_path):
+    """Matching inputs/sources and existing artifacts are reused by default, but
+    no_cache forces a rebuild."""
+    import pandas as pd
+
+    import src.db.training as training
+
+    d = _deploy()
+    index = tmp_path / "player_similarity.index"
+    meta = tmp_path / "player_metadata.json"
+    index.write_bytes(b"x")
+    meta.write_bytes(b"y")
+    monkeypatch.setattr(d, "SIMILARITY_INDEX", index)
+    monkeypatch.setattr(d, "SIMILARITY_METADATA", meta)
+    monkeypatch.setattr(d, "_similarity_inputs_hash", lambda *_a, **_k: "ihash")
+    monkeypatch.setattr(d, "_similarity_source_hash", lambda: "shash")
+    monkeypatch.setattr(d, "_read_similarity_inputs_hash", lambda: "ihash")
+    monkeypatch.setattr(d, "_read_similarity_source_hash", lambda: "shash")
+    monkeypatch.setattr("src.serving.directory.PLAYERS_SQL", "select 1")
+    monkeypatch.setattr("src.training.similarity.PLAYER_LIFETIME_SQL", "select 1")
+    monkeypatch.setattr("src.serving.directory.directory_players", lambda profiles: [])
+    monkeypatch.setattr(training, "to_dataframe", lambda *a, **k: pd.DataFrame([{"player_id": 1}]))
+
+    class _FakeSim:
+        players: list = []
+
+        def build(self, **kwargs):
+            built["ran"] = True
+            kwargs["index_path"].write_bytes(b"new-index")
+            kwargs["metadata_path"].write_bytes(b"new-meta")
+
+    monkeypatch.setattr("src.training.similarity.PlayerSimilarity", lambda: _FakeSim())
+    monkeypatch.setattr(d, "_write_similarity_state", lambda *a, **k: None)
+    built = {}
+
+    d.generate_similarity_artifacts()
+    assert built.get("ran") is None  # reused
+    d.generate_similarity_artifacts(no_cache=True)
+    assert built["ran"] is True  # forced rebuild
+
+
+def test_build_bento_image_forwards_no_cache(monkeypatch):
+    """build_bento_image threads no_cache to every reuse/download/similarity path
+    and into the Buildx command (default keeps caching)."""
+    d, built = _stub_bento_build(monkeypatch)
+    captured = {}
+
+    def cap_nn(*_a, **k):
+        captured["nn"] = k
+        return False
+
+    def cap_aux(*_a, **k):
+        captured["aux"] = k
+
+    def cap_sim(*_a, **k):
+        captured["sim"] = k
+
+    def cap_import(*_a, **k):
+        captured["import"] = k
+        return {"linear": "l", "gbdt": "g", "production": "p"}
+
+    monkeypatch.setattr(d, "_reuse_or_materialize_nn_onnx", cap_nn)
+    monkeypatch.setattr(d, "_download_aux_artifacts", cap_aux)
+    monkeypatch.setattr(d, "generate_similarity_artifacts", cap_sim)
+    monkeypatch.setattr(d, "_import_models", cap_import)
+
+    d.build_bento_image()
+    assert captured["nn"] == {"no_cache": False}
+    assert captured["aux"] == {"no_cache": False}
+    assert captured["sim"] == {"no_cache": False}
+    assert captured["import"] == {"no_cache": False}
+    assert "--no-cache" not in built["teed_calls"][0]
+
+    d.build_bento_image(no_cache=True)
+    assert captured["nn"] == {"no_cache": True}
+    assert captured["aux"] == {"no_cache": True}
+    assert captured["sim"] == {"no_cache": True}
+    assert captured["import"] == {"no_cache": True}
+    # The latest Buildx command carries --no-cache.
+    assert "--no-cache" in built["teed_calls"][-1]
+
+
+def test_deploy_bento_forwards_no_cache_to_build(monkeypatch, tmp_path):
+    """deploy_bento passes no_cache through to build_bento_image."""
+    d = _deploy()
+    monkeypatch.setattr(d, "LOGS", tmp_path)
+    monkeypatch.setattr(d, "generate_similarity_artifacts", lambda *a, **k: None)
+    monkeypatch.setattr(d, "_docker_login", lambda: None)
+    monkeypatch.setattr(d, "_read_state", lambda: {})
+    monkeypatch.setattr(d, "_write_state", lambda _s: None)
+    _stub_subprocess(monkeypatch)
+    _stub_deploy_mlflow_tracking(monkeypatch)
+    captured = {}
+
+    def fake_build(*_a, **k):
+        captured.update(k)
+        return "acme/tennis-bento:dev", 5
+
+    monkeypatch.setattr(d, "build_bento_image", fake_build)
+
+    d.deploy_bento()
+    assert captured == {"no_cache": False}
+    d.deploy_bento(no_cache=True)
+    assert captured == {"no_cache": True}

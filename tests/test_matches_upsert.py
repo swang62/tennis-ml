@@ -102,6 +102,24 @@ def test_force_replaces_existing_row_across_every_non_key_column(monkeypatch):
     assert written["score"] == "6-4 7-6 6-3"  # non-stat columns replaced too
 
 
+def test_force_update_replaces_best_of(monkeypatch):
+    written: dict[str, object] = {}
+
+    def fake_copy(table, df, *, conflict_col, update_cols):  # noqa: ARG001
+        written.update(df.iloc[0].to_dict())
+        return 1
+
+    monkeypatch.setattr(matches, "_copy_df_into", fake_copy)
+
+    stored = _stored_row(best_of=3)
+    candidate = _candidate_row(best_of=5)
+    record = matches.upsert_bronze_match(candidate, force=True, query=_query_for(stored))
+
+    assert record["action"] == "updated"
+    assert "best_of" in written
+    assert written["best_of"] == 5  # best_of is part of the force-replace update set
+
+
 def test_repeated_force_runs_converge_to_the_candidate_row(monkeypatch):
     written = {}
 

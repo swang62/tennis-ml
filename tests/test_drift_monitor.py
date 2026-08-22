@@ -254,6 +254,7 @@ def _fake_bronze_window(
     tournament: str = "atp_500",
     round_: str = "r64",
     indoor: int | None = None,
+    best_of: int = 3,
     rate_shift: float = 0.0,
 ) -> pd.DataFrame:
     """A bronze.match_events window: one row per physical match.
@@ -290,6 +291,7 @@ def _fake_bronze_window(
             "surface": [surface] * n,
             "tournament": [tournament] * n,
             "round": [round_] * n,
+            "best_of": [best_of] * n,
             "is_indoor": is_indoor,
             **rates,
         }
@@ -354,6 +356,7 @@ def test_five_bronze_matches_expand_to_ten_symmetric_scored_rows(monkeypatch):
         "as_of_date",
         "tournament",
         "round",
+        "best_of",
         "is_indoor",
     }
 

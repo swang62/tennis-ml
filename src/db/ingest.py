@@ -96,6 +96,7 @@ RAW_ATP_COLUMNS = [
     "round",
     "surface",
     "score",
+    "best_of",
     "indoor",
     "w_ace",
     "w_df",
@@ -256,6 +257,42 @@ def _score(m: dict[str, Any]) -> str | None:
     return re.sub(r"\(\d+\)", "", text).strip()
 
 
+def _completed_sets(score: str | None) -> int:
+    """Count space-separated completed sets (X-Y) in a canonical score."""
+    if not score:
+        return 0
+    return sum(1 for tok in str(score).split() if re.fullmatch(r"\d+-\d+", tok))
+
+
+def normalize_best_of(
+    raw: Any,
+    *,
+    level: str | None = None,
+    round_value: str | None = None,
+    score: str | None = None,
+) -> int:
+    """Normalize a best_of source to 1/3/5 with a fixed fallback order.
+
+    A source of exactly 1, 3, or 5 is trusted verbatim. Anything else (missing,
+    0, malformed, or unsupported like 2/4) falls back: round-robin (``rr``)
+    -> 1; grand_slam -> 5; a score with >=4 completed sets -> 5; otherwise -> 3.
+    A three-set score never implies five unless it is a Grand Slam.
+    """
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = None
+    if value in (1, 3, 5):
+        return value
+    if str(round_value or "").lower() == "rr":
+        return 1
+    if str(level or "").lower() == "grand_slam":
+        return 5
+    if _completed_sets(score) >= 4:
+        return 5
+    return 3
+
+
 def player_history(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     """Each player's full match history, oldest -> newest."""
     history: dict[str, list[dict[str, Any]]] = {}
@@ -312,6 +349,12 @@ def atp_rows_to_bronze(
                 "surface": _canonical_surface(m["surface"]),
                 "score": _score(m),
                 "is_indoor": _normalize_indoor(m.get("indoor")),
+                "best_of": normalize_best_of(
+                    m.get("best_of"),
+                    level=level,
+                    round_value=str(m["round"]).lower(),
+                    score=_score(m),
+                ),
                 "player1_ranking": _rank(m, "winner_rank"),
                 "player2_ranking": _rank(m, "loser_rank"),
                 "player1_wins_last_10": winner_wins,
@@ -432,7 +475,7 @@ def _copy_df_into(
 def clear_match_events() -> None:
     """Delete every bronze.match_events row inside one transaction.
 
-    Called by the seed's --force path so the corpus inserts into an empty
+    Called by the seed's --reset path so the corpus inserts into an empty
     table; the table/schema itself is never dropped.
     """
     with connection() as conn, conn.transaction(), conn.cursor() as cur:
@@ -446,7 +489,7 @@ def insert_bronze_rows(df: pd.DataFrame, *, overwrite: bool = False) -> int:
 
     Shared by the ingest CLI and the dev seed so both paths use one INSERT.
     match_id is the PK: ingestion skips an existing match_id (DO NOTHING).
-    The seed's --force path clears bronze.match_events first (see
+    The seed's --reset path clears bronze.match_events first (see
     clear_match_events) and inserts fresh rows; overwrite=True stays available
     for callers that want full-row replacement (DO UPDATE).
     """

@@ -256,12 +256,13 @@ _PARITY_GOLD = (
     0.0,
     0.0,
     0.0,
-    # 6 context values (is_clay, is_grass, is_hard, is_indoor,
+    # 7 context values (is_clay, is_grass, is_hard, is_indoor, best_of,
     # tournament_level, round_encoded)
     0.0,
     0.0,
     1.0,
     0.0,
+    3.0,  # best_of: gold COALESCE(best_of, 3) default
     0.0,
     0.0,
 )
@@ -306,11 +307,12 @@ _PARITY_GOLD_BA = (
     0.0,
     0.0,
     0.0,
-    # 6 context values
+    # 7 context values
     0.0,
     0.0,
     1.0,
     0.0,
+    3.0,  # best_of: gold COALESCE(best_of, 3) default
     0.0,
     0.0,
 )
@@ -522,6 +524,49 @@ def test_two_known_players_each_surface(surface):
         assert math.isfinite(row[col]), f"{col} is not finite: {row[col]!r}"
     assert row["tournament_level"] == 0
     assert row["round_encoded"] == 0
+
+
+@pytest.mark.parametrize("best_of", [1, 3, 5])
+def test_best_of_in_feature_order_and_emitted(best_of):
+    """best_of is emitted verbatim at the context position (after is_indoor,
+    before tournament_level) in the exact FEATURE_COLS order."""
+    out = build_inference_features(
+        "S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES, best_of=best_of
+    )
+    assert out.columns.tolist() == [*FEATURE_COLS, "player_id", "opponent_id"]
+    cols = FEATURE_COLS
+    assert cols[cols.index("is_indoor") + 1] == "best_of"
+    assert cols[cols.index("best_of") + 1] == "tournament_level"
+    assert out.iloc[0]["best_of"] == best_of
+
+
+@pytest.mark.parametrize("best_of", [1, 3, 5])
+def test_best_of_scalar_bulk_parity(best_of):
+    """Scalar and bulk builders emit byte-identical rows for each best_of value."""
+    req = {
+        "player_id": "S0AG",
+        "opponent_id": "Z355",
+        "surface": "hard",
+        "as_of_date": AS_OF_AFTER_ALL_MATCHES,
+        "best_of": best_of,
+    }
+    scalar = build_inference_features(**req)
+    bulk = build_inference_features_bulk([req])
+    pd.testing.assert_frame_equal(bulk, scalar, check_exact=True)
+    assert scalar.iloc[0]["best_of"] == best_of
+
+
+def test_best_of_invariants_under_id_swap():
+    """Swapping the requested ids preserves best_of and the complementary row
+    (best_of is a symmetric context feature)."""
+    out_ab = build_inference_features(
+        "S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES, best_of=5
+    )
+    out_ba = build_inference_features(
+        "Z355", "S0AG", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES, best_of=5
+    )
+    _assert_mirror(out_ab.iloc[0], out_ba.iloc[0])
+    assert out_ab.iloc[0]["best_of"] == out_ba.iloc[0]["best_of"] == 5
 
 
 def test_reversed_ids_mirror():
@@ -1203,6 +1248,7 @@ def test_train_inference_parity_on_historical_match():
         as_of_date=gold_ab["match_date"],
         tournament_level=int(gold_ab["tournament_level"]),
         round_encoded=int(gold_ab["round_encoded"]),
+        best_of=int(gold_ab["best_of"]),
     )
     infer_ab = out_ab.iloc[0]
     assert out_ab.columns.tolist() == [*FEATURE_COLS, "player_id", "opponent_id"]
@@ -1225,6 +1271,7 @@ def test_train_inference_parity_on_historical_match():
         as_of_date=gold_ba["match_date"],
         tournament_level=int(gold_ba["tournament_level"]),
         round_encoded=int(gold_ba["round_encoded"]),
+        best_of=int(gold_ba["best_of"]),
     )
     infer_ba = out_ba.iloc[0]
     for col in FEATURE_COLS:
