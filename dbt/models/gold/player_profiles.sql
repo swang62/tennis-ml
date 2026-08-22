@@ -62,6 +62,12 @@ WITH player_agg AS (
         CAST(SUM(pm.return_points_won) AS DOUBLE PRECISION)
             / NULLIF(SUM(pm.return_points_available), 0)
             AS return_points_won_pct,
+         (
+             (SUM(pm.return_points_won) + 1.0)
+                 / (SUM(pm.return_points_available) + 2.0)
+             / (1.0 - (SUM(pm.first_serve_points_won + pm.second_serve_points_won) + 1.0)
+                        / (SUM(pm.total_serve_points) + 2.0))
+         )::NUMERIC AS dominance,
 
         -- Surface counts and win rates.
         COUNT(*) FILTER (WHERE pm.surface = 'hard')                                   AS hard_matches,
@@ -153,47 +159,48 @@ SELECT
     COALESCE(lr.rank, pa.last_match_rank)       AS current_rank,
 
     -- Service
-    TRUNC(pa.first_serve_in_pct::NUMERIC, 5)::DOUBLE PRECISION AS first_serve_in_pct,
-    TRUNC(pa.aces_per_first_serve::NUMERIC, 5)::DOUBLE PRECISION AS aces_per_first_serve,
-    TRUNC(pa.first_serve_points_won_pct::NUMERIC, 5)::DOUBLE PRECISION
+    pa.first_serve_in_pct                  AS first_serve_in_pct,
+    pa.aces_per_first_serve                AS aces_per_first_serve,
+    pa.first_serve_points_won_pct
         AS first_serve_points_won_pct,
-    TRUNC(pa.second_serve_points_won_pct::NUMERIC, 5)::DOUBLE PRECISION
+    pa.second_serve_points_won_pct
         AS second_serve_points_won_pct,
-    TRUNC(pa.overall_serve_points_won_pct::NUMERIC, 5)::DOUBLE PRECISION
+    pa.overall_serve_points_won_pct
         AS overall_serve_points_won_pct,
-    TRUNC(pa.double_faults_per_serve_point::NUMERIC, 5)::DOUBLE PRECISION
+    pa.double_faults_per_serve_point
         AS double_faults_per_serve_point,
-    TRUNC(pa.aces_per_service_game::NUMERIC, 5)::DOUBLE PRECISION
+    pa.aces_per_service_game
         AS aces_per_service_game,
-    TRUNC(pa.break_points_saved_pct::NUMERIC, 5)::DOUBLE PRECISION
+    pa.break_points_saved_pct
         AS break_points_saved_pct,
 
     -- Return
-    TRUNC(pa.return_points_won_pct::NUMERIC, 5)::DOUBLE PRECISION
+    pa.return_points_won_pct
         AS return_points_won_pct,
-    TRUNC(ra.first_serve_return_points_won_pct::NUMERIC, 5)::DOUBLE PRECISION
+    ra.first_serve_return_points_won_pct
         AS first_serve_return_points_won_pct,
-    TRUNC(ra.second_serve_return_points_won_pct::NUMERIC, 5)::DOUBLE PRECISION
+    ra.second_serve_return_points_won_pct
         AS second_serve_return_points_won_pct,
-    TRUNC(ra.return_games_won_pct::NUMERIC, 5)::DOUBLE PRECISION
+    ra.return_games_won_pct
         AS return_games_won_pct,
-    TRUNC(ra.break_point_conversion_pct::NUMERIC, 5)::DOUBLE PRECISION
+    ra.break_point_conversion_pct
         AS break_point_conversion_pct,
-    TRUNC(ra.break_point_opportunities_per_return_game::NUMERIC, 5)::DOUBLE PRECISION
+    ra.break_point_opportunities_per_return_game
         AS break_point_opportunities_per_return_game,
 
     -- Surface
     COALESCE(pa.hard_matches, 0)              AS hard_matches,
     COALESCE(pa.clay_matches, 0)              AS clay_matches,
     COALESCE(pa.grass_matches, 0)             AS grass_matches,
-    TRUNC(pa.hard_win_rate::NUMERIC, 5)::DOUBLE PRECISION AS hard_win_rate,
-    TRUNC(pa.clay_win_rate::NUMERIC, 5)::DOUBLE PRECISION AS clay_win_rate,
-    TRUNC(pa.grass_win_rate::NUMERIC, 5)::DOUBLE PRECISION AS grass_win_rate,
-    TRUNC(pa.career_win_rate::NUMERIC, 5)::DOUBLE PRECISION AS career_win_rate,
+    pa.hard_win_rate                         AS hard_win_rate,
+    pa.clay_win_rate                         AS clay_win_rate,
+    pa.grass_win_rate                        AS grass_win_rate,
+    pa.dominance                             AS dominance,
+    pa.career_win_rate                       AS career_win_rate,
 
     -- Recent form
     ls.recent_snapshot_date,
-    TRUNC(ls.win_rate_10::NUMERIC, 5) AS win_rate_10
+    ls.win_rate_10                           AS win_rate_10
 FROM {{ source('bronze', 'player_profiles') }} bp
 LEFT JOIN player_agg pa       ON pa.player_id = bp.player_id
 LEFT JOIN return_agg ra       ON ra.player_id = bp.player_id

@@ -42,6 +42,7 @@ pool_stats AS (
         AVG(second_serve_win_pct_10) AS second_serve_win_pct_10,
         AVG(serve_win_pct_10) AS serve_win_pct_10,
         AVG(return_points_won_pct_10) AS return_points_won_pct_10,
+        AVG(dominance) AS dominance,
         AVG(df_rate_10) AS df_rate_10,
         AVG(aces_per_svc_game_10) AS aces_per_svc_game_10,
         ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY avg_player_rank_10))
@@ -167,6 +168,10 @@ SELECT
         AS serve_win_pct_10,
     ROUND(COALESCE(p.return_points_won_pct_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS return_points_won_pct_10,
+    -- Tour-average fallback dominance: mean lifetime Dominance Ratio over the
+    -- full snapshot pool; 0.0 when the pool is empty.
+    ROUND(COALESCE(p.dominance, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
+        AS dominance,
     ROUND(COALESCE(p.df_rate_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS df_rate_10,
     ROUND(COALESCE(p.aces_per_svc_game_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION

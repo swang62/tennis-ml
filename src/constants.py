@@ -52,11 +52,7 @@ SCHEMA_SQL = ROOT / "infra" / "postgres" / "schema.sql"
 DEPLOY_ARTIFACTS = ROOT / "data" / "deploy"
 
 # Model-tied serving artifacts frozen into DEPLOY_ARTIFACTS on promotion
-FROZEN_ARTIFACTS = (
-    "linear_scaler.pkl",
-    "bio_embeddings.npz",
-    "bio_feature_cols.json",
-)
+FROZEN_ARTIFACTS = ("linear_scaler.pkl",)
 
 # --- Candidate manifest ---
 CANDIDATE_MANIFEST = DATA_PROCESSED / "candidate_manifest.json"
@@ -107,12 +103,7 @@ LINEAGE_BASE_KEYS = (
     LINEAGE_MODEL_URI_KEY,
 )
 LINEAGE_SCALER_KEYS = ("scaler_uri", "scaler_hash")
-LINEAGE_AUX_KEYS = (
-    "embeddings_uri",
-    "embeddings_hash",
-    "bio_feature_cols_uri",
-    "bio_feature_cols_hash",
-)
+LINEAGE_AUX_KEYS = ()
 BASE_TAG_PREFIX = "base_"
 AUX_TAG_PREFIX = "aux_"
 FEATURE_COLS_TAG = "feature_cols"
@@ -142,9 +133,9 @@ def build_lineage_tags(
 
     base_pins is the {name: pin} map consolidated by 03 (registered_model_name,
     version, run_id, model_uri, plus scaler_uri/scaler_hash for linear).
-    aux_pins comes from 00 and carries only predictive-model inputs
-    (embeddings/bio_feature_cols URIs + hashes); navigation artifacts are
-    never pinned on the champion.
+    aux_pins comes from 00; there are currently no model-lineage aux artifacts
+    (bio embeddings were removed). Navigation artifacts are never pinned on the
+    champion.
     """
     tags: dict[str, str] = {}
     for name, pin in base_pins.items():
@@ -188,15 +179,12 @@ DRIFT_REF_MAX = 10000
 # --- Player similarity block calibration (explicit, reviewed weights) ---
 # The similarity vector is a weighted concatenation of independently calibrated
 # blocks: identity (one-hot), lifetime playstyle stats, surface career
-# performance, reputation, and a PCA-reduced bio block.
+# performance, and reputation.
 SIM_IDENTITY_WEIGHT = 0.10
 SIM_PLAYSTYLE_WEIGHT = 0.35
 SIM_SURFACE_WEIGHT = 0.25
 SIM_REPUTATION_WEIGHT = 0.25
-SIM_BIO_WEIGHT = 0.05
-SIM_BIO_PCA_DIM = 10
 SIM_SURFACE_SHRINK_K = 30.0
-SIM_RANK_SCALE = 200.0
 SIM_EXPERIENCE_K = 100.0
 
 

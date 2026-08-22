@@ -27,8 +27,13 @@ from src.utils.countries import resolve_ioc, valid_ioc
 # profile is retained: the directory, similarity, and MiniSearch build over all
 # players regardless of match count. Training never reads this query — it
 # consumes gold.match_features via training/to_dataframe.
+#
+# height/birthdate/turned_pro ride along from bronze so the deploy similarity
+# snapshot can feed the profile descriptor block; directory_players ignores
+# them, so the directory contract below is unchanged.
 PLAYERS_SQL = f"""
 SELECT bp.player_id, bp.display_name, bp.ioc, bp.backhand, bp.handedness, bp.summary,
+       bp.height, bp.birthdate, bp.turned_pro,
        COALESCE(gp.match_count, 0) AS matches_played,
        gp.current_rank
 FROM {BRONZE_PROFILES_TABLE} bp

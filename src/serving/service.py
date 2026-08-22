@@ -1060,12 +1060,6 @@ class TennisPredictor:
         with open(AUX_DIR / "linear_scaler.pkl", "rb") as f:
             self.scaler = pickle.load(f)
         _validate_feature_contract(self.scaler, "linear_scaler.pkl")
-        with open(AUX_DIR / "bio_feature_cols.json") as f:
-            self.bio_feature_cols = json.load(f)
-        bio_data = np.load(str(AUX_DIR / "bio_embeddings.npz"), allow_pickle=True)
-        # player_ids is a string array (object dtype, requires pickle); vectors is float32.
-        self.bio_by_player = {pid: i for i, pid in enumerate(bio_data["player_ids"])}
-        self.bio_array = bio_data["vectors"].astype(np.float32)
         self.temperature = _load_serving_temperature()
 
     def _predict_proba(self, row_ab: pd.DataFrame, row_ba: pd.DataFrame) -> pd.DataFrame:
@@ -1100,17 +1094,9 @@ class TennisPredictor:
         p_gbdt_ab = _positive_class_probability(self.gbdt, features_ab)
         p_gbdt_ba = _positive_class_probability(self.gbdt, features_ba)
         gbdt_ms = (perf_counter() - gbdt_started_at) * 1000
-        # ONNX inputs match the training forward signature.
-        nn_inputs_ab = {
-            "tab": scaled_ab.astype(np.float32),
-            "bio_p": self._row_bio_np(row_ab["player_id"].to_numpy()),
-            "bio_o": self._row_bio_np(row_ab["opponent_id"].to_numpy()),
-        }
-        nn_inputs_ba = {
-            "tab": scaled_ba.astype(np.float32),
-            "bio_p": self._row_bio_np(row_ba["player_id"].to_numpy()),
-            "bio_o": self._row_bio_np(row_ba["opponent_id"].to_numpy()),
-        }
+        # ONNX input matches the training forward signature (tab-only).
+        nn_inputs_ab = {"tab": scaled_ab.astype(np.float32)}
+        nn_inputs_ba = {"tab": scaled_ba.astype(np.float32)}
         nn_started_at = perf_counter()
         nn_ab = np.asarray(self.nn_session.run(None, nn_inputs_ab)[0])
         nn_ba = np.asarray(self.nn_session.run(None, nn_inputs_ba)[0])
@@ -1268,12 +1254,3 @@ class TennisPredictor:
         except Exception:
             _log.exception("predict_from_ids_bulk failed")
             raise InvalidArgument("prediction failed — check input row format") from None
-
-    def _row_bio_np(self, ids: np.ndarray) -> np.ndarray:
-        """Map player ids to bio vectors (np.float32), zero-filled for unknown players."""
-        out = np.zeros((len(ids), len(self.bio_feature_cols)), dtype=np.float32)
-        for i, pid in enumerate(ids):
-            j = self.bio_by_player.get(pid)
-            if j is not None:
-                out[i] = self.bio_array[j]
-        return out

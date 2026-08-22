@@ -1,8 +1,7 @@
-"""Similarity tests with fake embeddings and DuckDB fixtures."""
+"""Similarity tests with DuckDB fixtures (no bio embeddings)."""
 
 import json
 import re
-import sys
 from pathlib import Path
 
 import duckdb
@@ -15,45 +14,22 @@ from src.db import client, training
 from src.training import similarity
 from src.training.similarity import (
     BLOCK_WEIGHTS,
+    DOMINANCE_COLS,
+    IDENTITY_BLOCK_COLS,
     LIFETIME_PLAYSTYLE_COLS,
+    PROFILE_COLS,
     REPUTATION_BLOCK_COLS,
     SURFACE_BLOCK_COLS,
     PlayerData,
     PlayerSimilarity,
     block_slices,
-    embed_bio_summaries,
     vector_block_norms,
 )
 
-
-class FakeTextEmbedding:
-    """Stand-in for fastembed.TextEmbedding: fixed 4-dim ones vectors, no network."""
-
-    def __init__(self, _model_name: str = "") -> None:
-        self.embed_calls: list[list[str]] = []
-
-    def embed(self, texts):
-        self.embed_calls.append(list(texts))
-        return np.ones((len(texts), 4), dtype=np.float32)
-
-
-class _FakeFastembed:
-    """Stand-in fastembed module whose TextEmbedding factory returns the fake."""
-
-    def __init__(self, factory) -> None:
-        self.TextEmbedding = factory
-
-
-def _patch_embedding(monkeypatch: pytest.MonkeyPatch) -> FakeTextEmbedding:
-    # Inject the fake module because fastembed is imported lazily.
-    fake = FakeTextEmbedding()
-    monkeypatch.setitem(sys.modules, "fastembed", _FakeFastembed(lambda _model_name: fake))
-    return fake
-
-
 # Included career aggregates (gold.player_profiles): lifetime playstyle stats,
-# surface win rates + exposure counts, and the reputation signals, plus the
-# excluded recent-form field that must never enter a vector.
+# surface win rates + exposure counts, and the reputation signals (no
+# current_rank), plus the excluded recent-form field that must never enter a
+# vector. height/turned_pro are bronze identity metadata, also excluded.
 _GOLD_PROFILE_COLS = [
     "first_serve_in_pct",
     "aces_per_first_serve",
@@ -78,6 +54,7 @@ _GOLD_PROFILE_COLS = [
     "career_win_rate",
     "current_rank",
     "win_rate_10",
+    "dominance",
 ]
 
 
@@ -94,6 +71,7 @@ def _create_two_table_fixture(con: duckdb.DuckDBPyConnection) -> None:
             handedness VARCHAR,
             summary VARCHAR,
             height DOUBLE,
+            birthdate DATE,
             turned_pro INTEGER,
             birthplace VARCHAR
         )
@@ -105,13 +83,13 @@ def _create_two_table_fixture(con: duckdb.DuckDBPyConnection) -> None:
         + ")"
     )
     con.executemany(
-        "INSERT INTO bronze.player_profiles VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO bronze.player_profiles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
-            ("P1", "Alice", "1H", "L", "Great server", 185.0, 2010, "Spain"),
-            ("P2", "Bob", "2H", "R", "", 190.0, 2015, "Italy"),
-            ("P3", "Carol", "1H", "R", "Solid returner", 178.0, 2020, "USA"),
-            ("P4", "Dave", "2H", "L", None, 195.0, 2012, "France"),
-            ("", "Ghost", "1H", "R", "No id", 180.0, 2018, "UK"),
+            ("P1", "Alice", "1H", "L", "Great server", 185.0, "1990-01-01", 2010, "Spain"),
+            ("P2", "Bob", "2H", "R", "", 190.0, "1995-01-01", 2015, "Italy"),
+            ("P3", "Carol", "1H", "R", "Solid returner", 178.0, "2000-01-01", 2020, "USA"),
+            ("P4", "Dave", "2H", "L", None, 195.0, "1992-01-01", 2012, "France"),
+            ("", "Ghost", "1H", "R", "No id", 180.0, "1998-01-01", 2018, "UK"),
         ],
     )
     # P3 (and Ghost) have no match history: every playstyle cell is NULL and
@@ -146,10 +124,12 @@ def _create_two_table_fixture(con: duckdb.DuckDBPyConnection) -> None:
                 0.72,
                 5,
                 0.80,
+                1.0,
             ),
             (
                 "P2",
                 0.60,
+                1.0,
                 0.15,
                 0.70,
                 0.53,
@@ -176,6 +156,7 @@ def _create_two_table_fixture(con: duckdb.DuckDBPyConnection) -> None:
             (
                 "P3",
                 None,
+                1.0,
                 None,
                 None,
                 None,
@@ -215,6 +196,7 @@ def _create_two_table_fixture(con: duckdb.DuckDBPyConnection) -> None:
                 0.44,
                 0.52,
                 0.45,
+                1.0,
                 0.30,
                 0.50,
                 250,
@@ -250,6 +232,7 @@ def _create_two_table_fixture(con: duckdb.DuckDBPyConnection) -> None:
                 0.50,
                 60,
                 0.40,
+                1.0,
             ),
         ],
     )
@@ -266,7 +249,6 @@ def _duck_query(con: duckdb.DuckDBPyConnection):
 
 def _build_with_fixture(tmp_path: Path, monkeypatch) -> PlayerSimilarity:
     """Build against an in-memory DuckDB two-table fixture (offline path)."""
-    _patch_embedding(monkeypatch)
     monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
     monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
     con = duckdb.connect()
@@ -280,27 +262,23 @@ def _build_with_fixture(tmp_path: Path, monkeypatch) -> PlayerSimilarity:
 
 
 # Vector layout: one-hot identity descriptors precede the lifetime playstyle
-# stats, then the surface and reputation blocks, then the PCA-reduced bio
-# block (min(SIM_BIO_PCA_DIM, n_samples, n_features) — 4 dims for the
-# 4-player fixture). block_slices exposes the exact columns, so tests read
-# blocks by name instead of hard-coded offsets.
-ONE_HOT = 4
+# stats, then the surface and reputation blocks. block_slices exposes the exact
+# columns, so tests read blocks by name instead of hard-coded offsets.
 STYLE = LIFETIME_PLAYSTYLE_COLS
 SURFACE = SURFACE_BLOCK_COLS
 REPUTATION = REPUTATION_BLOCK_COLS
-BIO_WIDTH = 4  # PCA keeps min(10, 4 players, 4 fake dims) = 4 for the fixture.
-
-
-def _style_block(vector: object) -> np.ndarray:
-    # faiss IndexFlatIP.reconstruct returns a plain np.ndarray.
-    arr: np.ndarray = np.asarray(vector)
-    return arr[block_slices(BIO_WIDTH)["playstyle"]]
 
 
 def _block(vector: object, name: str) -> np.ndarray:
     """Slice one calibrated block out of a vector (see block_slices)."""
     arr: np.ndarray = np.asarray(vector)
-    return arr[block_slices(BIO_WIDTH)[name]]
+    return arr[block_slices()[name]]
+
+
+def _style_block(vector: object) -> np.ndarray:
+    # faiss IndexFlatIP.reconstruct returns a plain np.ndarray.
+    arr: np.ndarray = np.asarray(vector)
+    return arr[block_slices()["playstyle"]]
 
 
 def _style_values(vector: object) -> dict[str, float]:
@@ -334,18 +312,10 @@ def test_build_uses_lifetime_playstyle_aggregates(tmp_path: Path, monkeypatch):
         index.reconstruct(finder.player_ids.index("P1")),
         {
             "first_serve_in_pct": 0.62,
-            "aces_per_first_serve": 0.20,
-            "first_serve_points_won_pct": 0.73,
-            "second_serve_points_won_pct": 0.51,
             "overall_serve_points_won_pct": 0.65,
-            "double_faults_per_serve_point": 0.04,
             "aces_per_service_game": 0.50,
-            "break_points_saved_pct": 0.62,
             "return_points_won_pct": 0.42,
-            "first_serve_return_points_won_pct": 0.30,
-            "second_serve_return_points_won_pct": 0.55,
             "break_point_conversion_pct": 0.40,
-            "break_point_opportunities_per_return_game": 0.45,
         },
         reference="overall_serve_points_won_pct",
     )
@@ -354,18 +324,10 @@ def test_build_uses_lifetime_playstyle_aggregates(tmp_path: Path, monkeypatch):
         index.reconstruct(finder.player_ids.index("P4")),
         {
             "first_serve_in_pct": 0.58,
-            "aces_per_first_serve": 0.12,
-            "first_serve_points_won_pct": 0.68,
-            "second_serve_points_won_pct": 0.55,
             "overall_serve_points_won_pct": 0.61,
-            "double_faults_per_serve_point": 0.08,
             "aces_per_service_game": 0.25,
-            "break_points_saved_pct": 0.50,
             "return_points_won_pct": 0.46,
-            "first_serve_return_points_won_pct": 0.36,
-            "second_serve_return_points_won_pct": 0.51,
             "break_point_conversion_pct": 0.44,
-            "break_point_opportunities_per_return_game": 0.52,
         },
         reference="overall_serve_points_won_pct",
     )
@@ -392,36 +354,8 @@ def test_build_null_and_cold_start_style_cells_imputed_zero(tmp_path: Path, monk
     assert np.all(p1 > 0.0)
 
 
-def test_build_embeds_bio_and_one_hot_identity(tmp_path: Path, monkeypatch):
-    fake = _patch_embedding(monkeypatch)
-    monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
-    monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
-    con = duckdb.connect()
-    try:
-        _create_two_table_fixture(con)
-        finder = PlayerSimilarity()
-        finder.build(query=_duck_query(con))
-    finally:
-        con.close()
-    index = finder.index
-    assert index is not None
-    # Every profiled player's summary is embedded (empty/None normalized to "").
-    assert fake.embed_calls == [["Great server", "", "Solid returner", ""]]
-    p2 = index.reconstruct(finder.player_ids.index("P2"))
-    # Bio is PCA-reduced to min(10, 4 players, 4 fake dims) = 4 dims. The fake
-    # returns constant rows, so the centered batch has zero variance and the
-    # reduced block is zero — the embed call still happened for every profile.
-    bio_block = _block(p2, "bio")
-    assert bio_block.shape[0] == BIO_WIDTH
-    assert np.all(np.isfinite(bio_block))
-    assert np.linalg.norm(bio_block) == 0.0
-    # Lifetime playstyle stats carry the real signal for this fixture.
-    assert np.all(_style_block(p2) > 0.0)
-
-
 def test_build_is_deterministic_same_data_identical_vectors(tmp_path: Path, monkeypatch):
     """Rebuilding from identical data yields bit-identical vectors and layout."""
-    _patch_embedding(monkeypatch)
     monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
     monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
     con = duckdb.connect()
@@ -443,7 +377,6 @@ def test_build_is_deterministic_same_data_identical_vectors(tmp_path: Path, monk
 
 def test_build_one_hot_layout_fixed_when_category_missing(tmp_path: Path, monkeypatch):
     """Missing one-hot categories must not change the vector dimension."""
-    _patch_embedding(monkeypatch)
     monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
     monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
     con = duckdb.connect()
@@ -466,7 +399,6 @@ def test_build_one_hot_layout_fixed_when_category_missing(tmp_path: Path, monkey
 
 def test_build_always_rebuilds_index_from_fresh_data(tmp_path: Path, monkeypatch):
     """build() replaces any previously built index; stale vectors never persist."""
-    _patch_embedding(monkeypatch)
     monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
     monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
     con = duckdb.connect()
@@ -479,7 +411,7 @@ def test_build_always_rebuilds_index_from_fresh_data(tmp_path: Path, monkeypatch
         base = np.array(old_index.reconstruct(0))
 
         con.execute(
-            "UPDATE gold.player_profiles SET first_serve_points_won_pct = 0.99 "
+            "UPDATE gold.player_profiles SET overall_serve_points_won_pct = 0.99 "
             "WHERE player_id = 'P1'"
         )
         finder.build(query=_duck_query(con))
@@ -492,7 +424,6 @@ def test_build_always_rebuilds_index_from_fresh_data(tmp_path: Path, monkeypatch
 def test_build_excludes_identity_and_recent_form(tmp_path: Path, monkeypatch):
     """Bio identity/physical fields and recent rolling form leave vectors
     unchanged; career reputation, surface, and playstyle signals do not."""
-    _patch_embedding(monkeypatch)
     monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
     monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
     con = duckdb.connect()
@@ -503,24 +434,30 @@ def test_build_excludes_identity_and_recent_form(tmp_path: Path, monkeypatch):
         assert finder.index is not None
         base = [np.array(finder.index.reconstruct(i)) for i in range(finder.index.ntotal)]
 
-        # Mutate only excluded signals: physical/bio identity (height, turned_pro,
-        # birthplace, display_name) and recent rolling form (win_rate_10).
+        # Mutate only excluded signals: audit metadata and recent rolling form.
         con.execute(
-            "UPDATE bronze.player_profiles SET height = height + 5, "
-            "turned_pro = turned_pro - 3, birthplace = 'X', display_name = 'X'"
+            "UPDATE bronze.player_profiles SET birthplace = 'X', display_name = 'X', summary = 'X'"
         )
         con.execute("UPDATE gold.player_profiles SET win_rate_10 = 0.99")
+        # current_rank is also excluded from the vector now.
+        con.execute("UPDATE gold.player_profiles SET current_rank = 1")
         finder2 = PlayerSimilarity()
         finder2.build(query=_duck_query(con))
         assert finder2.index is not None
         for i in range(finder2.index.ntotal):
             assert np.array_equal(base[i], finder2.index.reconstruct(i))
 
-        # The reputation signals (match_count, career_win_rate, current_rank)
-        # are career-level and included in the vector.
+        con.execute("UPDATE bronze.player_profiles SET height = height + 5")
+        finder_profile = PlayerSimilarity()
+        finder_profile.build(query=_duck_query(con))
+        assert finder_profile.index is not None
+        assert not np.array_equal(base[0], finder_profile.index.reconstruct(0))
+
+        # The reputation signals (match_count, career_win_rate) are career-level
+        # and included in the vector.
         con.execute(
             "UPDATE gold.player_profiles SET match_count = match_count + 999, "
-            "career_win_rate = 0.99, current_rank = 1"
+            "career_win_rate = 0.99"
         )
         finder3 = PlayerSimilarity()
         finder3.build(query=_duck_query(con))
@@ -532,7 +469,7 @@ def test_build_excludes_identity_and_recent_form(tmp_path: Path, monkeypatch):
 
         # So are lifetime playstyle and surface signals.
         con.execute(
-            "UPDATE gold.player_profiles SET first_serve_points_won_pct = 0.99, "
+            "UPDATE gold.player_profiles SET overall_serve_points_won_pct = 0.99, "
             "clay_win_rate = 0.85 WHERE player_id = 'P1'"
         )
         finder4 = PlayerSimilarity()
@@ -542,6 +479,39 @@ def test_build_excludes_identity_and_recent_form(tmp_path: Path, monkeypatch):
             not np.array_equal(base[i], finder4.index.reconstruct(i))
             for i in range(finder4.index.ntotal)
         )
+    finally:
+        con.close()
+
+
+def test_build_profile_block_carries_bronze_metadata(tmp_path: Path, monkeypatch):
+    """The profile descriptor block (height/age/years_pro) is read from the
+    bronze profiles snapshot, not the gold lifetime aggregates, so populated
+    fixture players carry non-zero profile values and a height change moves the
+    full vector."""
+    monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
+    monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
+    con = duckdb.connect()
+    try:
+        _create_two_table_fixture(con)
+        finder = PlayerSimilarity()
+        finder.build(query=_duck_query(con))
+        assert finder.index is not None
+        p1_profile = _block(finder.index.reconstruct(finder.player_ids.index("P1")), "profile")
+        # height (185.0), age, and years_pro are all populated and non-zero.
+        assert np.all(p1_profile > 0.0)
+        assert p1_profile[0] > 0.0  # height component
+
+        # A height change in the bronze snapshot moves the profile block and
+        # therefore the full vector.
+        findex = finder.index
+        assert findex is not None
+        base = np.array(findex.reconstruct(finder.player_ids.index("P1")))
+        con.execute("UPDATE bronze.player_profiles SET height = height + 5 WHERE player_id = 'P1'")
+        taller = PlayerSimilarity()
+        taller.build(query=_duck_query(con))
+        tindex = taller.index
+        assert tindex is not None
+        assert not np.array_equal(base, np.array(tindex.reconstruct(finder.player_ids.index("P1"))))
     finally:
         con.close()
 
@@ -572,7 +542,6 @@ def test_surface_block_shrinks_rates_and_carries_exposure(tmp_path: Path, monkey
 def test_changing_clay_win_rate_changes_vectors(tmp_path: Path, monkeypatch):
     """Regression: surface career performance is a first-class signal — a
     higher clay win rate moves that player's vector and only theirs."""
-    _patch_embedding(monkeypatch)
     monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
     monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
     con = duckdb.connect()
@@ -608,7 +577,6 @@ def _synthetic_profiles(player_ids: list[str]) -> pd.DataFrame:
             "display_name": player_ids,
             "backhand": ["2H"] * len(player_ids),
             "handedness": ["R"] * len(player_ids),
-            "summary": [""] * len(player_ids),
         }
     )
 
@@ -619,6 +587,7 @@ def _stub_query(rows: list[dict[str, str | float]]):
         "player_id",
         *LIFETIME_PLAYSTYLE_COLS,
         *SURFACE_BLOCK_COLS,
+        *DOMINANCE_COLS,
         *REPUTATION_BLOCK_COLS,
     ]
 
@@ -639,93 +608,55 @@ def _cos(a: object, b: object) -> float:
     return float(np.asarray(a, dtype=np.float32) @ np.asarray(b, dtype=np.float32))
 
 
-def test_rank_reputation_included_lower_rank_stronger(monkeypatch):
-    """current_rank enters the reputation block: a lower rank number is a
-    stronger reputation signal, and rank differences alone move the vector."""
-    _patch_embedding(monkeypatch)
-    matrix = similarity.build_playstyle_matrix(
-        _synthetic_profiles(["A", "B"]),
-        query=_stub_query(
-            [
-                {"player_id": "A", "current_rank": 5.0},
-                {"player_id": "B", "current_rank": 400.0},
-            ]
-        ),
-    )
-    va, vb = matrix.to_numpy(np.float32)
-    # Identical non-rank blocks mean identical per-row norms: comparable.
-    rank_a = _block(va, "reputation")[0]
-    rank_b = _block(vb, "reputation")[0]
-    assert rank_a > rank_b  # rank 5 is a stronger signal than rank 400
-    assert _cos(va, vb) < 1.0  # the rank difference moves the vectors apart
+def test_reputation_block_excludes_rank_and_includes_career(tmp_path, monkeypatch):
+    """Reputation is match_count + career_win_rate only; current_rank is
+    excluded, so a rank change never moves the vector, but a career change does."""
+    monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
+    monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
+    con = duckdb.connect()
+    try:
+        _create_two_table_fixture(con)
+        finder = PlayerSimilarity()
+        finder.build(query=_duck_query(con))
+        assert finder.index is not None
+        base = [np.array(finder.index.reconstruct(i)) for i in range(finder.index.ntotal)]
+
+        # current_rank is no longer part of the vector.
+        con.execute("UPDATE gold.player_profiles SET current_rank = 1 WHERE player_id = 'P1'")
+        finder.build(query=_duck_query(con))
+        assert np.array_equal(base[0], np.array(finder.index.reconstruct(0)))
+
+        # match_count change does move the vector.
+        con.execute(
+            "UPDATE gold.player_profiles SET match_count = match_count + 999 WHERE player_id = 'P1'"
+        )
+        finder.build(query=_duck_query(con))
+        assert not np.array_equal(base[0], np.array(finder.index.reconstruct(0)))
+    finally:
+        con.close()
 
 
-def test_block_weights_calibrate_bio_never_dominates(monkeypatch):
+def test_block_weights_calibrate_no_bio_blocks():
     """Every active block contributes exactly its calibrated weight share of
-    the final unit vector. Bio is PCA-reduced to SIM_BIO_PCA_DIM columns and
-    weighted 0.05, so it is a minor auxiliary block — widening raw embeddings
-    never widens the final vector, and playstyle stays the dominant signal."""
-    _patch_embedding(monkeypatch)
+    the final unit vector; there is no bio block, so playstyle/surface/
+    reputation each carry their full configured weight."""
     player_ids = [f"P{i}" for i in range(10)]
     profiles = _synthetic_profiles(player_ids)
-    monkeypatch.setattr(similarity, "embed_bio_summaries", _wide_embed_factory(16))
     matrix = similarity.build_playstyle_matrix(profiles, query=_flat_query(player_ids))
     v = matrix.to_numpy(np.float32)[0]
-    num_bio = len([c for c in matrix.columns if c.startswith("bio_")])
-    assert num_bio == similarity.SIM_BIO_PCA_DIM  # 10 players, 16 dims -> 10
-    total = np.sqrt(sum(w * w for name, w in BLOCK_WEIGHTS.items()))
-    expected = {
-        name: BLOCK_WEIGHTS[name] / total
-        for name in ("identity", "playstyle", "surface", "reputation", "bio")
-    }
-    norms = vector_block_norms(v, num_bio=num_bio)
-    for name, expected_norm in expected.items():
-        assert np.isclose(norms[name], expected_norm, rtol=1e-4), name
-    # Primary signals are playstyle, surface, reputation; bio is the smallest
-    # active block (surface and reputation share the same 0.25 weight).
-    assert norms["playstyle"] > norms["surface"] >= norms["reputation"] > norms["bio"]
-    assert norms["bio"] < 0.5 * norms["surface"]
-
-    # Dimensionality independence: widening raw bio 16 -> 32 dims leaves the
-    # final vector width and every block norm unchanged.
-    monkeypatch.setattr(similarity, "embed_bio_summaries", _wide_embed_factory(32))
-    matrix32 = similarity.build_playstyle_matrix(profiles, query=_flat_query(player_ids))
-    assert matrix32.shape[1] == matrix.shape[1]
-    norms32 = vector_block_norms(
-        matrix32.to_numpy(np.float32)[0], num_bio=similarity.SIM_BIO_PCA_DIM
-    )
-    for name, expected_norm in expected.items():
-        assert np.isclose(norms32[name], expected_norm, rtol=1e-4), name
-
-
-def test_bio_block_width_capped_by_samples_features_and_config(monkeypatch):
-    """The shared bio block is PCA-reduced to min(SIM_BIO_PCA_DIM, n_samples,
-    n_features): the configured cap when enough players, n_samples otherwise,
-    and n_features when embeddings are narrower than the cap."""
-    _patch_embedding(monkeypatch)
-
-    # Enough players: capped exactly at the configured dimension.
-    many = [f"P{i}" for i in range(12)]
-    monkeypatch.setattr(similarity, "embed_bio_summaries", _wide_embed_factory(20))
-    matrix = similarity.build_playstyle_matrix(_synthetic_profiles(many), query=_flat_query(many))
-    assert sum(c.startswith("bio_") for c in matrix.columns) == similarity.SIM_BIO_PCA_DIM
-
-    # Fewer players than the cap: the block shrinks to n_samples.
-    few = [f"P{i}" for i in range(4)]
-    matrix = similarity.build_playstyle_matrix(_synthetic_profiles(few), query=_flat_query(few))
-    assert sum(c.startswith("bio_") for c in matrix.columns) == 4
-
-    # Narrower embeddings than the cap: the block shrinks to n_features.
-    monkeypatch.setattr(similarity, "embed_bio_summaries", _wide_embed_factory(3))
-    matrix = similarity.build_playstyle_matrix(_synthetic_profiles(many), query=_flat_query(many))
-    assert sum(c.startswith("bio_") for c in matrix.columns) == 3
-
-    # Single player: one component, still finite.
-    one = ["P0"]
-    monkeypatch.setattr(similarity, "embed_bio_summaries", _wide_embed_factory(20))
-    matrix = similarity.build_playstyle_matrix(_synthetic_profiles(one), query=_flat_query(one))
-    assert sum(c.startswith("bio_") for c in matrix.columns) == 1
-    assert np.all(np.isfinite(matrix.to_numpy(np.float32)))
+    norms = vector_block_norms(v)
+    assert norms["profile"] == 0.0
+    assert norms["identity"] > 0.0
+    assert norms["surface"] > 0.0
+    assert norms["reputation"] > 0.0
+    assert np.isclose(norms["identity"] / norms["surface"], 0.1 / 0.25, rtol=1e-4)
+    # The primary signals (playstyle, surface, reputation) carry the larger
+    # weights and dominate the small identity descriptor block; surface and
+    # reputation share the same 0.25 weight so their norms are approximately
+    # equal.
+    assert norms["playstyle"] > norms["surface"]
+    assert norms["reputation"] > norms["identity"]
+    assert np.isclose(norms["surface"], norms["reputation"], rtol=1e-4)
 
 
 def _surface_query(player_ids: list[str]):
@@ -744,7 +675,6 @@ def _surface_query(player_ids: list[str]):
                 "hard_matches": 150.0,
                 "clay_matches": 200.0,
                 "grass_matches": 50.0,
-                "current_rank": 10.0,
                 "match_count": 200.0,
                 "career_win_rate": 0.6,
             }
@@ -753,81 +683,10 @@ def _surface_query(player_ids: list[str]):
     return query
 
 
-def test_bio_perturbation_minor_bounded_effect(monkeypatch):
-    """Regression for the weight rebalance: bio is a tiny bonus (0.05), so a
-    bio-only perturbation to one player moves that player's vector far less
-    than a meaningful clay or playstyle change to one player."""
-    _patch_embedding(monkeypatch)
-    player_ids = [f"P{i}" for i in range(10)]
-    profiles = _synthetic_profiles(player_ids)
-    query = _surface_query(player_ids)
-    monkeypatch.setattr(similarity, "embed_bio_summaries", _wide_embed_factory(16, seed=0))
-    base = similarity.build_playstyle_matrix(profiles, query=query).to_numpy(np.float32)
-
-    def row0_move(embed_seed: int = 0, mutate: None | tuple[str, float] = None) -> float:
-        """Movement of player 0's row vs base; mutate is (career column, value)."""
-        monkeypatch.setattr(similarity, "embed_bio_summaries", _wide_embed_factory(16, embed_seed))
-        q = query
-        if mutate is not None:
-            q = _patched_query(query, mutate[0], player_ids[0], mutate[1])
-        changed = similarity.build_playstyle_matrix(profiles, query=q).to_numpy(np.float32)
-        return float(np.linalg.norm(changed[0] - base[0]))
-
-    # Meaningful clay swing for player 0 (0.50 -> 0.95, high exposure).
-    clay_move = row0_move(mutate=("clay_win_rate", 0.95))
-    # Meaningful playstyle swing for player 0 (0.40 -> 0.95).
-    style_move = row0_move(mutate=("first_serve_points_won_pct", 0.95))
-
-    # A bio perturbation needs perturbed embeddings: rebuild with one player's
-    # bio row offset (deterministic), comparing only that player's row.
-    def bio_row_move(delta: float) -> float:
-        monkeypatch.setattr(
-            similarity,
-            "embed_bio_summaries",
-            _wide_embed_factory(16, seed=0, perturb_row=0, delta=delta),
-        )
-        changed = similarity.build_playstyle_matrix(profiles, query=query).to_numpy(np.float32)
-        return float(np.linalg.norm(changed[0] - base[0]))
-
-    bio_move = bio_row_move(delta=0.5)
-    assert bio_move > 0.0  # the perturbation actually moved the row
-    assert bio_move < clay_move, f"bio {bio_move:.4f} should be minor vs clay {clay_move:.4f}"
-    assert bio_move < style_move, f"bio {bio_move:.4f} should be minor vs style {style_move:.4f}"
-
-
-def _patched_query(base_query, col: str, player_id: str, value: float):
-    """Return a query like base_query but with one player's career cell set."""
-
-    def query(_sql: str) -> pd.DataFrame:
-        df = base_query(_sql)
-        df.loc[df["player_id"] == player_id, col] = value
-        return df
-
-    return query
-
-
-def test_pca_bio_finite_and_deterministic(monkeypatch):
-    """The PCA-reduced bio path yields all-finite vectors and bit-identical
-    vectors across rebuilds (full-SVD PCA is deterministic, row order kept)."""
-    _patch_embedding(monkeypatch)
-    player_ids = [f"P{i}" for i in range(10)]
-    profiles = _synthetic_profiles(player_ids)
-    monkeypatch.setattr(similarity, "embed_bio_summaries", _wide_embed_factory(20))
-    query = _flat_query(player_ids)
-
-    first = similarity.build_playstyle_matrix(profiles, query=query).to_numpy(np.float32)
-    assert np.all(np.isfinite(first))
-    assert np.all(np.isfinite(first[:3, :]))  # spot-check rows, no NaN/Inf anywhere
-
-    second = similarity.build_playstyle_matrix(profiles, query=query).to_numpy(np.float32)
-    assert np.array_equal(first, second)
-
-
-def test_similar_style_players_more_comparable(monkeypatch):
+def test_similar_style_players_more_comparable():
     """Hermetic style comparison without live data: two clay-court players
     with alike serve and return shapes rank far closer than either does to a
     hard-court server — the Nadal/Alcaraz-style case the redesign targets."""
-    _patch_embedding(monkeypatch)
     clay_a = {
         "player_id": "A",
         "clay_win_rate": 0.76,
@@ -871,6 +730,27 @@ def test_similar_style_players_more_comparable(monkeypatch):
     assert cos_ab > 0.99  # near-identical clay+style profiles are very close
     assert cos_ac < 0.99  # a hard-court attacker is clearly farther
     assert cos_ab > cos_ac and cos_ab > cos_bc
+
+
+def test_vector_layout_and_column_count():
+    """The final vector is exactly identity + playstyle + surface + reputation
+    columns, with no bio block and no current_rank."""
+    matrix = similarity.build_playstyle_matrix(
+        _synthetic_profiles(["A", "B"]),
+        query=_flat_query(["A", "B"]),
+    )
+    expected_cols = [
+        *IDENTITY_BLOCK_COLS,
+        *PROFILE_COLS,
+        *LIFETIME_PLAYSTYLE_COLS,
+        *SURFACE_BLOCK_COLS,
+        *DOMINANCE_COLS,
+        *REPUTATION_BLOCK_COLS,
+    ]
+    assert list(matrix.columns) == expected_cols
+    assert matrix.shape[1] == len(expected_cols)
+    assert "current_rank" not in matrix.columns
+    assert not any(name.startswith("bio_") for name in matrix.columns)
 
 
 def test_search_returns_sorted_top_k_from_built_index(tmp_path: Path, monkeypatch):
@@ -968,7 +848,6 @@ def test_search_empty_players_returns_empty():
 
 
 def test_build_load_round_trip(tmp_path: Path, monkeypatch):
-    _patch_embedding(monkeypatch)
     monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
     monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
     # build() writes to DEFAULT_* (data/processed); load() reads from
@@ -1017,7 +896,6 @@ def test_duck_and_snapshot_fixtures_produce_identical_vectors(
 ) -> None:
     """The same SQL + builder yield bit-identical vectors through a direct
     DuckDB query and the two-table DuckDB snapshot (offline training path)."""
-    _patch_embedding(monkeypatch)
     monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
     monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
 
@@ -1062,31 +940,9 @@ def _flat_query(player_ids: list[str]):
                 "player_id": player_ids,
                 **dict.fromkeys(LIFETIME_PLAYSTYLE_COLS, 0.4),
                 **dict.fromkeys(SURFACE_BLOCK_COLS, 0.5),
-                "current_rank": 10.0,
                 "match_count": 200.0,
                 "career_win_rate": 0.6,
             }
         )
 
     return query
-
-
-def _wide_embed_factory(
-    width: int, seed: int = 0, perturb_row: int | None = None, delta: float = 0.0
-):
-    """embed_bio_summaries stand-in: deterministic per-player distinct rows, so
-    the PCA sees real variance (constant rows would reduce to an all-zero bio
-    block). The same seed always yields the same matrix, keeping rebuilds
-    bit-identical. perturb_row optionally offsets one row's embeddings (for
-    perturbation tests)."""
-
-    def _embed(profiles: pd.DataFrame, _model_name: str = "") -> pd.DataFrame:
-        values = np.random.default_rng(seed).normal(size=(len(profiles), width)).astype(np.float32)
-        if perturb_row is not None:
-            values[perturb_row] += delta
-        out = pd.DataFrame(values)
-        out.columns = [f"bio_{i}" for i in range(width)]
-        out.insert(0, "player_id", profiles["player_id"].to_numpy())
-        return out
-
-    return _embed

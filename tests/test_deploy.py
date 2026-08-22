@@ -505,8 +505,6 @@ def _aux_tags_and_files(monkeypatch, tmp_path, d, pre_populate=True):
     artifacts_dir.mkdir()
     specs = [
         ("base_linear_scaler_uri", "base_linear_scaler_hash", "linear_scaler.pkl"),
-        ("aux_embeddings_uri", "aux_embeddings_hash", "bio_embeddings.npz"),
-        ("aux_bio_feature_cols_uri", "aux_bio_feature_cols_hash", "bio_feature_cols.json"),
     ]
     tags = {}
     for uri_tag, hash_tag, name in specs:
@@ -583,11 +581,11 @@ def test_download_aux_artifacts_missing_tag_fails(monkeypatch, tmp_path):
     d = _deploy()
     _specs, tags, _downloaded, artifacts_dir = _aux_tags_and_files(monkeypatch, tmp_path, d)
     monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", artifacts_dir)
-    del tags["aux_embeddings_uri"]
+    del tags["base_linear_scaler_uri"]
 
     import pytest
 
-    with pytest.raises(RuntimeError, match="aux_embeddings_uri"):
+    with pytest.raises(RuntimeError, match="base_linear_scaler_uri"):
         d._download_aux_artifacts(None, tags)
 
 
@@ -617,7 +615,7 @@ def test_download_aux_artifacts_retries_once_on_transient_failure(monkeypatch, t
         monkeypatch, tmp_path, d, pre_populate=True
     )
     monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", artifacts_dir)
-    name = "bio_embeddings.npz"
+    name = "linear_scaler.pkl"
     (artifacts_dir / name).unlink()  # missing -> needs a download
     attempts = []
 
@@ -637,7 +635,7 @@ def test_download_aux_artifacts_retries_once_on_transient_failure(monkeypatch, t
 
     d._download_aux_artifacts(None, tags)
 
-    assert attempts == [tags["aux_embeddings_uri"]] * 2
+    assert attempts == [tags["base_linear_scaler_uri"]] * 2
     assert (artifacts_dir / name).exists()
 
 
@@ -648,7 +646,7 @@ def test_download_aux_artifacts_raises_after_retry_fails(monkeypatch, tmp_path):
         monkeypatch, tmp_path, d, pre_populate=True
     )
     monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", artifacts_dir)
-    name = "bio_embeddings.npz"
+    name = "linear_scaler.pkl"
     (artifacts_dir / name).unlink()  # missing -> needs a download
     calls = []
 
@@ -664,7 +662,7 @@ def test_download_aux_artifacts_raises_after_retry_fails(monkeypatch, tmp_path):
 
     import pytest
 
-    with pytest.raises(RuntimeError, match=r"bio_embeddings\.npz"):
+    with pytest.raises(RuntimeError, match=r"linear_scaler\.pkl"):
         d._download_aux_artifacts(None, tags)
     assert len(calls) == 2  # initial attempt + one retry, then no more
 
@@ -921,10 +919,6 @@ def _lineage_tags():
         "base_nn_version": "1",
         "base_nn_run_id": "run-nn",
         "base_nn_model_uri": "runs:/run-nn/nn_model",
-        "aux_embeddings_uri": "runs:/run-aux/bio_embeddings.npz",
-        "aux_embeddings_hash": "bbb",
-        "aux_bio_feature_cols_uri": "runs:/run-aux/bio_feature_cols.json",
-        "aux_bio_feature_cols_hash": "ccc",
         c.FEATURE_COLS_TAG: json.dumps(FEATURE_COLS, separators=(",", ":")),
         c.FEATURE_COLS_HASH_TAG: _deploy()._feature_cols_hash(FEATURE_COLS),
     }
@@ -1133,7 +1127,8 @@ def test_build_input_fingerprint_ignores_generated_outputs(monkeypatch, tmp_path
 
 
 def test_build_lineage_tags_flattens_exact_pins():
-    """build_lineage_tags turns base/aux pins into the champion tag set."""
+    """build_lineage_tags turns base pins into the champion tag set and emits no
+    aux (bio) tags — bio embeddings were removed from the champion lineage."""
     import src.constants as c
 
     base_pins = {
@@ -1158,12 +1153,8 @@ def test_build_lineage_tags_flattens_exact_pins():
             "model_uri": "runs:/run-nn/nn_model",
         },
     }
-    aux_pins = {
-        "embeddings_uri": "runs:/run-aux/bio_embeddings.npz",
-        "embeddings_hash": "bbb",
-        "bio_feature_cols_uri": "runs:/run-aux/bio_feature_cols.json",
-        "bio_feature_cols_hash": "ccc",
-    }
+    # No model-lineage aux (bio) artifacts remain; an empty map is expected.
+    aux_pins: dict[str, str] = {}
     tags = c.build_lineage_tags(base_pins, aux_pins)
 
     assert tags["base_linear_version"] == "3"
@@ -1171,8 +1162,8 @@ def test_build_lineage_tags_flattens_exact_pins():
     assert "base_gbdt_scaler_uri" not in tags  # only linear has a scaler
     assert tags["base_gbdt_run_id"] == "run-gbdt"
     assert tags["base_nn_model_uri"] == "runs:/run-nn/nn_model"
-    assert tags["aux_embeddings_hash"] == "bbb"
-    assert tags["aux_bio_feature_cols_uri"] == "runs:/run-aux/bio_feature_cols.json"
+    # No aux/bio lineage tags are produced.
+    assert not any(key.startswith("aux_") for key in tags)
     # Navigation artifacts (similarity index/metadata, player directory) are not
     # model lineage: build_lineage_tags never emits their tags.
     for nav_key in (

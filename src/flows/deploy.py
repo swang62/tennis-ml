@@ -42,12 +42,9 @@ from src.constants import (
     LOGS,
     PRODUCTION_MODEL,
     ROOT,
-    SIM_BIO_PCA_DIM,
-    SIM_BIO_WEIGHT,
     SIM_EXPERIENCE_K,
     SIM_IDENTITY_WEIGHT,
     SIM_PLAYSTYLE_WEIGHT,
-    SIM_RANK_SCALE,
     SIM_REPUTATION_WEIGHT,
     SIM_SURFACE_SHRINK_K,
     SIM_SURFACE_WEIGHT,
@@ -121,17 +118,12 @@ AUX_FILES = [
 SOURCE_FINGERPRINT_FILES = [
     TEMPLATE_BENTOFILE,
     SERVICE_FILE,
-    # Added: these packaged runtime inputs can change predictions without changing service.py.
+    ROOT / "infra" / "postgres" / "schema.sql",
     ROOT / "src" / "features" / "columns.py",
     ROOT / "src" / "features" / "inference.py",
     ROOT / "src" / "features" / "tour_averages.py",
-    ROOT / "src" / "constants.py",
-    # Rest of the runtime source closure shipped in the Bento image.
-    ROOT / "src" / "utils" / "countries.py",
     ROOT / "src" / "db" / "client.py",
     ROOT / "src" / "db" / "migrate_db.py",
-    ROOT / "infra" / "postgres" / "schema.sql",
-    ROOT / "src" / "utils" / "config.py",
     ROOT / "src" / "training" / "similarity.py",
     ROOT / "src" / "training" / "nn.py",
 ]
@@ -229,10 +221,7 @@ def _similarity_source_hash() -> str:
             "playstyle_weight": SIM_PLAYSTYLE_WEIGHT,
             "surface_weight": SIM_SURFACE_WEIGHT,
             "reputation_weight": SIM_REPUTATION_WEIGHT,
-            "bio_weight": SIM_BIO_WEIGHT,
-            "bio_pca_dim": SIM_BIO_PCA_DIM,
             "surface_shrink_k": SIM_SURFACE_SHRINK_K,
-            "rank_scale": SIM_RANK_SCALE,
             "experience_k": SIM_EXPERIENCE_K,
         }
     }
@@ -376,29 +365,25 @@ def _write_model_info(
 
 
 def _download_aux_artifacts(client: Any, tags: dict[str, str]) -> float:
-    """Download the champion's lineage-pinned aux artifacts into DEPLOY_ARTIFACTS.
+    """Download the champion's lineage-pinned artifacts into DEPLOY_ARTIFACTS.
 
     Returns the resolved calibration temperature (pinned value for a tagged
     champion, 1.0 for a legacy champion) so the caller can embed it in
     model_info.json.
 
-    Three model-affecting artifacts are pinned on the champion model version via
-    URI+hash lineage tags. A local copy is reused when its content hash
-    already matches the pin; otherwise the artifact is downloaded from its
-    exact URI (one retry on a transient download failure) and verified
-    against its content hash before the build proceeds. A champion missing
-    any required tag is not deployable and must be re-promoted from a full
-    training run. The temperature-scaling calibration artifact is materialized
-    separately by _materialize_calibration (optional for legacy champions).
-    Similarity artifacts are rebuilt from the DuckDB snapshot at
-    deploy time and are never champion-pinned.
+    The fitted linear scaler (base lineage) is pinned on the champion model
+    version via URI+hash lineage tags; its content hash is verified before the
+    build proceeds. A local copy is reused when its content hash already
+    matches the pin; otherwise the artifact is downloaded from its exact URI
+    (one retry on a transient download failure). The temperature-scaling
+    calibration artifact is materialized separately by _materialize_calibration
+    (optional for legacy champions). Similarity artifacts are rebuilt from the
+    DuckDB snapshot at deploy time and are never champion-pinned.
     """
     import mlflow
 
     specs = [
         ("base_linear_scaler_uri", "base_linear_scaler_hash", "linear_scaler.pkl"),
-        ("aux_embeddings_uri", "aux_embeddings_hash", "bio_embeddings.npz"),
-        ("aux_bio_feature_cols_uri", "aux_bio_feature_cols_hash", "bio_feature_cols.json"),
     ]
     DEPLOY_ARTIFACTS.mkdir(parents=True, exist_ok=True)
     for uri_tag, hash_tag, filename in specs:
@@ -656,7 +641,7 @@ def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
     import torch
 
     # Needed so torch.load can resolve the class — torch.save records the path.
-    from src.training.nn import TabularBioMLP  # type: ignore[reportUnusedImport]
+    from src.training.nn import TabularMLP  # type: ignore[reportUnusedImport]
 
     # The MLP uses standard ONNX ops; suppress unrelated exporter warnings.
     logging.getLogger("torch.onnx").setLevel(logging.ERROR)
@@ -671,28 +656,23 @@ def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
     stored = _import_or_reuse(nn_pin)
 
     pyfunc = bentoml.mlflow.load_model(stored.tag)
-    raw = pyfunc.get_raw_model()  # TabularBioMLP
+    raw = pyfunc.get_raw_model()  # TabularMLP
     raw.eval()
 
     tab_dim = raw.tab_mlp[0].in_features
-    bio_dim = raw.bio_mlp[0].in_features
     dummy_tab = torch.zeros(1, tab_dim, dtype=torch.float32)
-    dummy_bio_p = torch.zeros(1, bio_dim, dtype=torch.float32)
-    dummy_bio_o = torch.zeros(1, bio_dim, dtype=torch.float32)
 
     NN_ONNX_FILE.parent.mkdir(parents=True, exist_ok=True)
     with torch.inference_mode():
         torch.onnx.export(
             raw,
-            (dummy_tab, dummy_bio_p, dummy_bio_o),
+            (dummy_tab,),
             str(NN_ONNX_FILE),
-            input_names=["tab", "bio_p", "bio_o"],
+            input_names=["tab"],
             output_names=["logit"],
             opset_version=18,
             dynamic_axes={
                 "tab": {0: "batch"},
-                "bio_p": {0: "batch"},
-                "bio_o": {0: "batch"},
                 "logit": {0: "batch"},
             },
             # Single-file artifact: keep weights inline so ONNX Runtime needs
@@ -1071,7 +1051,7 @@ def generate_similarity_artifacts() -> Path:
     _log(
         "similarity",
         f"snapshot inputs or sources changed: rebuilding similarity index for "
-        f"{len(profiles)} players (bio embedding — no output until it finishes)",
+        f"{len(profiles)} players",
     )
     similarity = PlayerSimilarity()
     similarity.build(

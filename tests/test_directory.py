@@ -66,7 +66,8 @@ def _directory_sql_df() -> pd.DataFrame:
         """
         CREATE TABLE bronze.player_profiles (
             player_id VARCHAR, display_name VARCHAR, ioc VARCHAR,
-            backhand VARCHAR, handedness VARCHAR, summary VARCHAR
+            backhand VARCHAR, handedness VARCHAR, summary VARCHAR,
+            height DOUBLE, birthdate DATE, turned_pro INTEGER
         )
         """
     )
@@ -74,13 +75,23 @@ def _directory_sql_df() -> pd.DataFrame:
         "CREATE TABLE gold.player_profiles (player_id VARCHAR, match_count BIGINT, current_rank BIGINT)"
     )
     con.executemany(
-        "INSERT INTO bronze.player_profiles VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO bronze.player_profiles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
-            ("p1", "A Player", "ESP", "1H", "R", "s1"),
-            ("p2", "B Player", "ARG", "2H", "L", "s2"),
-            ("p3", "C Player", "USA", "1H", "L", "s3"),
-            ("p4", "D Player", "FRA", "2H", "R", "s4"),  # no gold row at all
-            ("p5", "E Player", "AUS", "2H", "R", "s5"),
+            ("p1", "A Player", "ESP", "1H", "R", "s1", 185.0, "1990-01-01", 2010),
+            ("p2", "B Player", "ARG", "2H", "L", "s2", 190.0, "1992-01-01", 2012),
+            ("p3", "C Player", "USA", "1H", "L", "s3", 178.0, "1994-01-01", 2014),
+            (
+                "p4",
+                "D Player",
+                "FRA",
+                "2H",
+                "R",
+                "s4",
+                195.0,
+                "1996-01-01",
+                2016,
+            ),  # no gold row at all
+            ("p5", "E Player", "AUS", "2H", "R", "s5", 180.0, "1998-01-01", 2018),
         ],
     )
     con.executemany(
@@ -582,10 +593,7 @@ _SIM_SOURCE_MUTATIONS = [
             "SIM_PLAYSTYLE_WEIGHT",
             "SIM_SURFACE_WEIGHT",
             "SIM_REPUTATION_WEIGHT",
-            "SIM_BIO_WEIGHT",
-            "SIM_BIO_PCA_DIM",
             "SIM_SURFACE_SHRINK_K",
-            "SIM_RANK_SCALE",
             "SIM_EXPERIENCE_K",
         )
     ],

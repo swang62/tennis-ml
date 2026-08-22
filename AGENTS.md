@@ -66,7 +66,7 @@ registry -> BentoML -> React dashboard.
 - Comments must explain why, invariants, contracts, or non-obvious behavior;
   do not add comments that merely repeat constants, settings, parameter
   values, or immediately visible code. Source/config is the authority for
-  values.
+  values. Do not add inline comments to every new line.
 - Run `just lint` and the narrowest relevant tests, then the full suite before
   declaring completion. Never commit unless asked.
 
