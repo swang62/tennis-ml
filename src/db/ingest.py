@@ -216,7 +216,7 @@ def _float_stat(row: dict[str, Any], key: str) -> float:
 def _normalize_indoor(value: Any) -> int | None:
     """Normalize raw ATP indoor field to 1 (indoor), 0 (outdoor), or None (unknown).
 
-    Raw CSVs use 'I' for indoor, 'O' for outdoor; empty/NaN/other = unknown.
+    Raw CSVs use 'I'/'O' or 1/0; empty/NaN/other = unknown.
     """
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
@@ -227,6 +227,8 @@ def _normalize_indoor(value: Any) -> int | None:
         return 1
     if s == "O":
         return 0
+    if s in {"0", "1"}:
+        return int(s)
     return None
 
 

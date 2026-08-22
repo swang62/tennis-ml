@@ -107,6 +107,47 @@ def test_append_raw_match_rows_dedupes_against_existing_file(tmp_path):
     assert [r["tourney_id"] for r in rows] == ["2026-418", "2026-419"]
 
 
+def test_append_raw_match_rows_separates_file_without_terminal_newline(tmp_path):
+    path = tmp_path / "2026.csv"
+    a = _raw_csv_row("2026-418", "001")
+    b = _raw_csv_row("2026-419", "001")
+    with path.open("w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=matches.RAW_MATCH_COLUMNS)
+        writer.writeheader()
+        writer.writerow(a)
+    path.write_bytes(path.read_bytes().rstrip(b"\n"))
+
+    appended, ids = matches.append_raw_match_rows([b], path)
+
+    assert appended == 1
+    assert ids == {"2026-418-001", "2026-419-001"}
+    rows = list(csv.DictReader(path.open(newline="")))
+    assert [row["tourney_id"] for row in rows] == ["2026-418", "2026-419"]
+
+
+def test_sort_raw_match_csv_orders_date_then_match_number(tmp_path):
+    path = tmp_path / "2026.csv"
+    later = matches.bronze_row_to_raw_match(
+        {**_bronze_row(), "match_id": "2026-419-002", "match_date": "2026-01-06"}
+    )
+    earlier = matches.bronze_row_to_raw_match(
+        {**_bronze_row(), "match_id": "2026-418-001", "match_date": "2026-01-05"}
+    )
+    same_tourney = matches.bronze_row_to_raw_match(
+        {**_bronze_row(), "match_id": "2026-418-002", "match_date": "2026-01-05"}
+    )
+    matches.append_raw_match_rows([later, same_tourney, earlier], path)
+
+    matches.sort_raw_match_csv(path)
+
+    rows = list(csv.DictReader(path.open(newline="")))
+    assert [(row["tourney_date"], row["match_num"]) for row in rows] == [
+        ("20260105", "1"),
+        ("20260105", "2"),
+        ("20260106", "2"),
+    ]
+
+
 def test_raw_match_row_fills_profile_fields_in_winner_loser_columns():
     raw = matches.bronze_row_to_raw_match(
         _bronze_row(),
@@ -121,6 +162,7 @@ def test_raw_match_row_fills_profile_fields_in_winner_loser_columns():
     assert raw["winner_hand"] == "L"
     assert raw["winner_ht"] == "190"
     assert raw["winner_ioc"] == "FRA"
+    assert raw["indoor"] == "O"
     assert raw["loser_name"] == "Lost One"
     assert raw["loser_hand"] == "R"
     assert raw["loser_ht"] == "188"

@@ -33,6 +33,17 @@ class _Page:
         return self._body
 
 
+class _SequencePage(_Page):
+    def __init__(self, bodies: list[str]) -> None:
+        super().__init__(bodies[0])
+        self._bodies = iter(bodies)
+        self.goto_count = 0
+
+    def goto(self, *_args, **_kwargs) -> None:
+        self.goto_count += 1
+        self._body = next(self._bodies)
+
+
 def _fetch(body: str, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(rankings, "_jitter", lambda: None)
     return matches.fetch_hawkeye_match(_Page(body), 2026, "421", "ms001")
@@ -62,6 +73,19 @@ def test_challenge_html_without_json_is_rejected(monkeypatch):
     payload, reason = _fetch(body, monkeypatch)
     assert payload is None
     assert "challenge" in reason
+
+
+def test_challenge_html_is_retried_twice(monkeypatch):
+    challenge = "<html><body>Just a moment...</body></html>"
+    page = _SequencePage([challenge, challenge, _RAW])
+    monkeypatch.setattr(rankings, "_jitter", lambda: None)
+    monkeypatch.setattr(matches.time, "sleep", lambda _delay: None)
+
+    payload, reason = matches.fetch_hawkeye_match(page, 2026, "421", "ms001")
+
+    assert reason == ""
+    assert payload is not None
+    assert page.goto_count == 3
 
 
 def test_build_match_id_is_date_free_and_stable():

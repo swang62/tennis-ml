@@ -515,6 +515,11 @@ HAWKEYE_NAV_TIMEOUT_MS = 60_000
 # Randomized human-like gap between Hawkeye requests (bot-detection hygiene).
 HAWKEYE_SLEEP_MIN_S = 3.0
 HAWKEYE_SLEEP_MAX_S = 8.0
+# A challenge response is transient more often than a malformed payload; retry
+# it twice with a slightly longer pause before reporting a per-match skip.
+HAWKEYE_CHALLENGE_RETRIES = 2
+HAWKEYE_RETRY_SLEEP_MIN_S = 8.0
+HAWKEYE_RETRY_SLEEP_MAX_S = 14.0
 
 # JSON is served raw, but CloakBrowser renders it wrapped in an HTML shell
 # (<html>...<pre>{...}</pre>... — seen in the probes and the live run), so an
@@ -888,40 +893,52 @@ def fetch_hawkeye_match(
     pacing: ``rankings._jitter()`` here, the 3-8s gap between requests).
     """
     url = HAWKEYE_URL.format(year=year, tournament_id=tournament_id, match_id=match_id)
-    rankings._jitter()
-    try:
-        page.goto(url, wait_until="domcontentloaded", timeout=HAWKEYE_NAV_TIMEOUT_MS)
-    except Exception as exc:
-        return None, f"navigation failed ({type(exc).__name__}: {exc})"
-    try:
-        body = page.content()
-    except Exception as exc:
-        return None, f"page content failed ({type(exc).__name__}: {exc})"
-    if _HTML_BODY_RE.search(body[:2048]):
-        # CloakBrowser wraps the raw JSON in an HTML shell; recover it before
-        # classifying the response as a challenge.
-        embedded = _JSON_BODY_RE.search(body)
-        if embedded is None:
-            return None, f"HTML/challenge response ({len(body)} bytes)"
+    for attempt in range(HAWKEYE_CHALLENGE_RETRIES + 1):
+        if attempt:
+            delay = random.uniform(HAWKEYE_RETRY_SLEEP_MIN_S, HAWKEYE_RETRY_SLEEP_MAX_S)
+            print(f"  Hawkeye {match_id}: challenge retry {attempt}/{HAWKEYE_CHALLENGE_RETRIES}")
+            time.sleep(delay)
+        rankings._jitter()
         try:
-            payload = json.loads(embedded.group(1))
-        except ValueError:
-            return None, f"HTML/challenge response ({len(body)} bytes)"
-    else:
+            page.goto(url, wait_until="domcontentloaded", timeout=HAWKEYE_NAV_TIMEOUT_MS)
+        except Exception as exc:
+            return None, f"navigation failed ({type(exc).__name__}: {exc})"
         try:
-            payload = json.loads(body)
-        except ValueError:
-            return None, f"invalid JSON response ({len(body)} bytes)"
-    if not isinstance(payload, dict):
-        return None, f"unexpected JSON shape ({type(payload).__name__})"
-    match = payload.get("Match")
-    if (
-        not isinstance(match, dict)
-        or not isinstance(match.get("PlayerTeam"), dict)
-        or not isinstance(match.get("OpponentTeam"), dict)
-    ):
-        return None, "payload missing Match/PlayerTeam/OpponentTeam"
-    return payload, ""
+            body = page.content()
+        except Exception as exc:
+            return None, f"page content failed ({type(exc).__name__}: {exc})"
+        if _HTML_BODY_RE.search(body[:2048]):
+            # CloakBrowser wraps the raw JSON in an HTML shell; recover it before
+            # classifying the shell as a challenge.
+            embedded = _JSON_BODY_RE.search(body)
+            if embedded is None:
+                reason = f"HTML/challenge response ({len(body)} bytes)"
+                if attempt < HAWKEYE_CHALLENGE_RETRIES:
+                    continue
+                return None, reason
+            try:
+                payload = json.loads(embedded.group(1))
+            except ValueError:
+                reason = f"HTML/challenge response ({len(body)} bytes)"
+                if attempt < HAWKEYE_CHALLENGE_RETRIES:
+                    continue
+                return None, reason
+        else:
+            try:
+                payload = json.loads(body)
+            except ValueError:
+                return None, f"invalid JSON response ({len(body)} bytes)"
+        if not isinstance(payload, dict):
+            return None, f"unexpected JSON shape ({type(payload).__name__})"
+        match = payload.get("Match")
+        if (
+            not isinstance(match, dict)
+            or not isinstance(match.get("PlayerTeam"), dict)
+            or not isinstance(match.get("OpponentTeam"), dict)
+        ):
+            return None, "payload missing Match/PlayerTeam/OpponentTeam"
+        return payload, ""
+    raise AssertionError("unreachable")
 
 
 def fetch_hawkeye_batch(
@@ -1276,7 +1293,7 @@ _BRONZE_TIER_TO_LEVEL = {
     "atp_250": "250",
 }
 
-_INDOR_TO_RAW: dict[int | None, str] = {0: "O", 1: "I"}
+_INDOR_TO_RAW: dict[int | None, str] = {0: "O", 1: "I", None: ""}
 
 # Bronze player1_*/player2_* stat suffix -> raw winner-side column.
 _BRONZE_TO_RAW_STATS = {
@@ -1442,8 +1459,26 @@ def append_raw_match_rows(
         writer = csv.DictWriter(fh, fieldnames=RAW_MATCH_COLUMNS)
         if create:
             writer.writeheader()
+        elif path.read_bytes()[-1:] != b"\n":
+            fh.write("\n")
         writer.writerows(new_rows)
     return len(new_rows), ids
+
+
+def sort_raw_match_csv(path: Path) -> None:
+    """Sort a yearly raw CSV by tournament date, then numeric match number."""
+    if not path.exists() or path.stat().st_size == 0:
+        return
+    with path.open(newline="") as fh:
+        reader = csv.DictReader(fh)
+        if reader.fieldnames != RAW_MATCH_COLUMNS:
+            raise ValueError(f"{path.name}: expected columns {RAW_MATCH_COLUMNS}")
+        rows = list(reader)
+    rows.sort(key=lambda row: (row["tourney_date"], int(row["match_num"])))
+    with path.open("w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=RAW_MATCH_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 # ── Flow orchestration: window, archive, tournaments, enrichment ──
@@ -1730,6 +1765,7 @@ def _process_tournament(
     canonical: dict[str, str] | None,
     profiles: dict[str, dict[str, str]] | None = None,
     csv_ids: dict[int, set[str]] | None = None,
+    match_ids: set[str] | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
     """Discover, enrich, upsert, and CSV-append one tournament's matches.
@@ -1802,6 +1838,8 @@ def _process_tournament(
             "skipped (duplicate physical match)"
         )
     result["skipped"] += len(duplicates)
+    if match_ids is not None:
+        resolved = [match for match in resolved if match.get("match_id") in match_ids]
 
     hawkeye = fetch_hawkeye_batch(resolved, year=year, tournament_id=tournament_id, page=page)
     upsert_records: list[dict[str, Any]] = []
@@ -1896,6 +1934,7 @@ def matches_flow(
     start_date: date | None = None,
     end_date: date | None = None,
     csv_ids: dict[int, set[str]] | None = None,
+    match_ids: set[str] | None = None,
     force: bool = False,
 ):
     """Discover ATP 250+ tournaments in the window and enrich bronze rows.
@@ -2004,6 +2043,7 @@ def matches_flow(
                     canonical=canonical,
                     profiles=profiles,
                     csv_ids=csv_ids,
+                    match_ids=match_ids,
                     force=force,
                 )
                 if result["results_page_ok"]:
@@ -2018,6 +2058,9 @@ def matches_flow(
         if page is not None:
             page.close()
         browser.close()
+
+    for year in years:
+        sort_raw_match_csv(raw_match_path(year))
 
     if not any_page_ok:
         raise RuntimeError(
@@ -2050,12 +2093,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="replace existing bronze rows with the candidate row instead of skipping them",
     )
+    parser.add_argument(
+        "--match-ids",
+        type=lambda value: {item.strip() for item in value.split(",") if item.strip()},
+        help="optional comma-separated Hawkeye match ids to retry",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    matches_flow(start_date=args.start, end_date=args.end, force=args.force)
+    matches_flow(
+        start_date=args.start,
+        end_date=args.end,
+        match_ids=args.match_ids,
+        force=args.force,
+    )
 
 
 if __name__ == "__main__":
