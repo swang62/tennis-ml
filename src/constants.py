@@ -1,6 +1,7 @@
 """Single source of truth for shared paths, names, and environment settings."""
 
 import os
+import sys
 from enum import StrEnum
 from pathlib import Path
 
@@ -13,7 +14,11 @@ def load_env() -> None:
     load_dotenv(ROOT / ".env", override=True)
 
 
-load_env()
+# Under pytest the environment comes from [tool.pytest_env]; skip the repo
+# .env so tests never read or depend on a real local .env. Production (pytest
+# not imported) loads the .env exactly as before.
+if "pytest" not in sys.modules:
+    load_env()
 
 
 def get_database_url() -> str:
