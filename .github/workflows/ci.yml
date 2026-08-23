@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint and typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.4.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Install dependencies
+        run: |
+          uv sync --locked --group dev
+          pnpm --dir web install --frozen-lockfile
+          go install github.com/yannh/kubeconform/cmd/kubeconform@v0.7.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Check Python formatting
+        run: uv run ruff format --check .
+
+      - name: Check web formatting and lint
+        run: pnpm --dir web exec biome check .
+
+      - name: Validate Kubernetes manifests
+        run: kubeconform -ignore-missing-schemas -summary infra/manifests/*.yaml
+
+      - name: Run typecheck
+        run: uv run basedpyright
+
+  python-tests:
+    name: Python tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked --group dev
+
+      - name: Run Python tests
+        run: OMP_NUM_THREADS=1 uv run pytest
+
+  web-tests:
+    name: Web tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.4.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm --dir web install --frozen-lockfile
+
+      - name: Run web typecheck
+        run: pnpm --dir web exec tsc --noEmit
+
+      - name: Run web tests
+        run: pnpm --dir web test
