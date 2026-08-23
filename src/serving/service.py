@@ -35,10 +35,10 @@ from src.constants import (
     DEPLOY_ARTIFACTS,
     FRAMEWORK_KEY,
     GOLD_PROFILES_TABLE,
+    GOLD_TOUR_AVERAGES_TABLE,
     PRODUCTION_MODEL,
     SILVER_PLAYER_MATCHES,
     STACK_ORDER,
-    TOUR_AVERAGES_TABLE,
     GBDTFramework,
     load_env,
     normalize_gbdt_framework,
@@ -150,7 +150,7 @@ SELECT
     ta.tour_return_games_won_pct
 FROM {BRONZE_PROFILES_TABLE} bp
 LEFT JOIN {GOLD_PROFILES_TABLE} gp ON gp.player_id = bp.player_id
-CROSS JOIN {TOUR_AVERAGES_TABLE} ta
+CROSS JOIN {GOLD_TOUR_AVERAGES_TABLE} ta
 WHERE bp.player_id = %s
 """
 
