@@ -22,6 +22,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
+          cache-dependency-glob: uv.lock
 
       - uses: pnpm/action-setup@v4
         with:
@@ -70,6 +71,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
+          cache-dependency-glob: uv.lock
 
       - name: Install dependencies
         run: uv sync --group dev
@@ -98,7 +100,7 @@ jobs:
 
       - name: Run web typecheck
         working-directory: web
-        run: pnpm exec tsc --noEmit
+        run: pnpm exec -- tsc --noEmit
 
       - name: Run web tests
         working-directory: web
