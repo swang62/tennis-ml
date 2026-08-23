@@ -21,6 +21,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
+          prune-cache: false
           cache-dependency-glob: uv.lock
 
       - uses: pnpm/action-setup@v6
@@ -59,6 +60,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
+          prune-cache: false
           cache-dependency-glob: uv.lock
 
       - name: Install dependencies
