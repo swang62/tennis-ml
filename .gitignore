@@ -33,7 +33,6 @@ infra/postgres/tls/server.key
 # Models (serialized)
 *.pkl
 *.joblib
-*.json
 
 # Package manifests and web toolchain config (repository-owned; not hidden by *.json above)
 !/web/package.json

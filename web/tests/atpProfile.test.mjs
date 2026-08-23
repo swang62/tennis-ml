@@ -1,8 +1,7 @@
 // Hermetic tests for the pure ATP overview URL helper in lib/atpProfile.ts.
 // Deterministic string derivation only; no network, no DOM, no database.
 
-import assert from "node:assert";
-import { test } from "node:test";
+import { assert, test } from "vitest";
 import { atpOverviewUrl } from "../src/lib/atpProfile.ts";
 
 test("AG37 fixture resolves to the expected ATP overview URL", () => {

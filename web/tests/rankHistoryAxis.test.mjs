@@ -1,9 +1,7 @@
 // Focused tests for the deterministic yearly axis of the rank-history chart.
-// Runs with `node --test tests/` (Node >= 23.6 strips types from the imported
-// .ts helper natively); no test framework dependency.
+// Runs with `pnpm test` (Vitest) from the web/ directory.
 
-import assert from "node:assert";
-import { test } from "node:test";
+import { assert, test } from "vitest";
 import { yearAxisDomain } from "../src/lib/rankHistoryAxis.ts";
 
 test("one tick per year whose Jan 1 lies inside the displayed domain", () => {

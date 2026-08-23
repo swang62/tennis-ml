@@ -1,9 +1,7 @@
 // Focused test for the full round-code labels shown in the Recent tournaments
-// table and H2H meeting metadata. Runs with `node --test tests/`
-// (Node >= 23.6 strips types from the imported .ts helpers natively).
+// table and H2H meeting metadata. Runs with `pnpm test` (Vitest) from the web/ directory.
 
-import assert from "node:assert";
-import { test } from "node:test";
+import { assert, test } from "vitest";
 import { ROUND_LABEL } from "../src/lib/format.ts";
 
 test("every supported round code maps to a full human label", () => {

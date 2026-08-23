@@ -1,9 +1,8 @@
 // Focused tests for the remaining pure display formatters in lib/format.ts:
 // pct, fairOdds, sanitizeErrorMessage, and TIER_LABEL. No API, DOM, or DB.
-// Runs with `node --test tests/` (Node >= 23.6 strips types natively).
+// Runs with `pnpm test` (Vitest) from the web/ directory.
 
-import assert from "node:assert";
-import { test } from "node:test";
+import { assert, test } from "vitest";
 import {
   fairOdds,
   pct,
