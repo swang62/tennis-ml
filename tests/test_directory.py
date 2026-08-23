@@ -566,7 +566,7 @@ def test_generate_similarity_artifacts_rebuilds_when_source_changes(
     old_source = d._similarity_source_hash()
 
     if kind == "constant":
-        monkeypatch.setattr(d, name, 11 if name == "SIM_BIO_PCA_DIM" else 0.99)
+        monkeypatch.setattr(d, name, 0.99)
     else:
         file_hashes[name] = "changed"
     sim_index, _sim_meta, state, _ = _stage_sim_build(

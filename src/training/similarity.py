@@ -13,9 +13,9 @@ import pandas as pd
 
 from src.constants import (
     BRONZE_PROFILES_TABLE,
-    DATA_PROCESSED,
     DEPLOY_ARTIFACTS,
     GOLD_PROFILES_TABLE,
+    MODELS_ARTIFACTS,
     SIM_EXPERIENCE_K,
     SIM_IDENTITY_WEIGHT,
     SIM_PLAYSTYLE_WEIGHT,
@@ -26,8 +26,8 @@ from src.constants import (
 from src.db.client import to_dataframe
 
 # Deploy rebuilds this dashboard index from the fresh snapshot, independently of models.
-DEFAULT_INDEX = DATA_PROCESSED / "player_similarity.index"
-DEFAULT_METADATA = DATA_PROCESSED / "player_metadata.json"
+DEFAULT_INDEX = MODELS_ARTIFACTS / "player_similarity.index"
+DEFAULT_METADATA = MODELS_ARTIFACTS / "player_metadata.json"
 SERVING_INDEX = DEPLOY_ARTIFACTS / "player_similarity.index"
 SERVING_METADATA = DEPLOY_ARTIFACTS / "player_metadata.json"
 

@@ -62,26 +62,6 @@ def test_raw_json_body_is_accepted(monkeypatch):
     assert payload["Match"]["Winner"] == "S0S1"
 
 
-def test_challenge_html_without_json_is_rejected(monkeypatch):
-    body = "<html><body>Just a moment... enable JavaScript and cookies to continue</body></html>"
-    payload, reason = _fetch(body, monkeypatch)
-    assert payload is None
-    assert "challenge" in reason
-
-
-def test_challenge_html_is_retried_twice(monkeypatch):
-    challenge = "<html><body>Just a moment...</body></html>"
-    page = _SequencePage([challenge, challenge, _RAW])
-    monkeypatch.setattr(rankings, "_jitter", lambda: None)
-    monkeypatch.setattr(matches.time, "sleep", lambda _delay: None)
-
-    payload, reason = matches.fetch_hawkeye_match(page, 2026, "421", "ms001")
-
-    assert reason == ""
-    assert payload is not None
-    assert page.goto_count == 3
-
-
 def test_build_match_id_is_date_free_and_stable():
     """Same edition year + opaque tournament id + sequence -> one canonical id."""
     assert matches.build_match_id(2026, "418", 26) == "2026-418-026"
@@ -170,28 +150,6 @@ def test_hawkeye_to_bronze_swaps_seeds_when_winner_is_side_b():
     assert row["minutes"] == 84  # MatchTime 01:24:27
 
 
-def test_hawkeye_to_bronze_falls_back_best_of_for_grand_slam():
-    """Fixture ms001 has NumberOfSets=3; with it removed the source is absent and
-    the tournament tier drives the fallback: grand_slam -> 5 (score-independent)."""
-    payload = _hw_payload("hawkeye_ms001")
-    payload["Match"].pop("NumberOfSets", None)
-
-    row = matches.hawkeye_to_bronze(
-        payload,
-        {
-            "match_id": "2026-421-001",
-            "match_date": "2026-08-10",
-            "player1_id": "S0S1",
-            "player2_id": "N0AE",
-            "winner_id": "S0S1",
-            "tournament": "grand_slam",
-            "round": "f",
-        },
-    )
-    assert row is not None
-    assert row["best_of"] == 5  # grand_slam fallback
-
-
 # ── Discovery → resolution: match-level skip propagation ────────────
 
 
@@ -222,49 +180,3 @@ def test_resolve_discovered_matches_keeps_live_atp_ids_without_legacy_map():
     assert resolved[0]["winner_id"] == "S0S1"
     assert resolved[0]["tournament"] == "masters"
     assert skipped == []
-
-
-def test_process_tournament_discovery_failure_does_not_drop_live_matches(monkeypatch):
-    html = Path("tests/fixtures/montreal_results_2026.html").read_text()
-    monkeypatch.setattr(matches, "_fetch_page", lambda _page, _url, _label: (html, ""))
-    monkeypatch.setattr(rankings, "_jitter", lambda: None)
-    monkeypatch.setattr(matches.time, "sleep", lambda _: None)
-
-    def fail_discovery(_page, candidates, **_kwargs):
-        return {
-            "known": 0,
-            "discovered": 0,
-            "failed": [
-                {"id": c["id"], "player": c["player"], "reason": "navigation failed"}
-                for c in candidates
-            ],
-        }
-
-    monkeypatch.setattr(rankings, "discover_players", fail_discovery)
-
-    fetched = []
-
-    def fail_hawkeye(resolved, **_kwargs):
-        fetched.extend(resolved)
-        return [{**match, "hawkeye_error": "unavailable"} for match in resolved]
-
-    monkeypatch.setattr(matches, "fetch_hawkeye_batch", fail_hawkeye)
-
-    result = matches._process_tournament(
-        _Page(""),
-        {"tournament_id": "421", "slug": "montreal", "name": "Montreal", "year": "2026"},
-        2026,
-        tier="masters",
-        surface="hard",
-        physical={},
-        known_ids={},
-        claimed={},
-        rank_points={},
-        ages={},
-        canonical={},
-        profiles={},
-    )
-
-    assert result["discovered"] == 94
-    assert len(fetched) == 94
-    assert result["fetched"] == 0

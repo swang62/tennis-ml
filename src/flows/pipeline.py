@@ -19,9 +19,10 @@ from src.constants import (
     load_env,
 )
 
-# Training notebooks (00-05), run in order.
+# Training and evaluation notebooks (01-04), run in order. The former 00
+# embeddings step was removed: the pipeline is tabular-only and pins no
+# auxiliary (bio) artifacts. Promotion assigns @champion directly in 04.
 NB_ORDER = [
-    "00_embeddings.ipynb",
     "01_train_test_split.ipynb",
     "02_tune_gbdt.ipynb",
     "02_tune_linear.ipynb",

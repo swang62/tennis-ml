@@ -697,6 +697,7 @@ def hawkeye_to_bronze(
             "match_date": _as_date(discovered_match.get("match_date"))
             if discovered_match
             else None,
+            "match_num": ms_sequence(discovered_match.get("match_id")) if discovered_match else 0,
             "player1_id": player1_id,
             "player2_id": player2_id,
             "tournament": tier,
@@ -876,6 +877,7 @@ def validate_new_bronze_row(row: dict[str, Any]) -> str | None:
     required = (
         "match_id",
         "match_date",
+        "match_num",
         "player1_id",
         "player2_id",
         "tournament",
@@ -885,6 +887,9 @@ def validate_new_bronze_row(row: dict[str, Any]) -> str | None:
     for column in required:
         if _missing_value(row.get(column)):
             return f"missing required field {column}"
+    match_num = row.get("match_num")
+    if not isinstance(match_num, int) or isinstance(match_num, bool) or match_num < 1:
+        return "match_num must be a positive integer"
     if row["player1_id"] == row["player2_id"]:
         return "player1_id equals player2_id"
     if row["winner_id"] != row["player1_id"]:
@@ -1167,7 +1172,7 @@ def bronze_row_to_raw_match(
     payload, and bronze fields. Unknown values stay empty.
     """
     match_id = str(row.get("match_id") or "")
-    tourney_id, sep, seq = match_id.rpartition("-")
+    tourney_id, sep, _ = match_id.rpartition("-")
     if not sep:
         return dict.fromkeys(RAW_MATCH_COLUMNS, "")
     match_date = _as_date(row.get("match_date"))
@@ -1185,7 +1190,7 @@ def bronze_row_to_raw_match(
             "tourney_level": _BRONZE_TIER_TO_LEVEL.get(str(row.get("tournament") or ""), ""),
             "indoor": _INDOR_TO_RAW.get(row.get("is_indoor"), ""),
             "tourney_date": match_date.strftime("%Y%m%d") if match_date else "",
-            "match_num": str(int(seq)),
+            "match_num": str(int(row["match_num"])),
             "winner_id": winner_id,
             "winner_seed": str(row.get("winner_seed") or ""),
             "winner_entry": str(row.get("winner_entry") or ""),

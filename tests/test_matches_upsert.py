@@ -10,6 +10,7 @@ from src.features.columns import BRONZE_COLUMNS, BRONZE_COLUMNS_INT
 _BASE = {
     "match_id": "2026-418-026",
     "match_date": date(2026, 1, 5),
+    "match_num": 26,
     "player1_id": "W1",
     "player2_id": "L1",
     "tournament": "grand_slam",

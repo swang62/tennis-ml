@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS bronze.match_events (
     best_of                    SMALLINT,
     surface                    VARCHAR NOT NULL,
     score                      VARCHAR,
+    match_num                  INTEGER NOT NULL,  -- per-tournament sequence from raw CSV (required)
     is_indoor                  SMALLINT,
     player1_ranking            INTEGER,
     player2_ranking            INTEGER,
@@ -185,6 +186,18 @@ ALTER TABLE bronze.match_events DROP CONSTRAINT IF EXISTS match_events_check_bes
 ALTER TABLE bronze.match_events ADD CONSTRAINT match_events_check_best_of CHECK (
     best_of IS NULL OR best_of IN (1, 3, 5)
 );
+
+-- Persist match_num (per-tournament sequence from the raw CSV); required, so NOT NULL.
+ALTER TABLE bronze.match_events ADD COLUMN IF NOT EXISTS match_num INTEGER;
+-- Legacy rows predating match_num cannot be chronologically ordered and are
+-- dropped here; `seed --reset` recreates them with match_num populated. No-op on
+-- a fresh database. Keeps the migration idempotent on a database upgraded in place.
+DELETE FROM bronze.match_events WHERE match_num IS NULL;
+ALTER TABLE bronze.match_events ALTER COLUMN match_num SET NOT NULL;
+
+-- match_date is the mandatory bronze key; enforce NOT NULL (idempotent no-op
+-- on databases already created with the constraint).
+ALTER TABLE bronze.match_events ALTER COLUMN match_date SET NOT NULL;
 
 -- Secondary indexes for the common gold-layer expansion/rolling query
 -- patterns (player1/player2 sides of bronze are scanned per player + date).

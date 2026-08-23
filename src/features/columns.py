@@ -38,6 +38,7 @@ BRONZE_COLUMNS_FLOAT: tuple[str, ...] = (
 BRONZE_COLUMNS: tuple[str, ...] = (
     "match_id",
     "match_date",
+    "match_num",
     "player1_id",
     "player2_id",
     "tournament",

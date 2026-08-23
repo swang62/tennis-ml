@@ -90,6 +90,12 @@ def validate_bronze_row(row: Mapping[str, Any]) -> list[str]:
     if row.get("winner_id") != row.get("player1_id"):
         issues.append("winner_id must equal player1_id")
 
+    match_num = row.get("match_num")
+    if match_num is not None and (
+        not isinstance(match_num, int) or isinstance(match_num, bool) or match_num < 1
+    ):
+        issues.append(f"match_num must be a positive integer: {match_num}")
+
     best_of = row.get("best_of")
     if best_of is not None and best_of not in (1, 3, 5):
         issues.append(f"best_of must be 1, 3, or 5: {best_of}")

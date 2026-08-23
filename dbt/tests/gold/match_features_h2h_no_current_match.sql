@@ -10,6 +10,7 @@ WITH pair_meetings AS (
         GREATEST(player_id, opponent_id) AS b,
         match_id,
         match_date,
+        MAX(match_num) AS match_num,
         MAX(CASE WHEN player_id < opponent_id THEN match_won
                  ELSE 1 - match_won END) AS a_won
     FROM {{ ref('player_matches') }}
@@ -23,13 +24,16 @@ prior_meeting_rows AS (
         meeting.a_won,
         ROW_NUMBER() OVER (
             PARTITION BY mf.match_id, mf.player_id
-            ORDER BY meeting.match_date DESC, meeting.match_id DESC
+            ORDER BY meeting.match_date DESC, meeting.match_num DESC, meeting.match_id DESC
         ) AS rn
     FROM {{ ref('match_features') }} mf
+    JOIN {{ ref('player_matches') }} pm
+      ON pm.match_id = mf.match_id AND pm.player_id = mf.player_id
     JOIN pair_meetings meeting
         ON meeting.a = LEAST(mf.player_id, mf.opponent_id)
        AND meeting.b = GREATEST(mf.player_id, mf.opponent_id)
-       AND meeting.match_date < mf.match_date
+       AND (meeting.match_date, meeting.match_num, meeting.match_id)
+           < (pm.match_date, pm.match_num, pm.match_id)
 ),
 derived AS (
     SELECT

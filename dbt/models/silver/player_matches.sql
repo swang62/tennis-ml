@@ -19,7 +19,7 @@
 
 WITH expanded AS (
     SELECT
-        match_id, match_date, surface,
+        match_id, match_date, surface, match_num,
         player1_id AS player_id,
         player2_id AS opponent_id,
         NULLIF(player1_ranking, 0) AS player_ranking,
@@ -45,7 +45,7 @@ WITH expanded AS (
     UNION ALL
 
     SELECT
-        match_id, match_date, surface,
+        match_id, match_date, surface, match_num,
         player2_id AS player_id,
         player1_id AS opponent_id,
         NULLIF(player2_ranking, 0) AS player_ranking,
@@ -73,7 +73,7 @@ numbered AS (
     SELECT
         *,
         ROW_NUMBER() OVER (
-            PARTITION BY player_id ORDER BY match_date, match_id
+            PARTITION BY player_id ORDER BY match_date, match_num, match_id
         ) AS player_match_number,
         COUNT(*) OVER (
             PARTITION BY player_id ORDER BY match_date
@@ -103,6 +103,7 @@ SELECT
     match_id,
     match_date,
     surface,
+    match_num,
     player_id,
     opponent_id,
     player_ranking,
@@ -129,4 +130,4 @@ WHERE match_id IS NOT NULL
 {% if is_incremental() %}
   AND player_id IN (SELECT player_id FROM changed_players)
 {% endif %}
-ORDER BY match_date, match_id, player_id
+ORDER BY match_date, match_num, match_id, player_id

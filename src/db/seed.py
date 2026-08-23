@@ -12,6 +12,7 @@ from src.db.ingest import (
     BRONZE_MATCHES_TABLE,
     atp_rows_to_bronze,
     canonical_match_id,
+    canonical_players,
     clear_match_events,
     discover_ranking_csvs,
     enrich_players,
@@ -85,17 +86,30 @@ def select_matches(
 
 
 def latest_official_ranks() -> dict[str, int]:
-    """Return latest archived top-200 ranks mapped to canonical player ids."""
+    """Return latest archived top-200 ranks mapped to canonical player ids.
+
+    A ranking row resolves to a canonical id either directly, when its own
+    player id is a canonical ATP id, or through the reviewed source-to-canonical
+    map. Rows that resolve through neither route are excluded (preserving rank
+    order and the existing top-10 selection downstream).
+    """
     rows = load_ranking_rows(discover_ranking_csvs(), rank_limit=200)
     if rows.empty:
         raise ValueError("miniseed selection requires archived official rankings")
     latest = rows[rows["ranking_date"] == rows["ranking_date"].max()]
-    rank_map = load_ranking_player_map()
-    return {
-        canonical: int(rank)
-        for source, rank in zip(latest["player_id"], latest["rank"], strict=True)
-        if (canonical := rank_map.get(str(source))) is not None
-    }
+    canonical_ids = set(canonical_players())
+    rank_map = load_ranking_player_map(canonical_ids=canonical_ids)
+    resolved: dict[str, int] = {}
+    for source, rank in zip(latest["player_id"], latest["rank"], strict=True):
+        source = str(source)
+        if source in canonical_ids:
+            canonical = source
+        elif (canonical := rank_map.get(source)) is not None:
+            canonical = canonical
+        else:
+            continue
+        resolved[canonical] = int(rank)
+    return resolved
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

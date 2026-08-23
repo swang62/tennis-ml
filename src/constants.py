@@ -46,11 +46,17 @@ OUTPUTS = ARTIFACTS / "notebooks"
 LOGS = ARTIFACTS / "logs"
 DATA_PROCESSED = ROOT / "data" / "processed"
 SCHEMA_SQL = ROOT / "infra" / "postgres" / "schema.sql"
-DEPLOY_ARTIFACTS = ROOT / "data" / "deploy"
+
+# Generated model artifacts (manifests, calibration, indexes)
+# live under root models/; only the selected promoted serving artifacts are
+# staged under models/deploy before Bento packaging.
+MODELS_ROOT = ROOT / "models"
+MODELS_ARTIFACTS = MODELS_ROOT
+DEPLOY_ARTIFACTS = MODELS_ROOT / "deploy"
 
 FROZEN_ARTIFACTS = ("linear_scaler.pkl",)
 
-CANDIDATE_MANIFEST = DATA_PROCESSED / "candidate_manifest.json"
+CANDIDATE_MANIFEST = MODELS_ARTIFACTS / "candidate_manifest.json"
 PRODUCTION_MODEL = "ensemble_lr_model"
 CHAMPION_ALIAS = "champion"
 
@@ -89,13 +95,17 @@ LINEAGE_SCALER_KEYS = ("scaler_uri", "scaler_hash")
 LINEAGE_AUX_KEYS = ()
 BASE_TAG_PREFIX = "base_"
 AUX_TAG_PREFIX = "aux_"
+# Exact source run id that produced an immutable frozen selection (tuning run
+# for bases, promotion run for the ensemble). Used by the promotion notebook so
+# the standing champion resolves identical provenance.
+PIPELINE_SOURCE_RUN_ID_TAG = "pipeline_source_run_id"
 FEATURE_COLS_TAG = "feature_cols"
 FEATURE_COLS_HASH_TAG = "feature_cols_hash"
 
 CALIBRATION_ARTIFACT = "calibration_t.json"
 CALIBRATION_URI_TAG = "calibration_uri"
 CALIBRATION_HASH_TAG = "calibration_hash"
-CALIBRATION_STATE = DATA_PROCESSED / CALIBRATION_ARTIFACT
+CALIBRATION_STATE = MODELS_ARTIFACTS / CALIBRATION_ARTIFACT
 PLOTS = ARTIFACTS / "plots"
 
 CHAMPION_CURVE_ARTIFACT = "champion_curves.json"
@@ -135,6 +145,14 @@ DRIFT_CALIBRATION_DELTA = 0.1
 DRIFT_AUC_DROP = 0.1
 DRIFT_MIN_N_FOR_AUC = 30
 DRIFT_MIN_N_FOR_CHECK = 10
+
+RECENCY_HALF_LIFE_DAYS = 8 * 365.25
+
+# Recency selection lineage keys: the eight-year half-life and the explicit
+# full-snapshot cutoff passed to recency_weights, recorded on selection runs,
+# the candidate manifest, and champion version tags.
+RECENCY_HALF_LIFE_KEY = "recency_half_life_days"
+RECENCY_CUTOFF_KEY = "recency_cutoff_date"
 
 DRIFT_REF_MIN = 30
 DRIFT_REF_MAX = 10000

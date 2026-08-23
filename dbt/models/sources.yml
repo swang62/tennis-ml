@@ -16,6 +16,8 @@ sources:
             description: Unique match identifier.
           - name: match_date
             description: Match date.
+          - name: match_num
+            description: Per-tournament match sequence from the raw ATP CSV (match_num); required, never NULL.
           - name: player1_id
             description: First player.
           - name: player2_id

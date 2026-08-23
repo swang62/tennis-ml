@@ -29,8 +29,18 @@ class TabularMLP(L.LightningModule):
         return self.net(tab).squeeze(-1)
 
     def training_step(self, batch, _batch_idx):
-        tab, labels = batch
-        loss = nn.functional.binary_cross_entropy_with_logits(self(tab), labels)
+        if len(batch) == 3:
+            tab, labels, weights = batch
+        else:
+            tab, labels = batch
+            weights = None
+        logits = self(tab)
+        if weights is None:
+            loss = nn.functional.binary_cross_entropy_with_logits(logits, labels)
+        else:
+            # Normalized weighted BCE for training only; validation/predict stay unweighted.
+            bce = nn.functional.binary_cross_entropy_with_logits(logits, labels, reduction="none")
+            loss = (bce * weights).mean()
         self.log("train_loss", loss, prog_bar=True)
         return loss
 

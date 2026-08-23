@@ -15,6 +15,7 @@ from src.constants import (
     BRONZE_MATCHES_TABLE,
     BRONZE_PROFILES_TABLE,
     BULK_MAX_ROWS,
+    SILVER_PLAYER_MATCHES,
     SILVER_ROLLING_FEATURES,
 )
 from src.db.client import execute_df, first_row_dict
@@ -47,11 +48,15 @@ _ROUND_ENCODINGS = {
     "f": 7,
 }
 
+# Latest post-match snapshot through as_of_date inclusively, ordered by the
+# causal (snapshot_date, match_num) so the highest match_num on as_of_date wins.
 _LATEST_SNAPSHOT_SQL = f"""
-SELECT * FROM {SILVER_ROLLING_FEATURES}
-WHERE player_id = %s
-  AND snapshot_date < %s::date
-ORDER BY player_match_number DESC
+SELECT rf.* FROM {SILVER_ROLLING_FEATURES} rf
+JOIN {SILVER_PLAYER_MATCHES} pm
+  ON pm.player_id = rf.player_id AND pm.match_id = rf.match_id
+WHERE rf.player_id = %s
+  AND rf.snapshot_date <= %s::date
+ORDER BY rf.snapshot_date DESC, pm.match_num DESC, rf.match_id DESC
 LIMIT 1
 """
 
@@ -60,8 +65,8 @@ SELECT match_id, winner_id, surface
 FROM {BRONZE_MATCHES_TABLE}
 WHERE ((player1_id = %s AND player2_id = %s)
     OR (player1_id = %s AND player2_id = %s))
-  AND match_date < %s::date
-ORDER BY match_date DESC, match_id DESC
+  AND match_date <= %s::date
+ORDER BY match_date DESC, match_num DESC, match_id DESC
 LIMIT {H2H_PRIOR_MEETINGS}
 """
 
@@ -75,10 +80,12 @@ _SNAPSHOTS_BULK_SQL = f"""
 SELECT req.player_id AS req_player_id, req.as_of_iso, s.*
 FROM unnest(%s::text[], %s::date[]) AS req(player_id, as_of_iso)
 LEFT JOIN LATERAL (
-    SELECT * FROM {SILVER_ROLLING_FEATURES}
-    WHERE player_id = req.player_id
-      AND snapshot_date < req.as_of_iso
-    ORDER BY player_match_number DESC
+    SELECT rf.* FROM {SILVER_ROLLING_FEATURES} rf
+    JOIN {SILVER_PLAYER_MATCHES} pm
+      ON pm.player_id = rf.player_id AND pm.match_id = rf.match_id
+    WHERE rf.player_id = req.player_id
+      AND rf.snapshot_date <= req.as_of_iso
+    ORDER BY rf.snapshot_date DESC, pm.match_num DESC, rf.match_id DESC
     LIMIT 1
 ) s ON true
 """
@@ -98,8 +105,8 @@ LEFT JOIN LATERAL (
     FROM {BRONZE_MATCHES_TABLE}
     WHERE ((req.player_id = player1_id AND req.opponent_id = player2_id)
         OR (req.opponent_id = player1_id AND req.player_id = player2_id))
-      AND match_date < req.as_of_iso::date
-    ORDER BY match_date DESC, match_id DESC
+      AND match_date <= req.as_of_iso::date
+    ORDER BY match_date DESC, match_num DESC, match_id DESC
     LIMIT {H2H_PRIOR_MEETINGS}
 ) h ON true
 """

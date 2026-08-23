@@ -143,7 +143,7 @@ command -v curl >/dev/null 2>&1 || { echo "[dev] error: 'curl' not found" >&2; e
 
 # --- Stage the FAISS similarity assets from the training snapshot -----------
 # The Bento /similar_players endpoint loads the index from
-# data/deploy/player_similarity.index; stage it (plus its metadata) from the
+# models/deploy/player_similarity.index; stage it (plus its metadata) from the
 # DuckDB training snapshot. Fails fast, so Bento starts only after the
 # similarity inputs reflect the snapshot players (run `just snapshot` after
 # changing DATABASE_URL).
@@ -190,7 +190,7 @@ log db "PostgreSQL at ${DB_HOST:-localhost}:$DB_PORT (database $DB_NAME), tables
 log bento "resolving @champion and importing cached models..."
 uv run python -c '
 from pathlib import Path
-from src.constants import DATA_PROCESSED, load_env
+from src.constants import DEPLOY_ARTIFACTS, load_env
 from src.flows.deploy import (
     _lineage_pins, _import_or_reuse, _materialize_nn_onnx, _latest_production_version,
 )
@@ -208,7 +208,7 @@ for key in ("production", "linear", "gbdt"):
     framework = pins[key].get("framework") if key == "gbdt" else None
     _import_or_reuse(pins[key], framework)
 
-nn_onnx = DATA_PROCESSED / "nn_best.onnx"
+nn_onnx = DEPLOY_ARTIFACTS / "nn_best.onnx"
 if nn_onnx.exists():
     print(f"[bento] reusing nn_best ONNX: {nn_onnx}")
 else:

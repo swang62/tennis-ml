@@ -478,11 +478,13 @@ def _fake_execute_df(sql: str, _params: list[object] | None = None) -> pd.DataFr
             player_match_rows=0,
         )
         return pd.DataFrame([row])
+    if "rolling_features" in sql:
+        return pd.DataFrame()  # cold start: no snapshots
     if "player_matches" in sql:
         return pd.DataFrame([{"n": 0}])
     if "match_events" in sql:
         return pd.DataFrame(columns=["winner_id"])
-    return pd.DataFrame()  # rolling_features / player_profiles: cold start
+    return pd.DataFrame()  # player_profiles: cold start
 
 
 def test_predict_from_ids_preserves_caller_order():
