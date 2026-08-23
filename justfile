@@ -72,6 +72,7 @@ etl *args:
 full-pipeline *args:
     just notify-failure _full-pipeline {{ args }}
 
+# seed: --all, --enrich, --reset, etl: --incremental, train: --force-promote, deploy: --no-cache
 _full-pipeline *args: deps lint test cluster-create probe migrate
     just seed {{ args }}
     just etl {{ args }}
