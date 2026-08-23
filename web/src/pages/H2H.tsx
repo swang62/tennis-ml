@@ -35,10 +35,10 @@ import { usePlayerDirectory } from "../lib/playerIndex";
 import { h2hRoute } from "../routes";
 import { useTheme } from "../theme";
 
-const SURFACES: Surface[] = ["clay", "grass", "hard", "carpet"];
+const SURFACES: Surface[] = ["hard", "grass", "clay", "carpet"];
 const BEST_OF: { value: BestOf; label: string }[] = [
-  { value: 3, label: "Best of 3" },
   { value: 5, label: "Best of 5" },
+  { value: 3, label: "Best of 3" },
   { value: 1, label: "Best of 1" },
 ];
 const TOURNAMENT_TIERS: { value: TournamentTier; label: string }[] = [
@@ -46,19 +46,19 @@ const TOURNAMENT_TIERS: { value: TournamentTier; label: string }[] = [
   { value: "masters", label: "Masters" },
   { value: "atp_500", label: "ATP 500" },
   { value: "atp_250", label: "ATP 250" },
-  { value: "davis_cup", label: "Davis Cup" },
   { value: "atp_finals", label: "ATP Finals" },
   { value: "olympics", label: "Olympics" },
+  { value: "davis_cup", label: "Davis Cup" },
   { value: "professional", label: "Professional" },
 ];
 const ROUNDS: { value: MatchRound; label: string }[] = [
-  { value: "r128", label: "R128" },
-  { value: "r64", label: "R64" },
-  { value: "r32", label: "R32" },
-  { value: "r16", label: "R16" },
-  { value: "qf", label: "Quarterfinal" },
-  { value: "sf", label: "Semifinal" },
   { value: "f", label: "Final" },
+  { value: "sf", label: "Semifinal" },
+  { value: "qf", label: "Quarterfinal" },
+  { value: "r16", label: "R16" },
+  { value: "r32", label: "R32" },
+  { value: "r64", label: "R64" },
+  { value: "r128", label: "R128" },
   { value: "rr", label: "Round Robin" },
 ];
 
@@ -114,11 +114,11 @@ export default function H2H() {
   const [playerA, setPlayerA] = useState<string | null>(searchPlayerA ?? null);
   const [playerB, setPlayerB] = useState<string | null>(searchPlayerB ?? null);
   const [surface, setSurface] = useState<Surface>("hard");
-  const [bestOf, setBestOf] = useState<BestOf>(3);
-  const [tournament, setTournament] = useState<TournamentTier | "">("");
+  const [bestOf, setBestOf] = useState<BestOf>(5);
+  const [tournament, setTournament] = useState<TournamentTier>("grand_slam");
   const [round, setRound] = useState<MatchRound | "">("");
   const [asOfDate, setAsOfDate] = useState(today);
-  const [isIndoor, setIsIndoor] = useState<"" | 0 | 1>("");
+  const [isIndoor, setIsIndoor] = useState<0 | 1>(0);
 
   const directoryQ = usePlayerDirectory();
 
@@ -434,16 +434,9 @@ export default function H2H() {
                 <span className="field-label">Venue</span>
                 <select
                   value={isIndoor}
-                  onChange={(e) =>
-                    setIsIndoor(
-                      e.target.value === ""
-                        ? ""
-                        : (Number(e.target.value) as 0 | 1),
-                    )
-                  }
+                  onChange={(e) => setIsIndoor(Number(e.target.value) as 0 | 1)}
                   className="select"
                 >
-                  <option value="">-</option>
                   <option value="0">Outdoor</option>
                   <option value="1">Indoor</option>
                 </select>
@@ -453,11 +446,10 @@ export default function H2H() {
                 <select
                   value={tournament}
                   onChange={(e) =>
-                    setTournament(e.target.value as TournamentTier | "")
+                    setTournament(e.target.value as TournamentTier)
                   }
                   className="select"
                 >
-                  <option value="">-</option>
                   {TOURNAMENT_TIERS.map((tier) => (
                     <option key={tier.value} value={tier.value}>
                       {tier.label}
@@ -500,10 +492,10 @@ export default function H2H() {
                     opponent_id: requireId(playerB),
                     surface,
                     best_of: bestOf,
-                    ...(tournament ? { tournament } : {}),
+                    tournament,
                     ...(round ? { round } : {}),
                     ...(asOfDate ? { as_of_date: asOfDate } : {}),
-                    ...(isIndoor !== "" ? { is_indoor: isIndoor } : {}),
+                    is_indoor: isIndoor,
                   })
                 }
                 disabled={predict.isPending}

@@ -8,10 +8,10 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 
 import duckdb
 
-from src.constants import DATA_PROCESSED, GOLD_MATCHES_TABLE, get_database_url
+from src.constants import DATA_PROCESSED, GOLD_MATCHES_TABLE, ROOT, get_database_url
 from src.features.columns import FEATURE_COLS, SIMILARITY_COLS
 
-SNAPSHOT_PATH = DATA_PROCESSED / "training_snapshot.duckdb"
+SNAPSHOT_PATH = ROOT / "data" / "training_snapshot.duckdb"
 
 SNAPSHOT_TABLES = (
     ("gold", "match_features"),
