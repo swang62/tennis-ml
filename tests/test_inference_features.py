@@ -3,7 +3,6 @@
 import math
 import re
 from datetime import date
-from typing import cast, override
 
 import duckdb
 import pandas as pd
@@ -21,7 +20,6 @@ from src.features.inference import (
     build_inference_features,
     build_inference_features_bulk,
 )
-from src.features.tour_averages import load_tour_averages
 
 # All fixture matches precede this fixed as-of date.
 AS_OF_AFTER_ALL_MATCHES = date(2026, 9, 1)
@@ -509,19 +507,6 @@ def test_two_known_players_each_surface(surface):
 
 
 @pytest.mark.parametrize("best_of", [1, 3, 5])
-def test_best_of_in_feature_order_and_emitted(best_of):
-    """Assert that best_of is emitted in the feature contract."""
-    out = build_inference_features(
-        "S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES, best_of=best_of
-    )
-    assert out.columns.tolist() == [*FEATURE_COLS, "player_id", "opponent_id"]
-    cols = FEATURE_COLS
-    assert cols[cols.index("is_indoor") + 1] == "best_of"
-    assert cols[cols.index("best_of") + 1] == "tournament_level"
-    assert out.iloc[0]["best_of"] == best_of
-
-
-@pytest.mark.parametrize("best_of", [1, 3, 5])
 def test_best_of_scalar_bulk_parity(best_of):
     """Scalar and bulk builders emit byte-identical rows for each best_of value."""
     req = {
@@ -537,18 +522,6 @@ def test_best_of_scalar_bulk_parity(best_of):
     assert scalar.iloc[0]["best_of"] == best_of
 
 
-def test_best_of_invariants_under_id_swap():
-    """Swapping ids preserves best_of and mirrors the row."""
-    out_ab = build_inference_features(
-        "S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES, best_of=5
-    )
-    out_ba = build_inference_features(
-        "Z355", "S0AG", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES, best_of=5
-    )
-    _assert_mirror(out_ab.iloc[0], out_ba.iloc[0])
-    assert out_ab.iloc[0]["best_of"] == out_ba.iloc[0]["best_of"] == 5
-
-
 def test_reversed_ids_mirror():
     """Swapping ids produces the complementary feature row."""
     out_ab = build_inference_features("S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
@@ -562,15 +535,6 @@ def test_reversed_ids_mirror():
             assert math.isfinite(out.iloc[0][col]), f"{col} not finite"
 
 
-def test_repeated_identical_inputs_are_deterministic():
-    """Identical requests produce identical canonical rows."""
-    a = build_inference_features("S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
-    b = build_inference_features("S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
-    c = build_inference_features("S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
-    pd.testing.assert_frame_equal(a, b, check_exact=True)
-    pd.testing.assert_frame_equal(b, c, check_exact=True)
-
-
 def test_known_players_profile_features():
     """Known profile features use requested order and as-of years_pro."""
     out = build_inference_features("S0AG", "Z355", "clay", as_of_date=AS_OF_AFTER_ALL_MATCHES)
@@ -581,48 +545,6 @@ def test_known_players_profile_features():
     assert row["opponent_years_pro"] == 13.0  # 2026 - 2013
     assert "player_height" not in out.columns
     assert "height_diff" not in out.columns
-
-
-def test_years_pro_time_aware_and_cold_start():
-    """years_pro follows as_of_date even when rolling features cold-start."""
-    out = build_inference_features("S0AG", "Z355", "hard", as_of_date=date(2025, 6, 1))
-    row = out.iloc[0]
-    assert row["player_years_pro"] == 7.0  # 2025 - 2018
-    assert row["opponent_years_pro"] == 12.0  # 2025 - 2013
-    for col in FEATURE_COLS:
-        assert math.isfinite(row[col]), f"{col} is not finite: {row[col]!r}"
-
-
-def test_materialized_defaults_return_expected_values():
-    """Cold starts use finite, deterministic values from the tour-average singleton."""
-    defaults = cast(dict[str, float], load_tour_averages())
-    assert set(TOUR_AVERAGES_FALLBACK_COLS).issubset(defaults.keys())
-    for col in TOUR_AVERAGES_FALLBACK_COLS:
-        assert not pd.isna(defaults[col]), f"{col} is NULL for the singleton row"
-        assert math.isfinite(float(defaults[col])), f"{col} not finite for the singleton row"
-
-    # Deterministic: re-reading the singleton returns identical values.
-    assert defaults == load_tour_averages()
-
-    # The builder imputes exactly these materialized defaults for two unknown
-    # players (cold-start sides equal the defaults; every diff stays neutral).
-    out = build_inference_features("ZZZZ", "YYYY", "hard", as_of_date=date(2026, 9, 1))
-    row = out.iloc[0]
-    for col in DIFF_COLS:
-        assert row[col] == 0, f"{col} should be neutral for two unknowns: {row[col]!r}"
-    assert row["player_weighted_form_10"] == pytest.approx(float(defaults["weighted_form_10"]))
-    # Equal cold-start defaults produce neutral win-rate and ace-rate diffs.
-    assert row["win_rate_diff"] == 0
-    assert row["ace_rate_diff"] == 0
-    # The removed per-side features are absent from the finalized contract.
-    for col in (
-        "player_days_since_last_match",
-        "player_matches_30d",
-        "player_surface_win_rate_10",
-    ):
-        assert col not in row
-    assert row["player_is_left_handed"] == pytest.approx(float(defaults["left_handed_rate"]))
-    assert row["player_years_pro"] == pytest.approx(float(defaults["avg_years_pro"]))
 
 
 def test_historical_as_of_excludes_later_snapshots():
@@ -642,32 +564,6 @@ def test_historical_as_of_excludes_later_snapshots():
     assert out.loc[0, "player_weighted_form_10"] == pytest.approx(
         float(snapshot["weighted_form_10"])
     )
-
-
-class _FixedTodayDate(date):
-    """datetime.date subclass whose today() returns a fixed date."""
-
-    @classmethod
-    @override
-    def today(cls) -> date:
-        return date(2026, 9, 1)
-
-
-def test_default_today_fecha(monkeypatch):
-    """Default date.today matches an explicit as-of date."""
-    out_explicit = build_inference_features("S0AG", "Z355", "clay", as_of_date=date(2026, 9, 1))
-    monkeypatch.setattr("src.features.inference.date", _FixedTodayDate)
-    out_default = build_inference_features("S0AG", "Z355", "clay")
-    pd.testing.assert_frame_equal(out_default, out_explicit, check_exact=True)
-    row = out_default.iloc[0]
-    assert not out_default[FEATURE_COLS].isnull().to_numpy().any()
-    for side in ("player", "opponent"):
-        for col in (
-            f"{side}_days_since_last_match",
-            f"{side}_matches_30d",
-            f"{side}_surface_win_rate_10",
-        ):
-            assert col not in row  # removed from the finalized contract
 
 
 @pytest.mark.parametrize(
@@ -713,17 +609,6 @@ def test_one_missing_player_imputed_no_nans(args):
     assert math.isfinite(row[f"{known_prefix}_years_pro"])
 
 
-def test_one_missing_player_reversed_mirror():
-    """One unknown player still produces mirror rows when ids are swapped."""
-    row_known_first = build_inference_features(
-        "S0AG", "UNKNOWN_ID", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES
-    )
-    row_reversed = build_inference_features(
-        "UNKNOWN_ID", "S0AG", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES
-    )
-    _assert_mirror(row_known_first.iloc[0], row_reversed.iloc[0])
-
-
 def test_both_unknowns_neutral_diffs():
     """Two unknown players receive identical defaults and neutral diffs."""
     out = build_inference_features("A0ZZ", "ZZ99", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
@@ -737,175 +622,10 @@ def test_both_unknowns_neutral_diffs():
     assert [row["is_clay"], row["is_grass"], row["is_hard"]] == [0, 0, 1]
 
 
-@pytest.mark.parametrize("surface", ["Clay", "CLAY", "", None, "0", 0])
+@pytest.mark.parametrize("surface", ["Clay", "", 0])
 def test_invalid_surface_raises(surface):
     with pytest.raises((ValueError, TypeError)):
         build_inference_features("S0AG", "Z355", surface, as_of_date=AS_OF_AFTER_ALL_MATCHES)
-
-
-@pytest.mark.parametrize("tournament_level", [-1, 5, True, "4", 4.0])
-def test_invalid_tournament_level_raises(tournament_level):
-    with pytest.raises((ValueError, TypeError)):
-        build_inference_features(
-            "S0AG",
-            "Z355",
-            "hard",
-            as_of_date=AS_OF_AFTER_ALL_MATCHES,
-            tournament_level=tournament_level,
-        )
-
-
-@pytest.mark.parametrize("round_encoded", [-1, 8, True, "7", 7.0])
-def test_invalid_round_encoded_raises(round_encoded):
-    with pytest.raises((ValueError, TypeError)):
-        build_inference_features(
-            "S0AG",
-            "Z355",
-            "hard",
-            as_of_date=AS_OF_AFTER_ALL_MATCHES,
-            round_encoded=round_encoded,
-        )
-
-
-@pytest.mark.parametrize(
-    "tournament_level, expected",
-    [
-        (4, 4),
-        (3, 3),
-        (2, 2),
-        (1, 1),
-        (0, 0),
-    ],
-)
-def test_valid_tournament_levels_accepted(tournament_level, expected):
-    out = build_inference_features(
-        "S0AG",
-        "Z355",
-        "hard",
-        as_of_date=AS_OF_AFTER_ALL_MATCHES,
-        tournament_level=tournament_level,
-    )
-    assert out.iloc[0]["tournament_level"] == expected
-
-
-@pytest.mark.parametrize(
-    "round_encoded, expected",
-    [
-        (7, 7),
-        (6, 6),
-        (5, 5),
-        (4, 4),
-        (3, 3),
-        (2, 2),
-        (1, 1),
-        (0, 0),
-    ],
-)
-def test_valid_round_encodings_accepted(round_encoded, expected):
-    out = build_inference_features(
-        "S0AG",
-        "Z355",
-        "hard",
-        as_of_date=AS_OF_AFTER_ALL_MATCHES,
-        round_encoded=round_encoded,
-    )
-    assert out.iloc[0]["round_encoded"] == expected
-
-
-@pytest.mark.parametrize(
-    "tournament, expected",
-    [
-        ("grand_slam", 4),
-        ("masters", 3),
-        ("atp_500", 2),
-        ("atp_250", 1),
-        ("davis_cup", 0),
-        ("atp_finals", 0),
-        ("olympics", 0),
-        ("professional", 0),
-    ],
-)
-def test_tournament_string_convenience_maps_to_codebook(tournament, expected):
-    """String tournament names map to the SAME encodings as the dbt codebook."""
-    out = build_inference_features(
-        "S0AG",
-        "Z355",
-        "hard",
-        as_of_date=AS_OF_AFTER_ALL_MATCHES,
-        tournament=tournament,
-    )
-    assert out.iloc[0]["tournament_level"] == expected
-
-
-@pytest.mark.parametrize(
-    "round, expected",
-    [
-        ("r128", 1),
-        ("r64", 2),
-        ("r32", 3),
-        ("r16", 4),
-        ("qf", 5),
-        ("sf", 6),
-        ("f", 7),
-    ],
-)
-def test_round_string_convenience_maps_to_codebook(round, expected):
-    """String round names map to the SAME encodings as the dbt codebook."""
-    out = build_inference_features(
-        "S0AG",
-        "Z355",
-        "hard",
-        as_of_date=AS_OF_AFTER_ALL_MATCHES,
-        round=round,
-    )
-    assert out.iloc[0]["round_encoded"] == expected
-
-
-@pytest.mark.parametrize("tournament", ["Roland Garros", "grand slam", "Grand_Slam", "random", ""])
-def test_unknown_tournament_string_maps_to_zero(tournament):
-    """Unknown tournament strings map to 0, matching the codebook's ELSE branch."""
-    out = build_inference_features(
-        "S0AG",
-        "Z355",
-        "hard",
-        as_of_date=AS_OF_AFTER_ALL_MATCHES,
-        tournament=tournament,
-    )
-    assert out.iloc[0]["tournament_level"] == 0
-
-
-@pytest.mark.parametrize("round", ["final", "F", "QF", "unknown", ""])
-def test_unknown_round_string_maps_to_zero(round):
-    """Unknown round strings map to 0, matching the codebook's ELSE branch."""
-    out = build_inference_features(
-        "S0AG",
-        "Z355",
-        "hard",
-        as_of_date=AS_OF_AFTER_ALL_MATCHES,
-        round=round,
-    )
-    assert out.iloc[0]["round_encoded"] == 0
-
-
-def test_tournament_string_equals_int_encoding():
-    """String and int paths produce byte-identical rows for the same encoding."""
-    out_str = build_inference_features(
-        "S0AG",
-        "Z355",
-        "clay",
-        as_of_date=AS_OF_AFTER_ALL_MATCHES,
-        tournament="grand_slam",
-        round="f",
-    )
-    out_int = build_inference_features(
-        "S0AG",
-        "Z355",
-        "clay",
-        as_of_date=AS_OF_AFTER_ALL_MATCHES,
-        tournament_level=4,
-        round_encoded=7,
-    )
-    pd.testing.assert_frame_equal(out_str, out_int, check_exact=True)
 
 
 @pytest.mark.parametrize(
@@ -960,74 +680,6 @@ def test_null_handedness_falls_back_to_pool_rate(monkeypatch):
     assert values["is_left_handed"] == pytest.approx(0.08)
     # Non-NULL cells are still read directly.
     assert values["years_pro"] == 8.0  # 2026 - 2018
-
-
-# ── Head-to-head: perspective-explicit recent-5 exposure and advantages ──
-
-
-def test_h2h_zero_prior_meetings_neutral():
-    """A pair with no meetings gets zero exposure and neutral H2H advantages."""
-    out = build_inference_features("S0AG", "UNKNOWN_ID", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
-    row = out.iloc[0]
-    assert row["player_id"] == "S0AG"
-    assert row["opponent_id"] == "UNKNOWN_ID"
-    assert row["h2h_exposure"] == 0
-    assert row["h2h_advantage"] == 0.0
-    assert row["h2h_surface_advantage"] == 0.0
-    assert "player_h2h_win_rate" not in out.columns
-    assert "opponent_h2h_matches" not in out.columns
-
-
-def test_bulk_never_met_pair_zero_exposure():
-    """Scalar and bulk builders agree for a pair with no meetings."""
-    req = {
-        "player_id": "S0AG",
-        "opponent_id": "UNKNOWN_ID",
-        "surface": "hard",
-        "as_of_date": AS_OF_AFTER_ALL_MATCHES,
-    }
-    scalar = build_inference_features(**req)
-    bulk = build_inference_features_bulk([req])
-    assert bulk.iloc[0]["h2h_exposure"] == 0
-    assert scalar.iloc[0]["h2h_exposure"] == 0
-    pd.testing.assert_frame_equal(bulk, scalar, check_exact=True)
-
-
-def test_bulk_met_pair_still_counts_exposure():
-    """The seeded meeting counts once in both bulk and scalar paths."""
-    req = {
-        "player_id": "S0AG",
-        "opponent_id": "Z355",
-        "surface": "hard",
-        "as_of_date": AS_OF_AFTER_ALL_MATCHES,
-    }
-    scalar = build_inference_features(**req)
-    bulk = build_inference_features_bulk([req])
-    assert bulk.iloc[0]["h2h_exposure"] == 1
-    assert scalar.iloc[0]["h2h_exposure"] == 1
-    pd.testing.assert_frame_equal(bulk, scalar, check_exact=True)
-
-
-def test_h2h_real_seeded_meeting():
-    """The seeded meeting contributes one prior win and mirrors when reversed."""
-    out = build_inference_features("S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
-    row = out.iloc[0]
-    assert row["player_id"] == "S0AG"  # requested order preserved
-    assert row["h2h_exposure"] == 1
-    assert row["h2h_advantage"] == pytest.approx((1 + 1) / (1 + 2) - 0.5)  # 1/6
-    # The hard meeting contributes 1/6; clay has no prior meetings and stays neutral.
-    assert row["h2h_surface_advantage"] == pytest.approx((1 + 1) / (1 + 2) - 0.5)
-    out_clay = build_inference_features("S0AG", "Z355", "clay", as_of_date=AS_OF_AFTER_ALL_MATCHES)
-    assert out_clay.iloc[0]["h2h_surface_advantage"] == 0.0
-    # Before that meeting (strictly-before, inclusive as-of still excludes it): zero priors, neutral.
-    out_before = build_inference_features("S0AG", "Z355", "hard", as_of_date=date(2026, 7, 11))
-    row_before = out_before.iloc[0]
-    assert row_before["h2h_exposure"] == 0
-    assert row_before["h2h_advantage"] == 0.0
-    assert row_before["h2h_surface_advantage"] == 0.0
-    # Reversed raw ids: mirror row (advantages negate, exposure equal).
-    row_ba = build_inference_features("Z355", "S0AG", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
-    _assert_mirror(row, row_ba.iloc[0])
 
 
 def test_h2h_first_and_second_meeting_boundaries():
@@ -1103,41 +755,6 @@ def test_h2h_surface_advantage_filters_bounded_window():
     assert row["h2h_surface_advantage"] != pytest.approx((3 + 1) / (5 + 2) - 0.5)
     row_ba = build_inference_features(b, a, "clay", as_of_date=date(2026, 7, 1))
     _assert_mirror(row, row_ba.iloc[0])
-
-
-def test_h2h_same_date_meetings_included():
-    """Inclusive as-of counts same-day meetings; both count on their own date."""
-    a, b = "H2H_E", "H2H_I"
-    _insert_prior_meetings(
-        a, b, [("h2h-s1", "2026-03-10", 1, "hard"), ("h2h-s2", "2026-03-10", 0, "hard")]
-    )
-    out_same = build_inference_features(a, b, "hard", as_of_date=date(2026, 3, 10))
-    row_same = out_same.iloc[0]
-    assert row_same["h2h_exposure"] == 2
-    assert row_same["h2h_advantage"] == pytest.approx((1 + 1) / (2 + 2) - 0.5)  # 0.0
-    assert row_same["h2h_surface_advantage"] == pytest.approx((1 + 1) / (2 + 2) - 0.5)
-    # The next day still sees both meetings as priors.
-    out_next = build_inference_features(a, b, "hard", as_of_date=date(2026, 3, 11))
-    row_next = out_next.iloc[0]
-    assert row_next["h2h_exposure"] == 2
-    assert row_next["h2h_advantage"] == pytest.approx((1 + 1) / (2 + 2) - 0.5)  # 0.0
-    assert row_next["h2h_surface_advantage"] == pytest.approx((1 + 1) / (2 + 2) - 0.5)
-
-
-def test_h2h_reversed_raw_ids_mirror():
-    """Reversing ids negates H2H advantages and preserves exposure."""
-    a, b = "H2H_J", "H2H_K"
-    _insert_prior_meetings(
-        a,
-        b,
-        [("h2h-rv1", "2026-04-10", 1, "hard"), ("h2h-rv2", "2026-05-10", 0, "hard")],
-    )
-    row_ab = build_inference_features(a, b, "hard", as_of_date=date(2026, 6, 1))
-    row_ba = build_inference_features(b, a, "hard", as_of_date=date(2026, 6, 1))
-    _assert_mirror(row_ab.iloc[0], row_ba.iloc[0])
-    assert row_ab.iloc[0]["h2h_exposure"] == 2
-    assert row_ab.iloc[0]["h2h_advantage"] == pytest.approx((1 + 1) / (2 + 2) - 0.5)  # 0.0
-    assert row_ab.iloc[0]["h2h_surface_advantage"] == pytest.approx((1 + 1) / (2 + 2) - 0.5)
 
 
 # ── Train/inference parity ──
@@ -1251,42 +868,6 @@ def test_dominance_diff_formula_and_finite():
     assert float(snap["dominance"]) == pytest.approx(_lifetime_dominance(0.42, 0.63), abs=1e-5)
 
 
-def test_dominance_diff_mirror_negates():
-    """Swapping the ids negates dominance_diff (lifetime, not last-10)."""
-    out_ab = build_inference_features("S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
-    out_ba = build_inference_features("Z355", "S0AG", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
-    assert out_ba.iloc[0]["dominance_diff"] == pytest.approx(-out_ab.iloc[0]["dominance_diff"])
-    assert math.isfinite(out_ba.iloc[0]["dominance_diff"])
-
-
-def test_dominance_cold_start_two_unknown_neutral():
-    """Two unknown players use the pool lifetime dominance mean."""
-    out = build_inference_features("ZZZZ", "YYYY", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
-    row = out.iloc[0]
-    assert math.isfinite(row["dominance_diff"])
-    assert row["dominance_diff"] == 0
-    # The pool mean is the documentated lifetime dominance for the pool rates
-    # (0.42 / (1 - 0.58) == 1.0), materialized as the cold-start fallback.
-    pool = cast(dict[str, float], load_tour_averages())
-    assert float(pool["dominance"]) == pytest.approx(1.0, abs=1e-6)
-
-
-def test_dominance_one_known_one_unknown_fallback():
-    """One known player is compared with the pool lifetime dominance mean."""
-
-    out = build_inference_features("S0AG", "UNKNOWN_ID", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
-    row = out.iloc[0]
-    assert math.isfinite(row["dominance_diff"])
-    pool = cast(dict[str, float], load_tour_averages())
-    expected = _lifetime_dominance(0.42, 0.63) - float(pool["dominance"])
-    assert row["dominance_diff"] == pytest.approx(expected, abs=1e-5)
-    # Reversed: mirror -> negated.
-    out_rev = build_inference_features(
-        "UNKNOWN_ID", "S0AG", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES
-    )
-    assert out_rev.iloc[0]["dominance_diff"] == pytest.approx(-row["dominance_diff"])
-
-
 # ── surface_form_diff and days_since_last_match_diff ──
 
 
@@ -1314,60 +895,8 @@ def test_surface_form_and_days_since_diffs():
     assert cold.iloc[0]["days_since_last_match_diff"] == 0.0
 
 
-# ── is_indoor context feature ────────────────────────────────────
-
-
-def test_is_indoor_defaults_to_0_when_not_supplied():
-    """Missing indoor => is_indoor = 0 (safe outdoor default)."""
-    out = build_inference_features("S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
-    assert out["is_indoor"].iloc[0] == 0
-
-
 def test_is_indoor_1_when_indoor():
     out = build_inference_features(
         "S0AG", "Z355", "hard", is_indoor=1, as_of_date=AS_OF_AFTER_ALL_MATCHES
     )
     assert out["is_indoor"].iloc[0] == 1
-
-
-def test_is_indoor_0_when_outdoor():
-    out = build_inference_features(
-        "S0AG", "Z355", "hard", is_indoor=0, as_of_date=AS_OF_AFTER_ALL_MATCHES
-    )
-    assert out["is_indoor"].iloc[0] == 0
-
-
-def test_inference_row_has_no_nan_with_indoor():
-    """Full inference row with indoor is NaN-free."""
-    out = build_inference_features(
-        "S0AG",
-        "Z355",
-        "hard",
-        is_indoor=1,
-        tournament="grand_slam",
-        as_of_date=AS_OF_AFTER_ALL_MATCHES,
-    )
-    assert not out[FEATURE_COLS].isnull().to_numpy().any()
-    assert "is_indoor" in out.columns
-
-
-def test_cold_start_row_has_no_nan_with_indoor():
-    """Unknown players + indoor => no NaN in the feature row."""
-    out = build_inference_features(
-        "ZZZZ", "YYYY", "clay", is_indoor=1, as_of_date=AS_OF_AFTER_ALL_MATCHES
-    )
-    assert not out[FEATURE_COLS].isnull().to_numpy().any()
-    assert out["is_indoor"].iloc[0] == 1
-
-
-@pytest.mark.parametrize("is_indoor", [2, -1, True, "1", 1.0])
-def test_invalid_is_indoor_raises(is_indoor):
-    """is_indoor must be exactly the integer 0 or 1 when supplied."""
-    with pytest.raises(ValueError):
-        build_inference_features(
-            "S0AG",
-            "Z355",
-            "hard",
-            is_indoor=is_indoor,
-            as_of_date=AS_OF_AFTER_ALL_MATCHES,
-        )

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import math
 from datetime import date
 from typing import Any
 
 from src.constants import (
     CHAMPION_ALIAS,
+    FEATURE_COLS_HASH_TAG,
+    FEATURE_COLS_TAG,
     METRIC_PREFIX,
     PRODUCTION_MODEL,
     PROMOTION_TOLERANCE,
@@ -84,6 +87,35 @@ def resolve_champion(client: Any) -> Any | None:
         return client.get_model_version_by_alias(PRODUCTION_MODEL, CHAMPION_ALIAS)
     except Exception:
         return None
+
+
+def resolve_champion_feature_contract(
+    client: Any,
+    champion: Any,
+    feature_cols: list[str],
+    feature_cols_hash: str,
+) -> tuple[bool, Any]:
+    """Compare the champion's recorded feature contract against the local one."""
+
+    if champion is None:
+        return True, None
+    version = client.get_model_version(PRODUCTION_MODEL, champion.version)
+    tags = dict(getattr(version, "tags", None) or {})
+    raw_cols = tags.get(FEATURE_COLS_TAG)
+    raw_hash = tags.get(FEATURE_COLS_HASH_TAG)
+    if raw_cols is None or raw_hash is None:
+        return True, None
+    try:
+        champion_cols = json.loads(raw_cols)
+    except (TypeError, ValueError):
+        return True, None
+    if (
+        not isinstance(champion_cols, list)
+        or [str(c) for c in champion_cols] != list(feature_cols)
+        or str(raw_hash) != str(feature_cols_hash)
+    ):
+        return True, None
+    return False, str(raw_hash)
 
 
 def read_champion_metrics(client: Any, champion: Any) -> dict[str, float]:

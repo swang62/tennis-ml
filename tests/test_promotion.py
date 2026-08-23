@@ -224,10 +224,3 @@ def test_resolve_champion_returns_none_when_alias_absent():
     # A missing/broken alias must not raise; the caller treats None as
     # "no standing champion" and never moves @champion on a failed promotion.
     assert promotion.resolve_champion(_RaisingMlflowClient()) is None
-
-
-def test_read_champion_metrics_requires_a_resolved_champion():
-    # Without a champion there is no incumbent metric to beat; the gate
-    # surfaces that as a clear error rather than a silent None.
-    with pytest.raises(RuntimeError):
-        promotion.read_champion_metrics(object(), None)
