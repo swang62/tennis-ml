@@ -81,9 +81,13 @@ members = ["."]
 [tool.uv.sources]
 tennis-ml = { workspace = true, editable = true }
 
-# arm64-only resolution avoids the shap/llvmlite x86_64 conflict.
 [tool.uv]
-environments = ["sys_platform == 'darwin' and platform_machine == 'arm64'"]
+# Keep local Apple Silicon and Linux CI lock resolutions; Darwin Intel has a
+# shap/llvmlite conflict and is not a supported environment.
+environments = [
+  "sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
 
 [dependency-groups]
 # Runtime serving subset: packages imported by src/serving/ and src/features/
