@@ -1,10 +1,4 @@
--- Assert every match_features H2H value is exactly re-derivable from strictly
--- prior meetings (same-date excluded), so H2H never includes the current match.
--- h2h_exposure = count of the five most recent deduped meetings; h2h_advantage =
--- (prior wins + 1)/(prior meetings + 2) - 0.5 from the same window. Compared at
--- full precision (1e-6 tolerance). Any returned row is a violation.
 WITH pair_meetings AS (
-    -- One row per distinct unordered pair match; a_won from the lower-id side.
     SELECT
         LEAST(player_id, opponent_id) AS a,
         GREATEST(player_id, opponent_id) AS b,

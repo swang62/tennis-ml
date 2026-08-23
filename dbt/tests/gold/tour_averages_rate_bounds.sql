@@ -1,8 +1,3 @@
--- Assert every applicable rate column in the gold.tour_averages singleton is
--- bounded to [0, 1], while tour_aces_per_svc_game and
--- tour_break_point_opportunities_per_return_game are per-game rates that only
--- need a lower bound of 0. Tour benchmark columns may be NULL (zero denominator);
--- NULLs are skipped. Any returned row violates a bound.
 SELECT
     singleton_id,
     'win_rate_10' AS column_name, win_rate_10 AS value

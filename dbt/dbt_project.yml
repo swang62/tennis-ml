@@ -14,12 +14,10 @@ clean-targets:
 
 models:
   tennis_ml:
-    # bronze raw matches -> silver player snapshots -> gold match features.
     silver:
       +materialized: table
       +schema: silver
 
-      # CTAS tables need post-hooks; macros replace stale objects after dbt swaps.
       player_matches:
         +post-hook:
            - "{{ ensure_primary_key_sql(this, 'pk_player_matches', 'player_id, match_id') }}"
@@ -39,7 +37,6 @@ models:
       +materialized: table
       +schema: gold
 
-      # Reapply keys and indexes after materialization replaces the table.
       tour_averages:
         +post-hook:
           - "{{ ensure_primary_key_sql(this, 'pk_tour_averages', 'singleton_id') }}"

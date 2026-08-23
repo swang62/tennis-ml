@@ -1,7 +1,3 @@
--- Assert the tour_averages singleton contract: every imputation/live-inference
--- fallback is non-null and finite (NULL alone does not catch NaN/inf), and the
--- relation holds exactly one row. UNION ALL per fallback column reports every
--- violation, not just the first checked one. Any returned row is a violation.
 
 {% set fallback_cols = [
     "latest_player_ranking",
@@ -37,8 +33,6 @@ WITH violations AS (
     {% if not loop.last %}UNION ALL{% endif %}
     {% endfor %}
     UNION ALL
-    -- Weighted tour benchmarks may be NULL (zero denominator) but must be
-    -- finite when present.
     SELECT 'tour_break_point_opportunities_per_return_game' AS column_name,
            tour_break_point_opportunities_per_return_game AS value
     FROM {{ ref('tour_averages') }}

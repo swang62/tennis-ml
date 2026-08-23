@@ -2,58 +2,7 @@ version: 2
 
 models:
   - name: rolling_features
-    description: >
-      Post-match player snapshots: one row per (player_id, match_id) recording
-      the player's rolling form state immediately after that completed match.
-      All rolling windows are INCLUSIVE of the snapshot match — the Nth
-      snapshot's win_rate_10 is derived from the last 10 completed matches
-      including this one — so the newest snapshot is immediately usable for
-      future inference. match_features pairs each match with the player's
-      immediately preceding snapshot (strictly before match_date) to build
-      leakage-free training rows.
-
-      Snapshot grain: exactly one row per (player_id, match_id); equivalently
-      one per (player_id, player_match_number). snapshot_date is the completed
-      match date. Materialized incrementally with delete+insert on the
-      composite unique key (player_id, match_id): a run recomputes the full
-      history and rebuilds every row of each player whose (player_id, match_id)
-      perspective set changed — so historical bronze inserts replace all stale
-      snapshots for the affected players instead of appending only their new
-      matches' snapshots. The grain is enforced by the DB primary key
-      pk_rolling_features that the model's post-hook creates (dbt's incremental
-      unique_key alone is not a constraint). player_id, match_id,
-      snapshot_date, player_match_number, and matches_10 are non-null by
-      construction (player_matches pass-through or window COUNT/ROW_NUMBER)
-      and DB-enforced via the model's ensure_not_null_sql post-hook. The
-      relation is expensive and reused by both training and inference.
-
-      Cold start: rates are computed over however many completed matches fall
-      in the window. Every [0,1] probability rate is smoothed with the fixed
-      Beta(1,1) prior, (successes + 1) / (opportunities + 2): the first
-      snapshot's win_rate_10 is (1 + 1) / (1 + 2) = 0.5, and a zero-opportunity
-      ratio rate is never NULL (its smoothed denominator is always >= 2). The
-      per-rate smoothed values are always in [0, 1]. `matches_10` records how
-      many matches actually back the 10-match rates (1 for the first match, up
-      to 10) and is carried to gold as the rate-exposure column. The smoothed
-      probability rates are: win_rate_10, ace_rate_10, first_serve_pct_10,
-      break_points_saved_pct_10, first_serve_win_pct_10,
-      second_serve_win_pct_10, serve_win_pct_10, return_points_won_pct_10,
-      df_rate_10, and clay/grass/hard_win_rate_10. NOT probabilities, so
-      deliberately left unsmoothed: aces_per_svc_game_10 (per-game count, no
-      upper bound), weighted_form_10 (decay-weighted index), streak, and the
-      rank averages.
-      clay/grass/hard_win_rate_10 remain NULL until the player has played on
-      that surface.
-
-      Task 6: every `_5`/`_20` output, the separate win/loss streaks (replaced
-      by a single signed `streak`), last_match_date, and intermediate/source
-      outputs not consumed downstream are removed. days_since_last_match,
-      matches_30d, and current-match serve/break rates are derived on demand
-      (not stored here); raw serve/break counts remain in silver.
-      Precision contract: every emitted floating/statistical column is stored
-      at full arithmetic precision (no truncation or rounding). Integer
-      identifiers, ordinals, counts, dates, surfaces, ranks, rank points, and
-      the signed streak are unchanged.
+    description: Post-match player snapshots store rolling form for leakage-free training and inference.
     columns:
       - name: player_id
         description: Player this post-match snapshot describes.
@@ -62,37 +11,19 @@ models:
       - name: snapshot_date
         description: Date of the completed match this snapshot was taken after.
       - name: player_match_number
-        description: >
-          1-based ordinal of the player's matches (from silver.player_matches);
-          the snapshot's position in the player's history. Snapshot N is the
-          post-match state of the player's Nth match.
+        description: 1-based ordinal of the player's matches; this snapshot is the post-match state of the player's Nth match.
       - name: surface
         description: Surface of the snapshot match (clay, grass, hard, carpet); blank or unknown source values are normalized to hard at ingest.
       - name: latest_player_ranking
-        description: >
-          The player's ATP ranking at the snapshot match — the latest observed
-          ranking in the player's history at this point.
+        description: The player's ATP ranking at the snapshot match, the latest observed ranking in the player's history so far.
       - name: latest_player_rank_points
-        description: >
-          The player's ATP rank points at the snapshot match; NULL when
-          missing (0 -> NULL in silver.player_matches). Internal backing for
-          the inference-time rank_points_diff (as-of-date per-side lookup);
-          not itself a model feature.
+        description: The player's ATP rank points at the snapshot match (NULL when missing, 0->NULL); backs inference rank_points_diff; not a model feature.
       - name: latest_player_age
-        description: >
-          The player's age in fractional years at the snapshot match; NULL
-          when missing (0 -> NULL in silver.player_matches).
+        description: The player's age in fractional years at the snapshot match (NULL when missing, 0->NULL).
       - name: weighted_form_10
-        description: >
-          Exponentially-decayed win rate over the last 10 matches including
-          this one: match_won weighted by POW(0.9, max_match_number -
-          player_match_number), where max_match_number is the player's latest
-          match ordinal over the full history and player_match_number is this
-          snapshot's ascending ordinal (newest = gap 0, weight 1); each older
-          match decays by 0.9 per step. NULL only when the window is
-          empty; otherwise in [0, 1].
+        description: Exponentially decayed win rate over the last 10 matches.
       - name: win_rate_10
-        description: (wins + 1) / (matches + 2) over the last 10 completed matches including this one — Beta(1,1)-smoothed; 0.5 for the first match.
+        description: Beta-smoothed win rate over the last 10 completed matches.
       - name: ace_rate_10
         description: (aces + 1) / (first_serves_made + 2) over the last 10 matches including this one; smoothed, never NULL.
       - name: first_serve_pct_10
@@ -106,58 +37,23 @@ models:
       - name: serve_win_pct_10
         description: (first_serve_points_won + second_serve_points_won + 1) / (total_serve_points + 2) over the last 10 matches including this one; smoothed, never NULL.
       - name: return_points_won_pct_10
-        description: >
-          (return_points_won + 1) / (return_points_available + 2) over the last
-          10 matches including this one — the player's genuine return
-          percentage: opponent serve points NOT won divided by opponent serve
-          points. return_points_won/available are derived per match in
-          silver.player_matches from the opponent's raw serve counts. Smoothed,
-          never NULL. Consumed only by the PlayerSimilarity style index (not a
-          model feature).
+        description: "Beta(1,1)-smoothed return percentage over last 10 matches: (return_points_won+1)/(return_points_available+2); never NULL; consumed only by PlayerSimilarity."
       - name: aces_per_svc_game_10
-        description: Sum(aces) / sum(service_games) over the last 10 matches including this one; NULL when the window has no service games. Per-game count, not smoothed.
+        description: Aces per service game over the last 10 matches.
       - name: df_rate_10
         description: (double_faults + 1) / (total_serve_points + 2) over the last 10 matches including this one; smoothed, never NULL.
       - name: matches_10
-        description: >
-          Number of matches in the last-10 window backing the smoothed 10-match
-          rates: 1 for the first match, up to 10. This is the rate-exposure
-          column carried to gold (player_matches_10 / opponent_matches_10); 0
-          for a cold start with no prior match.
+        description: Number of matches backing the last-10 rates.
 
       - name: avg_player_rank_10
-        description: >
-          Average of the player's own ranking over the last 10 matches including
-          this one. match_features derives rank_trend_10 by subtracting the next
-          match's current ranking from this stored average.
+        description: Average of the player's own ranking over the last 10 matches; match_features derives rank_trend_10 from it.
       - name: avg_rank_faced_10
-        description: >
-          Average of opponent_ranking over the last 10 matches including this
-          one — the strength of schedule the player faced. AVG skips NULL
-          opponent rankings, so unranked opponents inside the window never
-          pollute the average.
+        description: Average opponent_ranking over the last 10 matches (strength of schedule); AVG skips NULL opponent rankings.
       - name: streak
-        description: >
-          Single signed current run including this snapshot's match: positive
-          = consecutive wins (1, 2, ...), negative = consecutive losses
-          (-1, -2, ...). A win pushes it positive, a loss negative; the first
-          match is +1 if won, -1 if lost. Replaces the old separate win_streak
-          / loss_streak columns.
+        description: "Single signed current run including this match: positive=consecutive wins, negative=losses; replaces old separate win/loss streak columns."
       - name: clay_win_rate_10
-        description: >
-          (wins + 1) / (clay matches + 2) over the last 10 matches on clay,
-          including any clay match in this snapshot's window — Beta(1,1)
-          smoothed. Carried forward unchanged on non-clay snapshots; NULL until
-          the player's first clay match.
+        description: Beta(1,1)-smoothed (wins+1)/(clay matches+2) over last 10 on clay; carried forward on non-clay snapshots; NULL until first clay match.
       - name: grass_win_rate_10
-        description: >
-          (wins + 1) / (grass matches + 2) over the last 10 matches on grass,
-          including any grass match in this snapshot's window — Beta(1,1)
-          smoothed. Carried forward unchanged on non-grass snapshots; NULL until
-          the player's first grass match.
+        description: Beta(1,1)-smoothed (wins+1)/(grass matches+2) over last 10 on grass; carried forward on non-grass snapshots; NULL until first grass match.
       - name: hard_win_rate_10
-        description: >
-          (wins + 1) / (hard matches + 2) over the last 10 matches on hard,
-          including any hard match in this snapshot's window — Beta(1,1)
-          smoothed. Carried forward unchanged on non-hard snapshots; NULL until
-          the player's first hard match.
+        description: Beta(1,1)-smoothed (wins+1)/(hard matches+2) over last 10 on hard; carried forward on non-hard snapshots; NULL until first hard match.

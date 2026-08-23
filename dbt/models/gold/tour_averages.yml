@@ -2,35 +2,9 @@ version: 2
 
 models:
   - name: tour_averages
-    description: >
-      SINGLE-ROW (singleton_id = 1) relation that replaces the date-keyed
-      gold.feature_defaults table and adds weighted tour benchmarks. It is the
-      only shared source for (1) difficult model-feature fallbacks used by
-      gold.match_features and inference, and (2) weighted tour-wide rates used
-      for player-profile comparisons. Fallback values aggregate ALL
-      silver.rolling_features snapshots (no as_of_date rows, no date-expansion
-      joins): rank/rank-points/streak-like values use the rounded median,
-      continuous rates, age, years-pro, and handedness rate use the mean, and
-      an empty pool falls back to explicit deterministic constants so every
-      fallback column is finite and non-null. Weighted tour comparison columns
-      are SUM(numerator) / SUM(denominator) ratios from silver.player_matches
-      and may be NULL only when their source denominator is zero. The
-      singleton_id uniqueness is enforced by the DB primary key
-      pk_tour_averages that the model's post-hook creates, and the model SQL
-      emits exactly one row by construction (all CTEs aggregate to one row and
-      are CROSS JOINed). ensure_not_null_sql re-applies NOT NULL on
-      singleton_id (a literal `1`) explicitly.
-      Limited historical leakage is intentional: old cold-start or otherwise
-      missing cells use the same full-pool singleton as current rows, and a
-      verification query reports the affected row/cell count.
-      Precision contract: every floating/statistical output is rounded to 5
-      decimal places at the model's output boundary
-      (ROUND(x::NUMERIC, 5)::DOUBLE PRECISION), so the aggregate CTEs retain
-      full precision internally. singleton_id, counts, and pool_as_of_date are
-      unchanged.
+    description: Single-row source of model fallbacks and weighted tour averages.
 
     columns:
-      # Singleton identity and observability.
       - name: singleton_id
         description: Constant 1; the single-row identity of this relation.
       - name: pool_as_of_date
@@ -44,7 +18,6 @@ models:
       - name: player_match_rows
         description: Player-perspective rows from silver.player_matches used by the weighted tour rates.
 
-      # Rank / streak-like medians (rounded) with empty-pool constants.
       - name: latest_player_ranking
         description: Median latest_player_ranking over the full snapshot pool; 100 when the pool is empty.
       - name: latest_player_rank_points
@@ -56,7 +29,6 @@ models:
       - name: avg_rank_faced_10
         description: Median avg_rank_faced_10 over the full snapshot pool; 100 when empty.
 
-      # Continuous means over the full snapshot pool (constants when empty).
       - name: latest_player_age
         description: Mean latest_player_age over the full snapshot pool; 26.0 when empty.
       - name: weighted_form_10
@@ -88,26 +60,18 @@ models:
       - name: hard_win_rate_10
         description: Mean hard_win_rate_10 over the full snapshot pool; 0.0 when empty.
 
-      # Cold-start activity defaults (median, rounded to a whole value).
       - name: days_since_default
         description: Median days since each player's latest snapshot (pool_as_of_date - latest_snapshot_date); 365 when the pool is empty.
       - name: matches_30d_default
         description: Median per-player match count in the 30 days before pool_as_of_date; 0 when the pool is empty.
 
-      # Explicit fixed constants and static profile-pool means.
       - name: rate_default
-        description: >
-          Fixed rate constant (0.5, the neutral Beta(1,1) prior) used for
-          surfaces a player has not yet played and empty-pool rates, so carpet
-          and cold-start matches get a finite, non-degenerate surface win rate
-          instead of a constant zero.
+        description: Neutral 0.5 rate for unseen surfaces and empty-pool fallbacks.
       - name: left_handed_rate
         description: Mean left-handed rate over profiles with known L/R handedness; 0.0 when none exist.
       - name: avg_years_pro
         description: Mean years-pro across profiles at pool_as_of_date (pool year - turned_pro); 8.0 when no profiles exist.
 
-      # Weighted tour benchmarks (SUM/SUM from silver.player_matches; NULL only
-      # when the denominator is zero).
       - name: tour_ace_rate
         description: Tour-wide aces per first serve (SUM(aces) / SUM(first_serves_made)).
       - name: tour_first_serve_pct
@@ -127,14 +91,6 @@ models:
       - name: tour_aces_per_svc_game
         description: Tour-wide aces per service game (SUM(aces) / SUM(service_games)); non-negative when present.
       - name: tour_break_point_opportunities_per_return_game
-        description: >
-          Tour-wide break-point opportunities per return game
-          (SUM(break_points_faced) / SUM(service_games)): weighted opponent
-          break points faced per service game played. May be NULL only when
-          the denominator is zero.
+        description: "Tour-wide break-point opportunities per return game (SUM(break_points_faced) / SUM(service_games)); NULL only when the denominator is zero."
       - name: tour_return_games_won_pct
-        description: >
-          Tour-wide return games won percentage
-          (SUM(break_points_faced - break_points_saved) / SUM(service_games)):
-          every converted break point ends that service game. May be NULL only
-          when the denominator is zero.
+        description: Tour-wide return games won percentage from break-point conversions per service game.
