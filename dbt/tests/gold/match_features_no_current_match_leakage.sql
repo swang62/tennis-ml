@@ -228,15 +228,17 @@ prior_snapshot AS (
     LEFT JOIN LATERAL (
         SELECT * FROM {{ ref('rolling_features') }} rfp
         WHERE rfp.player_id = mf.player_id
-          AND rfp.snapshot_date < pm.match_date
-        ORDER BY rfp.player_match_number DESC
+          AND (rfp.snapshot_date, rfp.match_num, rfp.match_id)
+              < (pm.match_date, pm.match_num, pm.match_id)
+        ORDER BY rfp.snapshot_date DESC, rfp.match_num DESC, rfp.match_id DESC
         LIMIT 1
     ) prp ON true
     LEFT JOIN LATERAL (
         SELECT * FROM {{ ref('rolling_features') }} rfo
         WHERE rfo.player_id = mf.opponent_id
-          AND rfo.snapshot_date < po.match_date
-        ORDER BY rfo.player_match_number DESC
+          AND (rfo.snapshot_date, rfo.match_num, rfo.match_id)
+              < (po.match_date, po.match_num, po.match_id)
+        ORDER BY rfo.snapshot_date DESC, rfo.match_num DESC, rfo.match_id DESC
         LIMIT 1
     ) pro ON true
     CROSS JOIN {{ ref('tour_averages') }} fd

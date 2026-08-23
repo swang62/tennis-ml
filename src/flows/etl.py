@@ -169,7 +169,7 @@ def _record_incremental_watermark(watermark: datetime | None) -> None:
         )
 
 
-@task(retries=0)
+@task()
 def bronze_to_gold(incremental: bool = False) -> int:
     log_file = _etl_log_file()
     mode = "incremental" if incremental else "full_refresh"
@@ -266,7 +266,7 @@ def _etl_flow_run_name() -> str:
     return etl_run_name(params.get("source"))
 
 
-@flow(log_prints=True, retries=1, flow_run_name=_etl_flow_run_name)
+@flow(log_prints=True, flow_run_name=_etl_flow_run_name)
 def etl_flow(incremental: bool = False, source: str | None = None):
     """Build bronze-to-gold models with dbt; incremental runs append new rows."""
     if source is not None and source not in VALID_ETL_SOURCES:

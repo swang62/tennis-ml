@@ -222,16 +222,16 @@ _PARITY_GOLD = (
     # 8 absolute state values (incl. matches_10 exposure pair)
     0.8,
     0.4,
-    5.0,  # player_matches_10 (S0AG s5)
-    3.0,  # opponent_matches_10 (Z355 z3)
+    6.0,  # player_matches_10 (S0AG s6, inclusive as-of)
+    4.0,  # opponent_matches_10 (Z355 z4, inclusive as-of)
     0.0,
     0.0,
     8.0,
     13.0,
-    # 3 pair-level head-to-head (no strictly-prior meetings)
-    0.0,
-    0.0,
-    0.0,
+    # 3 pair-level head-to-head (inclusive as-of includes the match itself)
+    1.0,
+    (1 + 1) / (1 + 2) - 0.5,  # h2h_advantage: A won the 1 prior meeting
+    (1 + 1) / (1 + 2) - 0.5,  # h2h_surface_advantage: hard meeting
     # 7 context values (is_clay, is_grass, is_hard, is_indoor, best_of,
     # tournament_level, round_encoded)
     0.0,
@@ -273,16 +273,16 @@ _PARITY_GOLD_BA = (
     # 8 absolute state values (Z355 first; matches_10 pair exchanged)
     0.4,
     0.8,
-    3.0,  # player_matches_10 (Z355 z3)
-    5.0,  # opponent_matches_10 (S0AG s5)
+    4.0,  # player_matches_10 (Z355 z4, inclusive as-of)
+    6.0,  # opponent_matches_10 (S0AG s6, inclusive as-of)
     0.0,
     0.0,
     13.0,
     8.0,
-    # 3 pair-level head-to-head (shared, no prior meetings)
-    0.0,
-    0.0,
-    0.0,
+    # 3 pair-level head-to-head (inclusive as-of includes the match itself)
+    1.0,
+    (0 + 1) / (1 + 2) - 0.5,  # h2h_advantage: Z355 lost the 1 prior meeting
+    (0 + 1) / (1 + 2) - 0.5,  # h2h_surface_advantage: hard meeting
     # 7 context values
     0.0,
     0.0,
@@ -323,7 +323,7 @@ def _seed(con: duckdb.DuckDBPyConnection) -> None:
         CREATE TABLE bronze.match_events (
             match_id VARCHAR, match_date DATE,
             player1_id VARCHAR, player2_id VARCHAR, winner_id VARCHAR,
-            surface VARCHAR
+            surface VARCHAR, match_num INTEGER
         )
         """
     )
@@ -351,10 +351,23 @@ def _seed(con: duckdb.DuckDBPyConnection) -> None:
         f"INSERT INTO silver.rolling_features VALUES ({', '.join(['?'] * 27)})",
         _snap_rows(),
     )
+    # Mirror the production silver.player_matches table the inference SQL joins
+    # on (player_id, match_id); match_num drives the latest-snapshot ordering.
+    con.execute(
+        """
+        CREATE TABLE silver.player_matches (
+            player_id VARCHAR, match_id VARCHAR, match_num INTEGER
+        )
+        """
+    )
+    con.executemany(
+        "INSERT INTO silver.player_matches VALUES (?, ?, ?)",
+        [(r[0], r[1], r[3]) for r in _snap_rows()],
+    )
     # Seed one bronze-style hard-court meeting; other matches are not H2H fixtures.
     con.executemany(
-        "INSERT INTO bronze.match_events VALUES (?, ?, ?, ?, ?, ?)",
-        [("pm-s6", date(2026, 7, 12), "S0AG", "Z355", "S0AG", "hard")],
+        "INSERT INTO bronze.match_events VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [("pm-s6", date(2026, 7, 12), "S0AG", "Z355", "S0AG", "hard", 1)],
     )
     con.executemany(
         "INSERT INTO bronze.player_profiles VALUES (?, ?, ?, ?)",
@@ -1006,8 +1019,8 @@ def test_h2h_real_seeded_meeting():
     assert row["h2h_surface_advantage"] == pytest.approx((1 + 1) / (1 + 2) - 0.5)
     out_clay = build_inference_features("S0AG", "Z355", "clay", as_of_date=AS_OF_AFTER_ALL_MATCHES)
     assert out_clay.iloc[0]["h2h_surface_advantage"] == 0.0
-    # Before that meeting (strictly-before): zero priors, neutral.
-    out_before = build_inference_features("S0AG", "Z355", "hard", as_of_date=date(2026, 7, 12))
+    # Before that meeting (strictly-before, inclusive as-of still excludes it): zero priors, neutral.
+    out_before = build_inference_features("S0AG", "Z355", "hard", as_of_date=date(2026, 7, 11))
     row_before = out_before.iloc[0]
     assert row_before["h2h_exposure"] == 0
     assert row_before["h2h_advantage"] == 0.0
@@ -1018,22 +1031,22 @@ def test_h2h_real_seeded_meeting():
 
 
 def test_h2h_first_and_second_meeting_boundaries():
-    """As-of dates exclude same-day meetings and include prior meetings."""
+    """Strictly-before the first meeting has zero priors; inclusive as-of then grows."""
     a, b = "H2H_F", "H2H_G"
     _insert_prior_meetings(a, b, [("h2h-f1", "2026-05-20", 1, "clay")])
-    # On the first meeting's own date: strictly-before excludes it.
-    out1 = build_inference_features(a, b, "clay", as_of_date=date(2026, 5, 20))
+    # The day before the first meeting: no priors yet.
+    out1 = build_inference_features(a, b, "clay", as_of_date=date(2026, 5, 19))
     row1 = out1.iloc[0]
     assert row1["h2h_exposure"] == 0
     assert row1["h2h_advantage"] == 0.0
     assert row1["h2h_surface_advantage"] == 0.0
-    # A second meeting: exactly one prior, A (requested) won it.
+    # A second meeting: both priors are now inclusive, A won the first, B the second.
     _insert_prior_meetings(a, b, [("h2h-f2", "2026-06-20", 0, "clay")])
     out2 = build_inference_features(a, b, "clay", as_of_date=date(2026, 6, 20))
     row2 = out2.iloc[0]
-    assert row2["h2h_exposure"] == 1
-    assert row2["h2h_advantage"] == pytest.approx((1 + 1) / (1 + 2) - 0.5)  # 1/6
-    assert row2["h2h_surface_advantage"] == pytest.approx((1 + 1) / (1 + 2) - 0.5)
+    assert row2["h2h_exposure"] == 2
+    assert row2["h2h_advantage"] == pytest.approx((1 + 1) / (2 + 2) - 0.5)  # 0.0
+    assert row2["h2h_surface_advantage"] == pytest.approx((1 + 1) / (2 + 2) - 0.5)
     # After the second meeting: both priors, 1 win each side -> neutral.
     out3 = build_inference_features(a, b, "clay", as_of_date=date(2026, 6, 21))
     row3 = out3.iloc[0]
@@ -1092,15 +1105,18 @@ def test_h2h_surface_advantage_filters_bounded_window():
     _assert_mirror(row, row_ba.iloc[0])
 
 
-def test_h2h_same_date_meetings_excluded():
-    """Same-day meetings are excluded; the next day both count."""
+def test_h2h_same_date_meetings_included():
+    """Inclusive as-of counts same-day meetings; both count on their own date."""
     a, b = "H2H_E", "H2H_I"
     _insert_prior_meetings(
         a, b, [("h2h-s1", "2026-03-10", 1, "hard"), ("h2h-s2", "2026-03-10", 0, "hard")]
     )
     out_same = build_inference_features(a, b, "hard", as_of_date=date(2026, 3, 10))
     row_same = out_same.iloc[0]
-    assert row_same["h2h_exposure"] == 0
+    assert row_same["h2h_exposure"] == 2
+    assert row_same["h2h_advantage"] == pytest.approx((1 + 1) / (2 + 2) - 0.5)  # 0.0
+    assert row_same["h2h_surface_advantage"] == pytest.approx((1 + 1) / (2 + 2) - 0.5)
+    # The next day still sees both meetings as priors.
     out_next = build_inference_features(a, b, "hard", as_of_date=date(2026, 3, 11))
     row_next = out_next.iloc[0]
     assert row_next["h2h_exposure"] == 2
@@ -1132,14 +1148,14 @@ FROM gold.match_features mf
 JOIN LATERAL (
     SELECT * FROM silver.rolling_features rf
     WHERE rf.player_id = mf.player_id
-      AND rf.snapshot_date < mf.match_date
+      AND rf.snapshot_date <= mf.match_date
     ORDER BY rf.player_match_number DESC
     LIMIT 1
 ) prp ON true
 JOIN LATERAL (
     SELECT * FROM silver.rolling_features rf
     WHERE rf.player_id = mf.opponent_id
-      AND rf.snapshot_date < mf.match_date
+      AND rf.snapshot_date <= mf.match_date
     ORDER BY rf.player_match_number DESC
     LIMIT 1
 ) pro ON true
@@ -1150,7 +1166,7 @@ LIMIT 1
 
 
 def test_train_inference_parity_on_historical_match():
-    """Gold and inference rows agree under strictly-prior snapshot semantics."""
+    """Gold and inference rows agree under inclusive snapshot semantics."""
     gold_ab = execute_df(_PARITY_MATCH_SQL, ["S0AG"]).iloc[0]
     out_ab = build_inference_features(
         str(gold_ab["player_id"]),

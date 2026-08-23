@@ -14,6 +14,7 @@ def _bronze_row() -> dict[str, object]:
     return {
         "match_id": "2026-418-026",
         "match_date": "2026-01-05",
+        "match_num": 26,
         "tournament": "grand_slam",
         "tournament_name": "Test Open",
         "surface": "hard",
@@ -128,13 +129,13 @@ def test_append_raw_match_rows_separates_file_without_terminal_newline(tmp_path)
 def test_sort_raw_match_csv_orders_date_then_match_number(tmp_path):
     path = tmp_path / "2026.csv"
     later = matches.bronze_row_to_raw_match(
-        {**_bronze_row(), "match_id": "2026-419-002", "match_date": "2026-01-06"}
+        {**_bronze_row(), "match_id": "2026-419-002", "match_date": "2026-01-06", "match_num": 2}
     )
     earlier = matches.bronze_row_to_raw_match(
-        {**_bronze_row(), "match_id": "2026-418-001", "match_date": "2026-01-05"}
+        {**_bronze_row(), "match_id": "2026-418-001", "match_date": "2026-01-05", "match_num": 1}
     )
     same_tourney = matches.bronze_row_to_raw_match(
-        {**_bronze_row(), "match_id": "2026-418-002", "match_date": "2026-01-05"}
+        {**_bronze_row(), "match_id": "2026-418-002", "match_date": "2026-01-05", "match_num": 2}
     )
     matches.append_raw_match_rows([later, same_tourney, earlier], path)
 
@@ -233,7 +234,9 @@ def test_raw_match_row_leaves_unknown_metadata_blank_and_prefers_profile_name():
 def test_append_raw_match_rows_dedupes_metadata_rows(tmp_path):
     path = tmp_path / "2026.csv"
     a = matches.bronze_row_to_raw_match({**_bronze_row(), "winner_seed": "5", "draw_size": 96})
-    b = matches.bronze_row_to_raw_match({**_bronze_row(), "match_id": "2026-419-001"})
+    b = matches.bronze_row_to_raw_match(
+        {**_bronze_row(), "match_id": "2026-419-001", "match_num": 1}
+    )
 
     matches.append_raw_match_rows([a, b], path)
     # Metadata-bearing rows dedupe by the same canonical id as plain rows.

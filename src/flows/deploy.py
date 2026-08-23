@@ -26,7 +26,6 @@ from src.constants import (
     CALIBRATION_HASH_TAG,
     CALIBRATION_URI_TAG,
     CHAMPION_ALIAS,
-    DATA_PROCESSED,
     DEPLOY_ARTIFACTS,
     FEATURE_COLS_HASH_TAG,
     FEATURE_COLS_TAG,
@@ -41,6 +40,7 @@ from src.constants import (
     LINEAGE_SCALER_KEYS,
     LINEAGE_VERSION_KEY,
     LOGS,
+    MODELS_ARTIFACTS,
     PRODUCTION_MODEL,
     ROOT,
     SIM_EXPERIENCE_K,
@@ -57,10 +57,10 @@ from src.features.columns import FEATURE_COLS
 
 TEMPLATE_BENTOFILE = ROOT / "bentofile.yaml"
 SERVICE_FILE = ROOT / "src" / "serving" / "service.py"
-PINNED_BENTOFILE = DATA_PROCESSED / "bentofile.pinned.yaml"
-BENTO_TAG_FILE = DATA_PROCESSED / "bento_tag.txt"
-STATE_FILE = DATA_PROCESSED / "bento_build_state.json"
-SIMILARITY_STATE_FILE = DATA_PROCESSED / "similarity_artifacts_state.json"
+PINNED_BENTOFILE = MODELS_ARTIFACTS / "bentofile.pinned.yaml"
+BENTO_TAG_FILE = MODELS_ARTIFACTS / "bento_tag.txt"
+STATE_FILE = MODELS_ARTIFACTS / "bento_build_state.json"
+SIMILARITY_STATE_FILE = MODELS_ARTIFACTS / "similarity_artifacts_state.json"
 
 SIMILARITY_SOURCE_FILES = [
     ROOT / "src" / "serving" / "directory.py",
@@ -91,6 +91,7 @@ NN_ONNX_FILE = DEPLOY_ARTIFACTS / "nn_best.onnx"
 SIMILARITY_INDEX = DEPLOY_ARTIFACTS / "player_similarity.index"
 SIMILARITY_METADATA = DEPLOY_ARTIFACTS / "player_metadata.json"
 MODEL_INFO_FILE = DEPLOY_ARTIFACTS / "model_info.json"
+
 AUX_FILES = [
     *[DEPLOY_ARTIFACTS / name for name in FROZEN_ARTIFACTS],
     SIMILARITY_INDEX,
@@ -714,7 +715,7 @@ def _write_pinned_bentofile(tags: dict[str, str]) -> Path:
     import yaml
 
     config = yaml.safe_load(TEMPLATE_BENTOFILE.read_text())
-    # nn_best is not a BentoModel dep anymore — served via data/processed/nn_best.onnx.
+    # nn_best is not a BentoModel dep anymore — served via models/deploy/nn_best.onnx.
     config["models"] = [tags[key] for key in ["linear", "gbdt", "production"]]
     PINNED_BENTOFILE.parent.mkdir(parents=True, exist_ok=True)
     PINNED_BENTOFILE.write_text(yaml.safe_dump(config, sort_keys=False))

@@ -1,10 +1,12 @@
 -- gold.match_features: training table, TWO directional rows per match keyed
 -- (match_id, player_id), each carrying complementary match_won labels.
 -- Side-level values are imputed BEFORE matchup diffs so every FEATURE_COLS
--- cell is non-null. Cost of leakage: the prior snapshot is the latest strictly
--- before match_date; missing cells fall back to the single-row tour_averages
--- singleton. match_won is the LABEL, not a feature. H2H reads
--- bronze.match_events bounded to the five most-recent strictly-prior
+-- cell is non-null. Cost of leakage: the prior snapshot is the latest
+-- causal-before row by (match_date, match_num), so it excludes the current
+-- match and future state yet lets a later same-date numbered match read an
+-- earlier numbered form; missing cells fall back to the single-row
+-- tour_averages singleton. match_won is the LABEL, not a feature. H2H reads
+-- bronze.match_events bounded to the five most-recent causal-before
 -- unordered-pair meetings. Similarity serve/return columns are never
 -- FEATURE_COLS.
 --
@@ -52,6 +54,7 @@ player_match_enriched AS (
     SELECT
         pm.match_id,
         pm.match_date,
+        pm.match_num,
         bron.tournament,
         bron.round,
         pm.surface,
@@ -115,8 +118,8 @@ player_match_enriched AS (
         END AS surface_form,
 
         -- Rest: days since prior match (snapshot date); pool median on cold
-        -- start. Same-date matches can't supply a prior snapshot (strict <),
-        -- so a back-to-back is at least 1 day. Capped at 30 pre-ln(1+days).
+        -- start. A same-day earlier-numbered match supplies a 0-day rest;
+        -- capped at 30 pre-ln(1+days).
         LEAST(30, CASE WHEN pr.player_id IS NULL THEN fd.days_since_default
              ELSE pm.match_date - pr.snapshot_date
         END) AS days_since_last_match,
@@ -139,14 +142,16 @@ player_match_enriched AS (
     JOIN changed_match_ids cm
         ON cm.match_id = pm.match_id
 {% endif %}
+    -- Prior snapshot: latest causal-before row by (match_date, match_num,
+    -- match_id); the current match and future are excluded, earlier same-date
+    -- numbered form is visible. match_num lives on rolling_features so this is a
+    -- single index-backed lateral, no player_matches join.
     LEFT JOIN LATERAL (
-        SELECT * FROM {{ ref('rolling_features') }} rf
+        SELECT rf.* FROM {{ ref('rolling_features') }} rf
         WHERE rf.player_id = pm.player_id
-          AND rf.snapshot_date < pm.match_date
-        -- (snapshot_date, match_id) DESC == player_match_number DESC (the
-        -- ordinal is assigned in exactly that order) and lets the ordered
-        -- idx_rolling_pid_date_match serve a bounded backward scan.
-        ORDER BY rf.snapshot_date DESC, rf.match_id DESC
+          AND (rf.snapshot_date, rf.match_num, rf.match_id)
+              < (pm.match_date, pm.match_num, pm.match_id)
+        ORDER BY rf.snapshot_date DESC, rf.match_num DESC, rf.match_id DESC
         LIMIT 1
     ) pr ON true
     CROSS JOIN {{ ref('tour_averages') }} fd
@@ -157,9 +162,9 @@ player_match_enriched AS (
 ),
 -- Prior unordered-pair meetings per directional row, read from bronze.
 -- match_events (one row per physical match, no dedup; winner_id, no id
--- canonicalization). Each orientation is an indexed lateral scan capped at the
--- five newest meetings; ROW_NUMBER then keeps the global top five, matching the
--- old OR-join while scanning only the newest meetings.
+-- canonicalization). Each orientation is a causal-before lateral scan capped at
+-- five meetings (current match and future excluded, earlier same-date numbered
+-- meetings included); ROW_NUMBER keeps the global top five.
 pair_meetings AS (
     SELECT match_id, player_id, winner_is_current_player, meeting_surface_matches
     FROM (
@@ -170,7 +175,7 @@ pair_meetings AS (
             (meeting_surface = surface) AS meeting_surface_matches,
             ROW_NUMBER() OVER (
                 PARTITION BY match_id, player_id
-                ORDER BY match_date DESC, meeting_match_id DESC
+                ORDER BY match_date DESC, meeting_match_num DESC, meeting_match_id DESC
             ) AS rn
         FROM (
             -- Player was player1 in the prior meeting.
@@ -180,16 +185,18 @@ pair_meetings AS (
                 meeting.winner_id,
                 meeting.match_date,
                 meeting.match_id AS meeting_match_id,
+                meeting.match_num AS meeting_match_num,
                 meeting.surface AS meeting_surface,
                 current_match.surface
             FROM player_match_enriched current_match
             CROSS JOIN LATERAL (
-                SELECT winner_id, match_date, match_id, surface
+                SELECT winner_id, match_date, match_id, match_num, surface
                 FROM {{ source('bronze', 'match_events') }} meeting
                 WHERE meeting.player1_id = current_match.player_id
                   AND meeting.player2_id = current_match.opponent_id
-                  AND meeting.match_date < current_match.match_date
-                ORDER BY meeting.match_date DESC, meeting.match_id DESC
+                  AND (meeting.match_date, meeting.match_num, meeting.match_id)
+                    < (current_match.match_date, current_match.match_num, current_match.match_id)
+                ORDER BY meeting.match_date DESC, meeting.match_num DESC, meeting.match_id DESC
                 LIMIT 5
             ) meeting
             UNION ALL
@@ -200,16 +207,18 @@ pair_meetings AS (
                 meeting.winner_id,
                 meeting.match_date,
                 meeting.match_id AS meeting_match_id,
+                meeting.match_num AS meeting_match_num,
                 meeting.surface AS meeting_surface,
                 current_match.surface
             FROM player_match_enriched current_match
             CROSS JOIN LATERAL (
-                SELECT winner_id, match_date, match_id, surface
+                SELECT winner_id, match_date, match_id, match_num, surface
                 FROM {{ source('bronze', 'match_events') }} meeting
                 WHERE meeting.player1_id = current_match.opponent_id
                   AND meeting.player2_id = current_match.player_id
-                  AND meeting.match_date < current_match.match_date
-                ORDER BY meeting.match_date DESC, meeting.match_id DESC
+                  AND (meeting.match_date, meeting.match_num, meeting.match_id)
+                    < (current_match.match_date, current_match.match_num, current_match.match_id)
+                ORDER BY meeting.match_date DESC, meeting.match_num DESC, meeting.match_id DESC
                 LIMIT 5
             ) meeting
         ) meetings_union

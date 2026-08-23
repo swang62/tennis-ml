@@ -29,7 +29,7 @@ Tennis match predictions end to end. I made this repo with the goal of learning 
 React 19 + TypeScript dashboard built with Vite, Tailwind CSS 4, TanStack, and ECharts.
 
 - **Player directory** — MiniSearch fuzzy search over the player list.
-- **Player similarity** — FAISS search using bio embeddings and service/return statistics.
+- **Player similarity** — FAISS search using service/return statistics.
 - **Head-to-head** — cumulative charts and per-model win probabilities.
 - **SEO** — canonical, Open Graph, JSON-LD, robots, and sitemap metadata.
 

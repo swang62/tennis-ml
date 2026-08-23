@@ -1,9 +1,9 @@
 # Data
 data/raw/
-data/processed/bentofile.pinned.yaml
-data/processed/bento_tag.txt
-data/processed/bento_build_state.json
-data/processed/candidate_manifest.json
+models/bentofile.pinned.yaml
+models/bento_tag.txt
+models/bento_build_state.json
+models/candidate_manifest.json
 data/*.csv
 
 # Training artifacts

@@ -208,3 +208,26 @@ def test_missing_champion_contract_promotes():
         )
         == 1
     )
+
+
+# ── alias failure safety: a broken/absent @champion never raises here ──
+
+
+class _RaisingMlflowClient:
+    """Simulates an MLflow store where the @champion alias is missing or broken."""
+
+    def get_model_version_by_alias(self, *_args, **_kwargs):
+        raise RuntimeError("alias not found")
+
+
+def test_resolve_champion_returns_none_when_alias_absent():
+    # A missing/broken alias must not raise; the caller treats None as
+    # "no standing champion" and never moves @champion on a failed promotion.
+    assert promotion.resolve_champion(_RaisingMlflowClient()) is None
+
+
+def test_read_champion_metrics_requires_a_resolved_champion():
+    # Without a champion there is no incumbent metric to beat; the gate
+    # surfaces that as a clear error rather than a silent None.
+    with pytest.raises(RuntimeError):
+        promotion.read_champion_metrics(object(), None)

@@ -47,6 +47,7 @@ def _valid_row() -> dict[str, object]:
         "player2_rank_points": 3000,
         "player1_age": 24.41,
         "player2_age": 28.75,
+        "match_num": 1,
         "winner_id": "A001",
     }
 

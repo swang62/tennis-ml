@@ -1,4 +1,4 @@
-"""Similarity tests with DuckDB fixtures (no bio embeddings)."""
+"""Similarity tests with DuckDB fixtures."""
 
 import re
 from pathlib import Path
@@ -552,7 +552,7 @@ def test_changing_clay_win_rate_changes_vectors(tmp_path: Path, monkeypatch):
 
 
 def _synthetic_profiles(player_ids: list[str]) -> pd.DataFrame:
-    """Profiled players with identical identity/bio (only career stats vary)."""
+    """Profiled players with identical identity and profile (only career stats vary)."""
     return pd.DataFrame(
         {
             "player_id": player_ids,

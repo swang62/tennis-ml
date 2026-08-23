@@ -237,7 +237,7 @@ def test_build_database_url_missing_contract_fails_fast(monkeypatch):
 
 def test_build_lineage_tags_flattens_exact_pins():
     """build_lineage_tags turns base pins into the champion tag set and emits no
-    aux (bio) tags — bio embeddings were removed from the champion lineage."""
+    aux tags — only base-model lineage is pinned."""
     import src.constants as c
 
     base_pins = {
@@ -262,7 +262,7 @@ def test_build_lineage_tags_flattens_exact_pins():
             "model_uri": "runs:/run-nn/nn_model",
         },
     }
-    # No model-lineage aux (bio) artifacts remain; an empty map is expected.
+    # No model-lineage aux artifacts remain; an empty map is expected.
     aux_pins: dict[str, str] = {}
     tags = c.build_lineage_tags(base_pins, aux_pins)
 
@@ -271,7 +271,7 @@ def test_build_lineage_tags_flattens_exact_pins():
     assert "base_gbdt_scaler_uri" not in tags  # only linear has a scaler
     assert tags["base_gbdt_run_id"] == "run-gbdt"
     assert tags["base_nn_model_uri"] == "runs:/run-nn/nn_model"
-    # No aux/bio lineage tags are produced.
+    # No aux lineage tags are produced.
     assert not any(key.startswith("aux_") for key in tags)
     # Navigation artifacts (similarity index/metadata, player directory) are not
     # model lineage: build_lineage_tags never emits their tags.

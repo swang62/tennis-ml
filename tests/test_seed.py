@@ -19,6 +19,85 @@ select_matches = seed.select_matches
 discover_atp_csvs = seed.discover_atp_csvs
 load_all_raw_atp_rows = seed.load_all_raw_atp_rows
 parse_args = seed.parse_args
+latest_official_ranks = seed.latest_official_ranks
+
+
+def _ranking_frame(dates, ids, ranks):
+    """Build a load_ranking_rows-shaped frame (datetimes + Int64 rank/points)."""
+    return pd.DataFrame(
+        {
+            "ranking_date": pd.to_datetime(dates, format="%Y%m%d"),
+            "player_id": list(ids),
+            "rank": pd.array(ranks, dtype="Int64"),
+            "points": pd.array([0] * len(ranks), dtype="Int64"),
+        }
+    )
+
+
+def _patch_rankings(monkeypatch, frame, canonical_ids, rank_map):
+    """Pin every file/network dependency behind latest_official_ranks."""
+    monkeypatch.setattr(seed, "discover_ranking_csvs", lambda: [Path("dummy.csv")])
+    monkeypatch.setattr(seed, "load_ranking_rows", lambda _paths, **_kwargs: frame)
+    monkeypatch.setattr(
+        seed, "canonical_players", lambda _path=None: dict.fromkeys(canonical_ids, "")
+    )
+    monkeypatch.setattr(seed, "load_ranking_player_map", lambda **_kwargs: rank_map)
+
+
+def test_latest_official_ranks_direct_atp_ids_resolve(monkeypatch):
+    """A ranking row whose player id is already a canonical ATP id resolves
+    directly; the reviewed map is not needed for those rows."""
+    frame = _ranking_frame(["20260105", "20260105"], ["A0E2", "Z355"], [1, 2])
+    # Empty legacy map: would NOT resolve these ids on its own.
+    _patch_rankings(monkeypatch, frame, canonical_ids={"A0E2", "Z355"}, rank_map={})
+
+    assert latest_official_ranks() == {"A0E2": 1, "Z355": 2}
+
+
+def test_latest_official_ranks_legacy_mapped_ids_resolve(monkeypatch):
+    """Source ids that are not canonical ATP ids still resolve through the
+    reviewed map (validation preserved via the canonical_ids passthrough)."""
+    frame = _ranking_frame(["20260105", "20260105"], ["12345", "67890"], [3, 4])
+    _patch_rankings(
+        monkeypatch,
+        frame,
+        canonical_ids={"A0E2", "Z355"},
+        rank_map={"12345": "A0E2", "67890": "Z355"},
+    )
+
+    assert latest_official_ranks() == {"A0E2": 3, "Z355": 4}
+
+
+def test_latest_official_ranks_mixes_direct_and_mapped(monkeypatch):
+    """Direct ATP ids and legacy-mapped source ids both resolve; an unresolved
+    row is dropped without discarding the rows that did resolve."""
+    frame = _ranking_frame(
+        ["20260105", "20260105", "20260105"],
+        ["A0E2", "67890", "99999"],
+        [1, 4, 5],
+    )
+    _patch_rankings(
+        monkeypatch,
+        frame,
+        canonical_ids={"A0E2", "Z355"},
+        rank_map={"67890": "Z355"},
+    )
+
+    assert latest_official_ranks() == {"A0E2": 1, "Z355": 4}
+
+
+def test_latest_official_ranks_excludes_unresolved_ids(monkeypatch):
+    """Rows that are neither canonical ATP ids nor present in the reviewed map
+    are excluded from the selection."""
+    frame = _ranking_frame(["20260105", "20260105"], ["00001", "00002"], [8, 9])
+    _patch_rankings(
+        monkeypatch,
+        frame,
+        canonical_ids={"A0E2", "Z355"},
+        rank_map={"00099": "Z355"},
+    )
+
+    assert latest_official_ranks() == {}
 
 
 def test_main_clears_active_sessions_before_seeding(monkeypatch):

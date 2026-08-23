@@ -26,14 +26,14 @@ models:
            - "{{ ensure_not_null_sql(this, ['match_id', 'match_date', 'player_id', 'opponent_id']) }}"
            - "{{ ensure_index_sql(this, 'idx_player_matches_match_id', 'match_id') }}"
            - "{{ ensure_index_sql(this, 'idx_player_matches_pid_date', 'player_id, match_date') }}"
-           - "{{ ensure_index_sql(this, 'idx_player_matches_pid_date_match', 'player_id, match_date DESC, match_id DESC') }}"
+           - "{{ ensure_index_sql(this, 'idx_player_matches_pid_date_match', 'player_id, match_date DESC, match_num DESC, match_id DESC') }}"
 
       rolling_features:
         +post-hook:
           - "{{ ensure_primary_key_sql(this, 'pk_rolling_features', 'player_id, match_id') }}"
-          - "{{ ensure_not_null_sql(this, ['player_id', 'match_id', 'snapshot_date', 'player_match_number', 'matches_10']) }}"
+          - "{{ ensure_not_null_sql(this, ['player_id', 'match_id', 'match_num', 'snapshot_date', 'player_match_number', 'matches_10']) }}"
           - "{{ ensure_index_sql(this, 'idx_rolling_pid_date', 'player_id, snapshot_date') }}"
-          - "{{ ensure_index_sql(this, 'idx_rolling_pid_date_match', 'player_id, snapshot_date DESC, match_id DESC') }}"
+          - "{{ ensure_index_sql(this, 'idx_rolling_pid_date_match', 'player_id, snapshot_date DESC, match_num DESC, match_id DESC') }}"
 
     gold:
       +materialized: table

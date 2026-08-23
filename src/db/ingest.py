@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import re
 import unicodedata
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -292,6 +293,7 @@ def atp_rows_to_bronze(
             {
                 "match_id": match_id,
                 "match_date": f"{ymd // 10000:04d}-{ymd % 10000 // 100:02d}-{ymd % 100:02d}",
+                "match_num": int(m["match_num"]),
                 "player1_id": m["winner_id"],
                 "player2_id": m["loser_id"],
                 "tournament": level,
@@ -344,14 +346,37 @@ def atp_rows_to_bronze(
 # ── CSV Loading ──────────────────────────────────────────────────
 
 
+def _valid_tourney_date(value: Any) -> bool:
+    """Whether a raw tourney_date is a real YYYYMMDD calendar date (0/blank invalid)."""
+    try:
+        ymd = int(value)
+        datetime(ymd // 10000, ymd % 10000 // 100, ymd % 100)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _valid_match_num(value: Any) -> bool:
+    """Whether a raw match_num is a positive integer (missing/0/blank invalid)."""
+    try:
+        return int(value) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def load_raw_atp_rows(path: str | Path) -> list[dict[str, Any]]:
-    """Read eligible ATP rows; require indoor data and preserve zero rank markers."""
+    """Read eligible ATP rows; require indoor data and a valid tourney_date, preserve zero rank markers."""
     df = pd.read_csv(path)
     missing = set(RAW_ATP_COLUMNS) - set(df.columns)
     if missing:
         raise ValueError(f"CSV missing raw ATP columns: {missing}")
     df = cast(pd.DataFrame, df[RAW_ATP_COLUMNS])
-    eligible = df["winner_id"].notna() & df["loser_id"].notna()
+    eligible = (
+        df["winner_id"].notna()
+        & df["loser_id"].notna()
+        & df["tourney_date"].map(_valid_tourney_date)
+        & df["match_num"].map(_valid_match_num)
+    )
     df = cast(pd.DataFrame, df.loc[eligible])
     return cast(list[dict[str, Any]], df.fillna(0).to_dict(orient="records"))
 

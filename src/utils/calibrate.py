@@ -5,13 +5,13 @@ import json
 
 import pandas as pd
 
-from src.constants import CALIBRATION_STATE, DATA_PROCESSED
+from src.constants import CALIBRATION_STATE, DATA_PROCESSED, MODELS_ARTIFACTS
 from src.evaluate.calibration import select_temperature
 
 
 def calibrate() -> None:
     """Write the selection-approved temperature without training or promoting."""
-    oof = pd.read_parquet(DATA_PROCESSED / "oof_stack_cv.parquet")
+    oof = pd.read_parquet(MODELS_ARTIFACTS / "oof_stack_cv.parquet")
     info = pd.read_parquet(DATA_PROCESSED / "info_train.parquet").reset_index(drop=True)
     labels = pd.read_parquet(DATA_PROCESSED / "y_train.parquet")["y"].reset_index(drop=True)
     if len(info) != len(labels):
