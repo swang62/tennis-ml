@@ -1,12 +1,9 @@
 // Focused tests for the On serve / On return metric-card formatters.
 // Percentage values and percentage deltas always carry one decimal place
 // ("80.0%", "▲ 9.0%") so decimal points line up in the right-aligned value
-// and delta columns; rates keep two-decimal precision. Runs with
-// `node --test tests/` (Node >= 23.6 strips types from the imported .ts
-// helpers natively); no test framework dependency.
+// and delta columns; rates keep two-decimal precision. Runs with `pnpm test` (Vitest) from the web/ directory.
 
-import assert from "node:assert";
-import { test } from "node:test";
+import { assert, test } from "vitest";
 import { formatDelta, formatMetric, formatRate } from "../src/lib/format.ts";
 
 test("formatMetric always shows one decimal place", () => {

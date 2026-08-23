@@ -1,8 +1,7 @@
 // Focused tests for the pure color helpers in lib/charts.ts: withAlpha and
-// surfaceColor. No API, DOM, or DB. Runs with `node --test tests/`.
+// surfaceColor. No API, DOM, or DB. Runs with `pnpm test` (Vitest) from the web/ directory.
 
-import assert from "node:assert";
-import { test } from "node:test";
+import { assert, test } from "vitest";
 import { surfaceColor, withAlpha } from "../src/lib/charts.ts";
 
 const dark = {

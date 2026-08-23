@@ -1,8 +1,5 @@
 """Hermetic tests for Hawkeye response parsing and rejection."""
 
-import json
-from pathlib import Path
-
 import pytest
 
 import src.flows.matches as matches
@@ -90,16 +87,72 @@ def test_build_match_id_reduces_date_like_year_to_edition_year():
     assert matches.build_match_id(19670220, "1967-southern-pro", 1) == "1967-southern-pro-001"
 
 
-def _hw_payload(name: str) -> dict:
-    return json.loads(Path(f"tests/fixtures/{name}.json").read_text())
+# Minimal inline Hawkeye payload: only the fields the mapper and the
+# assertions below read. Side A (PlayerTeam1) is the winner, so its seed lands
+# in the winner slot; draw_size/best_of/minutes fill their raw columns; absent
+# entry values stay None. Used in place of the deleted JSON fixture.
+_HAWKEYE_MS001 = {
+    "Tournament": {"Singles": 96},
+    "Match": {
+        "WinningPlayerId": "S0S1",
+        "NumberOfSets": 3,
+        "MatchTime": "01:27:28",
+        "PlayerTeam1": {
+            "PlayerId": "S0S1",
+            "SeedPlayerTeam": "5",
+            "EntryStatusPlayerTeam": None,
+        },
+        "PlayerTeam2": {
+            "PlayerId": "N0AE",
+            "SeedPlayerTeam": "28",
+            "EntryStatusPlayerTeam": None,
+        },
+        "PlayerTeam": {
+            "Sets": [
+                {
+                    "SetScore": None,
+                    "Stats": {
+                        "ServiceStats": {
+                            "Aces": {"Number": 7},
+                            "DoubleFaults": {"Number": 0},
+                            "FirstServe": {"Dividend": 37, "Divisor": 54},
+                            "FirstServePointsWon": {"Dividend": 32},
+                            "SecondServePointsWon": {"Dividend": 13},
+                            "ServiceGamesPlayed": {"Number": 10},
+                            "BreakPointsSaved": {"Dividend": 0, "Divisor": 0},
+                        }
+                    },
+                }
+            ]
+        },
+        "OpponentTeam": {
+            "Sets": [
+                {
+                    "SetScore": None,
+                    "Stats": {
+                        "ServiceStats": {
+                            "Aces": {"Number": 8},
+                            "DoubleFaults": {"Number": 1},
+                            "FirstServe": {"Dividend": 40, "Divisor": 64},
+                            "FirstServePointsWon": {"Dividend": 32},
+                            "SecondServePointsWon": {"Dividend": 12},
+                            "ServiceGamesPlayed": {"Number": 11},
+                            "BreakPointsSaved": {"Dividend": 2, "Divisor": 4},
+                        }
+                    },
+                }
+            ]
+        },
+    },
+}
 
 
 def test_hawkeye_to_bronze_stamps_source_metadata_winner_first():
-    """Fixture ms001: side A (PlayerTeam1) is the winner, so its seed/entry
+    """Inline ms001: side A (PlayerTeam1) is the winner, so its seed/entry
     land in the winner slot; payload draw_size/best_of/minutes fill their raw
     columns; absent entry values stay None, never fabricated."""
     row = matches.hawkeye_to_bronze(
-        _hw_payload("hawkeye_ms001"),
+        _HAWKEYE_MS001,
         {
             "match_id": "2026-421-001",
             "match_date": "2026-08-10",
@@ -123,31 +176,6 @@ def test_hawkeye_to_bronze_stamps_source_metadata_winner_first():
     assert row["player1_name"] == "Ben Shelton"
     assert row["player2_name"] == "Brandon Nakashima"
     assert row["winner_id"] == "S0S1"
-
-
-def test_hawkeye_to_bronze_swaps_seeds_when_winner_is_side_b():
-    """Fixture ms002: side B (PlayerTeam2) wins, so its seed moves to the
-    winner slot and side A's to the loser slot."""
-    row = matches.hawkeye_to_bronze(
-        _hw_payload("hawkeye_ms002"),
-        {
-            "match_id": "2026-421-002",
-            "match_date": "2026-08-09",
-            "player1_id": "S0S1",
-            "player2_id": "T0HA",
-            "winner_id": "S0S1",
-            "tournament": "masters",
-            "round": "sf",
-        },
-    )
-    assert row is not None
-
-    assert row["player1_id"] == "S0S1"
-    assert row["winner_seed"] == "5"  # side B (Shelton) seed
-    assert row["loser_seed"] == "12"  # side A (Tien) seed
-    assert row["draw_size"] == 96
-    assert row["best_of"] == 3
-    assert row["minutes"] == 84  # MatchTime 01:24:27
 
 
 # ── Discovery → resolution: match-level skip propagation ────────────

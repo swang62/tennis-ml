@@ -173,3 +173,7 @@ filterwarnings = [
 
 [tool.pytest_env]
 KMP_DUPLICATE_LIB_OK = "TRUE"
+DATABASE_URL = "postgresql://ci:ci@127.0.0.1:5432/tennis"
+POSTGRES_PASSWORD = "ci"
+BENTO_API_KEY = "ci"
+PREFECT_API_URL = "http://127.0.0.1:4200/api"

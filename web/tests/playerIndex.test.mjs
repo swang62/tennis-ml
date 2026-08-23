@@ -4,8 +4,7 @@
 // no asset fetch and is memoized per directory payload. No network, no DOM,
 // no database.
 
-import assert from "node:assert";
-import { test } from "node:test";
+import { assert, test } from "vitest";
 import {
   buildPlayerSearch,
   createPlayerSearchLoader,

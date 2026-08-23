@@ -114,7 +114,7 @@ snapshot:
 
 # Run the Python and web test suites.
 test:
-    OMP_NUM_THREADS=1 uv run pytest
+    uv run pytest
     pnpm --dir web test
 
 # Run the notebook training pipeline. --force-promote will always promote the candidate model as @champion

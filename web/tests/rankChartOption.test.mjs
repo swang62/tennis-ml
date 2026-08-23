@@ -7,11 +7,8 @@
 // from baseChartOption, so the hatch is present there. Render the rank-chart
 // option with ECharts' SVG SSR and assert the hatch appears together with the
 // vertical year grid lines and yearly ticks, on an unpadded domain that
-// starts at the earliest rank date. Runs with `node --test tests/`
-// (Node >= 23.6 strips types from the imported .ts helpers natively).
+// starts at the earliest rank date. Runs with `pnpm test` (Vitest) from the web/ directory.
 
-import assert from "node:assert";
-import { test } from "node:test";
 import { LineChart } from "echarts/charts";
 import {
   AriaComponent,
@@ -21,6 +18,7 @@ import {
 } from "echarts/components";
 import * as echarts from "echarts/core";
 import { SVGRenderer } from "echarts/renderers";
+import { assert, test } from "vitest";
 import { axisOption, baseChartOption } from "../src/lib/charts.ts";
 import { careerBestRank, yearAxisDomain } from "../src/lib/rankHistoryAxis.ts";
 
