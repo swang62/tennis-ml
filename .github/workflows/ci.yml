@@ -39,7 +39,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          uv sync --locked --group dev
+          uv sync --group dev
           pnpm --dir web install --frozen-lockfile
           go install github.com/yannh/kubeconform/cmd/kubeconform@v0.7.0
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
@@ -71,7 +71,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --locked --group dev
+        run: uv sync --group dev
 
       - name: Run Python tests
         run: OMP_NUM_THREADS=1 uv run pytest
