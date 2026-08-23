@@ -284,7 +284,7 @@ def test_generate_similarity_artifacts_requires_snapshot(monkeypatch, tmp_path):
 
     def no_snapshot(_sql):
         raise FileNotFoundError(
-            "training snapshot not found at data/processed/training_snapshot.duckdb; "
+            "training snapshot not found at data/training_snapshot.duckdb; "
             "run `just snapshot` first"
         )
 

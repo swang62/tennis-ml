@@ -455,6 +455,7 @@ def test_seed_rankings_and_enrichment_reset_propagates(monkeypatch):
     """--reset reaches both rankings and enrichment."""
     calls = []
     monkeypatch.setattr(seed, "ingest_rankings", lambda **kwargs: calls.append(kwargs) or {})
+    monkeypatch.setattr(seed, "clear_rankings", lambda: calls.append("clear-rankings"))
     monkeypatch.setattr(
         seed, "enrich_players", lambda ids, force=False: calls.append(("enrich", ids, force)) or 2
     )
@@ -462,6 +463,7 @@ def test_seed_rankings_and_enrichment_reset_propagates(monkeypatch):
     seed.seed_rankings_and_enrichment(["A0E2"], enrich=True, reset=True)
 
     assert calls == [
+        "clear-rankings",
         {"player_ids": {"A0E2"}, "force": True, "match_rows": None},
         ("enrich", ["A0E2"], True),
     ]
@@ -520,6 +522,7 @@ def _patch_seed_writes(monkeypatch, calls):
     monkeypatch.setattr(seed, "select_matches", lambda _matches, **_kwargs: [])
     monkeypatch.setattr(seed, "atp_rows_to_bronze", _fake_bronze)
     monkeypatch.setattr(seed, "clear_match_events", lambda: calls.append("clear"))
+    monkeypatch.setattr(seed, "clear_rankings", lambda: calls.append("clear-rankings"))
     monkeypatch.setattr(
         seed, "insert_bronze_rows", lambda _df, overwrite=False: calls.append(overwrite) or 0
     )

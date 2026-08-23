@@ -4,6 +4,9 @@ MLflow, no DB, no HTTP."""
 
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+
 import pytest
 
 from src.evaluate import promotion
@@ -224,3 +227,42 @@ def test_resolve_champion_returns_none_when_alias_absent():
     # A missing/broken alias must not raise; the caller treats None as
     # "no standing champion" and never moves @champion on a failed promotion.
     assert promotion.resolve_champion(_RaisingMlflowClient()) is None
+
+
+def test_resolve_champion_feature_contract_accepts_exact_version_tags():
+    columns = ["rank_diff", "is_hard"]
+    feature_hash = "contract-hash"
+    version = SimpleNamespace(
+        tags={
+            "feature_cols": json.dumps(columns),
+            "feature_cols_hash": feature_hash,
+        }
+    )
+
+    class Client:
+        def get_model_version(self, name, number):
+            assert (name, number) == (promotion.PRODUCTION_MODEL, "4")
+            return version
+
+    changed, recorded_hash = promotion.resolve_champion_feature_contract(
+        Client(), SimpleNamespace(version="4"), columns, feature_hash
+    )
+
+    assert (changed, recorded_hash) == (False, feature_hash)
+
+
+def test_resolve_champion_feature_contract_rejects_changed_columns():
+    version = SimpleNamespace(
+        tags={
+            "feature_cols": json.dumps(["rank_diff", "legacy_feature"]),
+            "feature_cols_hash": "contract-hash",
+        }
+    )
+
+    class Client:
+        def get_model_version(self, _name, _number):
+            return version
+
+    assert promotion.resolve_champion_feature_contract(
+        Client(), SimpleNamespace(version="4"), ["rank_diff", "is_hard"], "contract-hash"
+    ) == (True, None)

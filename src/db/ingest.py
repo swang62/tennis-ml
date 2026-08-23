@@ -5,8 +5,8 @@ from __future__ import annotations
 import csv
 import re
 import unicodedata
-from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, LiteralString, cast
@@ -448,6 +448,12 @@ def clear_match_events() -> None:
     """Delete all bronze.match_events rows without dropping the table."""
     with connection() as conn, conn.transaction(), conn.cursor() as cur:
         cur.execute(cast(LiteralString, f"DELETE FROM {BRONZE_MATCHES_TABLE}"))
+
+
+def clear_rankings() -> None:
+    """Delete all bronze.rankings rows without dropping the table."""
+    with connection() as conn, conn.transaction(), conn.cursor() as cur:
+        cur.execute(cast(LiteralString, f"DELETE FROM {BRONZE_RANKINGS_TABLE}"))
 
 
 def insert_bronze_rows(df: pd.DataFrame, *, overwrite: bool = False) -> int:

@@ -14,6 +14,7 @@ from src.db.ingest import (
     canonical_match_id,
     canonical_players,
     clear_match_events,
+    clear_rankings,
     discover_ranking_csvs,
     enrich_players,
     ingest_rankings,
@@ -151,6 +152,9 @@ def seed_rankings_and_enrichment(
     match_rows: list[dict[str, Any]] | None = None,
 ) -> None:
     """Import local ranks for seeded players and optionally enrich their profiles."""
+    if reset:
+        clear_rankings()
+        print("Cleared bronze.rankings for a clean rebuild")
     if not player_ids:
         return
     summary = ingest_rankings(player_ids=set(player_ids), force=reset, match_rows=match_rows)
