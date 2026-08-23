@@ -7,8 +7,8 @@ repos:
 
   - repo: local
     hooks:
-      - id: biome-web
-        name: biome format+lint (web)
+      - id: biome
+        name: biome
         description: Format and lint staged web files with Biome
         language: system
         entry: 'sh -c ''cd web && for f do pnpm exec biome check --write "${f#web/}" || exit 1; done'' --'
@@ -29,18 +29,18 @@ repos:
         entry: uv run basedpyright
         types_or: [python, jupyter]
 
-      - id: tests
+      - id: pytest
         name: pytest
-        description: Run only pytest tests affected by the changed files (coverage-based)
+        description: Run the Python test suite with uv
         language: system
-        entry: scripts/run_tests.sh
+        entry: uv run pytest --testmon
         pass_filenames: false
         files: ^(src|tests|infra/duckdb|dbt)/
 
-      - id: web-checks
-        name: pnpm test
-        description: TypeScript typecheck and unit tests for the web dashboard
+      - id: vitest
+        name: vitest
+        description: Build the web dashboard and run its Vitest unit tests
         language: system
-        entry: scripts/web_checks.sh
+        entry: sh -c 'cd web && pnpm test'
         pass_filenames: false
         files: ^web/

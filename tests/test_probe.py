@@ -19,9 +19,9 @@ def probe():
 
 @pytest.fixture(autouse=True)
 def _env(monkeypatch, tmp_path):
-    """Base environment: required vars set, MLflow on the filesystem store."""
-    for name in ("DATABASE_URL", "PREFECT_API_URL", "POSTGRES_PASSWORD", "BENTO_API_KEY"):
-        monkeypatch.setenv(name, f"test-{name}")
+    """Baseline env (DATABASE_URL, PREFECT_API_URL, POSTGRES_PASSWORD,
+    BENTO_API_KEY) is provided by [tool.pytest_env]; MLflow stays on the
+    filesystem store for the default code path."""
     monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
     env_path = tmp_path / ".env"
     env_path.write_text("")
