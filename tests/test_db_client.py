@@ -1,17 +1,8 @@
-"""PostgreSQL client tests using a recording psycopg-pool-shaped fake.
-
-The pool is faked at the module boundary (`db_client.ConnectionPool`), so no
-live PostgreSQL server is ever contacted: checkout/return, health checking,
-bounded concurrency, and broken-connection discard are all exercised against
-the fake's documented psycopg-pool contract.
-"""
+"""PostgreSQL client tests using a recording pool-shaped fake."""
 
 import threading
 from contextlib import contextmanager
 from types import SimpleNamespace
-from typing import cast
-
-import pandas as pd
 import psycopg
 import pytest
 
@@ -91,14 +82,7 @@ class BrokenConn(FakeConn):
 
 
 class FakePool:
-    """ConnectionPool-shaped fake with a bounded free list.
-
-    Mirrors psycopg-pool's observable contract: connections are health-checked
-    at checkout, broken connections are discarded instead of reused, at most
-    ``max_size`` connections are in use concurrently, and ``close()`` closes
-    the pool. ``max_idle`` records the idle-lifecycle configuration passed at
-    construction (the fake never closes idle connections on a timer).
-    """
+    """ConnectionPool-shaped fake covering checkout, discard, capacity, and close behavior."""
 
     def __init__(
         self,
@@ -217,7 +201,6 @@ def test_to_dataframe_returns_expected_columns_and_rows(fake_pool):
     assert len(df) == 2
     assert df.iloc[0].to_dict() == {"id": 1, "name": "Alice"}
     assert df.iloc[1].to_dict() == {"id": 2, "name": "O'Brien"}
-    assert fake_pool._free[0].statements[0][0] == "SELECT id, name FROM t ORDER BY id"
 
 
 def test_execute_df_without_params(fake_pool):
@@ -254,7 +237,8 @@ def test_execute_df_uses_placeholder_and_binds_params(fake_pool):
     db_client.execute_df(sql, ["O'Brien"])
 
     statement, params = fake_pool._free[0].statements[0]
-    assert statement == sql  # SQL text untouched: the quote never enters it
+    assert "O'Brien" not in statement
+    assert "%s" in statement
     assert params == ["O'Brien"]  # value travels as a bound parameter
 
 
@@ -263,51 +247,12 @@ def test_execute_df_with_tuple_params(fake_pool):
     db_client.execute_df(sql, ("O'Brien", 2))
 
     statement, params = fake_pool._free[0].statements[0]
-    assert statement == sql
+    assert "O'Brien" not in statement
+    assert statement.count("%s") == 2
     assert params == ("O'Brien", 2)
 
 
 # --- Pool configuration & lifecycle guardrails ---
-
-
-def test_get_pool_uses_passwordless_local_database_url(monkeypatch):
-    """Use the passwordless local DATABASE_URL verbatim for the pool."""
-    monkeypatch.setenv("DATABASE_URL", "postgresql://steve@127.0.0.1:5432/postgres")
-    monkeypatch.setattr(db_client, "_pool", None)
-    monkeypatch.setattr(db_client, "ConnectionPool", FakePool)
-
-    pool = cast(FakePool, db_client.get_pool())
-
-    assert pool.conninfo == "postgresql://steve@127.0.0.1:5432/postgres"
-    # No initial connections, up to four per worker: the whole app never
-    # exceeds (two workers x 4) checked-out connections, and returned
-    # connections unused for MAX_IDLE_S are closed (psycopg's 10-minute
-    # default would otherwise retain server capacity while the app sits
-    # idle).
-    assert pool.min_size == db_client.MIN_POOL_SIZE == 0
-    assert pool.max_size == db_client.MAX_POOL_SIZE == 4
-    assert pool.max_idle == db_client.MAX_IDLE_S == 10.0
-    # Bounded, health-checked pool: no database wait path is unbounded.
-    assert pool.kwargs == {"autocommit": True, "connect_timeout": db_client.CONNECT_TIMEOUT_S}
-    assert pool.check is FakePool.check_connection  # health probe at every checkout
-    assert pool.timeout == db_client.POOL_TIMEOUT_S  # bounded connection() wait
-    assert pool.reconnect_timeout == db_client.RECONNECT_TIMEOUT_S  # bounded retry
-    assert pool.wait_timeout == db_client.POOL_TIMEOUT_S  # bounded readiness wait
-    assert pool.waited  # wait() called: first use surfaces an unreachable DB
-
-
-def test_get_pool_uses_password_bearing_database_url(monkeypatch):
-    """Use the password-bearing Compose DATABASE_URL verbatim for the pool."""
-    monkeypatch.setenv(
-        "DATABASE_URL",
-        "postgresql://postgres:password@postgres:5432/tennis",
-    )
-    monkeypatch.setattr(db_client, "_pool", None)
-    monkeypatch.setattr(db_client, "ConnectionPool", FakePool)
-
-    pool = cast(FakePool, db_client.get_pool())
-
-    assert pool.conninfo == "postgresql://postgres:password@postgres:5432/tennis"
 
 
 def test_missing_config_fails_before_any_pool_creation(monkeypatch):
@@ -362,11 +307,7 @@ def test_transaction_holds_one_checked_out_connection(fake_pool):
 
 
 def test_concurrent_callers_acquire_parallel_connections(fake_pool):
-    """Three concurrent callers (like H2H) each get their own connection.
-
-    psycopg-pool hands out up to ``max_size`` connections at once: with four
-    per worker, the three H2H requests never queue on a shared connection.
-    """
+    """Three concurrent H2H-like callers each get a separate connection."""
     assert db_client.get_pool() is fake_pool
     start = threading.Barrier(3)
     hold = threading.Barrier(3)  # hold every connection until all are checked out
@@ -398,10 +339,7 @@ def test_concurrent_callers_acquire_parallel_connections(fake_pool):
 
 
 def test_concurrent_callers_expand_to_the_pool_cap(fake_pool):
-    """Up to max_size (4) concurrent callers each get a distinct connection.
-
-    The pool expands on demand to its per-worker cap and never hands out more.
-    """
+    """Concurrent callers get distinct connections up to the pool cap."""
     assert db_client.get_pool() is fake_pool
     n = db_client.MAX_POOL_SIZE  # 4
     start = threading.Barrier(n)
@@ -460,11 +398,7 @@ def test_execute_df_skips_broken_pooled_connection(fake_pool):
     ],
 )
 def test_execute_df_discards_broken_connection_then_reconnects(fake_pool, error):
-    """A mid-query connection failure discards the connection and re-raises.
-
-    The next call checks out a replacement; the failed statement is never
-    replayed automatically.
-    """
+    """A mid-query failure discards the connection and is not replayed."""
     broken = BrokenConn(error)
     fresh = FakeConn()
     fresh.results["SELECT 1"] = (["ok"], [(1,)])

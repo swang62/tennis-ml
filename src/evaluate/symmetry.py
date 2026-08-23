@@ -1,16 +1,4 @@
-"""Shared antisymmetry numerics: symmetric clipping, logit/sigmoid, and paired
-antisymmetric evidence.
-
-Every base scores both directions of a physical match; the pair (p_ab, p_ba)
-is projected into a single antisymmetric logit-space quantity:
-
-    evidence_ab = (logit(clip(p_ab)) - logit(clip(p_ba))) / 2
-
-with symmetric clipping at `EPS`. Reversing the pair negates the evidence, so
-`evidence_to_probability(e) + evidence_to_probability(-e) == 1` exactly. This
-module is pure numpy — no database, MLflow, or model imports — so training
-and serving share identical code.
-"""
+"""Pure NumPy helpers for symmetric clipping and antisymmetric evidence."""
 
 from __future__ import annotations
 
@@ -40,11 +28,7 @@ def logit(p) -> float | np.ndarray:
 
 
 def sigmoid(x) -> float | np.ndarray:
-    """Numerically stable logistic 1 / (1 + exp(-x)); +/-inf map to 1/0.
-
-    Computed piecewise so neither branch overflows; infinities resolve to
-    exp(-inf) = 0 and yield exactly 1.0 / 0.0.
-    """
+    """Return a numerically stable logistic value, including for infinities."""
     arr = np.asarray(x, dtype=float)
     with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
         result = np.where(arr >= 0, 1.0 / (1.0 + np.exp(-arr)), np.exp(arr) / (1.0 + np.exp(arr)))

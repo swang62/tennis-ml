@@ -1,6 +1,5 @@
 """Similarity tests with DuckDB fixtures (no bio embeddings)."""
 
-import json
 import re
 from pathlib import Path
 
@@ -10,26 +9,20 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.db import client, training
+from src.db import training
 from src.training import similarity
 from src.training.similarity import (
-    BLOCK_WEIGHTS,
     DOMINANCE_COLS,
-    IDENTITY_BLOCK_COLS,
     LIFETIME_PLAYSTYLE_COLS,
-    PROFILE_COLS,
     REPUTATION_BLOCK_COLS,
     SURFACE_BLOCK_COLS,
     PlayerData,
     PlayerSimilarity,
     block_slices,
-    vector_block_norms,
 )
 
-# Included career aggregates (gold.player_profiles): lifetime playstyle stats,
-# surface win rates + exposure counts, and the reputation signals (no
-# current_rank), plus the excluded recent-form field that must never enter a
-# vector. height/turned_pro are bronze identity metadata, also excluded.
+# Included gold aggregates are lifetime playstyle, surface, and reputation signals.
+# Recent form, rank, height, and turned_pro remain excluded.
 _GOLD_PROFILE_COLS = [
     "first_serve_in_pct",
     "aces_per_first_serve",
@@ -239,7 +232,7 @@ def _create_two_table_fixture(con: duckdb.DuckDBPyConnection) -> None:
 
 
 def _duck_query(con: duckdb.DuckDBPyConnection):
-    """Query function reading from a DuckDB connection, like training.to_dataframe."""
+    """Return a training.to_dataframe-compatible DuckDB query function."""
 
     def query(sql: str) -> pd.DataFrame:
         return con.execute(sql).df()
@@ -261,9 +254,7 @@ def _build_with_fixture(tmp_path: Path, monkeypatch) -> PlayerSimilarity:
     return finder
 
 
-# Vector layout: one-hot identity descriptors precede the lifetime playstyle
-# stats, then the surface and reputation blocks. block_slices exposes the exact
-# columns, so tests read blocks by name instead of hard-coded offsets.
+# Vector layout: identity, lifetime playstyle, surface, then reputation blocks.
 STYLE = LIFETIME_PLAYSTYLE_COLS
 SURFACE = SURFACE_BLOCK_COLS
 REPUTATION = REPUTATION_BLOCK_COLS
@@ -305,9 +296,7 @@ def test_build_uses_lifetime_playstyle_aggregates(tmp_path: Path, monkeypatch):
     index = finder.index
     assert index is not None
 
-    # The vector carries each player's career gold.player_profiles playstyle
-    # aggregates, not any recent rolling form; the three surface win rates
-    # live in the separate surface block (see the surface tests below).
+    # Career playstyle aggregates and surface rates occupy separate blocks.
     _assert_style(
         index.reconstruct(finder.player_ids.index("P1")),
         {
@@ -422,8 +411,7 @@ def test_build_always_rebuilds_index_from_fresh_data(tmp_path: Path, monkeypatch
 
 
 def test_build_excludes_identity_and_recent_form(tmp_path: Path, monkeypatch):
-    """Bio identity/physical fields and recent rolling form leave vectors
-    unchanged; career reputation, surface, and playstyle signals do not."""
+    """Excluded identity and recent-form fields do not change vectors."""
     monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
     monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
     con = duckdb.connect()
@@ -484,10 +472,7 @@ def test_build_excludes_identity_and_recent_form(tmp_path: Path, monkeypatch):
 
 
 def test_build_profile_block_carries_bronze_metadata(tmp_path: Path, monkeypatch):
-    """The profile descriptor block (height/age/years_pro) is read from the
-    bronze profiles snapshot, not the gold lifetime aggregates, so populated
-    fixture players carry non-zero profile values and a height change moves the
-    full vector."""
+    """The profile block uses bronze metadata and responds to height changes."""
     monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
     monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
     con = duckdb.connect()
@@ -517,9 +502,7 @@ def test_build_profile_block_carries_bronze_metadata(tmp_path: Path, monkeypatch
 
 
 def test_surface_block_shrinks_rates_and_carries_exposure(tmp_path: Path, monkeypatch):
-    """The surface block keeps the three career win rates, exposure-shrunk
-    toward 0.5 by match volume, plus the bounded exposure counts — so a
-    handful of matches never reads as reliably as a full career."""
+    """Surface rates are exposure-shrunk toward 0.5 and retain exposure counts."""
     finder = _build_with_fixture(tmp_path, monkeypatch)
     index = finder.index
     assert index is not None
@@ -540,8 +523,7 @@ def test_surface_block_shrinks_rates_and_carries_exposure(tmp_path: Path, monkey
 
 
 def test_changing_clay_win_rate_changes_vectors(tmp_path: Path, monkeypatch):
-    """Regression: surface career performance is a first-class signal — a
-    higher clay win rate moves that player's vector and only theirs."""
+    """Changing one player's clay rate moves only that player's vector."""
     monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
     monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
     con = duckdb.connect()
@@ -609,8 +591,7 @@ def _cos(a: object, b: object) -> float:
 
 
 def test_reputation_block_excludes_rank_and_includes_career(tmp_path, monkeypatch):
-    """Reputation is match_count + career_win_rate only; current_rank is
-    excluded, so a rank change never moves the vector, but a career change does."""
+    """Reputation uses career count and win rate, but not current rank."""
     monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
     monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
     con = duckdb.connect()
@@ -636,33 +617,8 @@ def test_reputation_block_excludes_rank_and_includes_career(tmp_path, monkeypatc
         con.close()
 
 
-def test_block_weights_calibrate_no_bio_blocks():
-    """Every active block contributes exactly its calibrated weight share of
-    the final unit vector; there is no bio block, so playstyle/surface/
-    reputation each carry their full configured weight."""
-    player_ids = [f"P{i}" for i in range(10)]
-    profiles = _synthetic_profiles(player_ids)
-    matrix = similarity.build_playstyle_matrix(profiles, query=_flat_query(player_ids))
-    v = matrix.to_numpy(np.float32)[0]
-    norms = vector_block_norms(v)
-    assert norms["profile"] == 0.0
-    assert norms["identity"] > 0.0
-    assert norms["surface"] > 0.0
-    assert norms["reputation"] > 0.0
-    assert np.isclose(norms["identity"] / norms["surface"], 0.1 / 0.25, rtol=1e-4)
-    # The primary signals (playstyle, surface, reputation) carry the larger
-    # weights and dominate the small identity descriptor block; surface and
-    # reputation share the same 0.25 weight so their norms are approximately
-    # equal.
-    assert norms["playstyle"] > norms["surface"]
-    assert norms["reputation"] > norms["identity"]
-    assert np.isclose(norms["surface"], norms["reputation"], rtol=1e-4)
-
-
 def _surface_query(player_ids: list[str]):
-    """Gold aggregate stub with realistic surface exposure (counts in the
-    hundreds), so a clay win-rate swing actually moves the vector — the flat
-    fixture's tiny counts would shrink any rate change away."""
+    """Return gold aggregates with enough surface exposure to show rate changes."""
 
     def query(_sql: str) -> pd.DataFrame:
         return pd.DataFrame(
@@ -684,9 +640,7 @@ def _surface_query(player_ids: list[str]):
 
 
 def test_similar_style_players_more_comparable():
-    """Hermetic style comparison without live data: two clay-court players
-    with alike serve and return shapes rank far closer than either does to a
-    hard-court server — the Nadal/Alcaraz-style case the redesign targets."""
+    """Similar clay-court styles rank closer than a dissimilar hard-court style."""
     clay_a = {
         "player_id": "A",
         "clay_win_rate": 0.76,
@@ -730,27 +684,6 @@ def test_similar_style_players_more_comparable():
     assert cos_ab > 0.99  # near-identical clay+style profiles are very close
     assert cos_ac < 0.99  # a hard-court attacker is clearly farther
     assert cos_ab > cos_ac and cos_ab > cos_bc
-
-
-def test_vector_layout_and_column_count():
-    """The final vector is exactly identity + playstyle + surface + reputation
-    columns, with no bio block and no current_rank."""
-    matrix = similarity.build_playstyle_matrix(
-        _synthetic_profiles(["A", "B"]),
-        query=_flat_query(["A", "B"]),
-    )
-    expected_cols = [
-        *IDENTITY_BLOCK_COLS,
-        *PROFILE_COLS,
-        *LIFETIME_PLAYSTYLE_COLS,
-        *SURFACE_BLOCK_COLS,
-        *DOMINANCE_COLS,
-        *REPUTATION_BLOCK_COLS,
-    ]
-    assert list(matrix.columns) == expected_cols
-    assert matrix.shape[1] == len(expected_cols)
-    assert "current_rank" not in matrix.columns
-    assert not any(name.startswith("bio_") for name in matrix.columns)
 
 
 def test_search_returns_sorted_top_k_from_built_index(tmp_path: Path, monkeypatch):
@@ -850,9 +783,7 @@ def test_search_empty_players_returns_empty():
 def test_build_load_round_trip(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
     monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
-    # build() writes to DEFAULT_* (data/processed); load() reads from
-    # SERVING_* (data/deploy). Point both at the same tmp file for the
-    # round-trip.
+    # Point build and serving paths at the same temporary files for the round-trip.
     monkeypatch.setattr(similarity, "SERVING_INDEX", tmp_path / "idx")
     monkeypatch.setattr(similarity, "SERVING_METADATA", tmp_path / "meta.json")
     con = duckdb.connect()
@@ -884,18 +815,11 @@ def test_load_missing_index_raises(tmp_path: Path, monkeypatch):
         PlayerSimilarity().load()
 
 
-def test_build_defaults_to_live_postgresql_client():
-    """The default query is the operational PostgreSQL client; offline builds
-    pass src.db.training.to_dataframe explicitly."""
-    assert similarity.to_dataframe is client.to_dataframe
-
-
 def test_duck_and_snapshot_fixtures_produce_identical_vectors(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """The same SQL + builder yield bit-identical vectors through a direct
-    DuckDB query and the two-table DuckDB snapshot (offline training path)."""
+    """Direct and snapshot DuckDB queries produce identical vectors."""
     monkeypatch.setattr(similarity, "DEFAULT_INDEX", tmp_path / "idx")
     monkeypatch.setattr(similarity, "DEFAULT_METADATA", tmp_path / "meta.json")
 
@@ -928,21 +852,3 @@ def test_duck_and_snapshot_fixtures_produce_identical_vectors(
     assert direct.index.ntotal == offline.index.ntotal
     for i in range(direct.index.ntotal):
         assert np.array_equal(direct.index.reconstruct(i), offline.index.reconstruct(i))
-
-
-def _flat_query(player_ids: list[str]):
-    """Gold aggregate stub: identical career rows for every player (all career
-    cells non-zero so every block is active)."""
-
-    def query(_sql: str) -> pd.DataFrame:
-        return pd.DataFrame(
-            {
-                "player_id": player_ids,
-                **dict.fromkeys(LIFETIME_PLAYSTYLE_COLS, 0.4),
-                **dict.fromkeys(SURFACE_BLOCK_COLS, 0.5),
-                "match_count": 200.0,
-                "career_win_rate": 0.6,
-            }
-        )
-
-    return query

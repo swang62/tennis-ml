@@ -1,8 +1,4 @@
-"""Deterministically seed PostgreSQL from ATP CSVs.
-
-Local match/profile data and official rank history always seed offline;
-Wikipedia bios are fetched only with the explicit --enrich flag.
-"""
+"""Deterministically seed PostgreSQL from ATP CSVs."""
 
 from __future__ import annotations
 
@@ -33,8 +29,6 @@ RAW_YEAR = RAW_DIR / "2026.csv"
 
 TOP_PLAYERS = 10
 RECENT = 10
-# Calendar year of the default seed corpus (data/raw/2026.csv); kept in sync
-# with the file name so the full-history rule never drifts from the data.
 DEFAULT_YEAR = int(RAW_YEAR.stem)
 
 
@@ -53,16 +47,12 @@ def select_matches(
     matches: list[dict[str, Any]],
     official_ranks: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
-    """Select distinct matches for the best-ranked players: their full
-    default-year (DEFAULT_YEAR) history plus their RECENT most recent
-    other-year matches."""
+    """Select each top player's full default-year history and recent prior matches."""
     history = {
         pid: sorted(hist, key=lambda m: (int(m["tourney_date"]), m["tourney_id"], m["match_num"]))
         for pid, hist in player_history(matches).items()
     }
     if official_ranks is None:
-        # Test/helper fallback only; production miniseed always supplies the
-        # official archive ranks below.
         official_ranks = {}
         for m in matches:
             for player_id, rank_key in (
@@ -95,11 +85,7 @@ def select_matches(
 
 
 def latest_official_ranks() -> dict[str, int]:
-    """Latest archived official ATP ranks, resolved into canonical player ids.
-
-    Only the top-200 archive rows are needed — the global top-10 the miniseed
-    selects are always within the top 200 — so the sub-200 archive is skipped.
-    """
+    """Return latest archived top-200 ranks mapped to canonical player ids."""
     rows = load_ranking_rows(discover_ranking_csvs(), rank_limit=200)
     if rows.empty:
         raise ValueError("miniseed selection requires archived official rankings")
@@ -150,19 +136,7 @@ def seed_rankings_and_enrichment(
     reset: bool,
     match_rows: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Import local official rank history for seeded players; enrich when asked.
-
-    Rankings come only from the local archive (offline); the import is scoped
-    to the seeded set. Source ids absent from the reviewed map are auto-mapped
-    by normalized name (with deterministic activity/rank/id tie-breaks using
-    match_rows), and the returned summary prints seed coverage — covered /
-    seeded players with official top-200 history, auto-mapped source ids, and
-    unresolved identities. ATP_player_database.csv stays the primary IOC source;
-    the ranking-source atp_players.csv fallback fills only seeded profiles still
-    missing an IOC (NULL/empty/UNK) and never overwrites a verified one.
-    Wikipedia enrichment is gated on --enrich and idempotent unless --reset is
-    given: profiles that already have a summary are skipped, never overwritten.
-    """
+    """Import local ranks for seeded players and optionally enrich their profiles."""
     if not player_ids:
         return
     summary = ingest_rankings(player_ids=set(player_ids), force=reset, match_rows=match_rows)
@@ -174,7 +148,6 @@ def seed_rankings_and_enrichment(
             f"{coverage['unresolved']} unresolved."
         )
     if enrich:
-        # enrich_players emits its own per-player lines and batch summary.
         enrich_players(player_ids, force=reset)
 
 
@@ -197,9 +170,6 @@ def main_default(enrich: bool = False, reset: bool = False) -> None:
         f"{distinct_players} players"
     )
 
-    # Idempotent by default (DO NOTHING on an existing match_id); --reset
-    # clears bronze.match_events first so the corpus inserts into an empty
-    # table instead of overwriting selected rows.
     if reset:
         clear_match_events()
         print(f"Cleared {BRONZE_MATCHES_TABLE} for a clean rebuild")
@@ -218,8 +188,7 @@ def main_default(enrich: bool = False, reset: bool = False) -> None:
 
 
 def main_all(enrich: bool = False, reset: bool = False) -> None:
-    """Seed every ATP CSV; --reset clears bronze.match_events first so the full
-    corpus is rebuilt cleanly."""
+    """Seed every ATP CSV; --reset clears bronze.match_events first."""
     csv_paths = discover_atp_csvs(RAW_DIR)
     if not csv_paths:
         print(f"No ATP CSVs found under {RAW_DIR}; nothing to seed")

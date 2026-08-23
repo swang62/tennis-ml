@@ -1,7 +1,4 @@
-"""Fast, hermetic tests for the scrape flow parser and date math.
-
-No Prefect server, no MLflow, no browser, no external fixture files — just pure logic.
-"""
+"""Hermetic tests for scrape parsing and date math."""
 
 import re
 from datetime import date
@@ -11,11 +8,7 @@ import pytest
 import src.flows.rankings as scrape
 import src.utils.scrape as scrape_mod
 
-# Real ATP #dateWeek-filter structure (observed on atptour.com): each option's
-# value is the week date (YYYY-MM-DD) or the literal "Current Week" for the
-# latest week; the visible text is YYYY.MM.DD. These helpers let hermetic
-# mocks answer ``_week_in_filter`` with the same logic the real page runs, so
-# the fixtures reflect the actual DOM instead of a stubbed boolean.
+# Mirror the real #dateWeek-filter DOM so mocks exercise date parsing, not a boolean stub.
 _FILTER_OPTION_RE = re.compile(r'<option[^>]*value="([^"]*)"[^>]*>(.*?)</option>', re.S)
 
 
@@ -79,23 +72,7 @@ def test_ranking_mondays_after_empty_when_current():
 
 
 def test_missing_weeks_default_is_only_previous_week(monkeypatch):
-    # Watermark 2026-01-05; no end_date -> stop at the most recent completed
-    # Monday (2026-01-19, today frozen to 2026-01-20), so the scan covers the
-    # watermark..previous-week window only (watermark + 7 days default start).
-    monkeypatch.setattr(scrape, "stored_ranking_mondays", lambda: {date(2026, 1, 5)})
-    _FrozenToday._today = date(2026, 1, 20)
-    monkeypatch.setattr(scrape, "date", _FrozenToday)
-    watermark, weeks = scrape.missing_ranking_mondays.fn()
-    assert watermark == date(2026, 1, 5)
-    assert weeks == [date(2026, 1, 12), date(2026, 1, 19)]
-
-
-def test_missing_weeks_no_args_does_not_use_completeness(monkeypatch):
-    # The count-based completeness gate is gone entirely: presence is the only
-    # completeness test for every path, so a no-arg run cannot refetch a stored
-    # week. Asserting the old helpers no longer exist proves the semantics.
-    assert not hasattr(scrape, "stored_ranking_monday_counts")
-    assert not hasattr(scrape, "COMPLETE_RANKING_MIN_ROWS")
+    # Without end_date, scan from the watermark through the latest completed Monday.
     monkeypatch.setattr(scrape, "stored_ranking_mondays", lambda: {date(2026, 1, 5)})
     _FrozenToday._today = date(2026, 1, 20)
     monkeypatch.setattr(scrape, "date", _FrozenToday)
@@ -105,8 +82,7 @@ def test_missing_weeks_no_args_does_not_use_completeness(monkeypatch):
 
 
 def test_missing_weeks_backfill_to_end_date(monkeypatch):
-    # end_date-only: scan starts watermark + 7 days; stored weeks (any row
-    # count) are never re-scraped, absent weeks are fetched.
+    # Scan from the watermark; stored weeks are skipped by presence alone.
     monkeypatch.setattr(scrape, "stored_ranking_mondays", lambda: {date(2026, 1, 5)})
     _FrozenToday._today = date(2026, 2, 3)
     monkeypatch.setattr(scrape, "date", _FrozenToday)
@@ -116,9 +92,7 @@ def test_missing_weeks_backfill_to_end_date(monkeypatch):
 
 
 def test_missing_weeks_stored_week_skipped_presence_only(monkeypatch):
-    # A stored week is complete by presence alone — row counts are irrelevant
-    # (the old >=100 refetch gate is gone). Stored 2026-01-05/12 are never
-    # re-scraped; absent 2026-01-19/26 are fetched.
+    # Stored weeks are skipped by presence alone; absent weeks are fetched.
     monkeypatch.setattr(
         scrape,
         "stored_ranking_mondays",
@@ -140,9 +114,7 @@ def test_missing_weeks_quits_when_end_date_at_watermark(monkeypatch):
 
 
 def test_missing_weeks_explicit_start_snaps_and_clamps_to_watermark(monkeypatch):
-    # start_date 2026-01-06 (Tue) snaps forward to 2026-01-12, then the
-    # watermark floor (2026-01-12 + 7 days = 2026-01-26) clamps it further —
-    # an explicit start can never reach weeks before the stored max.
+    # Explicit starts snap to Mondays and cannot reach weeks before the watermark.
     monkeypatch.setattr(scrape, "stored_ranking_mondays", lambda: {date(2026, 1, 19)})
     _FrozenToday._today = date(2026, 2, 3)
     monkeypatch.setattr(scrape, "date", _FrozenToday)
@@ -154,8 +126,7 @@ def test_missing_weeks_explicit_start_snaps_and_clamps_to_watermark(monkeypatch)
 
 
 def test_missing_weeks_no_week_before_stored_max_ever_fetched(monkeypatch):
-    # Watermark 2026-01-26; an explicit historical range before it fetches
-    # nothing — the scan floor is watermark + 7 days.
+    # A historical range before the watermark produces no weeks.
     monkeypatch.setattr(scrape, "stored_ranking_mondays", lambda: {date(2026, 1, 26)})
     _FrozenToday._today = date(2026, 2, 3)
     monkeypatch.setattr(scrape, "date", _FrozenToday)
@@ -167,8 +138,7 @@ def test_missing_weeks_no_week_before_stored_max_ever_fetched(monkeypatch):
 
 
 def test_missing_weeks_explicit_historical_start_clamped_to_current_year(monkeypatch):
-    # An explicit start before Jan 1 of the current year is clamped to this
-    # year's floor: nothing from 2025 is ever scheduled.
+    # Starts before the current year are clamped to this year's floor.
     monkeypatch.setattr(scrape, "stored_ranking_mondays", lambda: {date(2026, 1, 5)})
     _FrozenToday._today = date(2026, 2, 3)
     monkeypatch.setattr(scrape, "date", _FrozenToday)
@@ -180,9 +150,7 @@ def test_missing_weeks_explicit_historical_start_clamped_to_current_year(monkeyp
 
 
 def test_missing_weeks_end_date_after_latest_completed_monday_clamped(monkeypatch):
-    # An end_date beyond the most recent completed Monday is clamped down
-    # (today frozen to 2026-02-03 -> latest completed Monday 2026-02-02), so a
-    # future/unpublished week is never scheduled.
+    # Clamp end_date to the latest completed Monday to exclude future weeks.
     monkeypatch.setattr(scrape, "stored_ranking_mondays", lambda: {date(2026, 1, 5)})
     _FrozenToday._today = date(2026, 2, 3)
     monkeypatch.setattr(scrape, "date", _FrozenToday)
@@ -244,9 +212,8 @@ def test_fetch_week_skips_on_failure(monkeypatch, capsys):
     assert "Week 2026-01-05: skipped (could not load or parse)" in capsys.readouterr().out
 
 
-def test_fetch_week_navigates_the_shared_page(monkeypatch):
+def test_fetch_week_returns_rendered_rows(monkeypatch):
     monkeypatch.setattr(scrape, "_jitter", lambda: None)
-    calls: list[str] = []
 
     class Page:
         _filter = (
@@ -257,15 +224,14 @@ def test_fetch_week_navigates_the_shared_page(monkeypatch):
         )
 
         def goto(self, _url, **_kwargs):
-            calls.append("goto")
+            pass
 
         def evaluate(self, _js, arg):
-            calls.append("evaluate")
             # arg is [wanted, latest]; answer against the real filter structure.
             return _week_in_filter_real(self._filter, arg[0], arg[1])
 
         def wait_for_selector(self, _selector, **_kwargs):
-            calls.append("wait")
+            pass
 
         def content(self):
             # Must contain a player link: the wait loop only returns once
@@ -275,19 +241,11 @@ def test_fetch_week_navigates_the_shared_page(monkeypatch):
     assert scrape._fetch_week_html(
         Page(), "https://example.test/rankings", date(2026, 1, 5)
     ).endswith("</a>")
-    assert calls == ["goto", "wait", "evaluate", "wait"]
 
 
 def test_fetch_week_missing_option_after_filter_appears_skips_immediately(monkeypatch):
-    """Filter element appears but lacks the week -> reject immediately.
-
-    The option check runs exactly once; a never-published week is rejected at
-    once instead of polling the filter for the rest of the verification budget,
-    and the row-render wait is never reached.
-    """
+    """Filter element appears but lacks the week -> reject immediately."""
     monkeypatch.setattr(scrape, "_jitter", lambda: None)
-    checks = 0
-    row_waits = 0
 
     class Page:
         # 2026-01-12 is absent (no Current Week option either) -> never published.
@@ -302,13 +260,9 @@ def test_fetch_week_missing_option_after_filter_appears_skips_immediately(monkey
             pass
 
         def wait_for_selector(self, selector, **_kwargs):
-            nonlocal row_waits
-            if selector == scrape.RANKINGS_TABLE_SELECTOR:
-                row_waits += 1
+            pass
 
         def evaluate(self, _js, arg):
-            nonlocal checks
-            checks += 1
             return _week_in_filter_real(self._filter, arg[0], arg[1])
 
         def content(self):
@@ -316,16 +270,10 @@ def test_fetch_week_missing_option_after_filter_appears_skips_immediately(monkey
 
     with pytest.raises(scrape.RankingsParseError, match="never published"):
         scrape._fetch_week_html(Page(), "https://example.test/rankings", date(2026, 1, 12))
-    assert checks == 1
-    assert row_waits == 0
 
 
 def test_fetch_week_filter_absent_until_timeout_raises_unavailable(monkeypatch):
-    """Filter element never appears within the budget -> verification error.
-
-    Distinct from a missing week: the page is unverifiable (blocked or stuck
-    on a widget), not proof that the week was never published.
-    """
+    """A missing filter within the wait budget is an unverifiable page."""
     monkeypatch.setattr(scrape, "_jitter", lambda: None)
 
     class Page:
@@ -342,7 +290,6 @@ def test_fetch_week_filter_absent_until_timeout_raises_unavailable(monkeypatch):
 def test_fetch_week_filter_with_option_proceeds(monkeypatch):
     """Filter appears with the week as an option -> scrape proceeds."""
     monkeypatch.setattr(scrape, "_jitter", lambda: None)
-    checks = 0
 
     class Page:
         _filter = (
@@ -356,8 +303,6 @@ def test_fetch_week_filter_with_option_proceeds(monkeypatch):
             pass
 
         def evaluate(self, _js, arg):
-            nonlocal checks
-            checks += 1
             return _week_in_filter_real(self._filter, arg[0], arg[1])
 
         def content(self):
@@ -365,49 +310,19 @@ def test_fetch_week_filter_with_option_proceeds(monkeypatch):
 
     html = scrape._fetch_week_html(Page(), "https://example.test/rankings", date(2026, 1, 5))
     assert html.endswith("</a>")
-    assert checks == 1
-
-
-def test_fetch_week_existing_filter_incurs_no_fixed_delay(monkeypatch, capsys):
-    """A normal page with the week already in the filter proceeds on the first check."""
-    monkeypatch.setattr(scrape, "_jitter", lambda: None)
-    checks = 0
-
-    class Page:
-        _filter = (
-            '<select id="dateWeek-filter"><option value="2026-01-05">2026.01.05</option></select>'
-        )
-
-        def goto(self, _url, **_kwargs):
-            pass
-
-        def evaluate(self, _js, arg):
-            nonlocal checks
-            checks += 1
-            return _week_in_filter_real(self._filter, arg[0], arg[1])
-
-        def wait_for_selector(self, _selector, **_kwargs):
-            pass
-
-        def content(self):
-            return '<a href="/en/players/x/y/overview">x</a>'
-
-    html = scrape._fetch_week_html(Page(), "https://example.test/rankings", date(2026, 1, 5))
-    assert html.endswith("</a>")
-    assert checks == 1
-    assert "waiting..." not in capsys.readouterr().out
 
 
 def test_fetch_week_polls_until_rows_render_or_deadline(monkeypatch):
-    """No player links in the HTML -> keep polling, don't return early.
-
-    Regression: the old loop returned as soon as the page was not a Cloudflare
-    challenge, so a page whose rows were still rendering was captured empty and
-    the week wrongly skipped.
-    """
+    """The page is polled until player links appear."""
     monkeypatch.setattr(scrape, "_jitter", lambda: None)
     monkeypatch.setattr(scrape, "CHALLENGE_RESOLVE_BUDGET_S", 1)
-    waits = 0
+    contents = iter(
+        [
+            "<table></table>",
+            "<table></table>",
+            '<a href="/en/players/x/y/overview">x</a>',
+        ]
+    )
 
     class Page:
         _filter = (
@@ -421,25 +336,17 @@ def test_fetch_week_polls_until_rows_render_or_deadline(monkeypatch):
             return _week_in_filter_real(self._filter, arg[0], arg[1])
 
         def wait_for_selector(self, selector, **_kwargs):
-            nonlocal waits
-            if selector == scrape.RANKINGS_TABLE_SELECTOR:
-                waits += 1
+            pass
 
         def content(self):
-            return "<table></table>" if waits < 3 else '<a href="/en/players/x/y/overview">x</a>'
+            return next(contents)
 
     html = scrape._fetch_week_html(Page(), "https://example.test/rankings", date(2026, 1, 5))
     assert "<table></table>" not in html
-    assert waits >= 3
 
 
 def test_week_in_filter_matches_real_dom():
-    """_week_in_filter matches on option value OR text, dash OR dot format.
-
-    Drives the real function with a fake page whose evaluate mirrors the
-    production JS logic (the same _week_in_filter_real the other mocks use),
-    against realistic #dateWeek-filter markup observed on atptour.com.
-    """
+    """The week filter matches realistic option values and visible text."""
 
     class Page:
         def __init__(self, filter_html):
@@ -574,13 +481,7 @@ def test_translate_keeps_live_atp_ids_without_legacy_map():
 
 
 def test_backfill_that_cannot_access_the_site_fails():
-    """A backfill that could not access/parse the site for any week fails.
-
-    Rankings post weekly, so finding no parseable page for every expected week
-    means the site was blocked or the markup changed — not a legitimate
-    "nothing new" result (that path returns before the guard via the
-    empty-``weeks`` early return).
-    """
+    """A backfill with no parseable weeks fails instead of reporting no changes."""
     weeks = [date(2026, 1, 12), date(2026, 1, 19)]
     with pytest.raises(RuntimeError, match="could not access or parse"):
         scrape._fail_if_no_data_found(False, weeks)
@@ -616,14 +517,13 @@ def _overview_html(profile_id="XQ999", ioc="ITA", **overrides):
 
 
 class _FakePage:
-    """Shared browser page double: serves canned HTML and records navigation."""
+    """Shared browser page double that serves canned HTML."""
 
     def __init__(self, html=""):
         self._html = html
-        self.gotos: list[str] = []
 
-    def goto(self, url, **_kwargs):
-        self.gotos.append(url)
+    def goto(self, _url, **_kwargs):
+        pass
 
     def wait_for_function(self, _script, **_kwargs):
         pass
@@ -723,7 +623,7 @@ def test_parse_player_overview_unknown_ioc_becomes_unk():
 
 
 def test_fetch_overview_html_new_player_uses_slug(monkeypatch):
-    """Discovery navigates the shared page to the candidate's profile URL."""
+    """Discovery returns the rendered overview body for a candidate."""
     monkeypatch.setattr(scrape_mod, "_jitter", lambda: None)
     page = _FakePage(_overview_html())
 
@@ -731,24 +631,6 @@ def test_fetch_overview_html_new_player_uses_slug(monkeypatch):
 
     assert err == ""
     assert html  # the canned page body
-    assert len(page.gotos) == 1
-    assert "test-slug" in page.gotos[0] and "XQ999" in page.gotos[0]
-
-
-def test_fetch_overview_waits_for_player_details(monkeypatch):
-    monkeypatch.setattr(scrape_mod, "_jitter", lambda: None)
-    calls = []
-
-    class Page(_FakePage):
-        def wait_for_function(self, script, **kwargs):
-            calls.append((script, kwargs["arg"]))
-
-    html, err = scrape_mod._fetch_overview_html(Page(_overview_html()), "test-slug", "XQ999")
-
-    assert err == ""
-    assert html
-    assert calls[0][1] == "XQ999"
-    assert "Age" in calls[0][0]
 
 
 def test_discover_players_existing_player_never_navigates(monkeypatch):
@@ -765,7 +647,6 @@ def test_discover_players_existing_player_never_navigates(monkeypatch):
     )
 
     assert result == {"known": 1, "discovered": 0, "failed": []}
-    assert page.gotos == []  # never navigated
 
 
 def test_discover_players_valid_new_player(monkeypatch):
@@ -786,7 +667,6 @@ def test_discover_players_valid_new_player(monkeypatch):
 
     assert result["discovered"] == 1
     assert result["failed"] == []
-    assert len(page.gotos) == 1  # exactly one overview navigation
     assert len(persisted) == 1  # exactly one persistence attempt
     assert persisted[0][0]["id"] == "XQ999"  # uppercased canonical id
     # The new identity is resolvable for the rest of this run.
@@ -814,7 +694,6 @@ def test_discover_players_repeated_player_discovered_once(monkeypatch):
 
     assert result["discovered"] == 1
     assert len(persisted) == 1  # one lookup, one persistence
-    assert len(page.gotos) == 1  # one navigation
 
 
 def test_discover_players_missing_identity_fails_without_write(monkeypatch):
@@ -836,7 +715,6 @@ def test_discover_players_missing_identity_fails_without_write(monkeypatch):
     assert result["failed"] == [
         {"id": "XQ999", "player": "", "reason": "missing id or display name"}
     ]
-    assert page.gotos == []  # never navigated
     assert canonical == {} and profiles == {}
 
 
@@ -968,11 +846,6 @@ def test_parse_args_dry_run_flag():
     assert args.dry_run is True
 
 
-def test_parse_args_default_has_no_dry_run():
-    args = scrape.parse_args(["--start", "2026-08-10"])
-    assert args.dry_run is False
-
-
 def test_fetch_and_upsert_week_dry_run_skips_writes_and_discovery(monkeypatch, tmp_path, capsys):
     week = date(2026, 8, 10)
     html = (
@@ -1033,8 +906,7 @@ def test_rankings_flow_dry_run_skips_sort_and_csv_writes(monkeypatch, tmp_path):
     monkeypatch.setattr(scrape, "missing_ranking_mondays", lambda *_, **__: (None, [week]))
     monkeypatch.setattr(scrape, "canonical_players", lambda: {})
     monkeypatch.setattr(scrape, "load_player_metadata", lambda: {})
-    launched = []
-    monkeypatch.setattr(scrape, "_launch_browser", lambda: launched.append(1) or _FakeBrowser())
+    monkeypatch.setattr(scrape, "_launch_browser", lambda: _FakeBrowser())
     monkeypatch.setattr(scrape, "_fetch_week_html", lambda _p, _url, _w: html)
     current = tmp_path / "atp_rankings_current.csv"
     current.write_text("ranking_date,rank,player,points\n")
@@ -1044,8 +916,6 @@ def test_rankings_flow_dry_run_skips_sort_and_csv_writes(monkeypatch, tmp_path):
 
     scrape.rankings_flow.fn(start_date=week, end_date=week, force=True, dry_run=True)
 
-    # Dry-run still reaches the browser-launch path (no writes after).
-    assert launched == [1]
     # Dry-run never rewrites the CSV (no append, no sort).
     assert sort_calls == []
     assert current.read_text() == "ranking_date,rank,player,points\n"

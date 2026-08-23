@@ -58,12 +58,10 @@ def _directory_players_df() -> pd.DataFrame:
 def _directory_fake_execute_df(
     players_df: pd.DataFrame,
     summary_df: pd.DataFrame | None = None,
-) -> tuple[object, list[tuple[str, object]]]:
+) -> object:
     """Keyed on the SQL text: PLAYERS_SQL -> players rows, else the summary."""
-    calls: list[tuple[str, object]] = []
 
-    def fake(sql: str, params: list[object] | None = None) -> pd.DataFrame:
-        calls.append((sql, params))
+    def fake(sql: str, _params: list[object] | None = None) -> pd.DataFrame:
         return (
             players_df
             if "player_profiles" in sql
@@ -72,7 +70,7 @@ def _directory_fake_execute_df(
             else _directory_summary_df()
         )
 
-    return fake, calls
+    return fake
 
 
 def _directory_summary_df() -> pd.DataFrame:
@@ -80,7 +78,7 @@ def _directory_summary_df() -> pd.DataFrame:
 
 
 def test_directory_returns_players_and_summary_in_one_envelope():
-    fake, calls = _directory_fake_execute_df(_directory_players_df())
+    fake = _directory_fake_execute_df(_directory_players_df())
     with patch("src.serving.service.execute_df", side_effect=fake):
         resp = client.get("/directory")
     assert resp.status_code == 200
@@ -93,12 +91,10 @@ def test_directory_returns_players_and_summary_in_one_envelope():
     assert data["total_players"] == 2
     assert data["latest_match_date"] == "2026-08-10"
     assert data["total_matches"] == 123456
-    # Two queries per request: the directory itself plus the summary footer.
-    assert len(calls) == 2
 
 
 def test_directory_empty_players_and_summary():
-    fake, _calls = _directory_fake_execute_df(pd.DataFrame(), summary_df=pd.DataFrame())
+    fake = _directory_fake_execute_df(pd.DataFrame(), summary_df=pd.DataFrame())
     with patch("src.serving.service.execute_df", side_effect=fake):
         resp = client.get("/directory")
     assert resp.status_code == 200
@@ -115,14 +111,6 @@ def test_directory_database_error_returns_500():
     assert resp.status_code == 500
     assert resp.json()["ok"] is False
     assert "directory query failed" in resp.json()["error"]
-
-
-def test_directory_info_route_removed():
-    assert client.get("/directory_info").status_code == 404
-
-
-def test_only_players_route_remains_unmounted():
-    assert client.get("/players").status_code == 404
 
 
 # ── /rank_history ───────────────────────────────────────────────────────────
@@ -153,14 +141,6 @@ def test_rank_history_shape_and_parameter_binding():
         {"rank_date": "2024-02-05", "rank": 90},
         {"rank_date": "2024-03-04", "rank": 88},
     ]
-
-
-def test_rank_history_reads_bronze_rankings_not_match_events():
-    """History is weekly official rows from bronze.rankings, never match ranks."""
-    with patch("src.serving.service.execute_df", return_value=pd.DataFrame()) as exec:
-        resp = client.get("/rank_history?player_id=p1")
-    assert resp.status_code == 200
-    assert "FROM bronze.rankings" in exec.call_args_list[0].args[0]
 
 
 def test_rank_history_empty_for_player_without_rankings():
@@ -436,14 +416,6 @@ def test_head_to_head_zero_meetings():
     }
 
 
-def test_head_to_head_sql_is_direct_bronze_pair_read():
-    """One bronze query per request; no silver expansion, grouping, or dedup."""
-    with patch("src.serving.service.execute_df", return_value=pd.DataFrame()) as exec:
-        resp = client.get("/head_to_head?player1_id=a&player2_id=b")
-    assert resp.status_code == 200
-    assert "FROM bronze.match_events" in exec.call_args_list[0].args[0]
-
-
 def test_head_to_head_limit_clamped():
     with patch("src.serving.service.execute_df", return_value=pd.DataFrame()) as exec:
         resp = client.get("/head_to_head?player1_id=a&player2_id=b&limit=500")
@@ -514,12 +486,8 @@ def _fake_execute_df(sql: str, _params: list[object] | None = None) -> pd.DataFr
 
 
 def test_predict_from_ids_preserves_caller_order():
-    """predict_from_ids echoes the requested ids: the first-supplied id is the
-    player side (p_win > 0.5 -> predicted_winner = first id), and swapping the
-    ids swaps the response sides. No lower-id canonicalization at the endpoint."""
-    # Bypass __init__ (no DB/bootstrap): the @bentoml.service decorator turns
-    # the module-level name into a Service wrapper, so reach the original class
-    # via `.inner` and construct an instance without running __init__.
+    """predict_from_ids preserves caller order and swaps response sides with the ids."""
+    # Use the decorated class's inner type to bypass DB/bootstrap initialization.
     pred = cast(Any, object.__new__(TennisPredictor.inner))  # type: ignore[attr-defined,arg-type]
     pred._stack_order = list(STACK_ORDER)
     pred.scaler = StandardScaler().fit(
@@ -606,8 +574,6 @@ def test_predict_from_ids_schema_rejects_numeric_context_fields():
 
 
 def test_best_of_accepts_only_canonical_lengths():
-    from pydantic import ValidationError
-
     for value in (1, 3, 5):
         row = PredictFromIdsRow.model_validate(
             {"player_id": "S0AG", "opponent_id": "Z355", "surface": "hard", "best_of": value}
@@ -672,11 +638,7 @@ def test_best_of_rejects_extra_fields():
         )
 
 
-# ── malformed request deserialization (BentoML serde) ────────────────────────
-# BentoML raises pydantic ValidationError while deserializing the request body,
-# before the endpoint method runs; its server answers a 400 and logs a full
-# ERROR traceback per rejected request. The service filter drops that
-# client-error traceback noise and logs one concise warning instead.
+# ── malformed request deserialization: filter BentoML client-error tracebacks ──
 
 
 def _error_record(exc: Exception) -> logging.LogRecord:

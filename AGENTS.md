@@ -52,24 +52,23 @@ registry -> BentoML -> React dashboard.
 
 - Inspect the affected flow and callers before editing. Fix shared causes once;
   make the smallest correct change and avoid speculative abstractions.
-- Tests specify behavior at public seams. Prefer real outcomes, invariants,
-  and integration boundaries over source text, AST shape, private helpers,
-  constants, exact SQL spelling, call order, or full mock call lists.
-- Delete tests that only protect an implementation choice. Keep tests for
-  user/API behavior, data correctness, security, persistence, lineage,
-  symmetry, failure safety, and operational boundaries.
+- Tests are allowed only to verify observable behavior, data correctness,
+  persistence/error safety, security, or external contracts. Do not add
+  regression tests that merely freeze an implementation, constants, call order,
+  mock interactions, exact SQL, fake Prefect/MLflow/browser wiring, or synthetic
+  pin self-equality. Prefer real or local fixture data and test databases for
+  data manipulation; delete tests that only protect an implementation choice.
 - Never add `assert CONSTANT == value` merely to freeze a configurable or
   internal constant. Assert the observable behavior it influences; retain a
   literal assertion only for a genuine public/persisted contract.
 - Tests are hermetic: no live DB, network, MLflow, DagsHub, Prefect, or
   pre-built tables. Use fakes, mocks at external boundaries, and local fixtures.
-- Keep docstrings short: one sentence for public purpose or non-obvious
-  rationale; remove narration that repeats the code. Use comments for why, not
-  what.
-- Comments must explain why, invariants, contracts, or non-obvious behavior;
-  do not add comments that merely repeat constants, settings, parameter
-  values, or immediately visible code. Source/config is the authority for
-  values. Do not add inline comments to every new line.
+- Keep docstrings and comments concise: at most one short paragraph, usually one
+  line. Remove essay-like narration; describe only public purpose, contract,
+  invariant, or non-obvious rationale. Use comments for why, not what; do not
+  add comments that merely repeat constants, settings, parameter values, or
+  immediately visible code. Source/config is the authority for values. Do not
+  add inline comments to every new line.
 - Run `just lint` and the narrowest relevant tests, then the full suite before
   declaring completion. Never commit unless asked.
 

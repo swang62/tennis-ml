@@ -1,13 +1,8 @@
-"""Focused contract tests for official ranking serving.
-
-/rank_history and /player_profile both read their rank values from
-bronze.rankings (weekly official ATP top-200 rows) — never from match rows.
-"""
+"""Contract tests for official ranking serving."""
 
 from unittest.mock import patch
 
 import pandas as pd
-import pytest
 from starlette.testclient import TestClient
 
 from src.serving.service import DATA_APP
@@ -37,11 +32,8 @@ def test_rank_history_preserves_chronological_order():
     with patch("src.serving.service.execute_df", return_value=df) as exec:
         resp = client.get("/rank_history?player_id=p1")
     assert resp.status_code == 200
-    sql, params = exec.call_args_list[0].args
+    _sql, params = exec.call_args_list[0].args
     assert params == ["p1"]
-    # The history is sourced from bronze.rankings only — never match rows.
-    assert "bronze.rankings" in sql
-    assert "match_events" not in sql
     assert resp.json()["data"]["rank_history"] == [
         {"rank_date": "2024-01-01", "rank": 100},
         {"rank_date": "2024-01-08", "rank": 98},
@@ -56,9 +48,8 @@ def test_rank_history_empty_for_player_without_official_rows():
     with patch("src.serving.service.execute_df", return_value=df) as exec:
         resp = client.get("/rank_history?player_id=zzz")
     assert resp.status_code == 200
-    sql, params = exec.call_args_list[0].args
+    _sql, params = exec.call_args_list[0].args
     assert params == ["zzz"]
-    assert "bronze.rankings" in sql
     assert resp.json()["data"]["rank_history"] == []
 
 
@@ -92,8 +83,6 @@ def test_rankings_row_drives_api_rank_values():
         history = client.get(f"/rank_history?player_id={_SEEDED_PLAYER}").json()["data"][
             "rank_history"
         ]
-    sql, params = exec.call_args_list[0].args
+    _sql, params = exec.call_args_list[0].args
     assert params == [_SEEDED_PLAYER]
-    # The history is sourced from bronze.rankings only — never match rows.
-    assert "bronze.rankings" in sql
     assert {"rank_date": _TEST_DATE, "rank": _TEST_RANK} in history

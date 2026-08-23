@@ -6,7 +6,6 @@ from typing import cast
 import pandas as pd
 import pytest
 
-from src.constants import TOUR_AVERAGES_TABLE
 from src.features.columns import TOUR_AVERAGES_FALLBACK_COLS
 from src.features.inference import _to_date, build_inference_features
 

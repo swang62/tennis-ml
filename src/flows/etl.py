@@ -1,15 +1,4 @@
-"""Prefect flow: Bronze → Gold ETL.
-
-Runs `dbt build` which builds the medallion layers in dependency order:
-silver.player_matches (player-perspective rows) -> silver.rolling_features
-(post-match snapshots) -> gold.match_features (canonical one-row-per-match
-training table) -> gold.player_profiles (derived player-grain aggregates).
-
-Enrichment is a seed-time step (``just seed --enrich``), never post-ETL;
-re-run ``just etl`` to pick up new summaries. ETL defaults to a full refresh
-(``dbt build --full-refresh``); pass ``--incremental`` to append only new rows.
-The scrape-triggered Prefect deployment runs incremental.
-"""
+"""Prefect flow for Bronze-to-Gold dbt ETL."""
 
 import argparse
 import json
@@ -60,13 +49,8 @@ DBT_BUILD_CMD = [
 DBT_RUN_RESULTS = ROOT / "dbt" / "target" / "run_results.json"
 
 ETL_DEPLOYMENT_NAME = "etl"
-# No cron: ETL is triggered by the "scrape-triggers-etl" automation (see
-# register_automation) whenever a rankings or matches flow run completes
-# successfully. The trigger is a visible Prefect automation, not an in-flow
-# command.
-
-RANKINGS_FLOW_NAME = "rankings-flow"  # Prefect flow name of src/flows/rankings.py:rankings_flow
-MATCHES_FLOW_NAME = "matches-flow"  # Prefect flow name of src/flows/matches.py:matches_flow
+RANKINGS_FLOW_NAME = "rankings-flow"
+MATCHES_FLOW_NAME = "matches-flow"
 SCRAPE_ETL_AUTOMATION_NAME = "scrape-triggers-etl"
 
 
@@ -203,13 +187,10 @@ def bronze_to_gold(incremental: bool = False) -> int:
     try:
         logger = get_run_logger()
     except RuntimeError:
-        # No active run context (e.g. hermetic .fn() tests); skip Prefect logs.
         logger = None
     run_dbt_build(log_file=log_file, incremental=incremental, select=select, logger=logger)
     if select is None:
         _record_incremental_watermark(source_watermark)
-    # dbt owns the ETL write connection; use a separate bounded connection for
-    # post-build counts rather than contending with serving's process-local pool.
     with (
         psycopg.connect(
             get_database_url(),
@@ -268,12 +249,7 @@ VALID_ETL_SOURCES = frozenset({"rankings", "matches"})
 
 
 def etl_run_name(source: str | None) -> str:
-    """Flow-run name for the ETL flow.
-
-    ``etl-{source}`` when triggered by a known scrape flow, otherwise
-    ``etl-manual`` for direct/manual runs (which must not pretend to be
-    scrape-triggered).
-    """
+    """Return ``etl-{source}`` for scrape triggers, otherwise ``etl-manual``."""
     if source in VALID_ETL_SOURCES:
         return f"etl-{source}"
     return "etl-manual"
@@ -292,14 +268,7 @@ def _etl_flow_run_name() -> str:
 
 @flow(log_prints=True, retries=1, flow_run_name=_etl_flow_run_name)
 def etl_flow(incremental: bool = False, source: str | None = None):
-    """Bronze → gold ETL: dbt build only. Enrichment is a seed-time step —
-    run `just seed --enrich`, then re-run `just etl`.
-
-    Full refresh by default; `incremental=True` runs dbt without
-    `--full-refresh`, so only new rows are appended. ``source`` is the scrape
-    flow that triggered this run (``rankings``/``matches``); it is None for
-    manual runs and only ever one of the known scrape flows.
-    """
+    """Build bronze-to-gold models with dbt; incremental runs append new rows."""
     if source is not None and source not in VALID_ETL_SOURCES:
         raise ValueError(
             f"etl_flow source must be one of {sorted(VALID_ETL_SOURCES)} or None, got {source!r}"
@@ -310,14 +279,7 @@ def etl_flow(incremental: bool = False, source: str | None = None):
 
 
 def register_deployment() -> None:
-    """Create/update the ETL deployment (idempotent by name).
-
-    Registered on the host ``tennis-pool`` work pool so the automation's
-    ``RunDeployment`` action can resolve it by ``etl-flow/etl``. No cron — ETL
-    runs only when a rankings or matches flow run completes successfully. The
-    deployment pins ``incremental=True`` so automation-triggered ETL appends
-    new rows instead of rebuilding from bronze.
-    """
+    """Create or update the automation-triggered incremental ETL deployment."""
     repo_root = Path(__file__).resolve().parent.parent.parent
     from typing import Any, cast
 
@@ -343,19 +305,7 @@ def register_deployment() -> None:
 
 
 def build_scrape_etl_automation(source: str, etl_deployment_id: UUID) -> Automation:
-    """Automation spec: run ETL (tagged ``source``) when one scrape flow succeeds.
-
-    One automation per scrape flow so the ``RunDeployment`` action can pass an
-    explicit, validated ``source`` to the ETL flow — a single shared automation
-    cannot vary its parameters by which flow fired it. Pure builder (no API
-    calls) so the trigger/action wiring is unit-testable without a Prefect
-    server. The action passes ``incremental=True`` explicitly because the
-    automation's ``parameters`` replace (not merge with) the deployment's
-    defaults. The trigger requires the primary event resource to be a flow run
-    (``match={"prefect.resource.id": "prefect.flow-run.*"}``) and its related
-    ``flow`` resource to be the named scrape flow. A failed run — or any other
-    flow completing — never fires ETL.
-    """
+    """Build an automation that runs incremental ETL after a named scrape succeeds."""
     if source not in VALID_ETL_SOURCES:
         raise ValueError(f"source must be one of {sorted(VALID_ETL_SOURCES)}, got {source!r}")
     flow_name = RANKINGS_FLOW_NAME if source == "rankings" else MATCHES_FLOW_NAME
@@ -382,31 +332,24 @@ def build_scrape_etl_automation(source: str, etl_deployment_id: UUID) -> Automat
 
 
 def register_automation() -> None:
-    """Idempotent upsert of the per-source rankings/matches -> ETL automations.
-
-    One automation per scrape flow (``scrape-triggers-etl-rankings`` /
-    ``scrape-triggers-etl-matches``) so each fires ETL tagged with its source.
-    Replaces any existing automation with the same name, and removes the legacy
-    single ``scrape-triggers-etl`` automation so it does not double-fire. Runs on
-    the host worker (alongside the deployments) so the triggers are first-class,
-    visible Prefect automations.
-    """
+    """Register the matches-success -> ETL automation idempotently."""
     with get_client(sync_client=True) as client:
         deployment = client.read_deployment_by_name(f"{etl_flow.name}/{ETL_DEPLOYMENT_NAME}")
-    # Remove the legacy single automation to avoid duplicate ETL runs.
-    with suppress(ValueError):
-        cast(Automation, Automation.read(name=SCRAPE_ETL_AUTOMATION_NAME)).delete()
-    for source in sorted(VALID_ETL_SOURCES):
-        automation = build_scrape_etl_automation(source, deployment.id)
+    for name in (
+        SCRAPE_ETL_AUTOMATION_NAME,
+        f"{SCRAPE_ETL_AUTOMATION_NAME}-rankings",
+        f"{SCRAPE_ETL_AUTOMATION_NAME}-matches",
+    ):
         with suppress(ValueError):
-            cast(Automation, Automation.read(name=automation.name)).delete()
-        automation.create()
-        flow_name = RANKINGS_FLOW_NAME if source == "rankings" else MATCHES_FLOW_NAME
-        print(
-            f"Registered automation {automation.name!r}: "
-            f"{flow_name} success -> {etl_flow.name}/{ETL_DEPLOYMENT_NAME} "
-            f"(source={source})"
-        )
+            cast(Automation, Automation.read(name=name)).delete()
+
+    automation = build_scrape_etl_automation("matches", deployment.id)
+    automation.create()
+    print(
+        f"Registered automation {automation.name!r}: "
+        f"{MATCHES_FLOW_NAME} success -> {etl_flow.name}/{ETL_DEPLOYMENT_NAME} "
+        "(source=matches)"
+    )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

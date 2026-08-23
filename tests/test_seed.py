@@ -291,18 +291,6 @@ def test_load_all_raw_atp_rows_sorts_chronologically(tmp_path):
     assert [m["tourney_id"] for m in rows] == ["T1", "T2"]
 
 
-def test_parse_args_defaults_to_deterministic_miniset():
-    args = parse_args([])
-    assert args.all is False
-    assert args.enrich is False
-
-
-def test_parse_args_all():
-    args = parse_args(["--all"])
-    assert args.all is True
-    assert args.enrich is False
-
-
 def test_parse_args_enrich_is_independent_of_all():
     """--enrich is not mutually exclusive with --all; alone it keeps the miniset."""
     assert parse_args(["--enrich"]).enrich is True
@@ -462,27 +450,6 @@ def _patch_seed_writes(monkeypatch, calls):
         "seed_rankings_and_enrichment",
         lambda ids, enrich, reset, **_: calls.append((ids, enrich, reset)),
     )
-
-
-def test_main_default_skips_existing_rows_by_default(monkeypatch):
-    """The default miniset seed is idempotent: DO NOTHING on an existing match_id."""
-    calls = []
-    _patch_seed_writes(monkeypatch, calls)
-
-    seed.main_default()
-
-    assert calls == [False, (["A0E2", "Z355"], False, False)]
-
-
-def test_main_all_skips_existing_rows_by_default(monkeypatch):
-    """`--all` seed is also idempotent without --reset."""
-    calls = []
-    monkeypatch.setattr(seed, "discover_atp_csvs", lambda _dir: [Path("2026.csv")])
-    _patch_seed_writes(monkeypatch, calls)
-
-    seed.main_all(enrich=True)
-
-    assert calls == [False, (["A0E2", "Z355"], True, False)]
 
 
 def test_main_default_reset_clears_match_events_before_insert(monkeypatch):

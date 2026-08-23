@@ -19,7 +19,6 @@ from src.constants import (
     BRONZE_PROFILES_TABLE,
     BRONZE_RANKINGS_TABLE,
     ENRICH_WORKERS,
-    GOLD_MATCHES_TABLE,
     ROOT,
     get_database_url,
     load_env,
@@ -27,17 +26,13 @@ from src.constants import (
 from src.db.client import CONNECT_TIMEOUT_S, connection, to_dataframe
 from src.features.columns import BRONZE_COLUMNS, CANONICAL_SURFACES
 from src.features.validate import run_ingestion_checks
-from src.utils.countries import UNK, normalize_ioc, valid_ioc
+from src.utils.countries import UNK, valid_ioc
 
-# ATP data provides player identity; Wikipedia adds missing enrichment.
 ATP_DATABASE_CSV = ROOT / "data" / "ATP_player_database.csv"
 
-# Reviewed ranking identity map: explicit source-id assignments take precedence.
-# Unmapped source ids are resolved automatically from source/canonical names.
 RANKING_PLAYER_MAP_CSV = ROOT / "data" / "ranking_player_map.csv"
 RANKING_MAP_COLUMNS = ["ranking_player_id", "ranking_name", "player_id"]
 
-# ATP metadata columns; Wikipedia owns summary and enriched_at.
 ATP_PROFILE_COLUMNS = [
     "player_id",
     "display_name",
@@ -53,8 +48,6 @@ ATP_PROFILE_COLUMNS = [
     "ioc",
 ]
 
-# Raw ATP reference columns (the on-disk ATP_player_database.csv contract).
-# Discovery candidate rows must map onto these exact column names/order.
 ATP_DATABASE_COLUMNS = [
     "id",
     "player",
@@ -70,15 +63,12 @@ ATP_DATABASE_COLUMNS = [
     "ioc",
 ]
 
-# Discovery candidate optional typed fields are validated against the same
-# bounds the typed load applies (see load_atp_profiles). Empty/0 stay absent.
 _OPTIONAL_INT_FIELDS = {
     "weight": (20, 300),
     "height": (100, 250),
     "turnedpro": (1900, 2100),
 }
 
-# Columns every raw ATP match row carries (see data/column_glossary.md).
 RAW_ATP_COLUMNS = [
     "tourney_id",
     "tourney_name",
@@ -118,7 +108,6 @@ RAW_ATP_COLUMNS = [
     "l_bpFaced",
 ]
 
-# Raw ATP level to bronze tournament; non-tier events encode to 0 later.
 LEVEL_MAP = {
     "G": "grand_slam",
     "M": "masters",
@@ -131,53 +120,27 @@ LEVEL_MAP = {
     "P": "professional",
 }
 
-# Rolling-form window for wins_last_10 / matches_last_10.
 RECENT = 10
 
 WIKI_API = "https://en.wikipedia.org/w/api.php"
 USER_AGENT = "TennisML/0.1 (research project; contact@tennis-ml.local)"
 
-# Wikipedia bios stay brief enough for the profile view.
 SUMMARY_MAX_CHARS = 1000
-
-# ── Official Rankings Ingest ───────────────────────────────────
 
 RANKINGS_DIR = ROOT / "data" / "raw" / "rankings"
 ATP_PLAYERS_CSV = RANKINGS_DIR / "atp_players.csv"
 
-# Only atp_rankings_*.csv are discovered; atp_players.csv is metadata.
 RANKINGS_GLOB = "atp_rankings_*.csv"
 
-# Documented raw ranking shape. `player` is either a legacy numeric source id
-# or a canonical ATP id; `points` is empty (NULL) in early eras.
 RANKINGS_COLUMNS = ["ranking_date", "rank", "player", "points"]
 RANKING_TARGET_COLUMNS = ["ranking_date", "player_id", "rank", "points"]
 PLAYER_ID_RE = re.compile(r"^(?:\d+|[A-Za-z0-9]{4,})$")
 
 load_env()
 
-# ── Raw ATP → Bronze transform (shared with seed.py) ──────────────
-
-# Canonical match id rule: the year derived from the match date is prepended to
-# the opaque tourney_id only when that same year is not already repeated at the
-# id's start — "2026-418" + 2026 stays "2026-418" (never "2026-2026-418"),
-# while "1987-foo" + 2026 -> "2026-1987-foo". Shared by bronze ingestion, the
-# seed selection filter, and the match scrape so every path derives the same id.
-
 
 def canonical_match_id(tourney_id: str, match_num: int, year: int | None = None) -> str:
-    """Canonical Sackmann match id ``YYYY-TOURNAMENT_ID-NNN``, date-free.
-
-    The date-derived ``year`` is prepended once, and only when the tourney_id
-    does not already repeat that same year at its start (``2026-418`` + 2026
-    stays ``2026-418``; ``1987`` + 2026 -> ``2026-1987``). Any other four-digit
-    start is a different year and still gets the prefix — the check is against
-    the derived year, never "starts with any four digits". A date-like year
-    (``19670220``) is reduced to its four-digit edition year (``1967``), so the
-    id never embeds a YYYYMMDD. The id is opaque: internal dashes/nonstandard
-    Davis Cup ids pass through untouched, never parsed as numeric. ``match_num``
-    is zero-padded to three digits.
-    """
+    """Return a date-free id, prefixing year once and zero-padding match_num."""
     tid = str(tourney_id).strip()
     if year is not None:
         year = int(year)
@@ -214,10 +177,7 @@ def _float_stat(row: dict[str, Any], key: str) -> float:
 
 
 def _normalize_indoor(value: Any) -> int | None:
-    """Normalize raw ATP indoor field to 1 (indoor), 0 (outdoor), or None (unknown).
-
-    Raw CSVs use 'I'/'O' or 1/0; empty/NaN/other = unknown.
-    """
+    """Map ATP indoor markers to 1, 0, or None for unknown values."""
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
     if isinstance(value, int):
@@ -244,12 +204,7 @@ def _canonical_surface(value: Any) -> str:
 
 
 def _score(m: dict[str, Any]) -> str | None:
-    """Winner-perspective set score with tiebreak digits stripped.
-
-    Raw CSVs put the winner's games first in every set (``6-4 7-6(5)``); the
-    tiebreak point total in parentheses is display noise, so it is removed at
-    ingest (``6-4 7-6``). Empty/0 cells mean no score recorded and map to NULL.
-    """
+    """Return the winner-perspective score without tiebreak digits, or None if absent."""
     value = m.get("score")
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
@@ -273,13 +228,7 @@ def normalize_best_of(
     round_value: str | None = None,
     score: str | None = None,
 ) -> int:
-    """Normalize a best_of source to 1/3/5 with a fixed fallback order.
-
-    A source of exactly 1, 3, or 5 is trusted verbatim. Anything else (missing,
-    0, malformed, or unsupported like 2/4) falls back: round-robin (``rr``)
-    -> 1; grand_slam -> 5; a score with >=4 completed sets -> 5; otherwise -> 3.
-    A three-set score never implies five unless it is a Grand Slam.
-    """
+    """Normalize best-of values to 1, 3, or 5 using round, level, then score fallbacks."""
     try:
         value = int(raw)
     except (TypeError, ValueError):
@@ -430,11 +379,7 @@ def _copy_df_into(
     conflict_col: str,
     update_cols: list[str] | None = None,
 ) -> int:
-    """COPY via a transactional stage table so INSERT can apply ON CONFLICT.
-
-    Returns the number of rows actually inserted/updated, as reported by the
-    database (DO NOTHING skips existing PKs; DO UPDATE counts overwrites).
-    """
+    """COPY through a transactional stage table and return affected row count."""
     columns = list(df.columns)
     columns_sql = ", ".join(columns)
     with (
@@ -475,26 +420,13 @@ def _copy_df_into(
 
 
 def clear_match_events() -> None:
-    """Delete every bronze.match_events row inside one transaction.
-
-    Called by the seed's --reset path so the corpus inserts into an empty
-    table; the table/schema itself is never dropped.
-    """
+    """Delete all bronze.match_events rows without dropping the table."""
     with connection() as conn, conn.transaction(), conn.cursor() as cur:
         cur.execute(cast(LiteralString, f"DELETE FROM {BRONZE_MATCHES_TABLE}"))
 
 
 def insert_bronze_rows(df: pd.DataFrame, *, overwrite: bool = False) -> int:
-    """Insert bronze.match_events rows from a DataFrame; returns the number of
-    rows actually inserted (0 when every row already exists and overwrite is
-    False).
-
-    Shared by the ingest CLI and the dev seed so both paths use one INSERT.
-    match_id is the PK: ingestion skips an existing match_id (DO NOTHING).
-    The seed's --reset path clears bronze.match_events first (see
-    clear_match_events) and inserts fresh rows; overwrite=True stays available
-    for callers that want full-row replacement (DO UPDATE).
-    """
+    """Insert validated bronze rows and return inserted or updated row count."""
     df = df.copy()
     # Canonical surface boundary: absent/0/unmapped source values become hard
     # before validation and insertion, so no non-canonical value reaches bronze.
@@ -523,13 +455,7 @@ def insert_bronze_rows(df: pd.DataFrame, *, overwrite: bool = False) -> int:
 
 
 def load_profiles_for(player_ids: list[str], label: str, force: bool = False) -> int:
-    """Load ATP identities for player_ids and print status (shared with seed).
-
-    `label` names the caller in the status line ("seeded"/"ingested"). Returns
-    the number of profiles actually written (0 when the ATP database file is
-    absent). Idempotent by default (existing player_id rows are skipped);
-    force=True overwrites them.
-    """
+    """Load ATP identities for player_ids, printing status for the caller label."""
     if not ATP_DATABASE_CSV.exists():
         print(f"ATP database not found at {ATP_DATABASE_CSV}, skipping identity load")
         return 0
@@ -551,13 +477,7 @@ def load_profiles_for(player_ids: list[str], label: str, force: bool = False) ->
 def _parse_int(
     series: pd.Series, column: str, player_ids: pd.Series, low: int, high: int
 ) -> pd.Series:
-    """Parse an ATP integer column once at load time (fail loudly on garbage).
-
-    Empty cells become NULL; '0' is the ATP CSV's missing marker and also
-    becomes NULL. Any other non-empty value that is not an integer within
-    [low, high] raises, so malformed strings never silently land in the
-    table as a real number.
-    """
+    """Parse a bounded ATP integer column; empty/zero become NULL and malformed values raise."""
     s = series.fillna("").astype(str).str.strip()
     nonempty = s != ""
     nums = cast(pd.Series, pd.to_numeric(s.mask(~nonempty), errors="coerce"))
@@ -578,11 +498,7 @@ def _parse_int(
 
 
 def _parse_birthdate(series: pd.Series, player_ids: pd.Series) -> pd.Series:
-    """Parse ATP birthdate (YYYYMMDD) once at load time; NULL when empty.
-
-    Raises on any non-empty value that is not a plausible date so malformed
-    strings never land in the table.
-    """
+    """Parse ATP birthdates in YYYYMMDD form; reject non-empty invalid dates."""
     s = series.fillna("").astype(str).str.strip()
     nonempty = s != ""
     parsed = pd.to_datetime(s.mask(~nonempty), format="%Y%m%d", errors="coerce")
@@ -602,13 +518,7 @@ def load_atp_profiles(
     player_ids: set[str] | None = None,
     force: bool = False,
 ) -> int:
-    """Load typed ATP identity metadata while preserving Wikipedia enrichment.
-
-    Idempotent by default: an existing player_id row is skipped (DO NOTHING).
-    Pass force=True to overwrite ATP identity fields of existing rows (DO
-    UPDATE) — enrichment fields (summary, enriched_at) are never touched.
-    Returns the number of profiles actually inserted/updated.
-    """
+    """Load typed ATP identity metadata without overwriting Wikipedia fields."""
     atp = pd.read_csv(csv_path, dtype=str)
     if not {"id", "player", "atpname", "hand", "backhand", "ioc"} <= set(atp.columns):
         raise ValueError(f"ATP database CSV missing expected columns: {csv_path}")
@@ -685,13 +595,7 @@ def _require_csv_columns(path: str | Path, header: list[str], columns: list[str]
 
 
 def _csv_row_state(path: str | Path, row: dict[str, str], columns: list[str]) -> str:
-    """Validate a CSV and return "append" or "exists" for `row`.
-
-    `columns` are the header columns; the first is the dedupe key. A malformed
-    file or column-order mismatch raises; a present key with differing data
-    raises ValueError (conflict). Idempotent when an identical row exists.
-    Never writes.
-    """
+    """Validate a CSV and return ``append`` or ``exists``; never write."""
     rows = _read_csv_rows(path)
     if not rows:
         raise ValueError(f"{Path(path).name} has no header row")
@@ -741,13 +645,7 @@ def _upsert_csv_row(path: str | Path, row: dict[str, str], columns: list[str]) -
 
 
 def _validate_discovery_candidate(candidate: dict[str, object]) -> dict[str, str]:
-    """Validate a candidate ATP identity against the profile-column contract.
-
-    Raises ValueError on invalid required data or a malformed optional typed
-    field, so a bad candidate is rejected before any file is appended. Returns
-    the candidate with empty cells normalized to '' and a valid IOC code
-    (verified code, or the UNK sentinel for missing/invalid input).
-    """
+    """Validate and normalize a candidate ATP identity before file append."""
     raw = {col: _cell(candidate.get(col, "")) for col in ATP_DATABASE_COLUMNS}
     if not raw["id"]:
         raise ValueError("candidate missing ATP player id")
@@ -786,12 +684,7 @@ def persist_atp_player(
 
 
 def canonical_players(csv_path: str | Path = ATP_DATABASE_CSV) -> dict[str, str]:
-    """{canonical player_id: display_name} from the canonical profile reference.
-
-    The canonical id space is the profiles' ATP_Database.id space (the same ids
-    match events and player profiles are keyed on). This is the review target
-    and the validation reference for ranking map targets.
-    """
+    """Return canonical ATP ids and display names from the profile reference."""
     df = pd.read_csv(csv_path, dtype=str)
     if not {"id", "player"} <= set(df.columns):
         raise ValueError(f"canonical player reference CSV missing columns: {csv_path}")
@@ -812,14 +705,7 @@ def _metadata_csv_value(value: Any) -> str:
 def load_player_metadata(
     csv_path: str | Path = ATP_DATABASE_CSV,
 ) -> dict[str, dict[str, str]]:
-    """In-memory {uppercase player_id: {display_name, hand, height, ioc}}.
-
-    Reads the same local ATP reference ``canonical_players`` does, loaded once
-    per flow run — never a per-match query. Values pass through in Sackmann
-    vocabulary when the CSV has them (hand R/L/A, height in cm, IOC code) and
-    stay blank when absent; the CSV's 0 height marker is treated as missing.
-    Players without a row are simply absent from the map.
-    """
+    """Return uppercase player metadata from the local ATP reference CSV."""
     df = pd.read_csv(csv_path, dtype=str)
     if not {"id", "player", "hand", "height", "ioc"} <= set(df.columns):
         raise ValueError(f"player metadata CSV missing expected columns: {csv_path}")
@@ -844,12 +730,7 @@ def _normalize_name(name: str) -> str:
 
 
 def _normalize_name_variants(name: str) -> list[str]:
-    """Normalized-name variants: original and reversed token order.
-
-    Surname-first sources ("Wu Yibing") normalize differently from the
-    canonical given-first form ("Yibing Wu"), so identity matching tries both
-    orientations. Single-token names yield only the original.
-    """
+    """Return normalized name variants in original and reversed token order."""
     tokens = [t for t in name.split() if t]
     variants = [_normalize_name(" ".join(tokens))]
     if len(tokens) >= 2:
@@ -861,15 +742,7 @@ def load_ranking_player_map(
     csv_path: str | Path = RANKING_PLAYER_MAP_CSV,
     canonical_ids: set[str] | None = None,
 ) -> dict[str, str]:
-    """Load and validate the reviewed ranking identity map; returns
-    {ranking_player_id: player_id}.
-
-    The map is authoritative by source id; ranking_name is an audit/review field
-    and is never used for a production write. Raises ValueError on an invalid map
-    before any rows are written: a missing column, an empty required cell, a
-    duplicated source id, a canonical player_id targeted by more than one row, or
-    a target id absent from the canonical player reference.
-    """
+    """Return the reviewed source-to-canonical ranking map after validation."""
     df = pd.read_csv(csv_path, dtype=str)
     missing = set(RANKING_MAP_COLUMNS) - set(df.columns)
     if missing:
@@ -910,13 +783,7 @@ def ranking_name_candidates(
     ranking_rows: list[dict[str, Any]],
     canonical: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Deterministic normalized-name candidate report for maintainer review.
-
-    For each distinct ranking source row this reports the canonical players whose
-    exact name (case-insensitive) or normalized name matches the ranking name,
-    flagging `ambiguous` when a normalized name matches more than one canonical
-    player. Review-only: it never writes and is never used as a production mapping.
-    """
+    """Return a review-only report of exact and normalized ranking-name candidates."""
     if canonical is None:
         canonical = canonical_players()
     exact: dict[str, list[str]] = {}
@@ -949,11 +816,7 @@ def ranking_name_candidates(
 def unmapped_ranking_rows(
     ranking_rows: list[dict[str, Any]], rank_map: dict[str, str]
 ) -> list[dict[str, Any]]:
-    """Ranking source rows not covered by the approved map: id, audit name, count.
-
-    Unmapped rows do not fail an import; this report surfaces them so a maintainer
-    can review and extend the approved map.
-    """
+    """Return unmapped ranking sources grouped by id with audit name and count."""
     counts: dict[str, dict[str, Any]] = {}
     for row in ranking_rows:
         src = str(row["ranking_player_id"]).strip()
@@ -974,12 +837,7 @@ def unmapped_ranking_rows(
 def _canonical_corpus_stats(
     match_rows: list[dict[str, Any]] | None,
 ) -> dict[str, dict[str, int | None]]:
-    """{canonical player_id: {matches, best_rank}} from raw ATP match rows.
-
-    match activity = appearances as winner or loser; best_rank = lowest positive
-    winner/loser rank. Used only to break name-matching ties for identity choice,
-    never to synthesize rank history. None/empty rows yield empty stats.
-    """
+    """Return match activity and best rank stats for identity tie-breaking only."""
     stats: dict[str, dict[str, int | None]] = {}
     for row in match_rows or []:
         for side in ("winner", "loser"):
@@ -1005,16 +863,7 @@ def resolve_ranking_identities(
     canonical: dict[str, str],
     corpus_stats: dict[str, dict[str, int | None]] | None = None,
 ) -> dict[str, str]:
-    """Auto-map ranking source ids to canonical ids by normalized name.
-
-    Deterministic resolution for source ids absent from the approved map: a
-    Exact normalized names map directly. Otherwise the closest normalized name
-    is accepted when it has at least 80% character similarity. Ties resolve by
-    greatest match activity, lower best rank, then lexicographic player_id.
-    Returns {ranking source id: canonical player id}; ids with no usable source
-    name are left out. Never consults the map (explicit entries always win by
-    construction — callers resolve gaps only).
-    """
+    """Auto-map unresolved source ids by normalized name and deterministic tie-breaks."""
     norm_index: dict[str, list[str]] = {}
     for pid, name in canonical.items():
         norm = _normalize_name(name)
@@ -1069,16 +918,7 @@ def load_ranking_rows(
     csv_paths: list[Path],
     rank_limit: int | None = None,
 ) -> pd.DataFrame:
-    """Read and combine ranking CSVs into one validated, typed frame.
-
-    Raises ValueError on any malformed input before a row is returned: a file
-    missing the exact four documented columns, an empty/unparseable
-    ranking_date (YYYYMMDD), a non-integer or non-positive rank, a non-integer
-    player id, or non-empty non-integer points. Empty points are allowed (NULL).
-
-    rank_limit drops rows with rank > limit before validation; dropped rows are
-    outside the requested scope and never validated.
-    """
+    """Return validated ranking CSVs as a typed frame, optionally limited by rank."""
     frames: list[pd.DataFrame] = []
     for path in csv_paths:
         df = pd.read_csv(path, dtype=str)
@@ -1162,11 +1002,7 @@ def _atp_players_names(players_csv: Path) -> dict[str, str]:
 def _unmapped_report(
     top200: pd.DataFrame, rank_map: dict[str, str], players_csv: Path
 ) -> list[dict[str, Any]]:
-    """Top-200 source rows whose player id is absent from the approved map.
-
-    Grouped by source id with the atp_players display name and skipped-row
-    count, so the import report is actionable for maintainers extending the map.
-    """
+    """Group unmapped top-200 rows by source id, display name, and count."""
     names = _atp_players_names(players_csv)
     counts: dict[str, dict[str, Any]] = {}
     for pid in top200["player_id"]:
@@ -1200,14 +1036,7 @@ def backfill_profile_iocs(
     player_ids: set[str],
     players_csv: Path = ATP_PLAYERS_CSV,
 ) -> None:
-    """Backfill bronze.player_profiles.ioc for the given canonical player ids.
-
-    atp_players.csv is the higher-confidence IOC source: only players present in
-    the approved map are touched, and only a valid code replaces the UNK
-    sentinel/empty value — a verified IOC is never overwritten. The caller
-    derives the concrete player set (the seed's match corpus, or every mapped
-    canonical id for a full import).
-    """
+    """Fill missing profile IOCs from the approved ranking source without overwrites."""
     iocs = _atp_players_iocs(players_csv)
     updates: list[tuple[str, str]] = []
     for src_id, canonical in rank_map.items():
@@ -1237,35 +1066,7 @@ def ingest_rankings(
     force: bool = False,
     match_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Official-rankings import; returns the import summary.
-
-    Discover -> validate -> filter rank <= 200 -> map to canonical ids -> upsert.
-    Only the archive's top-200 rows are read (ranks > 200 are ignored). Raw
-    ranking source ids never reach the table: canonical ATP ids are retained
-    directly; legacy numeric ids are resolved through the approved identity map,
-    then auto-mapped by normalized name (deterministic: unique candidate, else greatest match
-    activity, then lower best rank, then lexicographic player_id, using
-    match_rows for the activity/rank tie-break). Explicit map entries always
-    win; auto-mapping only chooses identity and never invents ranking values —
-    only official rank <= 200 archive rows are ingested. Source ids that still
-    cannot be resolved are reported and skipped. Raises ValueError on malformed
-    input or an invalid map before any database write.
-
-    Idempotent by default: an existing (ranking_date, player_id) row is skipped
-    (DO NOTHING). Pass force=True to overwrite existing rows (DO UPDATE).
-
-    player_ids restricts the import to those canonical player ids — the seed
-    passes its exact match-corpus player set; None imports every mapped top-200
-    row. The filtered seed path is silent about global archive gaps and instead
-    returns a `coverage` summary — {seeded, covered, auto_mapped, unresolved} —
-    for the seed's coverage report. Only the full import (player_ids=None)
-    reports global unmapped/auto-mapped rows.
-
-    The ranking-source IOC fallback (atp_players.csv) always runs against a
-    concrete player set — the selected seed ids when supplied, otherwise every
-    mapped canonical id — and only fills NULL/empty/UNK profile IOCs; a
-    verified IOC is never overwritten.
-    """
+    """Import validated top-200 rankings, map identities, upsert rows, and return a summary."""
     csv_paths = discover_ranking_csvs(rankings_dir)
     if not csv_paths:
         print("No atp_rankings_*.csv files found under data/raw/rankings; nothing to import")
@@ -1401,7 +1202,7 @@ def ingest_rankings(
 
 
 def get_players_without_summary() -> list[str]:
-    """Players in bronze.player_profiles who lack a Wikipedia summary."""
+    """Return profile ids whose Wikipedia summary is empty or missing."""
     sql = f"""
         SELECT player_id
         FROM {BRONZE_PROFILES_TABLE}
@@ -1420,11 +1221,7 @@ def _normalized_wiki_name(value: str) -> str:
 
 
 def _normalized_wiki_variants(value: str) -> list[str]:
-    """Normalized wiki-name variants: original and reversed token order.
-
-    Surname-first article titles ("Wu Yibing") normalize differently from the
-    given-first player name ("Yibing Wu"), so enrichment tries both.
-    """
+    """Return normalized Wikipedia name variants in both token orders."""
     base = _normalized_wiki_name(value)
     tokens = base.split()
     variants = [base]
@@ -1491,13 +1288,7 @@ def extract_infobox_fields(summary: str) -> dict[str, str]:
 
 
 def extract_playing_style_paragraph(summary: str) -> str | None:
-    """First paragraph of the article's `Playing style` section, or None.
-
-    The plaintext Wikipedia extract uses `\n\n`-separated paragraphs and
-    `=== Playing style ===` section headers. Returns the first non-empty
-    paragraph after the header, trimmed of the header marker; None when the
-    section is absent or has no usable paragraph.
-    """
+    """Return the first non-empty paragraph in the Wikipedia Playing style section."""
     header = re.search(r"^==+\s*Playing style\s*==+\s*$", summary, re.MULTILINE)
     if not header:
         return None
@@ -1531,13 +1322,7 @@ def clean_bio_paragraph(text: str) -> str:
 
 
 def _fetch_wiki_bio(name: str, pid: str) -> tuple[str, str] | None:
-    """Fetch and parse a Wikipedia bio for one player; no DB access.
-
-    Returns ``(summary_text, page_title)`` when a usable bio is found, else
-    None (printing the per-player SKIP line). Pure HTTP + string parsing, so it
-    is safe to run from worker threads — the batch enricher parallelizes this
-    and performs the DB write on the main thread only.
-    """
+    """Fetch and parse one Wikipedia bio without database access."""
     title = search_wikipedia(name)
     if not title:
         print(f"  SKIP {pid}: no Wikipedia match for {name!r}")
@@ -1596,21 +1381,7 @@ def enrich_player(name: str, player_id: str | None = None) -> bool:
 
 
 def enrich_players(player_ids: list[str], force: bool = False) -> int:
-    """Best-effort enrich of bronze profiles with Wikipedia bios.
-
-    Idempotent by default: profiles that already have a non-empty summary are
-    counted as already enriched and silently skipped, never overwritten. Pass
-    force=True to re-fetch and overwrite every summary. Profiles without a
-    name are counted as no-name skips and never attempted.
-
-    The slow HTTP fetch + parse runs in a thread pool (ENRICH_WORKERS workers);
-    the DB write stays on the main thread on one pooled connection. Per-player
-    lines print only for currently enriching (OK) and failed (SKIP/ERROR)
-    players; pre-skip categories are summarized without per-player lines. The
-    final batch summary distinguishes attempted, already enriched, no name,
-    enriched, and failed (no usable bio or exception). Returns the number of
-    profiles enriched.
-    """
+    """Best-effort enrich profiles with Wikipedia bios; return the enriched count."""
     if not player_ids:
         return 0
     with connection() as conn:
@@ -1661,12 +1432,7 @@ def enrich_players(player_ids: list[str], force: bool = False) -> int:
 
 
 def enrich_missing() -> int:
-    """Idempotent Wikipedia enrichment for bronze profiles missing a summary.
-
-    Queries bronze.player_profiles for rows with null/empty summary and fetches
-    bios from Wikipedia. Skips profiles that already have a non-empty summary.
-    Returns count of profiles enriched.
-    """
+    """Enrich bronze profiles missing summaries and return the enriched count."""
     missing_summary = get_players_without_summary()
     if not missing_summary:
         print("All profiles have summaries. Nothing to do.")

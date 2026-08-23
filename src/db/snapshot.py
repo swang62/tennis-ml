@@ -11,18 +11,14 @@ import duckdb
 from src.constants import DATA_PROCESSED, GOLD_MATCHES_TABLE, get_database_url
 from src.features.columns import FEATURE_COLS, SIMILARITY_COLS
 
-# Training's single, atomically replaced local input.
 SNAPSHOT_PATH = DATA_PROCESSED / "training_snapshot.duckdb"
 
-# Training reads the gold feature/aggregate tables plus the bronze profile
-# metadata (bio summaries, handedness) that similarity/embeddings consume.
 SNAPSHOT_TABLES = (
     ("gold", "match_features"),
     ("gold", "player_profiles"),
     ("bronze", "player_profiles"),
 )
 
-# gold.match_features metadata columns preceding the model feature columns.
 META_COLS = (
     "match_id",
     "match_date",
@@ -34,7 +30,6 @@ META_COLS = (
     "match_won",
 )
 
-# Snapshot order: metadata, model features, then similarity-only columns.
 EXPECTED_FEATURE_ORDER = (*META_COLS, *FEATURE_COLS, *SIMILARITY_COLS)
 
 
@@ -103,10 +98,7 @@ def validate_snapshot(path: Path) -> None:
                     f'snapshot table "{schema}"."{table}" has {dupes_row[0]} duplicate "{key}" rows'
                 )
 
-        # Directional row contract for gold.match_features: match_id is the
-        # physical-match group key and (match_id, player_id) identifies one
-        # directional row. Every match must have exactly two rows (one per
-        # player) with reciprocal opponent ids and complementary labels.
+        # Each physical match must have two reciprocal, complementary rows.
         bad_groups = con.execute(
             f"SELECT COUNT(*) FROM ("
             f" SELECT match_id FROM {GOLD_MATCHES_TABLE}"
@@ -149,9 +141,7 @@ def validate_snapshot(path: Path) -> None:
                 "or non-complementary labels)"
             )
 
-        # Contract: every FEATURE_COLS cell is non-null and finite. dbt already
-        # enforces this in gold; the snapshot re-checks it so training can never
-        # read NULL/NaN/Infinity model features (similarity columns excluded).
+        # Recheck dbt's non-null, finite model-feature contract before training.
         col_checks = " OR ".join(
             f'"{c}" IS NULL OR isnan("{c}") OR isinf("{c}")' for c in FEATURE_COLS
         )
@@ -164,9 +154,7 @@ def validate_snapshot(path: Path) -> None:
                 f"{GOLD_MATCHES_TABLE} has {bad_row[0]} NULL or non-finite model feature cells"
             )
 
-        # best_of domain contract: the best-of-N format is exactly 1, 3, or 5
-        # (enforced at bronze ingest and imputed to 3 when NULL in gold). Any
-        # other value is a broken contract that would poison the model feature.
+        # The model accepts only best_of values 1, 3, and 5.
         bad_best_of = con.execute(
             f"SELECT COUNT(*) FROM {GOLD_MATCHES_TABLE} WHERE best_of NOT IN (1, 3, 5)"
         ).fetchone()
@@ -180,8 +168,7 @@ def validate_snapshot(path: Path) -> None:
         con.close()
 
 
-# Query/fragment parameter names whose values are secrets. Matched case-insensitively
-# against the decoded key when logging a snapshot source URL.
+# Query and fragment keys whose values must be redacted in logs.
 _SENSITIVE_PARAMS = frozenset(
     (
         "password",
@@ -215,9 +202,7 @@ def _mask_secret_values(raw: str) -> str:
 
 
 def _redact_pg_url(url: str) -> str:
-    """Return *url* safe to log: scheme, username, host/port, and database path
-    retained, plus non-sensitive query parameters and fragments. The password in
-    userinfo and values of sensitive query/fragment parameters become ****."""
+    """Return *url* safe to log with passwords and sensitive values redacted."""
     parts = urlsplit(url)
     if "@" in parts.netloc:
         userinfo, host = parts.netloc.rsplit("@", 1)
@@ -256,8 +241,6 @@ def _database_size_summary(path: Path) -> str:
         assert row is not None
     finally:
         con.close()
-    # Documented columns: database_name, database_size, block_size,
-    # total_blocks, used_blocks, free_blocks, wal_size, memory_usage, memory_limit.
     _, size, block_size, total_blocks, used_blocks, free_blocks, wal_size, _, _ = row
     return (
         f"database_size={size} block_size={block_size} total_blocks={total_blocks} "

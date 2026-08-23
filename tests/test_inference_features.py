@@ -1,12 +1,4 @@
-"""Hermetic inference-builder tests against an in-memory DuckDB stand-in.
-
-The seeded PostgreSQL used by earlier versions of this suite is replaced by a
-per-test in-memory DuckDB holding the same deterministic fixture data. Every
-SQL call the builder makes (latest snapshot, profiles, head-to-head, the
-gold.tour_averages singleton, and the direct cross-checks in this file)
-executes against that DuckDB with `%s` params translated to `?`. No live
-database, connection, DATABASE_URL, or seed is involved.
-"""
+"""Hermetic inference-builder tests using an in-memory DuckDB fixture."""
 
 import math
 import re
@@ -31,16 +23,12 @@ from src.features.inference import (
 )
 from src.features.tour_averages import load_tour_averages
 
-# All fixture matches are in 2026 (2026-01-04 .. 2026-07-12); a fixed as-of
-# date after the last match exercises the full snapshot history deterministically.
+# All fixture matches precede this fixed as-of date.
 AS_OF_AFTER_ALL_MATCHES = date(2026, 9, 1)
 
 _DB: duckdb.DuckDBPyConnection | None = None
 
-# The bulk queries drive the requested rows through a multi-argument PostgreSQL
-# unnest, which DuckDB does not support; rewrite only that FROM clause into
-# DuckDB's zipped-UNNEST subquery form so the real bulk SQL runs hermetically
-# against the fixture (the LATERAL/COUNT/GROUP BY semantics stay untouched).
+# Rewrite PostgreSQL's multi-argument unnest for DuckDB without changing query semantics.
 _BULK_UNNEST_RE = re.compile(
     r"unnest\((?P<args>(?:\?::\w+\[\])(?:, \?::\w+\[\])*)\) AS (?P<alias>\w+)\((?P<names>[^)]+)\)"
 )
@@ -68,15 +56,7 @@ def execute_df(sql: str, params: list[object] | None = None) -> pd.DataFrame:
 
 
 # ── Fixture data ─────────────────────────────────────────────────────────────
-#
-# Mirrors the deterministic seeded set the live suite used, narrowed to the
-# players the tests reference:
-#   S0AG (righty, turned pro 2018) and Z355 (righty, 2013) both have rolling
-#   snapshots; A0E2 and F0FV have one snapshot each; the single S0AG-vs-Z355
-#   meeting (2026-07-12) drives head-to-head
-#   and the train/inference parity check; gold.tour_averages holds one
-#   full-pool singleton row whose rate cells equal the pool aggregates, exactly
-#   as dbt materializes them.
+# Mirrors the seeded players, snapshots, meeting, and tour-average singleton used below.
 
 _S0AG = (
     2.0,
@@ -211,13 +191,9 @@ def _snap_rows() -> list[tuple[object, ...]]:
     return rows
 
 
-# Hand-computed gold row for the single parity match (S0AG vs Z355, hard,
-# 2026-07-12): the independent expectation the inference builder must reproduce.
-# Value order: match metadata (5), then FEATURE_COLS. Both directional
-# perspectives are seeded; the mirror row (Z355 perspective) negates diffs,
-# exchanges paired sides, and shares context + h2h_exposure.
+# Independent hand-computed expectation for both perspectives of the parity match.
 _PARITY_GOLD = (
-    # match_id, match_date, player_id, opponent_id, surface
+    # Match metadata precedes FEATURE_COLS.
     "pm-s6",
     date(2026, 7, 12),
     "S0AG",
@@ -375,10 +351,7 @@ def _seed(con: duckdb.DuckDBPyConnection) -> None:
         f"INSERT INTO silver.rolling_features VALUES ({', '.join(['?'] * 27)})",
         _snap_rows(),
     )
-    # The only seeded pair meeting is pm-s6 (S0AG beat Z355 on 2026-07-12),
-    # stored bronze-style: winner on player1_id (constraint winner_id =
-    # player1_id), canonical surface 'hard'. Other seeded matches are never
-    # requested as H2H pairs.
+    # Seed one bronze-style hard-court meeting; other matches are not H2H fixtures.
     con.executemany(
         "INSERT INTO bronze.match_events VALUES (?, ?, ?, ?, ?, ?)",
         [("pm-s6", date(2026, 7, 12), "S0AG", "Z355", "S0AG", "hard")],
@@ -455,10 +428,7 @@ def _duck_db_backed(monkeypatch):
 def _insert_prior_meetings(
     pair_a: str, pair_b: str, meetings: list[tuple[str, str, int, str]]
 ) -> None:
-    """Insert prior meetings as single bronze rows, winner on player1_id.
-
-    Each meeting is (match_id, date_iso, a_won, surface).
-    """
+    """Insert meetings as bronze rows with the winner on player1_id."""
     rows = []
     for match_id, date_iso, a_won, surface in meetings:
         winner, loser = (pair_a, pair_b) if a_won else (pair_b, pair_a)
@@ -473,8 +443,7 @@ def _insert_prior_meetings(
 
 
 def _assert_mirror(row_ab, row_ba):
-    """Swapping the two requested ids mirrors the row: ids swap, signed features
-    negate, paired features exchange, h2h_exposure and context stay equal."""
+    """Assert the mirror relationship for swapped player ids."""
     # Ids swap to requested order.
     assert row_ab["player_id"] == row_ba["opponent_id"]
     assert row_ab["opponent_id"] == row_ba["player_id"]
@@ -528,8 +497,7 @@ def test_two_known_players_each_surface(surface):
 
 @pytest.mark.parametrize("best_of", [1, 3, 5])
 def test_best_of_in_feature_order_and_emitted(best_of):
-    """best_of is emitted verbatim at the context position (after is_indoor,
-    before tournament_level) in the exact FEATURE_COLS order."""
+    """Assert that best_of is emitted in the feature contract."""
     out = build_inference_features(
         "S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES, best_of=best_of
     )
@@ -557,8 +525,7 @@ def test_best_of_scalar_bulk_parity(best_of):
 
 
 def test_best_of_invariants_under_id_swap():
-    """Swapping the requested ids preserves best_of and the complementary row
-    (best_of is a symmetric context feature)."""
+    """Swapping ids preserves best_of and mirrors the row."""
     out_ab = build_inference_features(
         "S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES, best_of=5
     )
@@ -570,8 +537,7 @@ def test_best_of_invariants_under_id_swap():
 
 
 def test_reversed_ids_mirror():
-    """Swapping the two ids must produce the mirror row: ids swapped, signed
-    features negated, paired features exchanged, exposure/context unchanged."""
+    """Swapping ids produces the complementary feature row."""
     out_ab = build_inference_features("S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
     out_ba = build_inference_features("Z355", "S0AG", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
     row_ab, row_ba = out_ab.iloc[0], out_ba.iloc[0]
@@ -605,12 +571,7 @@ def test_known_players_profile_features():
 
 
 def test_years_pro_time_aware_and_cold_start():
-    """years_pro derives from as_of_date, not a fixed snapshot of turned_pro.
-
-    At an as-of date before any seeded match (empty snapshot pool), profile
-    values still come from bronze.player_profiles and years_pro tracks the
-    as-of year, while all rolling features fall back to their constants.
-    """
+    """years_pro follows as_of_date even when rolling features cold-start."""
     out = build_inference_features("S0AG", "Z355", "hard", as_of_date=date(2025, 6, 1))
     row = out.iloc[0]
     assert row["player_years_pro"] == 7.0  # 2025 - 2018
@@ -620,14 +581,7 @@ def test_years_pro_time_aware_and_cold_start():
 
 
 def test_materialized_defaults_return_expected_values():
-    """The materialized gold.tour_averages singleton drives cold-start imputation.
-
-    Scalar inference performs no on-demand AVG/PERCENTILE queries: it reads the
-    single full-pool singleton row regardless of the as-of date. Every default
-    cell is finite, re-reads are deterministic, and a cold-start pair imputes
-    exactly those materialized values on both sides (so every diff stays
-    neutral).
-    """
+    """Cold starts use finite, deterministic values from the tour-average singleton."""
     defaults = cast(dict[str, float], load_tour_averages())
     assert set(TOUR_AVERAGES_FALLBACK_COLS).issubset(defaults.keys())
     for col in TOUR_AVERAGES_FALLBACK_COLS:
@@ -644,9 +598,7 @@ def test_materialized_defaults_return_expected_values():
     for col in DIFF_COLS:
         assert row[col] == 0, f"{col} should be neutral for two unknowns: {row[col]!r}"
     assert row["player_weighted_form_10"] == pytest.approx(float(defaults["weighted_form_10"]))
-    # win_rate_10 / ace_rate_10 are only exposed as canonical-minus-opponent
-    # diffs; two unknowns impute the same default on both sides, so the diffs
-    # collapse to exactly 0 and lock the imputed default values.
+    # Equal cold-start defaults produce neutral win-rate and ace-rate diffs.
     assert row["win_rate_diff"] == 0
     assert row["ace_rate_diff"] == 0
     # The removed per-side features are absent from the finalized contract.
@@ -738,10 +690,7 @@ def test_one_missing_player_imputed_no_nans(args):
     assert row[f"{unknown_prefix}_weighted_form_10"] == pytest.approx(
         float(pool["weighted_form_10"])
     )
-    # Profile-derived features for the unknown player are pool-imputed from
-    # the gold.tour_averages singleton. They must be finite, non-NaN, and
-    # within valid ranges (the exact value shifts with data — the contract is
-    # "plausible float," not a specific compute).
+    # Unknown profile features come from the finite, bounded tour-average singleton.
     assert 0.0 <= row[f"{unknown_prefix}_is_left_handed"] <= 1.0, (
         f"left_handed_rate out of bounds: {row[f'{unknown_prefix}_is_left_handed']}"
     )
@@ -752,8 +701,7 @@ def test_one_missing_player_imputed_no_nans(args):
 
 
 def test_one_missing_player_reversed_mirror():
-    """Mirror of the pool-imputed test with one unknown: both argument orders
-    are mirrors (ids swap, signed features negate, context equal)."""
+    """One unknown player still produces mirror rows when ids are swapped."""
     row_known_first = build_inference_features(
         "S0AG", "UNKNOWN_ID", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES
     )
@@ -764,11 +712,7 @@ def test_one_missing_player_reversed_mirror():
 
 
 def test_both_unknowns_neutral_diffs():
-    """Two unknown players receive identical defaults, so all diffs are 0.
-
-    as_of_date is passed explicitly (not the default) so the test stays
-    deterministic; the neutral-diff property holds for any as-of date.
-    """
+    """Two unknown players receive identical defaults and neutral diffs."""
     out = build_inference_features("A0ZZ", "ZZ99", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
     row = out.iloc[0]
     assert row["player_id"] == "A0ZZ"
@@ -1005,15 +949,11 @@ def test_null_handedness_falls_back_to_pool_rate(monkeypatch):
     assert values["years_pro"] == 8.0  # 2026 - 2018
 
 
-# ── Head-to-head (perspective-explicit; recent-5 exposure, recent-5 advantages) ──
-#
-# Seed data has no repeated pair, so H2H tests use isolated synthetic rows.
+# ── Head-to-head: perspective-explicit recent-5 exposure and advantages ──
 
 
 def test_h2h_zero_prior_meetings_neutral():
-    """A pair that never met (UNKNOWN_ID has no silver rows at all) gets the
-    locked neutral fallback: 0 exposure, advantage (0+1)/(0+2)-0.5 = 0 on both
-    the overall and the current-surface window."""
+    """A pair with no meetings gets zero exposure and neutral H2H advantages."""
     out = build_inference_features("S0AG", "UNKNOWN_ID", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
     row = out.iloc[0]
     assert row["player_id"] == "S0AG"
@@ -1026,13 +966,7 @@ def test_h2h_zero_prior_meetings_neutral():
 
 
 def test_bulk_never_met_pair_zero_exposure():
-    """Scalar/bulk parity for a never-met pair: both report h2h_exposure 0.
-
-    Regression: the bulk recent-5 query counts non-null match ids, so its
-    LEFT JOIN LATERAL null-extended row must not inflate a never-met pair to a
-    meeting_count of 1 (COUNT(*) would). The bulk row is byte-identical to the
-    scalar row.
-    """
+    """Scalar and bulk builders agree for a pair with no meetings."""
     req = {
         "player_id": "S0AG",
         "opponent_id": "UNKNOWN_ID",
@@ -1047,8 +981,7 @@ def test_bulk_never_met_pair_zero_exposure():
 
 
 def test_bulk_met_pair_still_counts_exposure():
-    """The fix must not deflate real meetings: the seeded S0AG-vs-Z355 meeting
-    still counts once through the bulk recent-5 path, matching the scalar builder."""
+    """The seeded meeting counts once in both bulk and scalar paths."""
     req = {
         "player_id": "S0AG",
         "opponent_id": "Z355",
@@ -1063,17 +996,13 @@ def test_bulk_met_pair_still_counts_exposure():
 
 
 def test_h2h_real_seeded_meeting():
-    """A real seeded meeting: S0AG beat Z355 once (Hamburg, 2026-07-12, hard),
-    so after that date the pair has exactly 1 prior won by the requested S0AG
-    side: advantage (1+1)/(1+2)-0.5 = 1/6. Reversed ids mirror it."""
+    """The seeded meeting contributes one prior win and mirrors when reversed."""
     out = build_inference_features("S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
     row = out.iloc[0]
     assert row["player_id"] == "S0AG"  # requested order preserved
     assert row["h2h_exposure"] == 1
     assert row["h2h_advantage"] == pytest.approx((1 + 1) / (1 + 2) - 0.5)  # 1/6
-    # The one meeting was on hard: surface advantage on hard is the same 1/6;
-    # a clay request has zero surface meetings in the window -> neutral
-    # (0+1)/(0+2)-0.5 = 0.
+    # The hard meeting contributes 1/6; clay has no prior meetings and stays neutral.
     assert row["h2h_surface_advantage"] == pytest.approx((1 + 1) / (1 + 2) - 0.5)
     out_clay = build_inference_features("S0AG", "Z355", "clay", as_of_date=AS_OF_AFTER_ALL_MATCHES)
     assert out_clay.iloc[0]["h2h_surface_advantage"] == 0.0
@@ -1089,8 +1018,7 @@ def test_h2h_real_seeded_meeting():
 
 
 def test_h2h_first_and_second_meeting_boundaries():
-    """First meeting (as-of on the meeting date) -> zero priors + neutral;
-    second meeting -> exactly one prior, with correct advantage on both sides."""
+    """As-of dates exclude same-day meetings and include prior meetings."""
     a, b = "H2H_F", "H2H_G"
     _insert_prior_meetings(a, b, [("h2h-f1", "2026-05-20", 1, "clay")])
     # On the first meeting's own date: strictly-before excludes it.
@@ -1115,10 +1043,7 @@ def test_h2h_first_and_second_meeting_boundaries():
 
 
 def test_h2h_last5_recency_drops_oldest():
-    """A 6th prior meeting drops the oldest from the recency window: only the
-    5 most recent meetings feed the advantage. The dropped meeting is the
-    pair's only A win, so the requested A side has 0 wins in the window:
-    (0+1)/(5+2)-0.5. Exposure is the recent-5 count, 5."""
+    """Only the five most recent meetings contribute to H2H advantage."""
     a, b = "H2H_C", "H2H_D"
     _insert_prior_meetings(
         a,
@@ -1141,9 +1066,7 @@ def test_h2h_last5_recency_drops_oldest():
 
 
 def test_h2h_surface_advantage_filters_bounded_window():
-    """h2h_surface_advantage smooths over the surface-matching subset of the
-    five most recent meetings only (gold's pair_meetings semantics): an old
-    surface win outside the window never counts, and the mirror negates."""
+    """Surface H2H advantage uses matching surfaces within the recent-five window."""
     a, b = "H2H_L", "H2H_M"
     _insert_prior_meetings(
         a,
@@ -1159,9 +1082,7 @@ def test_h2h_surface_advantage_filters_bounded_window():
     )
     out = build_inference_features(a, b, "clay", as_of_date=date(2026, 7, 1))
     row = out.iloc[0]
-    # Exposure is the recent-5 count, 5; the recent-5 window is v2..v6, of
-    # which four are clay with two A wins: (2+1)/(4+2)-0.5 = 0.0. Overall
-    # advantage over all five window meetings (2 wins): (2+1)/(5+2)-0.5 = -1/14.
+    # The recent-5 window is v2..v6: two clay wins and two overall wins.
     assert row["h2h_exposure"] == 5
     assert row["h2h_surface_advantage"] == pytest.approx((2 + 1) / (4 + 2) - 0.5)  # 0.0
     assert row["h2h_advantage"] == pytest.approx((2 + 1) / (5 + 2) - 0.5)  # -1/14
@@ -1172,8 +1093,7 @@ def test_h2h_surface_advantage_filters_bounded_window():
 
 
 def test_h2h_same_date_meetings_excluded():
-    """Meetings on the as-of date itself are excluded (strictly-before rule);
-    the next day both count."""
+    """Same-day meetings are excluded; the next day both count."""
     a, b = "H2H_E", "H2H_I"
     _insert_prior_meetings(
         a, b, [("h2h-s1", "2026-03-10", 1, "hard"), ("h2h-s2", "2026-03-10", 0, "hard")]
@@ -1189,8 +1109,7 @@ def test_h2h_same_date_meetings_excluded():
 
 
 def test_h2h_reversed_raw_ids_mirror():
-    """Reversing the raw input ids mirrors the H2H fields: advantages negate,
-    exposure stays equal, and the full row satisfies the mirror property."""
+    """Reversing ids negates H2H advantages and preserves exposure."""
     a, b = "H2H_J", "H2H_K"
     _insert_prior_meetings(
         a,
@@ -1205,10 +1124,7 @@ def test_h2h_reversed_raw_ids_mirror():
     assert row_ab.iloc[0]["h2h_surface_advantage"] == pytest.approx((1 + 1) / (2 + 2) - 0.5)
 
 
-# ── Train/inference parity (strongest train/serve agreement check) ──
-#
-# The gold row for the single parity match (S0AG vs Z355, hard, 2026-07-12) is
-# a hand-computed fixture literal; the builder must reproduce it exactly.
+# ── Train/inference parity ──
 
 _PARITY_MATCH_SQL = """
 SELECT mf.*
@@ -1234,12 +1150,7 @@ LIMIT 1
 
 
 def test_train_inference_parity_on_historical_match():
-    """The gold row built from the strictly-prior snapshot (date-strict
-    LATERAL) and an inference row built at that match's date (from only
-    strictly-earlier data) must agree on EVERY FEATURE_COL within 1e-6. No
-    column is skipped: the finalized contract gives gold and inference
-    identical strictly-prior date semantics for ranking, rank points, age,
-    rolling state, and the matches_10 exposure."""
+    """Gold and inference rows agree under strictly-prior snapshot semantics."""
     gold_ab = execute_df(_PARITY_MATCH_SQL, ["S0AG"]).iloc[0]
     out_ab = build_inference_features(
         str(gold_ab["player_id"]),
@@ -1280,8 +1191,7 @@ def test_train_inference_parity_on_historical_match():
 
 
 def test_new_contract_features_present_and_finite():
-    """The return-strength differential and the rate-exposure counts are part
-    of the contract: present, finite, and carrying the expected values."""
+    """Contract feature diffs and exposure counts are present and finite."""
     out = build_inference_features("S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
     row = out.iloc[0]
     assert "return_points_won_pct_diff" in out.columns
@@ -1299,13 +1209,7 @@ def test_new_contract_features_present_and_finite():
     assert row["opponent_matches_10"] == 4
 
 
-# ── Lifetime dominance (Dominance Ratio, unbounded history) ──
-#
-# SQL materializes lifetime `dominance` = return_points_won_pct /
-# (1 - serve_win_pct) per snapshot at full precision (no truncation); the
-# builder reads the stored value and emits `dominance_diff` (signed, negates
-# on side swap). It never recomputes from the rounded 10-match rates. The
-# pool fallback is the materialized tour-average lifetime mean.
+# ── Lifetime dominance uses the materialized unbounded-history ratio ──
 
 
 def _lifetime_dominance(return_pts_won: float, serve_pts_won: float) -> float:
@@ -1314,12 +1218,7 @@ def _lifetime_dominance(return_pts_won: float, serve_pts_won: float) -> float:
 
 
 def test_dominance_diff_formula_and_finite():
-    """dominance_diff reproduces the lifetime Dominance Ratio, not last-10.
-
-    Both known players carry stored dominance; the diff must equal
-    formula(S0AG) - formula(Z355), and the value must be finite. The test
-    fails if dominance is missing or non-finite (the diff would be NaN).
-    """
+    """dominance_diff uses the lifetime Dominance Ratio, not last-10 rates."""
     out = build_inference_features("S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
     row = out.iloc[0]
     expected = _lifetime_dominance(0.42, 0.63) - _lifetime_dominance(0.40, 0.55)
@@ -1345,8 +1244,7 @@ def test_dominance_diff_mirror_negates():
 
 
 def test_dominance_cold_start_two_unknown_neutral():
-    """Two unknown players fall back to the pool lifetime dominance mean, so
-    dominance_diff is exactly 0 and finite (cold start)."""
+    """Two unknown players use the pool lifetime dominance mean."""
     out = build_inference_features("ZZZZ", "YYYY", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
     row = out.iloc[0]
     assert math.isfinite(row["dominance_diff"])
@@ -1358,9 +1256,7 @@ def test_dominance_cold_start_two_unknown_neutral():
 
 
 def test_dominance_one_known_one_unknown_fallback():
-    """One known player keeps its stored lifetime dominance; the unknown side is
-    pool-imputed. dominance_diff is finite and reflects the fallback (non-zero
-    because the known player's dominance differs from the pool mean)."""
+    """One known player is compared with the pool lifetime dominance mean."""
 
     out = build_inference_features("S0AG", "UNKNOWN_ID", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
     row = out.iloc[0]
@@ -1379,13 +1275,7 @@ def test_dominance_one_known_one_unknown_fallback():
 
 
 def test_surface_form_and_days_since_diffs():
-    """The two contract diffs carry exact training-parity semantics.
-
-    surface_form_diff picks the CURRENT surface's carried per-surface rate
-    (clay/grass query their own columns; carpet uses the neutral 0.5 on both
-    sides); days_since_last_match_diff is ln(1 + capped as_of-minus-prior) per
-    side, differenced, with both sides capped at 30 before the transform.
-    """
+    """Surface form and days-since-last-match diffs match the feature contract."""
     # Strictly-prior snapshots at 2026-07-12: S0AG s5 (05-20, +53d), Z355 z3
     # (02-25, +137d); both cap to 30, so the diff is ln(31) - ln(31) = 0.0.
     out = build_inference_features("S0AG", "Z355", "hard", as_of_date=date(2026, 7, 12))

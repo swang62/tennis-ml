@@ -1,8 +1,4 @@
-"""BentoML service for the stacked ensemble and read-only dashboard data.
-
-The NN uses the deploy-time ONNX artifact; finalized features are built from
-ids in-service (scalar and bulk) against the live PostgreSQL gold tables.
-"""
+"""BentoML service for predictions and read-only dashboard data."""
 
 import builtins
 import json
@@ -13,7 +9,7 @@ import pickle
 from collections.abc import Callable
 from datetime import date, datetime
 from decimal import Decimal
-from enum import Enum, IntEnum, StrEnum
+from enum import IntEnum, StrEnum
 from time import perf_counter
 from typing import Any, cast
 
@@ -60,8 +56,7 @@ from src.serving.directory import PLAYERS_SQL, directory_players
 from src.training.similarity import PlayerSimilarity
 from src.utils.countries import resolve_ioc, valid_ioc
 
-# Canonical champion manifest baked at deploy time (written by deploy.py from
-# the champion's exact lineage tags; packaged via bentofile.yaml).
+# Deploy writes the champion manifest from its exact lineage tags.
 AUX_DIR = DEPLOY_ARTIFACTS
 MODEL_INFO_FILE = AUX_DIR / "model_info.json"
 
@@ -83,9 +78,7 @@ def _validate_feature_contract(estimator: Any, artifact_name: str) -> None:
         )
 
 
-# Serving dependencies stay here. Model packages are pinned because models are pickled.
-# base_image avoids BentoML's default build-essential injection; ca-certificates
-# and bash are the only system deps needed at runtime.
+# Pin model dependencies because the artifacts are pickled. Install only runtime OS deps.
 SERVING_IMAGE = Image(
     base_image="python:3.12-slim",
     distro="",
@@ -125,11 +118,7 @@ _NORMALIZE_KEYS = frozenset(
 
 # ── SQL (table names interpolated from constants; values always via `%s`) ──
 
-# One point query: bronze metadata (bp.*) joined to the dbt-materialized gold
-# aggregates (gp.*) and the one-row tour singleton (cross join). current_rank
-# is already materialized in gold.player_profiles via dbt (official ranking
-# with match-time fallback); no per-query CTE needed. Tour comparison deltas
-# are computed in Python, not SQL.
+# Gold supplies materialized profile aggregates and the tour singleton supplies benchmarks.
 _PROFILE_SQL = f"""
 SELECT
     bp.*,
@@ -165,9 +154,7 @@ CROSS JOIN {TOUR_AVERAGES_TABLE} ta
 WHERE bp.player_id = %s
 """
 
-# Official weekly history only: bronze.rankings, chronological. Never derived
-# from match rows. The response envelope stays {rank_date, rank}; points is
-# selected for parity with the source but not exposed.
+# Use official weekly rankings only; match rows are not a fallback here.
 _RANK_HISTORY_SQL = f"""
 SELECT ranking_date, rank, points
 FROM {BRONZE_RANKINGS_TABLE}
@@ -175,10 +162,7 @@ WHERE player_id = %s
 ORDER BY ranking_date
 """
 
-# Individual match rows, newest first: no tournament dedup, so every round of
-# an occurrence appears (e.g. the Rome final and its earlier rounds) up to the
-# visible limit. bronze.match_date is the tournament start date, so
-# same-occurrence rows tie and are broken deterministically by match_id.
+# Return every matching round, newest first, with deterministic match_id ties.
 _MATCH_HISTORY_SQL = f"""
 SELECT
     pm.match_id, pm.match_date, br.tournament, br.tournament_name, pm.surface, br.round,
@@ -206,7 +190,7 @@ ORDER BY pm.match_date DESC, pm.match_id DESC
 LIMIT %s
 """
 
-# Direct bronze pair read: one row per meeting, no silver expansion or dedup.
+# Read one row per meeting directly from bronze.
 _H2H_MEETINGS_SQL = f"""
 SELECT match_id, match_date, tournament, tournament_name, round, surface, score,
        player1_id, player2_id, winner_id
@@ -226,11 +210,7 @@ SELECT (
        (SELECT COUNT(match_id) FROM {BRONZE_MATCHES_TABLE}) AS total_matches
 """
 
-# BentoML uses the build context's README as the bento doc (OpenAPI
-# info.description) unless the service sets its own. The repo README is not an
-# API reference, so every /api/ endpoint is documented here manually: the
-# Starlette GET routes are mounted handlers the OpenAPI generator does not
-# introspect, so they exist in this description only.
+# Set an explicit API description because mounted GET routes are not introspected.
 SERVICE_DESCRIPTION = """\
 # Tennis Match Prediction API
 
@@ -275,14 +255,7 @@ def _effective_log_level() -> int:
     return getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
 
 
-# LOG_LEVEL is the effective level for the app logger and BentoML's native
-# access log. Suppress BentoML's noisy lifecycle INFO (initialized/cleanup
-# spam) by pinning "bentoml", but leave its child "bentoml.access" at
-# LOG_LEVEL: the AccessLogMiddleware (api_server.logging.access, enabled by
-# default) wraps the whole HTTP app — the mounted Starlette GET routes and the
-# Bento API POST routes — and emits one concise line per request (client,
-# scheme, method, path, status, latency; never headers, bodies, or query
-# strings) only while that logger sits at INFO or below.
+# Keep lifecycle logs quiet while leaving request access logs at LOG_LEVEL.
 _log_level = _effective_log_level()
 logging.getLogger("bentoml").setLevel(logging.WARNING)
 logging.getLogger("bentoml.access").setLevel(_log_level)
@@ -293,11 +266,7 @@ if not _log.handlers:
 
 
 class _SuppressRequestValidationTraceback(logging.Filter):
-    """BentoML answers malformed API requests with a 400 (pydantic
-    ValidationError raised while deserializing, before the method runs) but
-    also logs a full ERROR traceback for each one. Drop that client-error
-    noise at the emitting logger and log one concise warning instead; 500s
-    and other error tracebacks pass through untouched."""
+    """Replace BentoML validation tracebacks with concise 400 warnings."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         exc_info = record.exc_info
@@ -317,24 +286,17 @@ class _SuppressRequestValidationTraceback(logging.Filter):
         return False
 
 
-# The filter must sit on the logger that emits the traceback, not an ancestor
-# (logging only filters records at the emitting logger). BentoML pins the
-# internal name; if a future version renames it the filter degrades to a no-op.
+# Attach the filter to the emitting logger; ancestor filters do not see records.
 logging.getLogger("bentoml._internal.server.http_app").addFilter(
     _SuppressRequestValidationTraceback()
 )
 
 # ── Read-only data endpoints (GET, no auth) ────────────────────────────────
-# Bento APIs are POST-only, so dashboard GET routes use a mounted Starlette app.
-# SQL values are always parameterized; response shapes are a dashboard contract.
+# Dashboard GET routes use the mounted Starlette app; SQL values stay parameterized.
 
 
 def _safe_query(sql: str, params: list[object] | None = None) -> pd.DataFrame:
-    """Run *sql* and return the result; return empty DataFrame only when a
-    dbt-created relation (silver/gold table) does not exist yet, so the web
-    dashboard renders an empty state instead of a 500 before ETL. Other
-    failures (bad columns, connection errors) propagate to the 500 handler.
-    """
+    """Return an empty frame for missing dbt tables; propagate other failures."""
     try:
         return execute_df(sql, params)
     except _pg_errors.UndefinedTable:
@@ -411,17 +373,7 @@ def _stack_evidence(
     *,
     temperature: float = 1.0,
 ) -> dict[str, float]:
-    """Per-base antisymmetric evidence -> stacked p_win + symmetric base probs.
-
-    `pairs` maps each base name to its two directional probabilities (p_ab,
-    p_ba) in the requested orientation. Each base's paired scores are projected
-    to antisymmetric evidence, the three evidence values are stacked in fixed
-    order and run through the no-intercept logistic stacker, and the symmetric
-    base probabilities are returned alongside p_win. `temperature` calibrates
-    only p_win (default 1.0 = no-op); base probabilities stay uncalibrated.
-    Pure numpy/sklearn — no Bento/DB state — so it is unit-testable in
-    isolation.
-    """
+    """Stack paired base probabilities into symmetric base scores and ``p_win``."""
     order = list(stack_order) if stack_order is not None else list(STACK_ORDER)
     if list(pairs.keys()) != order:
         raise ValueError(
@@ -500,15 +452,7 @@ class PredictFromIdsRow(BaseModel):
 def _predict_from_ids_bulk_impl(
     rows: list[PredictFromIdsRow], predict_proba: object
 ) -> pd.DataFrame:
-    """Build + predict a batch; `predict_proba` is the service's shared ensemble.
-
-    Each row accepts the same fields as `predict_from_ids` (including its own
-    historical `as_of_date`). Both orientation rows are built per context
-    (forward and reversed), paired, and stacked through the shared ensemble.
-    Returns a
-    DataFrame with the finalized FEATURE_COLS plus ids and the four probability
-    columns, in input order with the REQUESTED ids.
-    """
+    """Build both orientations, run the shared ensemble, and preserve input order."""
     started_at = perf_counter()
     normalized: list[dict[str, object]] = []
     for row in rows:
@@ -576,8 +520,7 @@ def _player_profile(request: Request) -> JSONResponse:
         df = _safe_query(_PROFILE_SQL, [player_id])
     except Exception as exc:
         return _err(500, f"profile query failed: {exc}")
-    # One point query: the player's materialized profile row plus the tour
-    # singleton (cross join). An empty result means the player is unknown.
+    # The empty result means the player is unknown.
     if df.empty:
         return _err(404, f"unknown player_id: {player_id}")
     row = first_row_dict(df)
@@ -606,9 +549,7 @@ def _player_profile(request: Request) -> JSONResponse:
         ),
     }
 
-    # Deltas are player minus tour, computed here — never in SQL. The three
-    # return-side benchmarks derive from their serve complements; nulls flow
-    # through unchanged.
+    # Compute player-minus-tour deltas here; return benchmarks use serve complements.
     tour_comparisons = {
         "first_serve_in_pct": delta("first_serve_in_pct", row["tour_first_serve_pct"]),
         "aces_per_first_serve": delta("aces_per_first_serve", row["tour_ace_rate"]),
@@ -680,8 +621,7 @@ def _player_profile(request: Request) -> JSONResponse:
             "delta": _iso(row["rank_points_delta"]),
         }
 
-    # Country metadata resolved from the profile's stored IOC; missing/invalid
-    # codes resolve to the UNK sentinel ("", "Country unknown").
+    # Resolve stored IOC values through the shared UNK fallback.
     ioc = valid_ioc(row["ioc"])
     iso2, country_name = resolve_ioc(ioc)
 
@@ -753,11 +693,7 @@ def _match_history(request: Request) -> JSONResponse:
         return _err(500, f"match history query failed: {exc}")
     matches = []
     for r in _records(df):
-        # opponent_ranking preserves the source value first, then the official
-        # rank history on/before the match date (both may be NULL). The display
-        # field is ready for the UI: a known (resolved/mapped) opponent with no
-        # top-200 row reads 200+; an unresolved identity reads N/A. Current
-        # rank is never consulted.
+        # Prefer the source rank, then the latest official rank on or before the match.
         ranking = r["opponent_ranking"]
         if ranking is not None:
             rank_display = ranking
@@ -892,11 +828,7 @@ def _similar_players(request: Request) -> JSONResponse:
 
 
 def _non_secret_database_meta() -> dict[str, object]:
-    """Non-secret connection metadata parsed from DATABASE_URL.
-
-    Reports server address, port, and database name only — never credentials or
-    the connection URL itself.
-    """
+    """Return server, port, and database name without credentials."""
     from urllib.parse import unquote, urlsplit
 
     raw = os.environ.get("DATABASE_URL") or ""
@@ -912,12 +844,7 @@ def _non_secret_database_meta() -> dict[str, object]:
 
 
 def _model_info(_request: Request) -> JSONResponse:
-    """Baked champion manifest, deployment mode, and non-secret DB metadata.
-
-    Production mode is claimed only when the image runs with SERVING_MODE=production
-    AND the baked manifest is present; source-mode local serving always reports
-    development.
-    """
+    """Return the champion manifest, serving mode, and non-secret DB metadata."""
     manifest: dict[str, object] | None = None
     try:
         manifest = json.loads(MODEL_INFO_FILE.read_text())
@@ -934,13 +861,7 @@ def _model_info(_request: Request) -> JSONResponse:
 
 
 def _load_serving_temperature() -> float:
-    """Load the calibration temperature from the packaged model_info manifest.
-
-    Reads ``calibration.temperature`` (deploy embeds the pinned value; 1.0 for
-    legacy champions). A missing/invalid/non-positive/non-finite value falls
-    back to 1.0 (no-op) so serving never crashes on a broken calibration and
-    never silently collapses to 0.5.
-    """
+    """Load a positive finite calibration temperature, or return the 1.0 no-op."""
     try:
         manifest = json.loads(MODEL_INFO_FILE.read_text())
         value = manifest["calibration"]["temperature"]
@@ -958,13 +879,7 @@ def _load_serving_temperature() -> float:
 
 
 def _health(_request: Request) -> JSONResponse:
-    """Liveness plus PostgreSQL reachability via an authenticated SELECT 1.
-
-    A 200 implies the service finished initializing (models loaded, schema
-    bootstrapped) — DATA_APP only answers once the service is serving — and
-    that PostgreSQL is reachable right now. The error body is a static
-    message so no connection details leak.
-    """
+    """Report liveness and PostgreSQL reachability without leaking details."""
     try:
         execute_df("SELECT 1")
     except Exception:
@@ -973,8 +888,7 @@ def _health(_request: Request) -> JSONResponse:
     return _ok({"status": "healthy"})
 
 
-# Mounted at the service root; coexists with the POST-only @bentoml.api routes
-# (the SDK's server checks its own routes first, then falls through to mounts).
+# Mount at the service root alongside the POST-only Bento routes.
 
 
 async def _handle_starlette_error(_request: Request, exc: Exception):
@@ -1015,12 +929,7 @@ DATA_APP = Starlette(
 
 
 class _LGBMProbaAdapter:
-    """Expose sklearn-style predict_proba over a native LightGBM Booster.
-
-    bentoml.lightgbm.load_model returns the native Booster, which has no
-    predict_proba; Booster.predict already returns P(class 1) for the binary
-    objective, so predict_proba stacks [1 - p, p] to match the sklearn API.
-    """
+    """Adapt a native LightGBM Booster to sklearn's ``predict_proba`` interface."""
 
     def __init__(self, booster: Any) -> None:
         self._booster = booster
@@ -1044,8 +953,7 @@ class _LGBMProbaAdapter:
 class TennisPredictor:
     bento_linear = bentoml.models.BentoModel("linear_best:latest")
     bento_gbdt = bentoml.models.BentoModel("gbdt_best:latest")
-    # NN is not a BentoModel here — served from data/processed/nn_best.onnx
-    # (materialized at deploy time from the pinned nn_best MLflow version).
+    # Serve the NN from the deploy-time ONNX artifact, not a BentoModel.
     bento_production = bentoml.models.BentoModel(f"{PRODUCTION_MODEL}:latest")
     # Calibration temperature; __init__ overrides from the packaged artifact.
     temperature: float = 1.0
@@ -1085,23 +993,14 @@ class TennisPredictor:
         self.temperature = _load_serving_temperature()
 
     def _predict_proba(self, row_ab: pd.DataFrame, row_ba: pd.DataFrame) -> pd.DataFrame:
-        """Run the stacked ensemble without recursively calling the HTTP endpoint.
-
-        Both paired directional rows must be supplied: `row_ab` carries the
-        requested orientation (player_id vs opponent_id) and `row_ba` the
-        reversed orientation (opponent_id vs player_id). Each base scores both,
-        the pairs are projected to antisymmetric evidence, and the evidence is
-        stacked through the production logistic stacker. Output rows preserve
-        the requested (row_ab) ids and orientation.
-        """
+        """Score paired orientations through the stacker without an HTTP call."""
         started_at = perf_counter()
         if len(row_ab) != len(row_ba):
             raise ValueError("paired orientations must have equal length")
         features_ab = row_ab[FEATURE_COLS]
         features_ba = row_ba[FEATURE_COLS]
 
-        # Linear + NN paths share the persisted train-fit scaler
-        # (StandardScaler().fit(X_train), same contract the NN was trained on).
+        # Linear and NN paths share the persisted train-fit scaler.
         scale_started_at = perf_counter()
         scaled_ab = self.scaler.transform(features_ab)
         scaled_ba = self.scaler.transform(features_ba)
@@ -1150,8 +1049,7 @@ class TennisPredictor:
             p_win[i] = probs["p_win"]
         ensemble_ms = (perf_counter() - ensemble_started_at) * 1000
 
-        # Aggregate-only observability: means (no per-row dumps). A single row
-        # additionally logs its requested ids, preserving the scalar path's detail.
+        # Log aggregate metrics only, plus ids for single-row requests.
         first = row_ab.iloc[0] if not row_ab.empty else None
         first_ident = (
             f" player_id={first['player_id']} opponent_id={first['opponent_id']}"
@@ -1220,8 +1118,7 @@ class TennisPredictor:
         except Exception:
             _log.exception("predict_from_ids failed")
             raise InvalidArgument("prediction failed - check input parameters") from None
-        # One row in, one row out — return the first record as a flat dict for
-        # ergonomic JSON over HTTP. ids come from row_ab (requested order).
+        # Return the requested orientation as a flat JSON record.
         rec = first_row_dict(out_df)
         rec["p_win"] = builtins.round(float(rec["p_win"]), 4)
         rec["p_linear"] = builtins.round(float(rec["p_linear"]), 4)
@@ -1262,13 +1159,7 @@ class TennisPredictor:
 
     @bentoml.api
     def predict_from_ids_bulk(self, rows: list[PredictFromIdsRow]) -> list[dict[str, object]]:
-        """Bulk predictions from minimal per-row contexts (internal endpoint).
-
-        Each row accepts the same fields/defaults as `predict_from_ids`,
-        including a per-row historical `as_of_date`. The batch is capped at
-        1,000 rows and the ensemble runs once for the whole batch. This
-        endpoint is internal: Nginx does not expose it publicly.
-        """
+        """Return predictions for a batch of per-row contexts."""
         if not rows:
             raise InvalidArgument("rows must be a non-empty list")
         if len(rows) > BULK_MAX_ROWS:

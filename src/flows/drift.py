@@ -1,16 +1,4 @@
-"""Production drift monitor against the deployed champion Bento.
-
-Scheduled 30 minutes after the weekly scrape (Monday 06:30 UTC). Runs dbt build
-to refresh silver/gold, resolves the MLflow champion, and compares two
-size-matched windows of physical matches from bronze.match_events — the
-post-cutoff current window and the most recent pre-cutoff reference window,
-each expanded into both scoring orientations and scored through the production
-Bento. Evidently's DataDriftPreset scores per-feature PSI, prediction PSI, and
-drift share over only the numeric bronze serve/point rates (DRIFT_FEATURE_COLS);
-context fields used to score remain out of the analysis. Current-window
-performance is compared against the champion's promotion-pinned metric tags;
-the combined signals map to a healthy / investigate / retrain verdict.
-"""
+"""Monitor drift and current-window performance against the deployed champion."""
 
 from __future__ import annotations
 
@@ -21,7 +9,6 @@ from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import urlparse
 
 import mlflow
 import numpy as np
@@ -77,23 +64,8 @@ LOCK_FILE = ARTIFACTS / ".check_drift.lock"
 EXPERIMENT_NAME = "drift-monitor"
 
 DRIFT_DEPLOYMENT_NAME = "drift"
-# 30 minutes after the scrape cron (Monday 06:00 UTC), so ETL has finished.
 DRIFT_CRON = "0 20 1 * *"
 
-# Drift analysis frame: the numeric bronze serve/point rates whose per-column
-# PSI drives the feature verdict, the derived orientation label, and the
-# champion's p_win. All four rates are scale-normalized per match, so their
-# distributions are not dominated by seasonal composition: raw totals grow with
-# match length (best-of-3 vs best-of-5, tiebreak games), while the rates are
-# per-match percentages that track serve performance itself. Match-context
-# fields (surface, tournament, round, is_indoor) and everything player-specific
-# (rankings, rolling form, age, H2H, schedule volume, player profiles) are
-# intentionally excluded — they legitimately change with the tour calendar and
-# player mix, so their PSI would flag composition drift rather than performance
-# drift. `score` is a VARCHAR and break_points_saved_pct is omitted because its
-# denominator (break points faced) is frequently 0, making the rate
-# NULL-dominated. p_win is not a match feature: it is monitored separately as
-# prediction-distribution PSI.
 DRIFT_FEATURE_COLS = [
     "player1_first_serve_pct",
     "player1_serve_win_pct",
@@ -106,15 +78,6 @@ DRIFT_FEATURE_COLS = [
 ]
 DRIFT_ANALYSIS_COLUMNS = [*DRIFT_FEATURE_COLS, "match_won", "p_win"]
 
-# Bronze physical-match projection used by both drift windows: one row per
-# match, so source windows never double-count a match. The context fields are
-# the normalized public strings ingest already writes (surface, tournament,
-# round) plus COALESCE(is_indoor, 0); they are carried only to build the Bento
-# request contexts and never enter the drift analysis. The rate expressions
-# mirror the unsmoothed single-match versions of the dbt rolling_feature
-# formulas (first_serve_pct_10, serve_win_pct_10, ace_rate_10, df_rate_10) and
-# are NULLIF-guarded so a side with zero opportunities (a walkover) yields NULL
-# instead of a divide-by-zero.
 _BRONZE_WINDOW_COLUMNS: tuple[str, ...] = (
     "match_id",
     "match_date",
@@ -163,11 +126,7 @@ def _ensure_experiment(client: MlflowClient) -> str:
 
 
 def _champion_cutoff_date(client: Any) -> date | None:
-    """Latest training-data match date pinned on the champion, from MLflow.
-
-    Falls back to the model-registration timestamp for champions promoted
-    before the training-data watermark tag existed.
-    """
+    """Return the champion's pinned training-data cutoff, with a timestamp fallback."""
     champion = resolve_champion(client)
     if champion is None:
         return None
@@ -179,11 +138,7 @@ def _champion_cutoff_date(client: Any) -> date | None:
 
 
 def _pinned_metrics(client: Any, champion: Any) -> dict[str, Any]:
-    """Champion metric tags pinned at promotion: the 4 gate metrics + eval notes.
-
-    Returns only the tags that exist; the 4 metrics are floats, eval_max_date is
-    kept as its stored string.
-    """
+    """Return available promotion-pinned metrics and evaluation tags."""
     tags = client.get_model_version(PRODUCTION_MODEL, champion.version).tags or {}
     pinned: dict[str, Any] = {}
     for name in METRIC_NAMES:
@@ -205,8 +160,7 @@ def _post_batch(contexts: list[dict[str, str | int | None]]) -> list[dict[str, o
     headers = {"Content-Type": "application/json"}
     if BENTO_API_KEY:
         headers[BENTO_API_KEY_HEADER] = BENTO_API_KEY
-    # The bulk endpoint's Pydantic schema wraps the list under `rows`; a bare
-    # array is rejected with a 400 "Input should be an object".
+    # The bulk schema requires the list under `rows`.
     resp = requests.post(url, json={"rows": contexts}, headers=headers, timeout=120)
     resp.raise_for_status()
     body: object = resp.json()
@@ -223,11 +177,7 @@ def _score_batches(contexts: list[dict[str, str | int | None]]) -> list[float]:
         if len(records) != len(chunk):
             raise RuntimeError(f"row-count mismatch: sent {len(chunk)}, got {len(records)}")
         for i, rec in enumerate(records):
-            # The bulk response carries the requested ids; verify each record
-            # corresponds to its request row before trusting its p_win. A
-            # reordered or sorted response would silently pair probabilities
-            # with the wrong orientation labels and collapse the symmetric
-            # accuracy to 0.5 — refuse rather than compute wrong metrics.
+            # Refuse reordered responses because they pair probabilities with wrong labels.
             request = chunk[i]
             if (
                 rec.get("player_id") != request["player_id"]
@@ -247,12 +197,7 @@ def _score_batches(contexts: list[dict[str, str | int | None]]) -> list[float]:
 
 
 def _validate_production(client: Any) -> Any:
-    """Resolve the champion and ensure the configured Bento frontend responds.
-
-    Drift measures whatever frontend is configured, including development
-    Bentos. Production identity validation belongs to promotion/evaluation,
-    not monitoring.
-    """
+    """Resolve the champion and verify that the configured Bento responds."""
     champion = resolve_champion(client)
     if champion is None:
         raise RuntimeError(
@@ -268,14 +213,7 @@ def _validate_production(client: Any) -> Any:
 
 
 def _pull_windows(cutoff_date: date) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Current post-cutoff window + size-matched pre-cutoff reference window.
-
-    Both windows read one row per physical match from bronze.match_events.
-    `reference` is the most recent `n_reference` matches strictly before the
-    cutoff, where `n_reference` is the current-window size clamped to the
-    DRIFT_REF_MIN/DRIFT_REF_MAX bounds. It is fetched newest-first then reversed
-    back into chronological order so both windows share the same row order.
-    """
+    """Return current and size-matched pre-cutoff physical-match windows."""
     current = execute_df(
         f"SELECT {', '.join(_BRONZE_WINDOW_COLUMNS)} FROM bronze.match_events "
         "WHERE match_date > %s ORDER BY match_date, match_id",
@@ -293,14 +231,7 @@ def _pull_windows(cutoff_date: date) -> tuple[pd.DataFrame, pd.DataFrame]:
 
 
 def _validate_physical_matches(window: pd.DataFrame) -> None:
-    """Bronze boundary: reject rows whose winner is not exactly one of the two players.
-
-    Every physical match must carry a valid winner_id equal to exactly one of
-    player1_id/player2_id. A missing, ambiguous (equal to both), or
-    unidentifiable (equal to neither) winner would silently corrupt the
-    complementary orientation labels and the 50/50 batch balance, so it is
-    rejected here — before any expansion or API scoring.
-    """
+    """Require each physical match to identify exactly one winning player."""
     if window.empty:
         return
     missing = {"player1_id", "player2_id", "winner_id"} - set(window.columns)
@@ -336,14 +267,7 @@ def _validate_physical_matches(window: pd.DataFrame) -> None:
 
 
 def _validate_expanded_window(frame: pd.DataFrame) -> None:
-    """Expanded-orientation invariant: exactly one 1 and one 0 per physical match.
-
-    Adjacent rows are the two orientations of one physical match, so their
-    labels must be complementary (sum exactly 1). The whole batch must be
-    non-empty with an even row count and an exactly 50/50 label balance
-    (mean 0.5). Any violation raises before a single API call — labels are
-    never silently repaired.
-    """
+    """Require adjacent orientations to be complementary and the batch balanced."""
     if frame.empty:
         raise ValueError("expanded drift frame is empty")
     if "match_won" not in frame.columns:
@@ -377,18 +301,7 @@ def _validate_expanded_window(frame: pd.DataFrame) -> None:
 
 
 def _expand_orientations(window: pd.DataFrame) -> pd.DataFrame:
-    """Expand physical matches into the two requested scoring orientations.
-
-    Each physical row yields player1→player2 and player2→player1, in that
-    order, with `match_won` derived from winner_id equality to the requested
-    side. Bronze player order is preserved — ids are never sorted or
-    canonicalized. The numeric match-stat rates are match-level values, so
-    both orientations of a match carry identical rate columns; the context
-    fields stay on the frame so scored rows remain traceable to the physical
-    match and the two orientations of each match are adjacent rows. The
-    bronze winner invariant is checked on input and the complementary-label
-    invariant on the interleaved result.
-    """
+    """Expand each physical match into adjacent, complementary orientations."""
     _validate_physical_matches(window)
     if window.empty:
         return window.copy()
@@ -401,7 +314,6 @@ def _expand_orientations(window: pd.DataFrame) -> pd.DataFrame:
     second["opponent_id"] = window["player1_id"]
     second["match_won"] = (window["winner_id"] == window["player2_id"]).astype(int)
     expanded = pd.concat([first, second], ignore_index=True)
-    # Interleave so each match's two orientations stay adjacent.
     interleave = np.repeat(np.arange(len(window)), 2) + np.tile([0, len(window)], len(window))
     expanded = expanded.iloc[interleave].reset_index(drop=True)
     _validate_expanded_window(expanded)
@@ -409,15 +321,7 @@ def _expand_orientations(window: pd.DataFrame) -> pd.DataFrame:
 
 
 def _observation_contexts(window: pd.DataFrame) -> list[dict[str, object]]:
-    """Raw Bento contexts from symmetric drift observations (bronze fields only).
-
-    Each context carries the requested-orientation ids, the match date as
-    `as_of_date`, and the raw bronze surface/tournament/round strings plus the
-    normalized indoor flag — the public bulk schema fields, unencoded. No gold
-    feature row or internal encoding is involved. Bronze values the request
-    model does not accept (e.g. the round-robin round ``rr``) are resolved at
-    the validation boundary, `_validated_contexts`.
-    """
+    """Build public Bento contexts from bronze-only drift observations."""
     contexts: list[dict[str, object]] = []
     for rec in window.to_dict("records"):
         match_date = rec["match_date"]
@@ -439,19 +343,7 @@ def _observation_contexts(window: pd.DataFrame) -> list[dict[str, object]]:
 
 
 def _validated_contexts(contexts: list[dict[str, object]]) -> list[dict[str, str | int | None]]:
-    """Validation boundary between bronze and the Bento public schema.
-
-    Every context must pass the real bulk request model before anything is
-    posted. Bronze can legitimately hold values the request model does not
-    accept — the round-robin round ``rr`` most notably — and those carry no
-    information the model was trained on: dbt maps unsupported rounds and
-    tournaments to ordinal 0, which the public schema expresses as an omitted
-    field, and unknown/absent bronze surfaces are normalized to ``hard`` (the
-    canonical default) since ingest guarantees only the four canonicals.
-    Unsupported enum values are dropped to those documented defaults; anything
-    still invalid raises here, before any HTTP request. The request model is
-    the only schema — no enum lists are duplicated.
-    """
+    """Validate and normalize contexts at the Bento request boundary."""
     accepted_rounds = {r.value for r in Round}
     accepted_tournaments = {t.value for t in TournamentLevel}
     accepted_surfaces = {s.value for s in Surface}
@@ -484,31 +376,14 @@ def _validated_contexts(contexts: list[dict[str, object]]) -> list[dict[str, str
 
 
 def _scored_diagnostics(frame: pd.DataFrame) -> str:
-    """Structured JSON of every scored row: match_id/player_id/opponent_id/match_won/p_win/pred.
-
-    `pred` is the standard thresholded prediction (p_win >= 0.5), matching the
-    accuracy computation. Only match ids and probabilities are logged — no
-    credentials or context payloads.
-    """
+    """Return diagnostic JSON with ids, labels, probabilities, and predictions."""
     diag = frame[["match_id", "player_id", "opponent_id", "match_won", "p_win"]].copy()
     diag["pred"] = (pd.to_numeric(diag["p_win"], errors="coerce") >= 0.5).astype(int)
     return json.dumps({"scored_rows": diag.to_dict("records")}, indent=2, default=str)
 
 
 def _validate_scored_frame(frame: pd.DataFrame) -> None:
-    """Scored-row invariant before any metrics: finite in-range p_win, not all ties.
-
-    Every scored row must carry a finite p_win in [0, 1]; NaN or out-of-range
-    probabilities mean the Bento response cannot be trusted and are rejected.
-    A batch whose predictions are ALL exactly 0.5 is rejected as a
-    constant-tie batch — a symmetric model ties (p == 1 - p == 0.5) only when
-    it has no signal on a match, so all ties indicate a broken serving path.
-    A single 0.5 tie among otherwise varying predictions is a legitimate
-    small-sample edge and passes. On any violation the full scored frame is
-    embedded as structured JSON in the error before raising, so
-    match_id/player_id/opponent_id/match_won/p_win/pred of every scored row
-    are inspectable in the run log.
-    """
+    """Require finite in-range probabilities and reject an all-tie scoring batch."""
     required = {"match_id", "player_id", "opponent_id", "match_won", "p_win"}
     missing = required - set(frame.columns)
     if missing:
@@ -534,18 +409,7 @@ def _validate_scored_frame(frame: pd.DataFrame) -> None:
 
 
 def _score_window(window: pd.DataFrame) -> pd.DataFrame:
-    """Append `p_win` (champion Bento) to a window of drift observations.
-
-    The analysis frame keeps only the numeric match-stat rates (DRIFT_FEATURE_COLS),
-    the derived orientation label, and the prediction — no match-context
-    attributes, no player-profile attributes. Raw bronze contexts pass the
-    `PredictFromIdsRow` boundary first, so every posted row is already the
-    validated public payload. The expanded-orientation invariant is checked
-    on entry and the scored-row invariant (finite in-range p_win, not an
-    all-tie batch) on the traceable frame before the context columns are
-    dropped, so a pre-expanded frame is protected even when it did not come
-    from `_expand_orientations`.
-    """
+    """Append champion ``p_win`` to a validated drift-observation window."""
     _validate_expanded_window(window)
     contexts = _validated_contexts(_observation_contexts(window))
     probas = _score_batches(contexts)
@@ -582,19 +446,7 @@ def _evidently_drift(
     json_path: Path,
     html_path: Path,
 ) -> tuple[dict[str, float], float, float]:
-    """Run Evidently DataDriftPreset over the two windows; save JSON + HTML.
-
-    The report input is restricted to exactly the monitored match-stat rates
-    and the prediction column: the balanced orientation label (`match_won`),
-    traceability ids, and match-context columns are excluded, per the
-    DataDriftPreset contract. `match_won` is not a monitored distribution —
-    it stays on the scored frames only for window metrics and calibration
-    outside Evidently. Every compared column is numeric and scored with PSI,
-    so each per-feature score is directly comparable against the PSI
-    threshold table. Returns (per match-stat-rate-column PSI, drift share,
-    prediction p_win PSI); drift share and prediction PSI come straight from
-    the report payload.
-    """
+    """Run Evidently drift checks and return feature, share, and prediction PSI."""
     evidently_columns = [*DRIFT_FEATURE_COLS, "p_win"]
     report = Report(
         metrics=[
@@ -640,12 +492,7 @@ def _recommendation(
     auc_drop: float | None,
     per_feature_drift: dict[str, float],
 ) -> str:
-    """Map drift signals to healthy / investigate / retrain (plan thresholds).
-
-    retrain: drift share >= 0.5, prediction PSI >= 0.2, |Δcalibration_rate|
-    > 0.05, or (n >= 30 and roc_auc drop > 0.05). investigate: any feature PSI
-    in the moderate band. healthy: otherwise.
-    """
+    """Map drift signals to ``healthy``, ``investigate``, or ``retrain``."""
     if (
         drift_share >= DRIFT_SHARE_THRESHOLD
         or prediction_psi >= DRIFT_PRED_PSI_THRESHOLD
@@ -662,19 +509,7 @@ def _recommendation(
 
 @flow(log_prints=True)
 def drift_flow(cutoff: date | None = None) -> int:
-    """Drift monitor: dbt build, champion validation, score windows, verdict.
-
-    An optional cutoff date overrides the champion's training-data watermark:
-    both windows are selected relative to it, and it is used for reporting,
-    logged params, artifact names, and insufficient-data messaging. The
-    override is never constrained relative to the champion — post-cutoff
-    training-era matches are intentionally treated as current data. Without an
-    override the champion watermark (TRAIN_DATA_MAX_DATE_KEY) governs.
-
-    The smoke test counts bronze physical matches newer than the cutoff; when
-    there are fewer than DRIFT_MIN_N_FOR_CHECK rows the drift check is skipped
-    entirely because PSI and performance metrics are too unstable.
-    """
+    """Build ETL, score current/reference windows, and publish a drift verdict."""
     load_env()
     suppress_insecure_tls_warning()
     client = MlflowClient()
@@ -824,11 +659,7 @@ def drift_flow(cutoff: date | None = None) -> int:
 
 
 def register_deployment() -> None:
-    """Create/update the Monday drift deployment (idempotent by name).
-
-    Scheduled 30 minutes after the scrape cron (Monday 06:30 UTC), on the host
-    ``tennis-pool`` work pool alongside scrape and ETL.
-    """
+    """Create or update the drift deployment."""
     repo_root = Path(__file__).resolve().parent.parent.parent
     deployment = cast(
         Any,

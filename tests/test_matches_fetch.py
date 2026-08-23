@@ -1,10 +1,4 @@
-"""Hermetic tests for Hawkeye response parsing (no browser, no network).
-
-Regression: the live August run returned every Hawkeye payload wrapped in an
-HTML shell (<html>...<pre>{...}</pre>...); the fetcher classified the shell as
-a Cloudflare challenge before the embedded-JSON recovery could run, so all
-matches were skipped. These tests pin the recovery and the rejection boundary.
-"""
+"""Hermetic tests for Hawkeye response parsing and rejection."""
 
 import json
 from pathlib import Path

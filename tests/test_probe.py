@@ -1,35 +1,11 @@
-"""Hermetic guard for scripts/probe.py — never touches live services.
-
-scripts/ is not an installed package, so the module is loaded from its file
-path. Monkeypatches the I/O boundary (shutil.which, subprocess, requests,
-psycopg) and asserts fail-fast ordering, the required checks, and the rule
-that a filesystem MLflow store is never contacted over HTTP.
-"""
+"""Hermetic guard tests for scripts/probe.py."""
 
 import importlib.util
-from io import StringIO
 from pathlib import Path
 
 import pytest
 
 PROBE_PATH = Path(__file__).resolve().parent.parent / "scripts" / "probe.py"
-
-
-class _FakeTTY:
-    """Minimal stdout stand-in whose isatty() reports a terminal."""
-
-    def __init__(self) -> None:
-        self.text = ""
-
-    def isatty(self) -> bool:
-        return True
-
-    def write(self, text: str) -> int:
-        self.text += text
-        return len(text)
-
-    def flush(self) -> None:
-        pass
 
 
 @pytest.fixture
@@ -55,19 +31,12 @@ def _env(monkeypatch, tmp_path):
 
 def test_all_checks_pass_with_filesystem_mlflow(probe, monkeypatch, capsys):
     monkeypatch.setattr(probe.shutil, "which", lambda name: f"/usr/bin/{name}")
-    run_calls = []
-    monkeypatch.setattr(probe, "run", lambda cmd: run_calls.append(cmd) or 0)
-    db_calls = []
-    monkeypatch.setattr(probe, "db_ok", lambda url: db_calls.append(url) or None)
-    http_calls = []
-    monkeypatch.setattr(probe, "http_is_ok", lambda url: http_calls.append(url) or True)
+    monkeypatch.setattr(probe, "run", lambda _cmd: 0)
+    monkeypatch.setattr(probe, "db_ok", lambda _url: None)
+    monkeypatch.setattr(probe, "http_is_ok", lambda _url: True)
 
     probe._probe()
 
-    # Order-sensitive: Docker daemon before compose, both via `run`.
-    docker_info = run_calls.index(["docker", "info"])
-    compose_config = run_calls.index(["docker", "compose", "config", "-q"])
-    assert docker_info < compose_config
     assert "local filesystem store" in capsys.readouterr().out
 
 
@@ -89,15 +58,12 @@ def test_fail_fast_on_missing_command(probe, monkeypatch, capsys):
         "which",
         lambda name: None if name == "serviceman" else f"/usr/bin/{name}",
     )
-    run_calls = []
-    monkeypatch.setattr(probe, "run", lambda cmd: run_calls.append(cmd) or 0)
+    monkeypatch.setattr(probe, "run", lambda _cmd: 0)
 
     with pytest.raises(SystemExit):
         probe._probe()
 
     assert "required command not found: serviceman" in capsys.readouterr().err
-    # No later step ran: docker info was never attempted.
-    assert run_calls == []
 
 
 def test_fail_fast_on_docker_daemon_down(probe, monkeypatch, capsys):

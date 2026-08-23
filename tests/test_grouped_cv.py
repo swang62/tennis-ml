@@ -1,13 +1,4 @@
-"""Hermetic tests for the time-forward grouped fold helpers.
-
-Gold holds two directional rows per physical match (one positive, one
-negative); the helpers must keep match groups intact, never train on a
-date equal to or later than a validation date, keep every validation fold
-exactly label-balanced, and be deterministic so linear, GBDT, and NN all
-use the same persisted fold map. Lifecycle: the 01 split notebook
-creates/replaces fold_assignment.parquet once per run; every 02 tuner
-loads and validates the current assignment and never writes it.
-"""
+"""Hermetic tests for time-forward grouped folds."""
 
 import numpy as np
 import pandas as pd
@@ -146,9 +137,7 @@ def test_create_replaces_stale_assignment_from_previous_snapshot(tmp_path):
     stale = load_fold_assignment(path)
     assert len(stale) == 12
 
-    # Snapshot grew (a later date added): 01 re-creates the assignment, and a
-    # 02 tuner must then load it successfully instead of failing against the
-    # stale file.
+    # A grown snapshot regenerates the assignment and replaces the stale file.
     new_ids, new_dates, new_labels = make_rows(n_dates=9)
     frame = create_fold_assignment(new_ids, new_dates, 2, 42, new_labels, path)
     assert len(frame) == 18

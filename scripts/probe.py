@@ -1,11 +1,4 @@
-"""Host workflow probe for `just probe` / `just full-pipeline`.
-
-Fail-fast, non-mutating preflight: required commands, Docker daemon, root
-`.env` configuration, host PostgreSQL reachability, Prefect readiness, MLflow
-reachability (HTTP URLs only; the local filesystem store is never contacted),
-and `docker compose config -q`. It never writes infrastructure or data and
-never prints credentials.
-"""
+"""Non-mutating host preflight for `just probe` and `just full-pipeline`."""
 
 from __future__ import annotations
 
@@ -23,18 +16,12 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent.parent
 ENV_PATH = ROOT / ".env"
 
-# Commands the data pipeline shells out to; anything else is checked later by
-# the step that needs it.
 REQUIRED_COMMANDS = ("uv", "docker", "kubectl", "k3d", "serviceman")
-# Host workflow contract: host PostgreSQL, host Prefect worker, Compose stack.
 REQUIRED_ENV = ("DATABASE_URL", "PREFECT_API_URL", "POSTGRES_PASSWORD", "BENTO_API_KEY")
 
 HTTP_TIMEOUT = 5  # seconds
 
 
-# Terminal-aware colors matching scripts/dev.sh: ANSI only when stdout is a
-# TTY, plain text when piped or tested. Blue for database, green for
-# serving/readiness, muted for generic preflight.
 COLOR_BLUE = "\033[34m"
 COLOR_GREEN = "\033[32m"
 COLOR_MUTED = "\033[90m"

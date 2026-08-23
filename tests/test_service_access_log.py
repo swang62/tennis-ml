@@ -1,12 +1,4 @@
-"""Hermetic tests for production request access logging.
-
-BentoML 1.4's native AccessLogMiddleware (api_server.logging.access, enabled
-by default) wraps the entire HTTP app, so the mounted Starlette GET routes and
-the Bento API POST routes share one concise access line per request. The
-service drives it purely through the "bentoml.access" logger level, which
-follows LOG_LEVEL (default INFO; the parent "bentoml" logger stays WARNING for
-lifecycle silence).
-"""
+"""Hermetic tests for production request access logging."""
 
 from __future__ import annotations
 
@@ -19,9 +11,7 @@ from starlette.testclient import TestClient
 
 from src.serving.service import DATA_APP, _effective_log_level
 
-# Production wraps DATA_APP (with the Bento API routes) inside BentoML's ASGI
-# server; this replicates the same middleware wrapper for hermetic in-process
-# assertions.
+# Mirror production's BentoML middleware wrapper for hermetic in-process assertions.
 client = TestClient(
     AccessLogMiddleware(
         DATA_APP,

@@ -1,14 +1,4 @@
-"""Training-snapshot DuckDB query helper.
-
-Training notebooks and modules read ONLY from the local DuckDB training
-snapshot (``src.db.snapshot``), never from the operational PostgreSQL client —
-this keeps training reproducible and offline-capable once ``just snapshot``
-has produced a valid snapshot. Deliberately does not import ``src.db.client``.
-
-The snapshot is opened lazily, read-only, and fails fast with a pointing error
-when no snapshot exists, so a notebook run against a missing snapshot never
-silently falls back to PostgreSQL or stale files.
-"""
+"""Read-only DuckDB access to the training snapshot."""
 
 from __future__ import annotations
 

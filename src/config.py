@@ -40,13 +40,7 @@ def ensure_kernel() -> str:
 
 
 def suppress_insecure_tls_warning() -> None:
-    """Silence urllib3's InsecureRequestWarning for self-signed cluster HTTPS.
-
-    Only when an insecure-TLS env setting is enabled (MLFLOW_TRACKING_INSECURE_TLS
-    or PREFECT_API_TLS_INSECURE_SKIP_VERIFY) — i.e. the operator already opted
-    into skipping TLS verification — so the expected warning is not surfaced.
-    No other warnings are touched.
-    """
+    """Suppress urllib3's TLS warning only when insecure TLS is explicitly enabled."""
     opted_in = any(
         os.environ.get(key, "").strip().lower() in {"true", "1"}
         for key in ("MLFLOW_TRACKING_INSECURE_TLS", "PREFECT_API_TLS_INSECURE_SKIP_VERIFY")

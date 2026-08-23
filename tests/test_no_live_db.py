@@ -1,17 +1,4 @@
-"""Static guard: test code must never reach for a live database.
-
-Fails when a test module reintroduces the deleted live-db fixture names
-(postgres_ready / gold_ready / seeded_test_db) or opens a production database
-client connection (importing get_conn/get_pool/connection, calling them, or
-refreshing the training snapshot) without demonstrably mocking the connection
-boundary. The guard deliberately allows the legitimate boundary-mocked
-patterns:
-- module imports of src.db.client (test_db_client unit-tests the client with a
-  fake pool and never opens a real connection);
-- qualified get_conn()/get_pool()/connection() calls inside a file that
-  references psycopg (the mock signal), as in the client's own unit tests;
-- snapshot.refresh_snapshot() inside a file that mocks _copy_tables.
-"""
+"""Static guard against live database access from tests."""
 
 import ast
 from pathlib import Path
@@ -53,8 +40,7 @@ def _failures(path: Path) -> list[str]:
         problems.append(f"line {getattr(node, 'lineno', '?'):>3}: {message}")
 
     for node in ast.walk(tree):
-        # Deleted live-db fixture names are never legitimate in test code —
-        # neither as identifiers nor as fixture parameters (def test_x(...)).
+        # Deleted live-db fixture names are never legitimate in test code.
         forbidden_name: str | None = None
         if isinstance(node, ast.Name) and node.id in _FORBIDDEN_FIXTURE_NAMES:
             forbidden_name = node.id
@@ -64,7 +50,7 @@ def _failures(path: Path) -> list[str]:
             record(node, f"forbidden live-db fixture name {forbidden_name!r}")
             continue
 
-        # Direct function imports bind the connection-opening client.
+        # Direct imports bind the connection-opening client.
         if isinstance(node, ast.ImportFrom):
             if node.module == "src.db.client":
                 for alias in node.names:
@@ -79,7 +65,7 @@ def _failures(path: Path) -> list[str]:
                 if alias.name == "src.db.client":
                     client_aliases.add(alias.asname or "client")
 
-        # Connection calls that are not demonstrably mocked at the boundary.
+        # Reject connection calls without a boundary mock signal.
         if isinstance(node, ast.Call):
             func = node.func
             if isinstance(func, ast.Name) and func.id in _CONNECTION_FUNCS:

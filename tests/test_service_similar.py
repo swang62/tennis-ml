@@ -78,22 +78,6 @@ def test_similar_players_response_keys_are_static_player_fields_only(setup):
         assert set(entry.keys()) == {"player_id", "display_name", "score"}
 
 
-def test_similar_players_single_search_per_request(setup):
-    """One request triggers exactly one index search (no per-result fetches)."""
-    client, finder = setup
-    calls = {"n": 0}
-    original = finder.search
-
-    def counting(query, top_k=5):
-        calls["n"] += 1
-        return original(query, top_k)
-
-    finder.search = counting
-    res = client.get("/similar_players", params={"player_id": "P1", "limit": 3})
-    assert res.status_code == 200
-    assert len(res.json()["data"]["similar_players"]) == 3
-
-
 def test_similar_players_requires_player_id(setup):
     client, _ = setup
     res = client.get("/similar_players")

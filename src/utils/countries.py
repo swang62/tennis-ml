@@ -1,27 +1,11 @@
-"""Shared IOC country-code reference: validation, resolution, and UNK fallback.
-
-The reference mapping lives in the module-level ``_COUNTRIES`` constant and is
-the single source of truth for which IOC codes are valid and how they resolve.
-Profile import (src/db/ingest.py) and serving both use these rules, so a
-code that is valid at import time resolves identically at read time.
-
-Conventions:
-- A valid IOC is a code present in the reference constant with a usable ISO
-  alpha-2 code (the UNK sentinel is valid but has no ISO code).
-- Missing or invalid source values normalize to UNK ("Country unknown");
-  nationality is never inferred from names or other fields.
-- No third-party country API is ever called at runtime.
-"""
+"""Shared IOC country-code reference with UNK fallback."""
 
 from __future__ import annotations
 
-# Sentinel code stored when a profile's IOC is missing or not verifiable.
 UNK = "UNK"
 UNKNOWN_NAME = "Country unknown"
 
-# {ioc: (iso2, country_name)}. Codes are uppercase; iso2 is empty only for the
-# UNK sentinel (there is no ISO code for "unknown"). Source: the former
-# data/ioc_countries.csv reference, inlined verbatim.
+# IOC codes map to (ISO-2 code, country name); UNK has no ISO-2 code.
 _COUNTRIES: dict[str, tuple[str, str]] = {
     "AFG": ("AF", "Afghanistan"),
     "ALB": ("AL", "Albania"),
@@ -268,12 +252,7 @@ def is_known_ioc(code: str) -> bool:
 
 
 def valid_ioc(value: object) -> str:
-    """IOC to store for a profile: the verified code, or UNK when unverifiable.
-
-    Missing/invalid values (empty, whitespace, unknown codes such as
-    historical non-ISO codes or typos) resolve to the UNK sentinel only;
-    verified codes are preserved exactly as normalized (trimmed/uppercased).
-    """
+    """Return the normalized verified IOC, or ``UNK`` when unknown."""
     code = normalize_ioc(value)
     if code != UNK and code not in _COUNTRIES:
         return UNK
@@ -281,9 +260,5 @@ def valid_ioc(value: object) -> str:
 
 
 def resolve_ioc(ioc: str) -> tuple[str, str]:
-    """Resolve a normalized IOC to (iso2, country_name).
-
-    Known codes resolve to their reference row; UNK itself and any
-    unknown/missing code resolve to the UNK row ("", "Country unknown").
-    """
+    """Resolve an IOC to its ISO-2 code and country name."""
     return _COUNTRIES.get(normalize_ioc(ioc), _COUNTRIES[UNK])

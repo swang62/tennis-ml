@@ -1,10 +1,4 @@
-"""Temperature scaling for the ensemble p_win (symmetry-preserving zero-intercept Platt).
-
-p' = sigmoid(t * logit(clip_probability(p))). Preserves swap symmetry and the
-0.5 fixed point. Pure numpy on the module surface so serving (no scipy in its
-Bento image) and hermetic tests can import it; scipy is imported lazily inside
-fit_temperature, which only training calls.
-"""
+"""Symmetry-preserving temperature scaling for ensemble win probabilities."""
 
 from __future__ import annotations
 
@@ -71,18 +65,7 @@ def select_temperature(
     bounds=(0.05, 20.0),
     brier_guard_tolerance=1e-3,
 ) -> CalibrationSelection:
-    """Walk-forward temperature selection over chronological, match-safe folds.
-
-    Each validation fold is calibrated with a temperature fit on strictly
-    earlier folds only, then held-out predictions are pooled and compared with
-    raw probabilities. Acceptance gates on log loss (the objective temperature
-    scaling minimizes; ROC-AUC is invariant to the monotone logit transform)
-    with Brier as a guardrail: calibrated log loss must strictly improve and
-    calibrated Brier must not degrade by more than ``brier_guard_tolerance``.
-    The serving temperature is then refit on all out-of-fold data. ``folds``
-    must be integer ordinals written chronologically ascending (the grouped_cv
-    convention), and every validation fold must hold both label classes.
-    """
+    """Select a temperature with chronological folds and bounded Brier degradation."""
     proba = np.asarray(proba, dtype=float)
     y = np.asarray(y, dtype=float)
     folds = np.asarray(folds)
@@ -128,8 +111,6 @@ def select_temperature(
     )
     raw_brier = float(np.mean((labels - raw) ** 2))
     calibrated_brier = float(np.mean((labels - calibrated) ** 2))
-    # Log loss is the primary gate (the fit's objective; AUC is invariant to
-    # the monotone logit transform); Brier only vetoes material degradation.
     accepted = (
         calibrated_log_loss < raw_log_loss and calibrated_brier < raw_brier + brier_guard_tolerance
     )

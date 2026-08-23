@@ -1,12 +1,4 @@
-"""Pure promotion-gate logic shared by 04_evaluate and its focused tests.
-
-The candidate is scored in the notebook (candidate head over the exact
-candidate base matrix). The incumbent's gate metrics come exclusively from the
-metric tags recorded on the `@champion` version at promotion time, resolved
-read-only through MlflowClient — never from a live Bento (which is drift-only)
-and never from loading the champion artifact. This module makes no HTTP calls
-and mutates nothing; the notebook owns MLflow and registration.
-"""
+"""Pure promotion-gate logic for candidate and champion metrics."""
 
 from __future__ import annotations
 
@@ -66,22 +58,7 @@ def decide_promotion(
     champion_feature_hash: object = None,
     candidate_feature_hash: object = None,
 ) -> int:
-    """1 promote / 0 skip; probability-first, idempotent, first-promotion aware.
-
-    With an incumbent, promotion requires either strictly better test log loss
-    with AUC within ``PROMOTION_TOLERANCE``, or strictly better ROC-AUC with
-    log loss within ``PROMOTION_TOLERANCE``. ``force`` overrides every gate —
-    idempotency and first-promotion checks both yield 1 — so a manual
-    ``--force-promote`` always registers a fresh version (refreshing lineage
-    tags).
-
-    FEATURE_COLS is the sole compatibility contract: base-model pins and
-    scaler/embeddings/bio-feature-column URIs and hashes are lineage only and
-    never gate promotion. A candidate whose feature-column hash differs from
-    the champion's — or a legacy champion carrying no contract tags — promotes
-    regardless of the metric gate, refreshing the champion's contract. A
-    matching contract keeps the metric gate and idempotency unchanged.
-    """
+    """Return 1 when force/contract/first-promotion passes or log loss/AUC improves within tolerance."""
     if force:
         return 1
     if champion_feature_hash is None or str(champion_feature_hash) != str(candidate_feature_hash):
@@ -102,11 +79,7 @@ def decide_promotion(
 
 
 def resolve_champion(client: Any) -> Any | None:
-    """Return the champion ModelVersion or None when the alias does not exist.
-
-    Read-only MLflow resolution: evaluation never mutates the registry on the
-    incumbent path, and registration happens only after every gate passes.
-    """
+    """Resolve the champion alias read-only, returning None when it is absent."""
     try:
         return client.get_model_version_by_alias(PRODUCTION_MODEL, CHAMPION_ALIAS)
     except Exception:
@@ -114,14 +87,7 @@ def resolve_champion(client: Any) -> Any | None:
 
 
 def read_champion_metrics(client: Any, champion: Any) -> dict[str, float]:
-    """Return the champion's recorded gate metrics from version tags, all 4.
-
-    Reads ``{METRIC_PREFIX}{metric}`` for every ``METRIC_NAMES`` entry from the
-    champion version's tags. Every metric must be present and parse to a finite
-    float, or the evaluation fails clearly — a missing/malformed champion tag is
-    a broken incumbent, never a first promotion. The champion's model artifact
-    is never loaded nor scored.
-    """
+    """Read all finite gate metrics from the champion version's tags."""
     if champion is None:
         raise RuntimeError("cannot read incumbent metrics without a champion")
     version = client.get_model_version(PRODUCTION_MODEL, champion.version)

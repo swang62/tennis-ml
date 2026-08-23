@@ -1,16 +1,4 @@
-"""Build directional, as-of-dated inference rows from PostgreSQL.
-
-The supplied player_id is the ``player_*`` side and the supplied opponent_id is
-the ``opponent_*`` side (request order preserved; no lower-id canonicalization).
-Rolling values use snapshots strictly before the requested date. Missing values
-use the materialized gold.tour_averages singleton (never on-demand
-AVG/PERCENTILE); SQL values are always passed as parameters.
-
-H2H features read bronze.match_events directly (one row per physical match):
-the pair branches match either storage orientation of the two players,
-winner_id is the explicit winner, and wins are counted by comparing winner_id
-to the caller-supplied id (requested order preserved).
-"""
+"""Build directional, as-of-dated inference rows from PostgreSQL."""
 
 from __future__ import annotations
 
@@ -33,16 +21,12 @@ from src.db.client import execute_df, first_row_dict
 from src.features.columns import CANONICAL_SURFACES, FEATURE_COLS
 from src.features.tour_averages import load_tour_averages
 
-# The four canonical surfaces only; unknown source values are normalized to
-# hard at ingest, and inference accepts exactly what bronze/gold can hold.
 VALID_SURFACES = CANONICAL_SURFACES
 VALID_TOURNAMENT_LEVELS = {0, 1, 2, 3, 4}
 VALID_ROUND_ENCODINGS = {0, 1, 2, 3, 4, 5, 6, 7}
 
-# Last N strictly-prior meetings used for the pair-level head-to-head features.
 H2H_PRIOR_MEETINGS = 5
 
-# String aliases mirror the dbt context codebook; unknown values map to 0.
 _TOURNAMENT_LEVELS = {
     "grand_slam": 4,
     "masters": 3,
@@ -63,7 +47,6 @@ _ROUND_ENCODINGS = {
     "f": 7,
 }
 
-# Latest snapshot per player strictly before the as-of date. Point lookup.
 _LATEST_SNAPSHOT_SQL = f"""
 SELECT * FROM {SILVER_ROLLING_FEATURES}
 WHERE player_id = %s
@@ -72,12 +55,6 @@ ORDER BY player_match_number DESC
 LIMIT 1
 """
 
-# Five most recent strictly-prior meetings for the requested pair, with the
-# surface each was played on (filtering for h2h_surface_advantage happens in
-# Python, inside the bounded window — the same semantics as gold's pair_meetings
-# CTE). Bronze stores one row per physical match; winner_id is the explicit
-# winner, so the caller counts wins by comparing winner_id to the requested
-# player id. h2h_exposure is the size of this same bounded recent-5 window.
 _H2H_PRIOR_SQL = f"""
 SELECT match_id, winner_id, surface
 FROM {BRONZE_MATCHES_TABLE}
@@ -88,18 +65,11 @@ ORDER BY match_date DESC, match_id DESC
 LIMIT {H2H_PRIOR_MEETINGS}
 """
 
-# Per-player static identity lookup (metadata lives in bronze; gold has
-# aggregates only).
 _PROFILE_SQL = f"""
 SELECT player_id, height, handedness, turned_pro
 FROM {BRONZE_PROFILES_TABLE}
 WHERE player_id = %s
 """
-
-# ── Set-oriented bulk queries ─────────────────────────────────────────────
-# Every query resolves all requested rows in one round trip (unnest + LATERAL
-# or ANY), so cost stays flat as the batch grows. Values are always bound via
-# `%s`; the pairs below mirror the scalar query semantics exactly.
 
 _SNAPSHOTS_BULK_SQL = f"""
 SELECT req.player_id AS req_player_id, req.as_of_iso, s.*
@@ -134,18 +104,12 @@ LEFT JOIN LATERAL (
 ) h ON true
 """
 
-# COUNT(h.match_id), not COUNT(*): the LEFT JOIN LATERAL null-extends pairs
-# with no prior meetings, and COUNT(*) would count that null row as a meeting.
-# (kept as a comment for the bounded prior-meeting bulk query below)
-
-
-# Keep the real type because tests monkeypatch the module's `date` name.
+# Keep the imported type stable when tests replace the module's `date` name.
 _DATE_TYPE = date
 
 
 def _to_date(value: object) -> date:
-    """Coerce a PostgreSQL DATE cell (datetime.date/Timestamp/datetime/str) to a
-    plain date."""
+    """Coerce a PostgreSQL date cell to a plain date."""
     if isinstance(value, pd.Timestamp):
         return value.date()
     if isinstance(value, datetime):
@@ -164,16 +128,11 @@ def _side_values(
     surface: str,
     as_of_date: date,
 ) -> dict[str, int | float]:
-    """Build one side's values from its latest snapshot or the tour-averages
-    singleton fallbacks.
-
-    Rolling snapshot values are used only for the retained model features.
-    """
+    """Build one side from its latest snapshot, with tour-average fallbacks."""
 
     def cell_lit(snapshot_col: str, fallback: float) -> float:
         if row is not None:
             value = row.get(snapshot_col)
-            # NaN is the only supported numeric value that is not self-equal.
             if value is not None and isinstance(value, Real) and value == value:
                 return float(value)
         return fallback
@@ -186,19 +145,11 @@ def _side_values(
     age = cell("latest_player_age", "latest_player_age")
     avg_rank_10 = cell("avg_player_rank_10", "avg_player_rank_10")
 
-    # Surface form on the requested surface: the prior snapshot's carried
-    # per-surface 10-match win rate, its pool mean when the surface was never
-    # played; carpet has no per-surface pool rate, so the neutral rate_default
-    # applies (parity with match_features.sql).
     surface_form = (
         cell_lit(f"{surface}_win_rate_10", float(defaults[f"{surface}_win_rate_10"]))
         if surface != "carpet"
         else float(defaults["rate_default"])
     )
-    # Rest: as-of date minus the strictly-prior snapshot's date (snapshot_date
-    # is that match's date); the pool median days-since on cold start (parity
-    # with gold's days_since_last_match). Capped at 30 days (parity with gold's
-    # LEAST(..., 30) before the ln scaling in the diff).
     days_since_last_match = min(
         (
             float((as_of_date - _to_date(row["snapshot_date"])).days)
@@ -252,7 +203,6 @@ def _profile_values_from_row(
         if not pd.isna(turned_pro)
         else float(defaults["avg_years_pro"])
     )
-    # Non-L/R handedness uses the pool rate, matching gold imputation.
     handedness = row_any["handedness"]
     is_left_handed = (
         float(handedness == "L")
@@ -302,10 +252,7 @@ def _normalize_inputs(
     is_indoor: int | None = None,
     best_of: int = 3,
 ) -> _RowContext:
-    """Validate one request; shared by both builders.
-
-    The requested id order is preserved: player_id stays the ``player_*`` side.
-    """
+    """Validate one request while preserving player_id as the player side."""
     if surface not in VALID_SURFACES:
         raise ValueError(f"surface must be one of {sorted(VALID_SURFACES)}, got {surface!r}")
     if tournament is not None:
@@ -347,12 +294,10 @@ def _normalize_inputs(
     if as_of_date is None:
         as_of_date = date.today()
     elif isinstance(as_of_date, datetime):
-        # A datetime is accepted and truncated to its date component.
         as_of_date = as_of_date.date()
     elif not isinstance(as_of_date, date):
         raise TypeError(f"as_of_date must be a datetime.date (or datetime), got {as_of_date!r}")
 
-    # ── No id sorting: the requested order is the model-side orientation ──
     player_id = player_id.strip()
     opponent_id = opponent_id.strip()
     return _RowContext(
@@ -379,15 +324,7 @@ def _assemble_row(
     h2h_surface_meetings: int,
     h2h_surface_wins_for_requested_player: int,
 ) -> dict[str, int | float | str]:
-    """Assemble one directional row in FEATURE_COLS order (shared by builders).
-
-    ``player_*`` is the requested player, ``opponent_*`` the requested opponent.
-    h2h_exposure is the five most recent strictly-prior meeting count (shared
-    by both mirrors); h2h_advantage and h2h_surface_advantage are the
-    Beta(1,1)-smoothed signed advantages over those same bounded recent-5
-    meetings (the surface variant restricted to meetings on the requested
-    surface), negating on side swap — the same formulas applied in gold.
-    """
+    """Assemble one directional row in the FEATURE_COLS contract."""
     row: dict[str, int | float | str] = {}
 
     def side(name: str, p: dict[str, int | float], o: dict[str, int | float]) -> int | float:
@@ -398,7 +335,6 @@ def _assemble_row(
             name.removeprefix("player_").removeprefix("opponent_")
         ]
 
-    # Matchup differences (requested player side minus opponent).
     row["rank_diff"] = player_side["ranking"] - opponent_side["ranking"]
     row["rank_points_diff"] = player_side["rank_points"] - opponent_side["rank_points"]
     row["age_diff"] = player_side["age"] - opponent_side["age"]
@@ -435,7 +371,6 @@ def _assemble_row(
         1.0 + player_side["days_since_last_match"]
     ) - math.log(1.0 + opponent_side["days_since_last_match"])
 
-    # Absolute state values (both sides matter).
     for name in (
         "player_weighted_form_10",
         "opponent_weighted_form_10",
@@ -448,15 +383,12 @@ def _assemble_row(
     ):
         row[name] = side(name, player_side, opponent_side)
 
-    # Pair-level head-to-head: shared bounded recent-5 exposure + signed
-    # smoothed advantages over that same window (overall and current-surface).
     row["h2h_exposure"] = h2h_exposure
     row["h2h_advantage"] = (h2h_wins_for_requested_player + 1.0) / (h2h_exposure + 2.0) - 0.5
     row["h2h_surface_advantage"] = (h2h_surface_wins_for_requested_player + 1.0) / (
         h2h_surface_meetings + 2.0
     ) - 0.5
 
-    # Numeric match context (one-hot surface).
     row["is_clay"] = int(ctx.surface == "clay")
     row["is_grass"] = int(ctx.surface == "grass")
     row["is_hard"] = int(ctx.surface == "hard")
@@ -465,7 +397,6 @@ def _assemble_row(
     row["tournament_level"] = ctx.tournament_level
     row["round_encoded"] = ctx.round_encoded
 
-    # Preserve the requested ids, not a sorted order.
     row["player_id"] = ctx.player_id
     row["opponent_id"] = ctx.opponent_id
     return row
@@ -499,7 +430,6 @@ def _build_inference_features_with_meta(
         best_of=best_of,
     )
 
-    # ── Materialized tour-averages singleton (no on-demand aggregates) ──
     ta = load_tour_averages()
     defaults = cast(dict[str, float], ta)
 
@@ -527,12 +457,6 @@ def _build_inference_features_with_meta(
     player_side.update(_profile_values(ctx.player_id, ctx.as_of_date, defaults))
     opponent_side.update(_profile_values(ctx.opponent_id, ctx.as_of_date, defaults))
 
-    # ── Head-to-head: the five most recent strictly-prior meetings for the
-    #    requested pair. bronze.match_events stores one row per physical match
-    #    and winner_id marks the explicit winner, so wins for the requested side
-    #    are counted directly by comparing winner_id to the requested player id.
-    #    Surface filtering runs inside the bounded recent-5 window (parity with
-    #    gold's pair_meetings CTE); h2h_exposure is that same bounded count.
     h2h_df = execute_df(
         _H2H_PRIOR_SQL,
         [ctx.player_id, ctx.opponent_id, ctx.opponent_id, ctx.player_id, ctx.as_of_iso],
@@ -553,7 +477,6 @@ def _build_inference_features_with_meta(
             if str(w) == ctx.player_id and matches
         )
 
-    # ── Assemble the directional row in FEATURE_COLS order ──
     row = _assemble_row(
         ctx,
         player_side,
@@ -633,17 +556,7 @@ def build_inference_features(
 
 
 def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame:
-    """Build directional rows for many matches in one set-oriented pass.
-
-    Each row accepts the same fields and validation as
-    `build_inference_features` (including its own historical `as_of_date`).
-    The tour-averages singleton is loaded once per batch; snapshots, 30-day
-    activity, profiles, and H2H history are resolved with unnest/LATERAL/ANY
-    queries — a constant number of round trips regardless of the batch size —
-    then every row is assembled with the exact same per-side value and row
-    logic as the scalar builder, so output matches repeated scalar calls.
-    Input order is preserved.
-    """
+    """Build many directional rows with set-oriented queries, preserving input order."""
     if not isinstance(rows, list) or not rows:
         raise ValueError("rows must be a non-empty list of match contexts")
     if len(rows) > BULK_MAX_ROWS:
@@ -653,7 +566,6 @@ def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame
     ta = load_tour_averages()
     defaults = cast(dict[str, float], ta)
 
-    # Distinct (player, as-of) pairs drive the set-oriented snapshot queries.
     pairs = list({(pid, c.as_of_date) for c in ctxs for pid in (c.player_id, c.opponent_id)})
     pair_pids = [p for p, _ in pairs]
     pair_dates = [d for _, d in pairs]
@@ -674,11 +586,6 @@ def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame
     for rec in execute_df(_PROFILES_BULK_SQL, [players]).to_dict("records"):
         profiles[str(rec["player_id"])] = cast(dict[str, object], rec)
 
-    # H2H lookup is keyed on the requested (player, opponent, as-of) triple;
-    # the recent-5 lateral matches either storage orientation and winner_id
-    # marks the explicit winner, so wins for each requested side are counted
-    # directly, with surface filtering applied inside the bounded window.
-    # h2h_exposure is the size of that same bounded recent-5 window.
     h2h: dict[tuple[str, str, str], list[tuple[str, str, str]]] = {}
     h2h_triples = list({(c.player_id, c.opponent_id, c.as_of_iso) for c in ctxs})
     h2h_rows = execute_df(

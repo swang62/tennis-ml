@@ -8,11 +8,7 @@ _VALIDATE_ONCE_SQL = f"SELECT singleton_id FROM {TOUR_AVERAGES_TABLE}"
 
 
 def load_tour_averages() -> dict[str, object]:
-    """Return the tour_averages singleton row, validated.
-
-    Raises RuntimeError if the table is absent, has != 1 row,
-    or singleton_id != 1.
-    """
+    """Return the sole tour_averages row with singleton_id=1; otherwise raise RuntimeError."""
     df = execute_df(_TOUR_AVERAGES_SQL)
     if df.empty:
         raise RuntimeError(f"{TOUR_AVERAGES_TABLE} is empty: run dbt build first")

@@ -1,9 +1,4 @@
-"""PyTorch tabular MLP shared by training and serving.
-
-Defined here (not inside the training notebook) so the MLflow-logged
-`nn_best` artifact unpickles outside the notebook kernel: torch.save
-records the class by module path.
-"""
+"""PyTorch tabular MLP shared by training and serving."""
 
 import lightning as L
 import torch
@@ -11,15 +6,7 @@ import torch.nn as nn
 
 
 class TabularMLP(L.LightningModule):
-    """Tabular MLP over a directional player-perspective row.
-
-    Encodes the balanced FEATURE_COLS row (supplied player + opponent rolling
-    stats, differentials, context) through a single sequential MLP. The model
-    is trained on directional rows and is not intrinsically antisymmetric:
-    reversing the input does not negate the logit. Antisymmetrization happens
-    downstream in the stacker, which scores both directions and projects to a
-    symmetric probability.
-    """
+    """MLP for directional ``FEATURE_COLS`` rows; symmetry is applied downstream."""
 
     def __init__(
         self,

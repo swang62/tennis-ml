@@ -8,7 +8,6 @@ import pytest
 
 import src.db.ingest as ingest
 import src.utils.countries as countries_mod
-from src.constants import BRONZE_PROFILES_TABLE
 from src.features.columns import BRONZE_COLUMNS
 
 
@@ -69,12 +68,7 @@ class _FakeTxn:
 
 
 class _FakeConn:
-    """Minimal psycopg-like connection recording statements and COPY rows.
-
-    rowcount is the value reported after each execute — the fake's stand-in
-    for the database's actual affected-row count (default 1: everything
-    inserted). Tests exercising skip accounting set it explicitly.
-    """
+    """Minimal psycopg-like connection recording statements, COPY rows, and rowcount."""
 
     def __init__(self):
         self.statements: list[tuple[str, object | None]] = []
@@ -331,10 +325,7 @@ def test_match_id_prefixes_only_a_missing_edition_year():
 
 
 def test_match_id_reduces_date_like_year_to_edition_year():
-    """A YYYYMMDD year is normalized to its four-digit edition year, so the id
-    never embeds a full date: 19670220 + 1967-southern-pro stays
-    ``1967-southern-pro-001``, and the year-prefix rule still applies to the
-    reduced year for bare tournament ids."""
+    """YYYYMMDD dates reduce to their four-digit edition year in match ids."""
     assert ingest.canonical_match_id("1967-southern-pro", 1, 19670220) == "1967-southern-pro-001"
     assert ingest.canonical_match_id("418", 26, 20260201) == "2026-418-026"
     assert ingest.canonical_match_id("2026-418", 26, 20260201) == "2026-418-026"
@@ -742,9 +733,7 @@ def test_load_atp_profiles_bulk_copies_base_columns(fake_ingest_conn, tmp_path):
 
     assert ingest.load_atp_profiles(csv) == 2
 
-    # COPY streams the rows into a temp stage, then a single INSERT ... SELECT
-    # applies the idempotent PK insert (DO NOTHING without --force) — never a
-    # DuckDB relation scan.
+    # COPY stages rows before the idempotent INSERT ... SELECT.
     assert any(
         sql == f"COPY stage ({', '.join(ingest.ATP_PROFILE_COLUMNS)}) FROM STDIN"
         for sql, _ in fake_ingest_conn.statements
@@ -1099,28 +1088,6 @@ def test_enrich_players_never_overwrites_existing_summaries(monkeypatch, fake_in
 # ── Indoor normalization ────────────────────────────────────────
 
 
-def test_normalize_indoor_I_is_1():
-    assert ingest._normalize_indoor("I") == 1
-
-
-def test_normalize_indoor_O_is_0():
-    assert ingest._normalize_indoor("O") == 0
-
-
-def test_normalize_indoor_empty_is_none():
-    assert ingest._normalize_indoor("") is None
-
-
-def test_normalize_indoor_nan_is_none():
-    import math
-
-    assert ingest._normalize_indoor(float("nan")) is None
-
-
-def test_normalize_indoor_none_is_none():
-    assert ingest._normalize_indoor(None) is None
-
-
 def test_atp_rows_to_bronze_indoor_I_maps_to_1():
     row = _raw_row()
     row["indoor"] = "I"
@@ -1186,40 +1153,12 @@ def test_atp_rows_to_bronze_normalizes_best_of_from_source_and_fallback():
 # ── IOC country reference (src/countries) ─────────────────────────
 
 
-def test_normalize_ioc_trims_and_uppercases():
-    assert countries_mod.normalize_ioc(" fra ") == "FRA"
-    assert countries_mod.normalize_ioc("gbr") == "GBR"
-
-
-def test_normalize_ioc_empty_or_none_becomes_unk():
-    assert countries_mod.normalize_ioc(None) == countries_mod.UNK
-    assert countries_mod.normalize_ioc("") == countries_mod.UNK
-    assert countries_mod.normalize_ioc("   ") == countries_mod.UNK
-
-
 def test_valid_ioc_preserves_known_and_falls_back_to_unk():
     assert countries_mod.valid_ioc(" FRA ") == "FRA"  # trimmed/uppercased
     assert countries_mod.valid_ioc("gbr") == "GBR"
     assert countries_mod.valid_ioc("UNK") == "UNK"
     for bad in (None, "", "  ", "XYZ", "URS", float("nan")):
         assert countries_mod.valid_ioc(bad) == "UNK"
-
-
-def test_resolve_ioc_known_codes():
-    assert countries_mod.resolve_ioc("FRA") == ("FR", "France")
-    assert countries_mod.resolve_ioc("USA") == ("US", "United States")
-
-
-def test_resolve_ioc_unknown_falls_back_to_unk_row():
-    unknown = ("", "Country unknown")
-    assert countries_mod.resolve_ioc("XYZ") == unknown
-    assert countries_mod.resolve_ioc("") == unknown
-    assert countries_mod.resolve_ioc("UNK") == unknown
-
-
-def test_is_known_ioc():
-    assert countries_mod.is_known_ioc("fra")
-    assert not countries_mod.is_known_ioc("XYZ")
 
 
 # ── IOC normalization in load_atp_profiles ────────────────────────

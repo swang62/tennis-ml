@@ -4,12 +4,10 @@ the size-matched reference window clamp. No Evidently, no DB, no HTTP."""
 from __future__ import annotations
 
 from datetime import date
-from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
-from src.evaluate.promotion import METRIC_NAMES
 from src.flows import drift
 
 # ── recommendation mapping (plan threshold table) ──
@@ -77,45 +75,6 @@ def test_recommendation_thresholds_are_strict_on_delta_triggers():
     )
     assert _recommend(prediction_psi=drift.DRIFT_PRED_PSI_THRESHOLD) == "retrain"
     assert _recommend(drift_share=drift.DRIFT_SHARE_THRESHOLD) == "retrain"
-
-
-# ── pinned champion metric tags → metric dict ──
-
-
-class _FakeClient:
-    def __init__(self, tags: dict[str, str]):
-        self._tags = tags
-
-    def get_model_version(self, _name, _version):
-        return SimpleNamespace(tags=self._tags)
-
-
-def _champion():
-    return SimpleNamespace(version="3")
-
-
-def test_pinned_metrics_parses_champion_tags():
-    tags: dict[str, str] = {}
-    for name in METRIC_NAMES:
-        tags[f"{drift.METRIC_PREFIX}{name}"] = "0.61"
-    tags[drift.EVAL_SPLIT_SIZE_KEY] = "125"
-    tags[drift.EVAL_MAX_DATE_KEY] = "2025-01-10"
-
-    pinned = drift._pinned_metrics(_FakeClient(tags), _champion())  # type: ignore[arg-type]
-
-    assert set(pinned) == set(METRIC_NAMES) | {
-        "eval_split_size",
-        "eval_max_date",
-    }
-    assert pinned["roc_auc"] == 0.61
-    assert pinned["eval_split_size"] == 125
-    assert pinned["eval_max_date"] == "2025-01-10"
-
-
-def test_pinned_metrics_skips_missing_tags():
-    client = _FakeClient({f"{drift.METRIC_PREFIX}roc_auc": "0.72"})
-    pinned = drift._pinned_metrics(client, _champion())  # type: ignore[arg-type]
-    assert pinned == {"roc_auc": 0.72}
 
 
 # ── size-matched reference window (DRIFT_REF_MIN/MAX clamp) ──

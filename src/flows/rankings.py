@@ -1,38 +1,9 @@
-"""Prefect flow: weekly ATP rankings catch-up.
-
-The database is the self-healing watermark (``MAX(bronze.rankings.ranking_date)``).
-With no params it fetches every missing Monday from the watermark through the
-most recent completed Monday; explicit ``--param start_date``/``end_date``
-override the range. Guarantees for every path: a stored ranking week is never
-re-scraped, the effective start never precedes the Monday after the watermark
-nor Jan 1 of the current year, and the effective end never follows the most
-recent completed Monday.
-
-Weeks are fetched with the CloakBrowser Python library (never the MCP server),
-using one persistent browser/page for the whole run so the profile's Cloudflare
-clearance and humanized-jitter discipline carry across every week. A process
-that exits without a clean ``browser.close()`` wedges that session server-side,
-so the ``finally`` always closes page and browser. Identity resolves only
-through the approved ranking identity map (``load_ranking_player_map``): raw
-ranking source ids never reach the database and unmapped players are skipped
-and reported.
-
-A week that fails to load or parse is skipped so the backfill continues; but a
-run that could not access or parse the site for any of its weeks fails (and is
-retried) instead of succeeding on no data. Each successful week commits
-independently.
-
-Rankings and matches are separate deployments (``rankings-flow/rankings``
-Sunday 22:00 UTC, ``matches-flow/matches`` 22:30 UTC); a successful run of
-either triggers the incremental ETL deployment. There is no combined scrape
-flow; both modules are standalone commands (``just rankings`` / ``just matches``).
-"""
+"""Backfill missing ATP ranking weeks using the persistent browser session."""
 
 from __future__ import annotations
 
 import argparse
 import csv
-import random
 import re
 import time
 from contextlib import suppress
@@ -56,65 +27,28 @@ from src.db.ingest import (
 )
 from src.utils.scrape import (
     PAGE_NAVIGATION_TIMEOUT_MS,
-    PLAYER_OVERVIEW_URL,
-    DiscoverError,
-    _discover_player,
-    _fetch_overview_html,
-    _ioc_from_overview,
     _jitter,
-    _known_profile_ids,
     discover_players,
-    parse_player_overview,
 )
 
 RANKINGS_URL = "https://www.atptour.com/en/rankings/singles?rankRange=0-200&dateWeek={date}"
 CURRENT_RANKINGS_CSV = RANKINGS_DIR / "atp_rankings_current.csv"
 
-# Rankings table anchor, stable across ATP Tour page versions (both the mobile
-# and the desktop rankings table carry this class; the parser uses only the
-# first table containing player links). A Cloudflare challenge or markup change
-# means this never matches: the week is logged and skipped, never a failure.
-# Rows are targeted (not the table element) because the table is permanently
-# hidden by the .non-live state — the element exists in the DOM immediately but
-# the row links only appear once the server-side data has rendered.
 RANKINGS_TABLE_SELECTOR = "table.mega-table tbody tr a[href*='/en/players/']"
-# #dateWeek-filter: the SELECT listing every published ranking week. Its
-# presence in the DOM marks the end of the Cloudflare/manual widget hand-off;
-# options are matched by text in _week_in_filter.
 FILTER_SELECTOR = "#dateWeek-filter"
-# Per-week page render budget. Reapplied fresh on every wait (one wait per
-# week), so a slow page never eats into the next week's budget. 30s per page is
-# ample for a normal rankings render.
 RANKINGS_TABLE_TIMEOUT_MS = 30_000
-# Total budget for the rows to render (Cloudflare auto-clear or server-side
-# render) before a week is skipped. 30s is the outer bound — anything slower
-# than that is not going to resolve, and a genuine missing week has no rows to
-# render and is skipped immediately.
 CHALLENGE_RESOLVE_BUDGET_S = 30
-# Readiness budget for the #dateWeek-filter element after navigation: while a
-# Cloudflare/manual widget is up the filter is absent from the DOM, so element
-# presence is the readiness signal. Once it appears, the requested week's
-# option is checked exactly once — a missing option means the week was never
-# published, with no further waiting.
 FILTER_VERIFY_BUDGET_S = 15
 
 CLOAKBROWSER_PROFILE_DIR = (
     Path.home() / ".local" / "share" / "tennis-prefect-worker" / "cloakbrowser"
 )
 
-# Player profile link inside each rankings row: /en/players/<slug>/<id>/overview
-# where <id> is the canonical ATP_Database id (lowercased in the URL). The
-# rank and points cells are matched by class prefix ("rank", "points") across
-# the current mobile/desktop table variants; the empty <li class="rank"> move
-# indicator inside the player cell never matches the rank regex because it
-# carries no bare digits.
-# The slug group is captured so each parsed row can feed profile discovery.
 _SLUG_RE = r"[^/]+"
 _PLAYER_LINK_RE = re.compile(rf"/en/players/({_SLUG_RE})/([^/]+)/overview")
 _ATP_PLAYER_ID_RE = re.compile(r"^[A-Za-z0-9]{4}$")
 _RANK_CELL_RE = re.compile(r'class="rank\b[^"]*"[^>]*>\s*(\d+)\s*<', re.S)
 _POINTS_CELL_RE = re.compile(r'class="points\b[^"]*"[^>]*>(.*?)</td>', re.S)
-# First table in the page whose rows carry player links is the rankings table.
 _RANKINGS_TABLE_RE = re.compile(
     r'<table\b[^>]*\bclass=["\'][^"\']*\bmega-table\b[^"\']*["\'][^>]*>(.*?)</table>',
     re.I | re.S,
@@ -127,9 +61,6 @@ class RankingsParseError(ValueError):
     """Raised when a fetched rankings page has no parseable rankings table."""
 
 
-# ── Date math ────────────────────────────────────────────────────
-
-
 def latest_completed_monday(today: date) -> date:
     """Most recent Monday strictly before ``today``."""
     days_since_monday = today.weekday()
@@ -139,11 +70,7 @@ def latest_completed_monday(today: date) -> date:
 
 
 def ranking_mondays_after(watermark: date, as_of: date) -> list[date]:
-    """Every ATP ranking Monday in (watermark, as_of] when as_of is Monday.
-
-    The watermark is itself a ranking Monday, so the first candidate is
-    ``watermark + 7 days`` and every further Monday is a 7-day step.
-    """
+    """Every ATP ranking Monday in (watermark, as_of] when as_of is Monday."""
     end = as_of if as_of.weekday() == 0 else latest_completed_monday(as_of)
     start = watermark + timedelta(days=7)
     if start > end:
@@ -166,34 +93,13 @@ def stored_ranking_mondays() -> set[date]:
         return {row[0] for row in cur.fetchall()}
 
 
-# ── Date math ────────────────────────────────────────────────────
-
-
 @task
 def missing_ranking_mondays(
     start_date: date | None = None,
     end_date: date | None = None,
     force: bool = False,
 ) -> tuple[date | None, list[date]]:
-    """Weeks to fetch, optionally ignoring stored ranking dates.
-
-    Returns ``(watermark, weeks)``; ``watermark`` is None when the table is
-    empty and ``weeks`` is then empty because the flow must not scrape history
-    from scratch (run ``just seed`` first).
-
-    Presence is the only completeness gate unless ``force`` is true. Forced
-    runs schedule every Monday in the requested range and upsert the rows again.
-    With no ``start_date`` the scan starts one week after the watermark (the
-    max stored Monday); with an explicit ``start_date`` it starts there (snapped
-    forward to the next Monday). The upper bound is ``end_date`` when given,
-    else the most recent completed Monday. Weeks come back oldest first.
-
-    Safety floors apply to every path (bare, start-only, end-only, both): the
-    effective start never precedes the Monday after the watermark nor Jan 1 of
-    the current year, and the effective end never follows the most recent
-    completed Monday — so an explicit historical ``start_date`` can never
-    backfill before this year and stored weeks are never touched.
-    """
+    """Return ``(watermark, weeks)`` while respecting stored-week and date floors."""
     today = date.today()
     last_completed = latest_completed_monday(today)
     end = min(end_date or last_completed, last_completed)
@@ -215,9 +121,7 @@ def missing_ranking_mondays(
         start = watermark + timedelta(days=7)
     else:
         start = start_date + timedelta(days=(7 - start_date.weekday()) % 7)
-    # Safety floors: never earlier than the Monday after the watermark, never
-    # earlier than Jan 1 of the current year, never later than the most recent
-    # completed Monday. The start is snapped to a Monday to keep the weekly step.
+    # Keep the scan within the current year and after the stored watermark.
     floor = max(watermark + timedelta(days=7), date(today.year, 1, 1))
     start = max(start, floor)
     start += timedelta(days=(7 - start.weekday()) % 7)
@@ -228,9 +132,6 @@ def missing_ranking_mondays(
             weeks.append(monday)
         monday += timedelta(days=7)
     return watermark, weeks
-
-
-# ── HTML parsing (fixture-testable, no network) ──────────────────
 
 
 def _cell_text(cell_html: str) -> str:
@@ -267,27 +168,16 @@ def _parse_row(row_html: str) -> dict[str, Any] | None:
 
 
 def extract_rankings_from_html(html: str) -> list[dict[str, Any]]:
-    """Parse the rendered ATP rankings page into rank/points/name/player_id rows.
-
-    Uses only the first page table that contains player profile links (the
-    current page renders a concise and a full table with identical data).
-    Raises RankingsParseError when no table with player links is found, so a
-    challenge page or a markup change fails visibly.
-    """
+    """Parse the first rendered rankings table containing player links."""
     for fragment in _RANKINGS_TABLE_RE.findall(html):
         rows: list[dict[str, Any]] = []
         for row_html in _ROW_SPLIT_RE.findall(fragment):
             parsed = _parse_row(row_html)
-            # Only the top 200 are requested (rankRange=0-200); ATP may render a
-            # fuller table, and the page duplicates the table, so cap by rank.
             if parsed is not None and 1 <= parsed["rank"] <= 200:
                 rows.append(parsed)
         if rows:
             return rows
     raise RankingsParseError("no rankings table with player links found in page HTML")
-
-
-# ── Identity translation + upsert ────────────────────────────────
 
 
 def translate_rank_rows(rows: list[dict[str, Any]]) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
@@ -309,16 +199,7 @@ def translate_rank_rows(rows: list[dict[str, Any]]) -> tuple[pd.DataFrame, list[
 def tier_from_bronze(
     tournament_id: str, existing_rows: list[dict[str, Any]] | None = None
 ) -> str | None:
-    """Bronze tier for a tournament from existing match rows; None when unknown.
-
-    Bronze has no tournament_id column, so a row belongs to the tournament when
-    its ``match_id`` carries the id as a ``-``-separated segment (both the
-    Sackmann ``YYYY-TOURNAMENT_ID-NNN`` and the match-stats
-    ``YYYY-YYYY-TOURNAMENT_ID-NNN`` shapes embed it). Returns the ``tournament``
-    value (already bronze vocabulary, set at ingest) of the newest matching row.
-    Unknown tournaments resolve to None — the caller skips/reports instead of
-    inventing a tier. Purely over the supplied rows; nothing is scraped here.
-    """
+    """Return the newest matching bronze tier, or ``None`` when unknown."""
     token = f"-{str(tournament_id).strip()}-"
     if not existing_rows or token == "--":
         return None
@@ -334,12 +215,7 @@ def tier_from_bronze(
 
 
 def _launch_browser():
-    """Open the shared persistent CloakBrowser profile for this scrape run.
-
-    A persistent profile retains Cloudflare clearance cookies between runs. The
-    first launch disables HTTP/2 as CloakBrowser recommends to warm the profile.
-    The flow is responsible for closing the context in its finally block.
-    """
+    """Open the persistent CloakBrowser profile used by this scrape run."""
     import os
 
     import cloakbrowser
@@ -363,18 +239,8 @@ def _launch_browser():
 
 
 def _week_in_filter(page, week: date) -> bool:
-    """Whether ``week`` appears in the page's #dateWeek-filter.
-
-    The filter lists every published ranking week; the requested week shows up
-    as an option when it exists. Each option's ``value`` is the date in
-    YYYY-MM-DD, except the most recent week, whose value is the literal
-    "Current Week" — so the current week matches by value only when it is the
-    latest completed Monday. A week that was never published (e.g. a future
-    Monday) is absent from the filter entirely and returns False.
-    """
+    """Whether ``week`` appears in the page's #dateWeek-filter."""
     wanted = week.strftime("%Y-%m-%d")
-    # The latest completed Monday bounds the request window, so a week beyond it
-    # can never be a valid (published) "Current Week".
     latest = latest_completed_monday(date.today()).strftime("%Y-%m-%d")
     return page.evaluate(
         "([wanted, latest]) => {"
@@ -400,29 +266,7 @@ def _week_in_filter(page, week: date) -> bool:
 
 
 def _fetch_week_html(page, url: str, week: date) -> str:
-    """Navigate the shared rankings page to one week and return its HTML.
-
-    The page stays open for the entire flow so its navigation state and the
-    persistent profile's Cloudflare clearance are reused for every week. Random
-    jitter before/after navigation keeps the moves human-like.
-
-    Verification is element-first, not option-first: the page may be sitting on
-    a Cloudflare or manual widget right after navigation, so the #dateWeek-filter
-    SELECT is absent while verification is still underway. The flow first waits
-    up to FILTER_VERIFY_BUDGET_S for the filter element itself to appear (a
-    page that renders it immediately proceeds at once), then checks the
-    requested week's option exactly once. A missing option means the week was
-    never published — rejected immediately. A filter that never appears within
-    the budget is an unverifiable page, distinct from a missing week.
-
-    The gate for real weeks is the captured HTML containing actual player links:
-    the table element itself is hidden by the .non-live state, so "attached" on
-    the table fires before the rows render, and "visible" never fires at all.
-    The loop therefore waits until either the row links appear in
-    ``page.content()`` or the CHALLENGE_RESOLVE_BUDGET_S deadline passes (a
-    Cloudflare challenge auto-clears in between). The caller decides whether a
-    final no-table page is a missing week.
-    """
+    """Navigate the shared page, verify publication, and return rendered HTML."""
     _jitter()
     page.goto(url, wait_until="domcontentloaded", timeout=PAGE_NAVIGATION_TIMEOUT_MS)
     _jitter()
@@ -441,8 +285,6 @@ def _fetch_week_html(page, url: str, week: date) -> str:
         )
     deadline = time.monotonic() + CHALLENGE_RESOLVE_BUDGET_S
     while True:
-        # Reapplied fresh on every check, so a slow page never eats into the
-        # next week's budget.
         with suppress(Exception):
             page.wait_for_selector(
                 RANKINGS_TABLE_SELECTOR, state="attached", timeout=RANKINGS_TABLE_TIMEOUT_MS
@@ -465,18 +307,8 @@ def fetch_and_upsert_week(
 ) -> int | None:
     """Fetch one weekly ranking page and upsert its mapped rows.
 
-    Uses the run's shared browser page (never launches its own — the flow owns
-    the page and closes it in finally). Before the identity-map filter it
-    discovers ATP profiles for ranking players missing from bronze, so a valid
-    new player is ingestible this week; a discovery failure only skips that
-    player's row (via the identity filter, since it never entered the maps).
-    ``canonical``/``profiles`` default to the reference tables, so direct calls
-    without them (e.g. fixtures) still discovery against bronze. Commits
-    independently (``_copy_df_into`` runs in one transaction). Returns the
-    number of rows written, or ``None`` when the page could not be accessed or
-    parsed (Cloudflare challenge, missing rankings week, markup change) — a
-    signal the caller reads to distinguish "found no data" (a failure) from
-    "found data but nothing new to write" (``0``).
+    Uses the flow's shared page and returns ``None`` when the page cannot be
+    accessed or parsed, distinguishing failure from a successful zero-row write.
     """
     url = RANKINGS_URL.format(date=week.isoformat())
     print(f"Week {week.isoformat()}: fetching {url}")
@@ -541,8 +373,7 @@ def _report_dry_run(
 ) -> None:
     """Read-only dry-run report of what fetch_and_upsert_week would write.
 
-    Performs no DB, CSV, or profile writes — purely diagnostic output so a
-    dry run can be checked without touching any persisted state.
+    Performs no database, CSV, or profile writes.
     """
     print(
         f"[dry-run] Week {week.isoformat()}: {len(rows)} row(s) parsed, "
@@ -606,10 +437,7 @@ def sort_current_rankings_csv() -> None:
 def scrape_run_name(start_date: date | None, end_date: date | None) -> str:
     """Flow-run name for a scrape flow: a dated range when explicit, else 'latest'.
 
-    Distinguishes omitted params from explicit values: ``scrape-{start}-{end}``
-    when both are given, ``scrape-latest`` when neither is, and a clear partial
-    form (``scrape-{start}-latest`` / ``scrape-latest-{end}``) for one-sided
-    overrides. ISO dates keep the name sortable and unambiguous.
+    Uses ISO dates for explicit bounds and ``latest`` for omitted bounds.
     """
     start = start_date.isoformat() if start_date is not None else "latest"
     end = end_date.isoformat() if end_date is not None else "latest"
@@ -636,30 +464,7 @@ def rankings_flow(
     force: bool = False,
     dry_run: bool = False,
 ):
-    """Scrape missing ranking weeks: watermark-to-today (no params) or a date range.
-
-    With no params every missing Monday from the watermark through the most
-    recent completed Monday is fetched — the same for scheduled cron runs,
-    ``prefect deployment run`` without params, and direct local calls, so a
-    bare run never silently backfills far history. With only ``end_date`` every
-    missing Monday from the watermark through that date is fetched oldest
-    first; any explicit ``start_date`` and/or ``end_date`` — both together
-    fetch every Monday in that range regardless of the watermark (for
-    historical backfills). Safety guarantees, enforced for every path: a week
-    already present in ``bronze.rankings`` is never re-scraped (presence is
-    the only completeness test — partial prior ingests are not refetched); the
-    effective start never precedes the Monday after the stored watermark or
-    Jan 1 of the current year (an explicit historical ``start_date`` is
-    clamped, with a warning); and the effective end never follows the most
-    recent completed Monday. An ``end_date`` at or before the watermark
-    naturally fetches nothing. Launches exactly one CloakBrowser session, processes every missing
-    week inside a try block, and closes the browser in finally — even when a
-    week fails, the session is always released before the flow returns/raises.
-    A run that had weeks to fetch but could not access or parse the rankings
-    site for any of them (Cloudflare blocked every page, or the markup changed)
-    is marked failed and retried; finding data that is already stored is a
-    success, not a failure.
-    """
+    """Fetch missing ranking weeks while preserving the watermark and browser invariants."""
     load_env()
     today = date.today()
     if start_date is not None and start_date < date(today.year, 1, 1):
@@ -718,10 +523,7 @@ def rankings_flow(
                 found_data = True
                 stored += rows
     finally:
-        # CloakBrowser tracks sessions server-side; an exit without a clean
-        # close permanently wedges the session id, so the browser (and any page
-        # that was created) is always released here — even when a week or page
-        # creation fails. Closing the context closes its pages too.
+        # Always release the server-side browser session.
         print("Closing browser session")
         if page is not None:
             page.close()
@@ -733,16 +535,7 @@ def rankings_flow(
 
 
 def _fail_if_no_data_found(found_data: bool, weeks: list[date]) -> None:
-    """Fail the run when the scrape could not access or parse the site at all.
-
-    Rankings post weekly, so if every week we tried failed to fetch or parse
-    (Cloudflare block, missing page, or markup change) the site is effectively
-    unreachable — a real failure worth surfacing, not a "nothing new" result.
-    That legitimate case (an empty ``weeks`` because everything is current)
-    returns before any browser work. Finding a parseable page counts as success
-    even when it wrote no new rows (already-present data), so re-scraping stored
-    weeks is never a failure.
-    """
+    """Fail when no requested week could be fetched or parsed."""
     if not found_data:
         raise RuntimeError(
             f"Scrape could not access or parse the rankings site for any of "
@@ -799,20 +592,9 @@ RANKINGS_CRON = "0 22 * * 0"
 
 
 def register_deployment() -> None:
-    """Create/update the Sunday-scheduled rankings deployment (idempotent by name).
-
-    Scheduled production runs use this independent deployment; rankings and
-    matches are separate deployments — there is no combined scrape flow.
-    Runs on the host ``tennis-pool`` work pool via the host worker and stays
-    manually triggerable from the Prefect UI or ``prefect deployment run``.
-    Flow code is the local repo checkout (process work pool — no image or
-    remote storage is required).
-    """
+    """Create or update the Sunday-scheduled rankings deployment."""
     repo_root = Path(__file__).resolve().parent.parent.parent
-    # No static parameter defaults: deployment parameters are frozen at
-    # registration, so a baked-in date would go stale for later cron runs. The
-    # flow defaults to the watermark (see rankings_flow); pass explicit
-    # --param start_date/end_date to override for a manual backfill.
+    # Leave dates unset so scheduled runs resolve the current watermark.
     deployment = cast(
         Any,
         rankings_flow.from_source(

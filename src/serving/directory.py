@@ -1,10 +1,4 @@
-"""Canonical player-directory query and normalization.
-
-Single source of truth for the directory data contract used by the deploy-time
-raw directory artifact written under data/deploy/ (see src/flows/deploy.py).
-The raw SQL and the IOC -> (iso2, country) mapping live here only, so the
-artifact can never drift from the source.
-"""
+"""Canonical player-directory query and normalization."""
 
 from __future__ import annotations
 
@@ -18,19 +12,8 @@ import pandas as pd
 from src.constants import BRONZE_PROFILES_TABLE, GOLD_PROFILES_TABLE
 from src.utils.countries import resolve_ioc, valid_ioc
 
-# Directory read: bronze metadata (name/IOC) joined to the dbt-derived gold
-# current_rank, with matches_played equal to gold.player_profiles.match_count
-# (the player's explicit distinct physical-match count, 0 for zero-match
-# players). current_rank is the player's latest official weekly rank
-# (bronze.rankings), falling back to match-time rank from the most recent match
-# when no ranking row exists — both materialized by dbt in gold. Every bronze
-# profile is retained: the directory, similarity, and MiniSearch build over all
-# players regardless of match count. Training never reads this query — it
-# consumes gold.match_features via training/to_dataframe.
-#
-# height/birthdate/turned_pro ride along from bronze so the deploy similarity
-# snapshot can feed the profile descriptor block; directory_players ignores
-# them, so the directory contract below is unchanged.
+# Keep every bronze profile for directory and similarity builds; gold supplies
+# the materialized rank and match count. Extra profile fields feed similarity.
 PLAYERS_SQL = f"""
 SELECT bp.player_id, bp.display_name, bp.ioc, bp.backhand, bp.handedness, bp.summary,
        bp.height, bp.birthdate, bp.turned_pro,
@@ -59,10 +42,7 @@ def _json_safe(value: object) -> object:
 
 
 def directory_players(df: pd.DataFrame) -> list[dict[str, object]]:
-    """Map raw directory rows to the deploy artifact's player shape.
-
-    Each entry carries only the static-picker fields, preserving SQL row order.
-    """
+    """Map raw rows to the deploy artifact shape, preserving SQL order."""
     players: list[dict[str, object]] = []
     for row in df.to_dict("records"):
         record = {str(k): _json_safe(v) for k, v in row.items()}

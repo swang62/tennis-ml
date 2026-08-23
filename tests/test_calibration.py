@@ -1,8 +1,4 @@
-"""Hermetic tests for temperature-scaling calibration helpers.
-
-Pure numpy/sklearn — no database, MLflow, or Bento. Verifies the symmetry
-contract, the behavior of fit_temperature, and the ECE diagnostic.
-"""
+"""Hermetic tests for temperature scaling and ECE diagnostics."""
 
 import math
 
@@ -133,9 +129,7 @@ def test_select_temperature_rejects_single_class_validation_fold():
 
 
 def test_select_temperature_brier_guardrail_accepts_within_tolerance(monkeypatch):
-    # t=0.7 on this fold improves log loss while Brier degrades by ~7e-7 — a
-    # noise-floor change inside the default guardrail tolerance, so the
-    # calibration is accepted on the log-loss primary gate.
+    # The small Brier regression is within tolerance, so the log-loss gain wins.
     monkeypatch.setattr("src.evaluate.calibration.fit_temperature", lambda *_args, **_kwargs: 0.7)
     p_val = [
         0.1663305428891164,
@@ -156,9 +150,7 @@ def test_select_temperature_brier_guardrail_accepts_within_tolerance(monkeypatch
 
 
 def test_select_temperature_brier_guardrail_rejects_beyond_tolerance(monkeypatch):
-    # Same fold, but a zero guardrail tolerance turns the degradation into a
-    # material violation: log loss still improves, yet the calibration is
-    # rejected because Brier must not degrade at all.
+    # Zero tolerance rejects the Brier regression despite improved log loss.
     monkeypatch.setattr("src.evaluate.calibration.fit_temperature", lambda *_args, **_kwargs: 0.7)
     p_val = [
         0.1663305428891164,

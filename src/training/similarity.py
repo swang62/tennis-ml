@@ -25,24 +25,13 @@ from src.constants import (
 )
 from src.db.client import to_dataframe
 
-# The similarity index is independent of the prediction models (a dashboard
-# feature rebuilt from the fresh snapshot at deploy). Deploy writes it to
-# data/deploy, where load() reads it back from the SERVING_* paths.
+# Deploy rebuilds this dashboard index from the fresh snapshot, independently of models.
 DEFAULT_INDEX = DATA_PROCESSED / "player_similarity.index"
 DEFAULT_METADATA = DATA_PROCESSED / "player_metadata.json"
 SERVING_INDEX = DEPLOY_ARTIFACTS / "player_similarity.index"
 SERVING_METADATA = DEPLOY_ARTIFACTS / "player_metadata.json"
 
-# Career lifetime playstyle stats per player (from gold.player_profiles).
-# Only how a player plays enters this block: serve shape and aggression,
-# return strength, and clutch. Surface win rates live in their own calibrated
-# block (SURFACE_BLOCK_COLS) with exposure-based shrinkage, and reputation
-# (match_count, career_win_rate) is a separate block. Recent rolling match
-# performance (win_rate_10, weighted_form_10, streak, and every *_10 signal in
-# gold.match_features), bio embeddings, current rank, and identity keys
-# (birthplace, name, player_id) never enter the vector. The profile descriptor
-# block (PROFILE_COLS) carries bronze height/age/years_pro so physical profile
-# is a small calibrated signal, not a biasing one.
+# Lifetime playstyle stats form one block; recent form, rank, and identity text do not.
 PROFILE_COLS = ["height", "age", "years_pro"]
 IDENTITY_BLOCK_COLS = ["is_right_handed", "is_two_handed_backhand"]
 LIFETIME_PLAYSTYLE_COLS: list[str] = [
@@ -53,24 +42,16 @@ LIFETIME_PLAYSTYLE_COLS: list[str] = [
     "break_point_conversion_pct",
 ]
 
-# Surface career performance block: win rates on each surface plus exposure
-# counts. Rates are exposure-shrunk toward the neutral 0.5 prior
-# (SIM_SURFACE_SHRINK_K) so a handful of matches never reads as reliably as a
-# full career; counts enter as the same bounded confidence n / (n + K). Column
-# names keep their gold names; the win-rate values stored in the vector are
-# the shrunk ones.
+# Surface rates shrink toward 0.5 by exposure; bounded exposure counts are included.
 SURFACE_RATE_COLS = ["hard_win_rate", "clay_win_rate", "grass_win_rate"]
 SURFACE_COUNT_COLS = ["hard_matches", "clay_matches", "grass_matches"]
 SURFACE_BLOCK_COLS = [*SURFACE_RATE_COLS, *SURFACE_COUNT_COLS]
 
-# Reputation block: career experience (match_count bounded by
-# SIM_EXPERIENCE_K) and career win rate. All materialized career signals —
-# never current standing or recent rolling form.
+# Reputation uses career experience and career win rate, not current standing or recent form.
 DOMINANCE_COLS = ["dominance"]
 REPUTATION_BLOCK_COLS = ["match_count", "career_win_rate"]
 
-# Public so deploy can hash exactly the gold lifetime inputs the playstyle
-# matrix consumes (its reuse check for the navigation artifacts).
+# Deploy hashes this SQL to decide whether similarity artifacts can be reused.
 PLAYER_LIFETIME_SQL = f"""
 SELECT player_id, {", ".join(LIFETIME_PLAYSTYLE_COLS + SURFACE_BLOCK_COLS + DOMINANCE_COLS + REPUTATION_BLOCK_COLS)}
 FROM {GOLD_PROFILES_TABLE}
@@ -83,12 +64,7 @@ class PlayerData(TypedDict):
     score: NotRequired[str]
 
 
-# Explicit calibrated block weights (single source of truth; mirrors the SIM_*
-# constants in src.constants). Each block is unit-normalized and scaled by its
-# weight before the final row L2 normalization, so a block's influence on
-# cosine similarity is exactly its weight — never its raw scale or dimension
-# count. The primary signals are playstyle, surface, and reputation; identity
-# is a small descriptor block.
+# Normalize each block before applying its calibrated weight.
 BLOCK_WEIGHTS: dict[str, float] = {
     "identity": SIM_IDENTITY_WEIGHT,
     "playstyle": SIM_PLAYSTYLE_WEIGHT,
@@ -98,11 +74,7 @@ BLOCK_WEIGHTS: dict[str, float] = {
 
 
 def block_slices() -> dict[str, slice]:
-    """Map each calibrated block to its column slice in the final vector.
-
-    Fixed-width blocks lead (identity, playstyle, surface, reputation). Tests
-    and tooling use this to attribute vector components to blocks.
-    """
+    """Map each vector block to its column slice."""
     widths: list[tuple[str, int]] = [
         ("identity", len(IDENTITY_BLOCK_COLS)),
         ("profile", len(PROFILE_COLS)),
@@ -120,24 +92,13 @@ def block_slices() -> dict[str, slice]:
 
 
 def vector_block_norms(vector: object) -> dict[str, float]:
-    """Per-block L2 norms of one row vector.
-
-    Because each block is unit-normalized and scaled by its calibrated weight
-    before the final row L2 normalization, a fully active block of an
-    L2-normalized vector has norm weight / sqrt(sum of squared weights); a
-    zero block (cold start) contributes 0.0. This is the calibration contract
-    tests assert, so block influence is weight-bound, never dimension-bound.
-    """
+    """Return the L2 norm of each block in one vector."""
     arr = np.asarray(vector).astype(np.float32).reshape(-1)
     return {name: float(np.linalg.norm(arr[sl])) for name, sl in block_slices().items()}
 
 
 def _weighted_block(values: np.ndarray, weight: float) -> np.ndarray:
-    """Unit-normalize a block row-wise, then scale it by its calibrated weight.
-
-    Zero rows (cold start) stay zero — faiss.normalize_L2 leaves them
-    untouched — so a missing block contributes nothing to similarity.
-    """
+    """Normalize a block row-wise and apply its calibrated weight."""
     block = np.ascontiguousarray(values, dtype=np.float32)
     faiss.normalize_L2(block)
     return block * weight
@@ -147,32 +108,12 @@ def build_playstyle_matrix(
     df: pd.DataFrame,
     query: Callable[[str], pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
-    """Assemble the per-player playstyle vector used by the similarity index.
-
-    The vector is a weighted concatenation of independently calibrated blocks,
-    each unit-normalized (or bounded-transformed) before scaling:
-
-    - identity: one-hot handedness + backhand (SIM_IDENTITY_WEIGHT)
-    - playstyle: LIFETIME_PLAYSTYLE_COLS lifetime serve/return stats
-      (SIM_PLAYSTYLE_WEIGHT)
-    - surface: exposure-shrunk hard/clay/grass win rates plus bounded exposure
-      counts (SIM_SURFACE_WEIGHT)
-    - reputation: career experience (match_count bounded by SIM_EXPERIENCE_K)
-      and career win rate, each bounded (SIM_REPUTATION_WEIGHT)
-
-    The primary signals are playstyle, surface, and reputation; identity is a
-    small descriptor block. Each block's influence is capped by its explicit
-    weight, so raw dimensionality can never dominate the vector. Blocks are
-    concatenated and each row L2-normalized once, so FAISS inner-product search
-    is cosine similarity. Returns one row per ``df`` row (row order preserved).
-    """
+    """Build weighted, row-normalized vectors while preserving ``df`` order."""
     df = df.reset_index(drop=True)
     query = query or to_dataframe
     state = query(PLAYER_LIFETIME_SQL)
     merged = df.merge(state, on="player_id", how="left")
-    # Career cells are NULL for players without a match: playstyle, surface
-    # rates/counts, and experience impute 0.0 (no signal); career win rate
-    # imputes the neutral 0.5 prior (no evidence is not a failure).
+    # Cold starts have no career signal; career win rate uses the neutral prior.
     merged["career_win_rate"] = merged["career_win_rate"].fillna(0.5)
     all_numeric = (
         LIFETIME_PLAYSTYLE_COLS + SURFACE_BLOCK_COLS + DOMINANCE_COLS + REPUTATION_BLOCK_COLS
@@ -183,11 +124,7 @@ def build_playstyle_matrix(
     merged[all_numeric] = merged[all_numeric].fillna(0.0).astype(np.float32)
     build_date = pd.Timestamp.today().normalize()
 
-    # Profile metadata (height, birthdate, turned_pro) lives in the bronze
-    # profiles snapshot, never in the gold lifetime aggregates
-    # (PLAYER_LIFETIME_SQL), so read it from df (the supplied snapshot rows).
-    # Missing players default to 0.0 so the descriptor block is a cold-start
-    # zero rather than NaN.
+    # Profile metadata comes from the bronze snapshot, not lifetime aggregates.
     def profile_column(name: str) -> pd.Series:
         if name in df.columns:
             return df[name]
@@ -221,8 +158,7 @@ def build_playstyle_matrix(
         index=df.index,
     )
 
-    # Surface block: win rates shrunk toward 0.5 by exposure, plus the bounded
-    # exposure counts themselves (confidence signal for the shrunk rates).
+    # Surface rates use exposure shrinkage, and exposure counts remain features.
     counts = merged[SURFACE_COUNT_COLS].to_numpy(np.float32)
     exposure = counts / (counts + np.float32(SIM_SURFACE_SHRINK_K))
     rates = merged[SURFACE_RATE_COLS].to_numpy(np.float32)
@@ -259,14 +195,7 @@ def build_playstyle_matrix(
 
 
 class PlayerSimilarity:
-    """Builds or loads a FAISS index of player playstyle profiles and finds similar players.
-
-    Usage:
-        finder = PlayerSimilarity()
-        finder.build()
-        finder.search("alcaraz")
-        finder.search("Carlos Alcaraz")
-    """
+    """Build or load a FAISS index for player similarity search."""
 
     def __init__(self):
         self.index: faiss.Index | None = None
@@ -294,12 +223,7 @@ class PlayerSimilarity:
         if profiles.empty:
             return
 
-        # Career aggregates per player from gold.player_profiles, consumed by
-        # the calibrated block vector (identity, lifetime playstyle stats,
-        # exposure-shrunk surface performance, reputation). The bronze profile
-        # snapshot also feeds the profile descriptor block (height/age/
-        # years_pro). Recent rolling match performance, bio embeddings, and
-        # current rank are excluded.
+        # Combine lifetime aggregates with the bronze profile descriptor.
         features = build_playstyle_matrix(profiles, query)
 
         self.index = faiss.IndexFlatIP(features.shape[1])
@@ -348,11 +272,7 @@ class PlayerSimilarity:
         query: str,
         top_k: int = 5,
     ) -> list[dict[str, str]]:
-        """Find players similar to *query* (player_id or display name).
-
-        Returns entries sorted by similarity (highest first), each with
-        player_id, display_name, and score (3 decimal places).
-        """
+        """Return similar players sorted by score."""
         # Load index if not exist
         if self.index is None:
             self.load()

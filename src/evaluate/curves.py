@@ -1,12 +1,4 @@
-"""Champion reference curve data: serialization and MLflow resolution.
-
-At promotion the freshly-promoted model's ROC/PR/calibration curve points are
-frozen on the champion version. Every later evaluation overlays the incumbent's
-curve as a fixed reference without ever loading the champion artifact (which the
-evaluation notebook does not own). The reference is computed on the
-promotion-time evaluation split, so treat it as a pinned incumbent baseline, not
-a curve scored on the current candidate's test set.
-"""
+"""Serialize and resolve the champion's pinned ROC, PR, and calibration curves."""
 
 from __future__ import annotations
 
@@ -79,12 +71,7 @@ def serialize_curve_data(data: CurveData) -> tuple[bytes, str]:
 
 
 def resolve_champion_curves(client: Any, champion: Any) -> CurveData | None:
-    """Download the pinned champion curve artifact, or None when absent.
-
-    Returns None when there is no champion (first promotion) or the incumbent was
-    promoted before curve pinning existed — callers plot the overlay only when
-    this returns data.
-    """
+    """Download the pinned curve artifact, returning None when unavailable."""
     if champion is None:
         return None
     from mlflow.artifacts import download_artifacts
@@ -98,6 +85,5 @@ def resolve_champion_curves(client: Any, champion: Any) -> CurveData | None:
         with open(path) as fh:
             return dict_to_curve_data(json.load(fh))
     except Exception:
-        # Incumbent pinned before curve export, a stale/broken artifact, or a
-        # transient registry error must never break the evaluation report.
+        # Missing or broken incumbent curves must not break evaluation.
         return None

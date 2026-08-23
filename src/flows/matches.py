@@ -1,16 +1,4 @@
-"""Prefect flow: ATP match-stats enrichment.
-
-Parses the ATP results-archive and tournament pages, fetches Hawkeye Complete
-stats on one shared persistent CloakBrowser page (sequential requests), and
-upserts winner-first rows into ``bronze.match_events``. Match ids are stable:
-a canonical ``(match_date, tournament_id, unordered player pair)`` reuses the
-stored row's id, else a deterministic ``YYYY-TOURNAMENT_ID-NNN`` derived from
-the ATP ``msNNN`` sequence. Every page/match failure is a counted skip unless
-no valid page was fetched at all (then the run fails so Prefect retries).
-
-Parsers/resolvers/mapper touch no network, browser, or DB; upserts and the
-flow's watermark/bronze reads are the only DB-touching entry points.
-"""
+"""Enrich ATP match statistics into stable, winner-first bronze rows."""
 
 from __future__ import annotations
 
@@ -52,11 +40,6 @@ from src.flows.rankings import scrape_run_name
 MATCHES_DEPLOYMENT_NAME = "matches"
 MATCHES_CRON = "30 22 * * 0"
 
-# ── Tournament discovery parsers (fixture-testable, no network) ──
-
-# Archive entries are <li> blocks holding the tournament-info (badge, profile
-# link, name, date) plus results CTA; <li> also appears in page navigation, so
-# only blocks that carry a tournament-info div are treated as entries.
 _ARCHIVE_LI_RE = re.compile(r"<li\b[^>]*>(.*?)</li>", re.S)
 _PROFILE_LINK_RE = re.compile(r"/en/tournaments/([^/]+)/(\d+)/overview")
 RESULTS_LINK_RE = re.compile(
@@ -66,9 +49,6 @@ _BADGE_RE = re.compile(r"categorystamps_([a-z0-9_]+)\.png")
 _NAME_SPAN_RE = re.compile(r'class="name">([^<]+)</span>')
 _DATE_SPAN_RE = re.compile(r'class="Date">([^<]+)</span>')
 
-# Archive badge images encode the tournament category as a raw ATP level code;
-# LEVEL_MAP (src/db/ingest.py) stays the single tier vocabulary. Badges outside
-# the tier set (itf/unitedcup/lvr/...) map to None and the caller skips.
 _BADGE_TO_LEVEL = {
     "grandslam": "G",
     "1000": "M",
@@ -76,8 +56,6 @@ _BADGE_TO_LEVEL = {
     "250": "250",
 }
 
-# "2 - 11 January, 2026" puts the month only on the end; "18 January - 1
-# February, 2026" carries it on both parts and the year only on the end.
 _DATE_PART_RE = re.compile(r"(\d{1,2})(?:\s+([A-Za-z]+))?(?:,\s*(\d{4}))?")
 _MONTHS = {
     name: index
@@ -108,13 +86,7 @@ def _tier_from_badge(badge: str | None) -> str | None:
 
 
 def _parse_archive_dates(text: str, year: int) -> tuple[date | None, date | None]:
-    """Start/end dates of an archive 'Date' span; (None, None) when unparseable.
-
-    Handles day-only starts ("2 - 11 January, 2026"), month on both parts
-    ("18 January - 1 February, 2026") and single dates (start == end). A
-    start month later than the end month implies a cross-year range, so the
-    start year steps back one.
-    """
+    """Parse an archive date span, including ranges that cross calendar years."""
     parts = [part.strip() for part in re.split(r"\s*[-\u2013]\s*", text.strip())]
     if not parts:
         return None, None
@@ -140,14 +112,7 @@ def _parse_archive_dates(text: str, year: int) -> tuple[date | None, date | None
 
 
 def extract_tournaments_from_archive(html: str, year: int) -> list[dict[str, Any]]:
-    """Parse the ATP results-archive page into tournament discovery rows.
-
-    Each row carries ``slug``, ``tournament_id``, ``name``, ``tier`` (bronze
-    vocabulary; None for non-tier or badge-less entries so the flow can
-    skip/report), ``start_date``/``end_date`` (date or None) and ``year``.
-    Entries without a profile link are ignored; a missing results link or badge
-    never raises.
-    """
+    """Parse archive entries into tournament rows; incomplete entries are skipped."""
     tournaments: list[dict[str, Any]] = []
     for block in _ARCHIVE_LI_RE.findall(html):
         if "tournament-info" not in block:
@@ -163,8 +128,6 @@ def extract_tournaments_from_archive(html: str, year: int) -> list[dict[str, Any
         start_date, end_date = (
             _parse_archive_dates(date_match.group(1), year) if date_match else (None, None)
         )
-        # The results link repeats the id and carries the entry's own year; use
-        # it only when consistent with the authoritative profile link.
         entry_year = str(year)
         if results is not None and results.group(2) == tournament_id:
             entry_year = results.group(3)
@@ -195,12 +158,7 @@ def _as_date(value: date | str | None) -> date | None:
 def in_window(
     tournaments: list[dict[str, Any]], start_date: date | str, end_date: date | str
 ) -> list[dict[str, Any]]:
-    """Tournaments whose [start_date, end_date] intersects the run window.
-
-    A tournament without reliable date metadata never intersects and is
-    excluded (deterministic; unparseable metadata is reported upstream). The
-    window compares inclusively on both ends.
-    """
+    """Return dated tournaments whose inclusive ranges intersect the run window."""
     start, end = _as_date(start_date), _as_date(end_date)
     if start is None or end is None:
         return []
@@ -218,26 +176,13 @@ def tier_for_tournament(
     tournament: dict[str, Any],
     existing_rows: list[dict[str, Any]] | None = None,
 ) -> str | None:
-    """Bronze tier for an archive tournament row; None when unsupported.
-
-    The archive badge tier (already bronze vocabulary) wins when present. A
-    badge-less tournament is classified only from existing bronze match rows
-    (``rankings.tier_from_bronze``) — never guessed, so an unknown tournament
-    resolves to None and the flow skips/reports it instead of assuming an ATP
-    250+ classification without evidence.
-    """
+    """Return the archive tier or a tier backed by existing bronze rows."""
     tier = tournament.get("tier")
     if tier:
         return str(tier)
     return rankings.tier_from_bronze(str(tournament.get("tournament_id") or ""), existing_rows)
 
 
-# ── Match discovery parsers (fixture-testable, no network) ──
-
-# One match card per played match: the results page renders each card as
-# <div class="match"> holding .match-header (round + court), .match-content
-# with two .stats-item/.player-info blocks and per-set .score-item cells, and
-# .match-footer > .match-cta with the H2H and stats (msXXX) links.
 _MATCH_CARD_RE = re.compile(r'<div class="match">')
 _DAY_HEADER_RE = re.compile(r'<div class="tournament-day">')
 _DAY_DATE_RE = re.compile(r"(\d{1,2})\s+([A-Za-z]+),?\s+(\d{4})")
@@ -250,8 +195,6 @@ _WINNER_DIV_RE = re.compile(r'<div class="winner">')
 _MATCH_FOOTER_RE = re.compile(r'<div class="match-footer">')
 _TEXT_TAG_RE = re.compile(r"<[^>]+>")
 
-# Tournament-round strong text -> bronze round vocabulary (r128..f); anything
-# unmapped (e.g. qualifying) keeps its raw long name for upstream reporting.
 _ROUND_TO_BRONZE = {
     "Final": "f",
     "Semifinals": "sf",
@@ -275,14 +218,7 @@ def _score_items(block: str) -> list[str]:
 
 
 def _score_from_blocks(items1: list[str], items2: list[str]) -> str | None:
-    """Winner-perspective set score; None when the sets do not align.
-
-    The first score-item in each block is an empty spacer column and is
-    dropped. Sets are zipped by index; a count mismatch (retired or incomplete
-    set) and ambiguous tiebreak cells yield None so callers never store a
-    misaligned score. Tiebreak points live on the set loser's cell ("6 4" in a
-    "7-6(4)" set); bronze strips the parentheses later (see _score in ingest).
-    """
+    """Return a winner-perspective score, or ``None`` when cells do not align."""
 
     def without_spacer(items: list[str]) -> list[str]:
         return items[1:] if items and _TEXT_TAG_RE.sub("", items[0]) == "" else items
@@ -306,20 +242,7 @@ def _score_from_blocks(items1: list[str], items2: list[str]) -> str | None:
 
 
 def extract_matches_from_results(html: str, tournament_id: str, year: int) -> list[dict[str, Any]]:
-    """Parse a tournament outcomes page into per-match discovery rows.
-
-    One row per distinct ``msXXX`` stats link, bound to the card that carries it
-    (the ``.match-footer``/``.match-cta`` block of that card, never paired with
-    links from other cards): ``match_id`` (msXXX), ``round`` (bronze vocabulary),
-    ``player1_id``/``player2_id`` (uppercased) plus their ``player1_slug``/
-    ``player2_slug`` and ``player1_name``/``player2_name`` from the two
-    ``.player-info`` overview links, ``winner_id`` (the player-info holding the
-    winner checkmark), ``match_date`` from the enclosing ``.tournament-day``
-    header, and ``score`` when the set cells align reliably (else None).
-
-    Cards whose stats link is not an msXXX (qualifying qsXXX, doubles) are
-    ignored; the tournament/year in the stats URL must match the arguments.
-    """
+    """Parse a tournament outcomes page into one row per valid ``msXXX`` link."""
     day_positions = [match.start() for match in _DAY_HEADER_RE.finditer(html)]
     card_positions = [match.start() for match in _MATCH_CARD_RE.finditer(html)]
     matches: list[dict[str, Any]] = []
@@ -386,63 +309,30 @@ def extract_matches_from_results(html: str, tournament_id: str, year: int) -> li
     return matches
 
 
-# Canonical physical-match key: (match_date, tournament_id, unordered canonical
-# uppercase player ids). tournament_id scopes the player pair so the same
-# players on different events/dates cannot collide; a frozenset (never a
-# mutable dict order) keeps the key deterministic and orientation-free.
 PhysicalKey = tuple[date, str, frozenset[str]]
 
 
 def physical_key(match_date: date, tournament_id: str, player1: str, player2: str) -> PhysicalKey:
-    """Canonical physical-match key: (match_date, tournament_id, {player ids}).
-
-    Player ids are uppercased and folded into a frozenset, so a match is the
-    same physical match regardless of page/winner-first orientation or id case.
-    """
+    """Build an orientation-independent key from date, tournament, and players."""
     return (match_date, tournament_id, frozenset({player1.upper(), player2.upper()}))
 
 
 def ms_sequence(match_id: Any) -> int:
-    """Positive numeric sequence from an ATP ``msNNN`` stats id; 0 when malformed.
-
-    Only the strict ``msNNN`` shape is accepted — digits are never stripped out
-    of a non-ms id — and a zero/non-positive sequence is rejected by callers.
-    """
+    """Return the positive sequence in a valid ``msNNN`` id, else ``0``."""
     raw = str(match_id or "").strip()
     digits = raw[2:] if raw.lower().startswith("ms") else ""
     return int(digits) if digits.isdigit() else 0
 
 
 def build_match_id(year: int, tournament_id: str, sequence: int) -> str:
-    """Canonical match id ``YYYY-TOURNAMENT_ID-NNN``, independent of match date.
-
-    Shares the year-prefix rule with bronze/raw-CSV ingestion
-    (``ingest.canonical_match_id``): a tournament id already starting with its
-    edition year is embedded verbatim (``2026-418`` stays ``2026-418``), never
-    a second prefix; otherwise the year is prepended once (``418`` + 2026 ->
-    ``2026-418-026``, never ``2026-2026-418-026``). The id is opaque:
-    dashed/nonstandard Davis Cup ids pass through untouched, never parsed as
-    numeric. ``sequence`` is the zero-padded ATP ``msNNN`` numeric sequence
-    (grows beyond 999 naturally; the caller rejects non-positive values). No
-    date component: the same edition+tournament+sequence always names the same
-    match.
-    """
+    """Build a date-independent canonical match id."""
     return canonical_match_id(tournament_id, sequence, year)
 
 
 def surface_for_tournament(
     tournament_id: str, existing_rows: list[dict[str, Any]] | None = None
 ) -> str | None:
-    """Latest known surface for a tournament from existing bronze rows.
-
-    Bronze has no tournament_id column, so a row belongs to the tournament when
-    its ``match_id`` carries the id as a ``-``-separated segment (both the
-    Sackmann ``YYYY-TOURNAMENT_ID-NNN`` and the match-stats
-    ``YYYY-YYYY-TOURNAMENT_ID-NNN`` shapes embed it). Returns the surface of
-    the newest matching row, None when the tournament is unknown — the caller
-    skips/reports instead of inventing a surface. Purely over the supplied
-    rows; nothing is scraped here.
-    """
+    """Return the newest matching bronze surface, or ``None`` when unknown."""
     if not existing_rows:
         return None
     token = f"-{tournament_id}-"
@@ -458,12 +348,7 @@ def surface_for_tournament(
 def resolve_discovered_matches(
     matches: list[dict[str, Any]], tier: str | None = None
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Convert live ATP match rows to bronze rows; report malformed identities.
-
-    Live ATP result pages provide canonical player ids directly. Missing profiles
-    are backfilled separately, so a valid id is retained even when absent from
-    the legacy CSV identity map.
-    """
+    """Convert live ATP rows to bronze rows and report malformed identities."""
     if not tier:
         return [], [{**match, "reason": "unknown tournament tier"} for match in matches]
     resolved: list[dict[str, Any]] = []
@@ -565,9 +450,7 @@ _SIDE_STAT_FIELDS: tuple[tuple[str, str, str], ...] = (
 def _team_blocks(team: dict[str, Any]) -> list[dict[str, Any]]:
     """Per-set stat blocks of one team, from either payload carrier.
 
-    The 2026 payload renders them under ``Sets``, older payloads under
-    ``SetScores``; both carry the identical per-block shape, so the mapper
-    reads whichever is present.
+    Read either the current ``Sets`` or legacy ``SetScores`` carrier.
     """
     blocks: list[dict[str, Any]] = []
     for carrier in ("Sets", "SetScores"):
@@ -578,14 +461,7 @@ def _team_blocks(team: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _side_stats(team: dict[str, Any]) -> tuple[dict[str, int] | None, str]:
-    """Match-total stat fields for one team, or (None, reason) when unusable.
-
-    The payload renders the whole-match totals on the block whose ``SetScore``
-    is empty (older payloads carry stats only there); a payload without such a
-    block sums its per-set blocks instead. Every required stat must be present
-    and numeric — an absent stat is a structured skip, never a fabricated
-    value. Explicit zeros are legal and kept (e.g. 0 break points faced).
-    """
+    """Return match-total stats, preferring totals and reporting unusable data."""
     blocks = _team_blocks(team)
     totals_block = next((block for block in blocks if block.get("SetScore") in (None, "")), None)
     blocks = [totals_block] if totals_block is not None else blocks
@@ -610,14 +486,7 @@ def _side_stats(team: dict[str, Any]) -> tuple[dict[str, int] | None, str]:
 
 
 def _score_from_teams(winner_team: dict[str, Any], loser_team: dict[str, Any]) -> str | None:
-    """Winner-perspective set score from the payload; None when not derivable.
-
-    The two teams' per-set blocks pair by index; blocks without a set score
-    (the whole-match totals row) are skipped, and a set-count mismatch or
-    non-numeric cell means the sets cannot be aligned reliably — None, never a
-    fabricated score. Tiebreak digits are omitted, matching bronze's canonical
-    score format (``_score`` in src/db/ingest.py).
-    """
+    """Return the payload's winner-perspective set score when derivable."""
     winner_blocks = _team_blocks(winner_team)
     loser_blocks = _team_blocks(loser_team)
     if len(winner_blocks) != len(loser_blocks):
@@ -704,31 +573,7 @@ def hawkeye_to_bronze(
     rank_points: dict[str, int] | None = None,
     ages: dict[str, float] | None = None,
 ) -> dict[str, Any] | None:
-    """Map a Hawkeye Complete stats payload into one winner-first bronze row.
-
-    Side A = ``Match.PlayerTeam`` (identity ``Match.PlayerTeam1``), side B =
-    ``Match.OpponentTeam`` (identity ``Match.PlayerTeam2``); the side whose id
-    matches ``Match.WinningPlayerId``/``Match.Winner`` is the winner and
-    supplies the player1 stats, because bronze enforces ``winner_id =
-    player1_id``. The winner's canonical id comes from ``discovered_match``
-    (a resolved discovery row) when present and consistent with the payload;
-    otherwise the payload side ids are used verbatim.
-
-    Returns None (after printing a reason) when the identities or winner are
-    missing/inconsistent, or any of the 18 required stat fields is absent —
-    the caller skips and reports instead of storing a plausible-but-invented
-    row. The 18 stat columns always carry payload-derived ints (explicit
-    zeros are legal). Metadata — match_id, match_date, tournament/tier,
-    tournament_name, round, surface, score — comes from the payload or
-    ``discovered_match`` when available and is None otherwise; ``surface``
-    (bronze fallback), ``rank_points``, and ``ages`` are injected lookups
-    with the seed defaults (0 / 0.0) for unknown players.
-
-    The returned row also carries non-bronze extra keys for the raw CSV sink
-    (never written to bronze): per-side seed/entry in winner/loser
-    orientation, draw_size/best_of/minutes from the payload, and the
-    discovered page names — each None when absent, never fabricated.
-    """
+    """Map a Hawkeye payload into one winner-first bronze row."""
     if not isinstance(payload, dict) or not isinstance(payload.get("Match"), dict):
         _report("payload has no Match object", discovered_match)
         return None
@@ -771,9 +616,7 @@ def hawkeye_to_bronze(
         _report(f"side {b_id}: {reason_b}", discovered_match)
         return None
 
-    # Canonical player ids: the discovered (resolved) ids win when they agree
-    # with the payload winner; otherwise the payload side ids are used. Any
-    # disagreement is a structured skip, never an invented orientation.
+    # Reject disagreements rather than inventing an orientation.
     p1_canonical = str(discovered_match.get("player1_id") or "").upper() if discovered_match else ""
     p2_canonical = str(discovered_match.get("player2_id") or "").upper() if discovered_match else ""
     discovered_winner = (
@@ -807,7 +650,6 @@ def hawkeye_to_bronze(
 
     score = _score_from_teams(team_a if winner_is_a else team_b, team_b if winner_is_a else team_a)
     if score is None and discovered_match and discovered_match.get("score"):
-        # Bronze canonical format strips tiebreak digits (_score in ingest).
         score = re.sub(r"\(\d+\)", "", str(discovered_match["score"])).strip() or None
 
     round_value = (
@@ -822,9 +664,6 @@ def hawkeye_to_bronze(
     )
     tournament_name = tournament.get("EventDisplayName") or tournament.get("TournamentName")
 
-    # Raw-CSV source metadata (extra row keys, never bronze columns): per-side
-    # seed/entry follow the payload winner orientation, draw_size/best_of/
-    # minutes come from the payload when present — absent values stay None.
     winner_identity, loser_identity = (
         (identity_a, identity_b)
         if winner_is_a
@@ -887,11 +726,8 @@ def fetch_hawkeye_match(
 ) -> tuple[dict[str, Any] | None, str]:
     """Fetch one Hawkeye Complete stats payload; (payload, "") or (None, reason).
 
-    Never raises on a bad response: navigation failures/timeouts, challenge or
-    HTML responses, invalid JSON, and payloads missing the stats/identity
-    blocks are classified and returned as a skip reason, so the batch loop
-    continues to the next match. Uses the run's shared page (the batch owns
-    pacing: ``rankings._jitter()`` here, the 3-8s gap between requests).
+    Classify navigation, challenge, JSON, and payload errors as skip reasons so
+    the batch continues. Use the run's shared page.
     """
     url = HAWKEYE_URL.format(year=year, tournament_id=tournament_id, match_id=match_id)
     for attempt in range(HAWKEYE_CHALLENGE_RETRIES + 1):
@@ -951,12 +787,8 @@ def fetch_hawkeye_batch(
 ) -> list[dict[str, Any]]:
     """Fetch Hawkeye stats for every discovered match, sequentially.
 
-    Launches the shared ``rankings._launch_browser`` (persistent profile,
-    ``humanize=True``) when no ``page`` is supplied, keeps one page for the
-    whole batch, and closes the browser in ``finally`` — one request at a time
-    with a randomized 3-8s gap plus ``_jitter`` before each navigation. Each
-    input row comes back with ``payload`` (dict or None) and ``hawkeye_error``
-    (skip reason or None); a bad match never aborts the batch.
+    Use one shared page for the batch and return each input row with ``payload``
+    and ``hawkeye_error``. A bad match never aborts the batch.
     """
     browser = None
     owned_page = None
@@ -1331,16 +1163,8 @@ def bronze_row_to_raw_match(
 ) -> dict[str, str]:
     """One Sackmann-format raw row from a bronze match_events row.
 
-    The canonical match_id embeds the raw tourney_id and match sequence, so it
-    round-trips: ``2026-418-026`` -> tourney_id ``2026-418``, match_num 26, and
-    re-deriving the id through the shared rule reproduces ``2026-418-026``.
-    ``profiles`` is the per-run in-memory player metadata map
-    (``load_player_metadata``): it supplies display name, hand, height, and IOC
-    for winner/loser when the player is known (the discovered page names on the
-    row are the fallback). The payload-derived source fields (per-side seed and
-    entry, draw_size, best_of, minutes) are stamped extra keys on the bronze row
-    by ``hawkeye_to_bronze``; stats/ranks/ages map from the bronze columns. Any
-    field the scrape cannot know stays empty — nothing is fabricated.
+    Reconstruct the Sackmann id from the bronze match id and map known profile,
+    payload, and bronze fields. Unknown values stay empty.
     """
     match_id = str(row.get("match_id") or "")
     tourney_id, sep, seq = match_id.rpartition("-")
@@ -1437,12 +1261,8 @@ def append_raw_match_rows(
 ) -> tuple[int, set[str]]:
     """Append only genuinely new Sackmann rows to a CSV; (appended, all ids).
 
-    ``existing`` is the pre-loaded id set when supplied (dedup guard), otherwise
-    loaded from the file. Rows already present (same canonical match id) are
-    skipped, including repeats earlier in the same batch; a brand-new file gets
-    the header first; an existing file is only appended to, so its rows are
-    byte-for-byte untouched. Returns the number of rows actually appended and
-    the full (existing + appended) id set.
+    Skip existing canonical ids, write a header for new files, and append without
+    rewriting existing rows. Return the appended count and full id set.
     """
     ids = set(existing) if existing is not None else load_csv_match_ids(path)
     new_rows: list[dict[str, str]] = []
@@ -1526,14 +1346,8 @@ def resolve_window(
 ) -> tuple[date, date] | None:
     """Inclusive [start, end] scrape window, or None when there is nothing.
 
-    Explicit dates are used exactly: both -> [start, end]; only ``start_date``
-    -> [start, today]; only ``end_date`` -> [watermark, end]. With no dates (a
-    scheduled run) the window defaults to [watermark, today], so a bare run
-    resumes from the last stored match and never crawls unbounded history. The
-    start needs the watermark whenever it is not explicit: an empty bronze
-    table with no ``start_date``, or an ``end_date`` at/before the watermark,
-    resolves to None so the caller reports and skips. ``today`` is injectable
-    for hermetic tests.
+    Explicit bounds are used as given; omitted bounds resume from the watermark
+    through today. An empty or invalid range returns ``None``.
     """
     today = today or date.today()
     if start_date is not None and end_date is not None:
@@ -1554,9 +1368,8 @@ def load_bronze_lookup_rows(
 ) -> list[dict[str, Any]]:
     """All bronze.match_events rows projected for the flow's lookups, once per run.
 
-    Values are normalized to Python scalars (``_python_scalar``) so the
-    physical-match, rank_points, and age indexes compare cleanly. ``query`` is
-    injectable for hermetic tests (default ``src.db.client.execute_df``).
+    Normalize values to Python scalars for the physical-match, rank, and age
+    indexes. ``query`` is injectable for hermetic tests.
     """
     if query is None:
         query = execute_df
@@ -1771,19 +1584,8 @@ def _process_tournament(
 ) -> dict[str, Any]:
     """Discover, enrich, upsert, and CSV-append one tournament's matches.
 
-    Fetches the results page after a generous 3-8s gap, parses per-match msXXX
-    rows, preserves live ATP player identities, dedupes
-    repeated physical keys before the Hawkeye fetch, then fetches Hawkeye stats
-    sequentially, upserts each winner-first bronze row — reusing the stored
-    physical match's id by the canonical (date, tournament, player-pair) key or
-    deriving the deterministic Sackmann id from the strictly-parsed ``msNNN``
-    sequence; with ``force`` an existing row is replaced by the candidate,
-    otherwise it is skipped — and appends each new match's Sackmann-format row
-    to the year's raw CSV (deduped against the file and this run; never a
-    rewrite). A proposed id already owned by a different physical match
-    (``_id_collision``) is a reported skip, never a merge. Every failure is a
-    printed, counted skip — never an abort. Returns the per-tournament record
-    the flow folds into its totals.
+    Discover, deduplicate, fetch, upsert, and append one tournament's matches.
+    Failures are counted skips; conflicting ids are never merged.
     """
     tournament_id = str(tournament.get("tournament_id") or "")
     name = tournament.get("name")
@@ -1949,18 +1751,7 @@ def matches_flow(
     match_ids: set[str] | None = None,
     force: bool = False,
 ):
-    """Discover ATP 250+ tournaments in the window and enrich bronze rows.
-
-    Window is inclusive on both ends: explicit dates are used exactly; with no
-    dates the window is watermark-driven (last stored ``bronze.match_events``
-    match_date through today), so a bare scheduled run never crawls unbounded
-    history. Match ids are stable and idempotent: a canonical
-    (match_date, tournament_id, unordered player pair) reuses the stored row's
-    id, else a deterministic id derives from the ATP ``msNNN`` sequence.
-    Existing rows are skipped unless ``force`` is set. Every page/match failure
-    is a counted skip unless no requested page could be fetched/parsed, then
-    the run fails so Prefect retries.
-    """
+    """Discover ATP 250+ tournaments in the inclusive window and enrich bronze rows."""
     load_env()
     watermark = matches_watermark()
     window = resolve_window(start_date, end_date, watermark)
@@ -2063,9 +1854,7 @@ def matches_flow(
                 for key in totals:
                     totals[key] += int(result.get(key, 0))
     finally:
-        # CloakBrowser tracks sessions server-side; an exit without a clean
-        # close permanently wedges the session id, so the browser (and any page
-        # that was created) is always released here.
+        # Always release the server-side browser session.
         print("Closing browser session")
         if page is not None:
             page.close()
@@ -2128,20 +1917,9 @@ if __name__ == "__main__":
 
 
 def register_deployment() -> None:
-    """Create/update the Sunday-scheduled matches deployment (idempotent by name).
-
-    Registers on the host ``tennis-pool`` work pool like the other host flows.
-    Scheduled production runs use this independent deployment; rankings and
-    matches are separate deployments — there is no combined scrape flow. No
-    static parameter defaults: deployment
-    parameters are frozen at registration, so a baked-in date would go stale
-    for later cron runs. The flow defaults to the watermark (see
-    ``matches_flow``); pass explicit ``--param start_date``/``--param end_date``
-    to override for a manual backfill.
-    """
+    """Create or update the Sunday-scheduled matches deployment."""
     repo_root = Path(__file__).resolve().parent.parent.parent
-    # prefect's async_dispatch stubs from_source() as a Coroutine union, but in
-    # a sync context it returns the Flow itself; cast to Any sidesteps that.
+    # Prefect's sync return is typed as a coroutine union here.
     deployment = cast(
         Any,
         matches_flow.from_source(

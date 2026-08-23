@@ -1,30 +1,4 @@
-"""Time-forward, match-group-safe, label-stratified cross-validation folds.
-
-Gold holds two directional rows per physical match — one per player — keyed
-by ``match_id``, with ``match_won`` the label relative to each row's player
-side. A complete match group therefore contributes exactly one positive and
-one negative row; the helpers below validate that invariant and exploit it
-so every validation fold is exactly label-balanced.
-
-Folds are chronological bands of ``match_date``: the train band's distinct
-dates are split into ``n_splits + 1`` contiguous, non-overlapping bands,
-fold ``k`` validates band ``k + 1``, and training for that fold is every
-match from dates strictly before the band — so ``max(fit dates) <
-min(validation dates)`` holds for every fold, no date straddles a fold
-boundary, and complete match groups (both orientations share one
-``match_date``) always move together. The earliest band is a grow-in
-window with no earlier data: it is never a validation fold and only feeds
-training for later folds.
-
-``grouped_fold_indices`` and the persisted assignment are deterministic
-functions of ``(match_ids, match_dates, n_splits)``; ``random_state`` is
-accepted for signature parity with sklearn splitters and never used.
-
-Lifecycle: the 01 split notebook persists ``fold_assignment.parquet`` once per
-run (one row per physical match, ``fold`` 0 = never-validated grow-in band,
-1..n_splits = the validation fold); 02 tuners load and validate it, so a stale
-file from a previous snapshot fails the load validation.
-"""
+"""Time-forward, match-safe, label-stratified cross-validation folds."""
 
 from __future__ import annotations
 
@@ -39,11 +13,7 @@ ArrayInput = np.ndarray | Sequence
 
 
 def _forward_bands(match_dates: np.ndarray, n_splits: int) -> list[tuple[np.ndarray, np.ndarray]]:
-    """Split the sorted unique match dates into ``n_splits + 1`` contiguous bands.
-
-    Returns inclusive ``(lo, hi)`` date pairs, one per band. Boundaries fall
-    between distinct dates, so no date ever straddles a fold.
-    """
+    """Split unique dates into contiguous inclusive bands."""
     if n_splits < 1:
         raise ValueError(f"n_splits must be >= 1, got {n_splits}")
     unique_dates = np.sort(np.unique(match_dates))
@@ -57,8 +27,7 @@ def _forward_bands(match_dates: np.ndarray, n_splits: int) -> list[tuple[np.ndar
 
 
 def _validate_label_invariant(match_ids: ArrayInput, labels: ArrayInput) -> None:
-    """Every match_id must hold exactly two directional rows, one positive
-    and one negative — the precondition that makes folds exactly balanced."""
+    """Require two directional rows per match, one positive and one negative."""
     ids = np.asarray(match_ids)
     labs = np.asarray(labels)
     if len(ids) != len(labs):
@@ -97,15 +66,7 @@ def grouped_fold_indices(
     _random_state: int,
     labels: ArrayInput | None = None,
 ) -> list[tuple[np.ndarray, np.ndarray]]:
-    """Row-level (fit_idx, val_idx) pairs for time-forward, match-safe folds.
-
-    Fold ``k`` validates the ``(k+1)``-th date band; fitting rows are every
-    match from dates strictly before that band, so no fit date is ever equal
-    to or later than a validation date and complete match groups always move
-    together (both orientations share one ``match_date``). When ``labels`` is
-    given, the directional-label invariant is validated once and each fold's
-    class balance is checked before any fit can run.
-    """
+    """Return time-forward row indices with complete match groups intact."""
     ids: np.ndarray = np.asarray(match_ids)
     dates: np.ndarray = np.asarray(match_dates)
     if labels is not None:
@@ -129,13 +90,7 @@ def fold_assignment_frame(
     _random_state: int,
     labels: ArrayInput | None = None,
 ) -> pd.DataFrame:
-    """One row per physical match: ``match_id``, ``match_date``, and ``fold``.
-
-    ``fold`` is the date-band index: 0 is the grow-in band that is never a
-    validation fold; folds 1..n_splits hold out the matches of validation
-    bands 1..n_splits, which are exactly the folds ``grouped_fold_indices``
-    returns. Deterministic for fixed ``(match_ids, match_dates, n_splits)``.
-    """
+    """Return one deterministic fold row per physical match."""
     ids: np.ndarray = np.asarray(match_ids)
     dates: np.ndarray = np.asarray(match_dates)
     if labels is not None:
@@ -180,14 +135,7 @@ def create_fold_assignment(
     labels: ArrayInput,
     path: str | Path,
 ) -> pd.DataFrame:
-    """Compute the current split's fold frame, validate the directional-label
-    invariant, and persist it, replacing any prior run's assignment.
-
-    Called exactly once per training run by the 01 split notebook after it
-    writes the new split artifacts; the 02 tuners only load what this wrote.
-    ``labels`` is required because a time-forward assignment that cannot be
-    exactly balanced per fold must fail here, not inside a tuner.
-    """
+    """Validate and persist the current run's fold assignment."""
     frame = fold_assignment_frame(match_ids, match_dates, n_splits, random_state, labels)
     save_fold_assignment(frame, path)
     return frame
@@ -200,16 +148,7 @@ def load_validated_fold_assignment(
     random_state: int,
     path: str | Path,
 ) -> pd.DataFrame:
-    """Load the current run's fold assignment and validate it against the
-    split this notebook is consuming, before any tuning starts.
-
-    The persisted frame must be exactly what the time-forward fold bands
-    compute for the current split: the same match IDs and dates, fold count,
-    canonical ordering (one row per match, sorted by match_id), and fold
-    values. Anything else — a stale file from a previous snapshot, a
-    different split, a different fold count, or a corrupted file — raises
-    with a clear message instead of silently diverging.
-    """
+    """Load and validate the persisted assignment for the current split."""
     path = Path(path)
     frame = load_fold_assignment(path)
     expected = fold_assignment_frame(match_ids, match_dates, n_splits, random_state)

@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""
-Standalone pipeline runner — runs all Papermill notebooks in sequence.
-
-``--force-promote`` passes ``force_promote=True`` into 04_evaluate so it always
-promotes the candidate (bypassing the metric gate), useful to refresh lineage
-tags without re-beating production.
-"""
+"""Run the training and evaluation notebooks in sequence."""
 
 import argparse
 import logging
@@ -13,7 +7,6 @@ import shutil
 import sys
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
-from pathlib import Path
 from typing import TextIO
 
 import papermill as pm
@@ -25,7 +18,6 @@ from src.constants import (
     PARAMS,
     load_env,
 )
-from src.db import training
 
 # Training notebooks (00-05), run in order.
 NB_ORDER = [
@@ -113,9 +105,7 @@ if __name__ == "__main__":
         redirect_stdout(_Tee(sys.stdout, log)),
         redirect_stderr(_Tee(sys.stderr, log)),
     ):
-        # Route Papermill's log_output records (INFO/WARNING) through the
-        # tee'd stderr so cell output lands in both console and run log.
-        # The handler binds the tee because it is created inside the redirect.
+        # Route Papermill output through the redirected stderr.
         logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(message)s")
 
         print(

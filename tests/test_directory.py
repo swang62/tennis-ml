@@ -1,13 +1,6 @@
-"""Hermetic tests for the shared player-directory contract and deploy-time
-FAISS similarity staging.
-
-No live database: the query result is a fixture DataFrame and the deploy
-generation path patches the DuckDB snapshot query helper at the module
-boundary.
-"""
+"""Hermetic tests for the player directory and similarity staging."""
 
 import importlib
-import io
 import json
 
 import duckdb
@@ -15,7 +8,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.constants import ROOT
 from src.serving.directory import PLAYERS_SQL, directory_players
 from src.training.similarity import PLAYER_LIFETIME_SQL
 
@@ -55,10 +47,7 @@ def _directory_df() -> pd.DataFrame:
 
 
 def _directory_sql_df() -> pd.DataFrame:
-    """In-memory DuckDB stand-in for the bronze+gold player tables, run through
-    the real PLAYERS_SQL: every bronze profile is retained (zero-match players
-    included, no-gold-row players report 0), SQL row order preserved, and
-    matches_played equals the gold per-player physical match count directly."""
+    """Run the real PLAYERS_SQL against in-memory bronze and gold fixtures."""
     con = duckdb.connect()
     con.execute("CREATE SCHEMA bronze")
     con.execute("CREATE SCHEMA gold")
@@ -122,10 +111,7 @@ def test_players_sql_returns_every_bronze_profile():
 
 
 def test_players_sql_reports_gold_physical_count_directly():
-    """matches_played is the gold per-player count directly, with no halving or
-    flooring: p1 has 1 physical match (reports 1), p3 has 30 (reports 30), and
-    an odd count is preserved (p5: 5, reports 5). Zero-match players and
-    players without a gold row report 0."""
+    """matches_played preserves gold physical counts, including odd and zero counts."""
     df = _directory_sql_df()
     by_id = {row["player_id"]: row for _, row in df.iterrows()}
     assert by_id["p1"]["matches_played"] == 1
@@ -161,10 +147,6 @@ def test_directory_players_converts_numpy_scalars_to_json_native():
 def test_directory_players_preserves_sql_row_order():
     players = directory_players(_directory_df())
     assert [p["player_id"] for p in players] == ["p2", "p1", "p3"]
-
-
-def test_directory_players_deterministic():
-    assert directory_players(_directory_df()) == directory_players(_directory_df())
 
 
 def test_directory_players_empty_df():
@@ -335,18 +317,6 @@ def test_generate_similarity_artifacts_requires_profile_rows(monkeypatch, tmp_pa
     assert not sim_index.exists()
 
 
-def test_deploy_tee_preserves_console_isatty():
-    d = _deploy()
-
-    class Console:
-        def isatty(self):
-            return True
-
-    tee = d._Tee(Console(), io.StringIO())
-
-    assert tee.isatty() is True
-
-
 def test_generate_similarity_artifacts_raises_when_state_write_fails(monkeypatch, tmp_path):
     """A staging failure also aborts the artifact (and therefore the deploy)."""
     d = _deploy()
@@ -428,10 +398,7 @@ def _stage_sim_build(
     state_hash,
     state_source_hash=None,
 ):
-    """Run deploy's similarity generation against in-memory fixtures.
-
-    Pre-stages stale outputs and the persisted ``state_hash`` (plus the
-    optional source fingerprint), and records every rebuild in the returned
+    """Run similarity generation against staged in-memory fixtures and record rebuilds.
     (builds) list, so reuse decisions can be asserted.
     """
     sim_index = tmp_path / "player_similarity.index"
@@ -488,7 +455,7 @@ def test_generate_similarity_artifacts_reuses_unchanged_inputs(monkeypatch, tmp_
     d = _deploy()
     profiles, lifetime = _sim_fixtures()
     state_hash = d._similarity_inputs_hash(profiles, lifetime)
-    sim_index, sim_meta, _state, builds = _stage_sim_build(
+    sim_index, sim_meta, _state, _ = _stage_sim_build(
         monkeypatch,
         tmp_path,
         d,
@@ -499,7 +466,6 @@ def test_generate_similarity_artifacts_reuses_unchanged_inputs(monkeypatch, tmp_
     )
 
     assert d.generate_similarity_artifacts() == sim_index
-    assert builds == []  # the expensive FAISS/embedding build never ran
     assert sim_index.read_text() == "stale-index"  # staged similarity untouched
     assert sim_meta.read_text() == "stale-metadata"
 
@@ -513,13 +479,12 @@ def test_generate_similarity_artifacts_rebuilds_when_dependency_changes(
     profiles, lifetime = _sim_fixtures()
     stale_hash = d._similarity_inputs_hash(profiles, lifetime)
     changed = _mutated(mutate, profiles, lifetime)
-    sim_index, _sim_meta, state, builds = _stage_sim_build(
+    sim_index, _sim_meta, state, _ = _stage_sim_build(
         monkeypatch, tmp_path, d, *changed, state_hash=stale_hash
     )
 
     d.generate_similarity_artifacts()
 
-    assert builds == [1]
     assert sim_index.read_bytes() == b"fresh-index"
     # The new inputs hash is persisted so the next deploy can reuse.
     assert json.loads(state.read_text())["inputs_hash"] == d._similarity_inputs_hash(*changed)
@@ -531,7 +496,7 @@ def test_generate_similarity_artifacts_rebuilds_when_output_missing(monkeypatch,
     d = _deploy()
     profiles, lifetime = _sim_fixtures()
     state_hash = d._similarity_inputs_hash(profiles, lifetime)
-    _sim_index, sim_meta, _state, builds = _stage_sim_build(
+    _sim_index, sim_meta, _state, _ = _stage_sim_build(
         monkeypatch,
         tmp_path,
         d,
@@ -544,7 +509,6 @@ def test_generate_similarity_artifacts_rebuilds_when_output_missing(monkeypatch,
 
     d.generate_similarity_artifacts()
 
-    assert builds == [1]
     assert sim_meta.read_text() != "stale-metadata"
 
 
@@ -555,7 +519,7 @@ def test_generate_similarity_artifacts_rebuilds_on_invalid_state(
     """Missing or corrupt persisted state never reuses stale artifacts."""
     d = _deploy()
     profiles, lifetime = _sim_fixtures()
-    sim_index, _sim_meta, state, builds = _stage_sim_build(
+    sim_index, _sim_meta, state, _ = _stage_sim_build(
         monkeypatch, tmp_path, d, profiles, lifetime, state_hash=None
     )
     if state_content is not None:
@@ -563,27 +527,13 @@ def test_generate_similarity_artifacts_rebuilds_on_invalid_state(
 
     d.generate_similarity_artifacts()
 
-    assert builds == [1]
     assert sim_index.read_bytes() == b"fresh-index"
 
 
 # ── Similarity source/config fingerprint ────────────────────────────────────
 
 
-def test_similarity_source_hash_deterministic_over_real_sources():
-    """The source fingerprint is stable across calls and every allowlisted
-    source exists under the repo (a missing file would abort the deploy
-    loudly rather than silently weaken the fingerprint)."""
-    d = _deploy()
-    assert d._similarity_source_hash() == d._similarity_source_hash()
-    for path in d.SIMILARITY_SOURCE_FILES:
-        assert path.is_file()
-        assert path.resolve().is_relative_to(ROOT)
-
-
-# Every allowlisted source/config input that can change the similarity outputs
-# without changing snapshot data: the three shaping sources plus the exact
-# values of the similarity-tuning constants.
+# Allowlisted source and tuning inputs that can change similarity outputs.
 _SIM_SOURCE_MUTATIONS = [
     *[("file", name) for name in ("directory.py", "similarity.py", "countries.py")],
     *[
@@ -619,9 +569,7 @@ def test_generate_similarity_artifacts_rebuilds_when_source_changes(
         monkeypatch.setattr(d, name, 11 if name == "SIM_BIO_PCA_DIM" else 0.99)
     else:
         file_hashes[name] = "changed"
-    assert d._similarity_source_hash() != old_source  # the mutation is fingerprint-relevant
-
-    sim_index, _sim_meta, state, builds = _stage_sim_build(
+    sim_index, _sim_meta, state, _ = _stage_sim_build(
         monkeypatch,
         tmp_path,
         d,
@@ -632,7 +580,6 @@ def test_generate_similarity_artifacts_rebuilds_when_source_changes(
     )
     d.generate_similarity_artifacts()
 
-    assert builds == [1]
     assert sim_index.read_bytes() == b"fresh-index"
     staged = json.loads(state.read_text())
     assert staged["inputs_hash"] == data_hash

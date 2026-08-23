@@ -1,27 +1,4 @@
-"""PostgreSQL client for the tennis-ml pipeline.
-
-PostgreSQL (via psycopg) is the only operational backend. Every query uses
-psycopg's `%s` placeholders — request data is never concatenated into SQL —
-and results come back as pandas DataFrames.
-
-Each process shares a lazily-created `psycopg_pool.ConnectionPool`
-(min_size=0, max_size=4, autocommit, ~30s connection/checkout/readiness
-timeouts, 10s idle close) that starts with no connections and, across the two
-Bento workers, caps the app at eight checked-out connections. A checked-out
-connection returns to the pool the moment its caller exits; surplus physical
-connections are closed after `MAX_IDLE_S` of disuse, so an idle app does not
-retain PostgreSQL connections (psycopg's default idle timeout is 10 minutes,
-far too long to hold server capacity). `execute_df()` checks out one
-connection per call; multi-step writes run inside an explicit
-`transaction()` context manager that holds one checked-out connection,
-commits on success and rolls back on error. A broken connection is discarded
-by the pool — statements are never replayed automatically. Transient network
-or TLS failures during checkout (SSL eof, pool timeouts) are retried with
-bounded exponential backoff; only the checkout is retried, never a statement.
-
-DuckDB remains installed solely for the training database snapshots; it is
-not part of the operational query path.
-"""
+"""PostgreSQL client with bounded pooling and retry-safe checkout."""
 
 from __future__ import annotations
 
@@ -37,39 +14,19 @@ import psycopg
 from psycopg.rows import tuple_row
 from psycopg_pool import ConnectionPool, PoolTimeout
 
-# Pool bounds: two Bento workers x max 4 connections per process cap the app
-# at 8 concurrent PostgreSQL queries (H2H fires three in parallel); min 0
-# starts with no connections. Subject to the database's capacity.
 MIN_POOL_SIZE = 0
 MAX_POOL_SIZE = 4
 
-# Idle lifecycle: a returned connection that goes unused is closed after
-# MAX_IDLE_S (psycopg defaults to 10 minutes, which would let an idle app
-# retain server capacity). Checkouts return immediately; only the physical
-# connection is closed after the idle period.
 MAX_IDLE_S = 10.0
 
-# Connection bounds: every wait is capped at 30 seconds so a wedged or
-# high-latency server fails a query instead of hanging a worker forever.
-# connect_timeout caps each TCP/SSL handshake (libpq defaults wait
-# indefinitely; integer seconds), pool timeout caps checkout waits, and
-# reconnect_timeout caps how long the pool keeps retrying an unreachable
-# server before giving up.
 CONNECT_TIMEOUT_S = 30
 POOL_TIMEOUT_S = 30.0
 RECONNECT_TIMEOUT_S = 30.0
 
-# Transient-failure retries: a remote PostgreSQL over TLS can drop a
-# connection during handshake or under load ("SSL error: unexpected eof",
-# pool checkout timeouts). Checkout is retried with bounded exponential
-# backoff; statements are never replayed, so writes stay safe.
 DB_RETRY_ATTEMPTS = 4
 DB_RETRY_BASE_S = 1.0
 DB_RETRY_MAX_S = 5.0
 
-# Transient-only: syntax errors, constraint violations, and other
-# ProgrammingError/DatabaseError subclasses are deterministic — never retried.
-# PoolTimeout is a subclass of OperationalError, listed explicitly for clarity.
 TRANSIENT_ERRORS: tuple[type[psycopg.Error], ...] = (
     psycopg.OperationalError,
     psycopg.InterfaceError,
@@ -81,16 +38,7 @@ _pool_lock = threading.Lock()
 
 
 def get_pool() -> ConnectionPool:
-    """Return the process-local connection pool, creating it on first use.
-
-    The pool is bounded (min_size=0, max_size=4) and autocommit, and closes
-    connections left idle for `MAX_IDLE_S`. `wait()` surfaces an unreachable
-    DATABASE_URL at first use instead of failing on the first query, with a
-    bounded readiness timeout. `check` runs a health probe on every checkout
-    so connections broken by the server (e.g. an SSL reset) are discarded
-    before reuse, and `reconnect_timeout` bounds how long the pool keeps
-    retrying after a failure.
-    """
+    """Return the lazy, bounded process-local connection pool."""
     global _pool
     pool = _pool
     if pool is None:
@@ -118,11 +66,7 @@ def get_pool() -> ConnectionPool:
 
 
 def close() -> None:
-    """Close the pool and reset it, releasing every connection.
-
-    Call when a worker or test finishes so the pool never holds stale
-    connections across runs.
-    """
+    """Close and reset the process-local connection pool."""
     global _pool
     with _pool_lock:
         if _pool is not None:
@@ -132,14 +76,7 @@ def close() -> None:
 
 @contextmanager
 def connection() -> Iterator[psycopg.Connection[Any]]:
-    """Check out one pooled connection for the duration of the block.
-
-    The connection is returned to the pool on exit, so callers never hold a
-    pooled connection longer than their work needs. Checkout is retried with
-    bounded exponential backoff on transient failures (TLS drops, pool
-    checkout timeouts); once checked out, the caller's work runs exactly
-    once — an error from the body propagates untouched, never replayed.
-    """
+    """Check out a connection, retrying transient failures before the body runs."""
     delay = DB_RETRY_BASE_S
     for attempt in range(DB_RETRY_ATTEMPTS):
         checkout = get_pool().connection()
@@ -189,11 +126,7 @@ def clear_active_sessions() -> tuple[list[int], list[int]]:
 
 @contextmanager
 def transaction() -> Iterator[psycopg.Cursor[Any]]:
-    """Run a multi-step write atomically on one pooled connection.
-
-    Commits on success, rolls back on error; the checked-out connection is
-    returned to the pool when the context exits.
-    """
+    """Run a multi-step write atomically on one pooled connection."""
     with connection() as conn, conn.transaction(), conn.cursor(row_factory=tuple_row) as cur:
         yield cur
 
@@ -204,17 +137,7 @@ def _cursor_to_df(cur: psycopg.Cursor[Any]) -> pd.DataFrame:
 
 
 def execute_df(sql: str, params: list[object] | tuple[object, ...] | None = None) -> pd.DataFrame:
-    """Run a parameterized query and return the results as a DataFrame.
-
-    Positional `%s` placeholders in `sql` are bound to `params` by psycopg, so
-    bound values containing quotes or other SQL metacharacters stay safe.
-
-    Each call checks out one pooled connection and returns it on exit. A
-    connection-level failure (OperationalError/InterfaceError) is discarded by
-    the pool and replaced asynchronously. Checkout failures are retried with
-    bounded backoff (see `connection()`); the statement itself is never
-    replayed automatically here: callers may be writing.
-    """
+    """Run a parameterized ``%s`` query and return its results as a DataFrame."""
     with connection() as conn, conn.cursor() as cur:
         cur.execute(cast(LiteralString, sql), params)
         return _cursor_to_df(cur)

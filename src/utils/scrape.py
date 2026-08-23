@@ -1,10 +1,4 @@
-"""Shared ATP scraping helpers used by both the rankings and matches flows.
-
-These cover player-profile discovery: navigating the run's single persistent
-browser page to an ATP overview URL, parsing the identity fields, and persisting
-newly discovered players through ``src.db.ingest.persist_atp_player``. They are
-kept out of either flow module so both can import the same implementation.
-"""
+"""Shared ATP player-profile scraping helpers."""
 
 from __future__ import annotations
 
@@ -21,22 +15,17 @@ from src.db.client import execute_df
 from src.db.ingest import persist_atp_player
 from src.utils.countries import valid_ioc
 
-# Per-navigation page-load budget for any ATP page goto (rankings week and player
-# overview). Defined here so both flows share one value; rankings re-imports it.
+# Shared page-load budget for rankings and player-overview navigation.
 PAGE_NAVIGATION_TIMEOUT_MS = 60_000
 
 PLAYER_OVERVIEW_URL = "https://www.atptour.com/en/players/{slug}/{player_id}/overview"
 
-# The overview page embeds the ATP player id in its own subnavigation/overview
-# links as /en/players/<slug>/<ID>/overview; a mismatched or absent id means
-# the page did not render the player we navigated to.
+# Validate the embedded overview link to reject redirects and mismatches.
 _OVERVIEW_ID_RE = re.compile(r"/en/players/[^/]+/([a-z0-9]+)/overview", re.I)
 _OVERVIEW_TITLE_RE = re.compile(r"<title>\s*(.*?)\s*\|\s*Overview\b", re.I | re.S)
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
-# Personal-details values (Age / Weight / Height / Turned pro / Plays / Country)
-# render in the module-"...-details" block; labels are title-cased and values
-# follow a colon.
+# Personal details render in the module-"...-details" block.
 _OVERVIEW_DOB_RE = re.compile(r"\bAge\s*\d{1,3}\s*\(\s*(\d{4})/(\d{2})/(\d{2})\s*\)")
 _OVERVIEW_WEIGHT_RE = re.compile(r"\bWeight\b[^()]*?\((\d{2,3})\s*kg\)", re.I)
 _OVERVIEW_HEIGHT_RE = re.compile(r"\bHeight\b[^()]*?\((\d{3})\s*cm\)", re.I)
@@ -48,8 +37,7 @@ _OVERVIEW_PLAYS_RE = re.compile(
 _OVERVIEW_BIRTHPLACE_RE = re.compile(
     r"\bBirthplace\s+(.+?)(?=\s+(?:Plays|Coach|Latest\s+news|Follow\s+player)\b)", re.I
 )
-# Three-letter IOC code drawn from the page's country flag sprite reference
-# (<use href="...flags.svg#flag-<ioc>">), the strongest IOC signal on the page.
+# The flag sprite is the page's machine-readable IOC signal.
 _FLAG_SRC_RE = re.compile(r"flags\.svg#flag-([a-z]{3})")
 
 
@@ -91,16 +79,7 @@ def _fetch_overview_html(page: Any, slug: str, player_id: str) -> tuple[str, str
 def parse_player_overview(
     html: str, profile_id: str, candidate: dict[str, Any]
 ) -> tuple[dict[str, str] | None, str]:
-    """Parse a rendered ATP overview page into a validated profile candidate.
-
-    Returns ``(profile_candidate, "")`` on success or ``(None, reason)`` on
-    failure. The page's embedded profile id must equal ``profile_id`` (the id
-    from the ATP profile link that brought us here), the player display name
-    must be present, and an IOC must resolve from the page — otherwise the row
-    is rejected with a structured reason and never persisted. Optional profile
-    fields (birthdate, weight, height, turned pro, handedness, backhand) are
-    extracted when the page has them and left empty otherwise.
-    """
+    """Parse and validate an ATP overview into a profile candidate."""
     title = _OVERVIEW_TITLE_RE.search(html)
     display_name = unescape(_HTML_TAG_RE.sub(" ", title.group(1))).strip() if title else ""
     raw = {
@@ -122,8 +101,7 @@ def parse_player_overview(
     if not raw["player"]:
         return None, "missing display name"
 
-    # The page must render the very player we navigated to: an embedded profile
-    # id that disagrees with the link id is a redirect/mismatch, not a discovery.
+    # Reject redirects and pages for a different player.
     ids = {m.group(1).upper() for m in _OVERVIEW_ID_RE.finditer(html)}
     if profile_id.upper() not in ids:
         return None, (f"page player id {sorted(ids)} does not match link id {profile_id.upper()}")
@@ -163,13 +141,7 @@ def parse_player_overview(
 
 
 def _ioc_from_overview(html: str) -> str:
-    """Three-letter IOC from the page's country flag sprite, else UNK.
-
-    The personal-details Country value is a full nationality name (e.g. "Great
-    Britain"), not an IOC code, so it cannot map to a code reliably; the flag
-    sprite reference (``flags.svg#flag-<ioc>``) is the page's only machine-
-    readable IOC signal. Unverifiable identifiers resolve to UNK.
-    """
+    """Return the IOC from the flag sprite, or ``UNK`` when absent."""
     flag = _FLAG_SRC_RE.search(html)
     return valid_ioc(flag.group(1)) if flag else "UNK"
 
@@ -183,11 +155,7 @@ def _known_profile_ids() -> set[str]:
 def _discover_player(
     page: Any, candidate: dict[str, Any], profile_id: str
 ) -> tuple[dict[str, str] | None, str]:
-    """Fetch, parse, and persist one DB-missing player; ``(profile, "")`` or ``(None, reason)``.
-
-    Raises on navigation/parse/persistence failures; the caller turns every
-    exception into one structured failure. Never aborts the scrape.
-    """
+    """Fetch, validate, and persist one missing player profile."""
     html, err = _fetch_overview_html(page, str(candidate.get("slug") or ""), profile_id)
     if err:
         raise DiscoverError(err)
@@ -207,20 +175,7 @@ def discover_players(
     canonical: dict[str, str],
     profiles: dict[str, dict[str, str]],
 ) -> dict[str, Any]:
-    """Discover and persist ATP profiles for player ids missing from bronze.
-
-    ``candidates`` is a per-run batch of unique ``{id, slug, player}`` rows
-    gathered from rankings/matches pages. Existing bronze players are skipped
-    (never navigated, never written); each DB-missing id is fetched once on the
-    run's shared ``page``, validated (page id == link id, name and IOC present),
-    and persisted through ``ingest.persist_atp_player``. Successful discoveries
-    immediately refresh the caller's in-memory ``canonical`` and ``profiles``
-    so downstream resolution sees them this run. Failures are
-    per-player and non-fatal: navigation, parsing, identity, and persistence
-    errors become structured reasons that never abort the scrape.
-
-    Returns ``{known, discovered, failed: [{id, player, reason}]}``.
-    """
+    """Discover missing profiles and return known, discovered, and failed counts."""
     known = _known_profile_ids()
     seen: set[str] = set()
     missing: list[dict[str, Any]] = []

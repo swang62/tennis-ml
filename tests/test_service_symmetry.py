@@ -1,19 +1,13 @@
-"""Hermetic tests for the serving evidence-stacking helper.
-
-Pure numpy/sklearn — no Bento, database, or MLflow. Verifies that the pure
-`_stack_evidence` helper returns complementary p_win and base probabilities
-when the paired orientation is reversed.
-"""
+"""Hermetic tests for complementary serving probabilities."""
 
 import json
 import warnings
 
 import numpy as np
 import pandas as pd
-import pytest
 from sklearn.linear_model import LogisticRegression
 
-from src.serving.service import _load_serving_temperature, _stack_evidence
+from src.serving.service import _stack_evidence
 
 
 def _toy_stacker() -> LogisticRegression:

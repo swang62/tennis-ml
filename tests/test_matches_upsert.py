@@ -1,9 +1,4 @@
-"""Hermetic tests for the bronze insert-or-force-replace conflict behavior.
-
-No DB: ``find_existing_match``'s injectable ``query`` stands in for the stored
-bronze row and ``_copy_df_into`` is monkeypatched, so nothing touches a live
-database.
-"""
+"""Hermetic tests for bronze insert-or-force-replace behavior."""
 
 from datetime import date
 

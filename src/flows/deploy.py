@@ -55,44 +55,26 @@ from src.constants import (
 )
 from src.features.columns import FEATURE_COLS
 
-# --- Deploy-only paths and names ---
 TEMPLATE_BENTOFILE = ROOT / "bentofile.yaml"
 SERVICE_FILE = ROOT / "src" / "serving" / "service.py"
 PINNED_BENTOFILE = DATA_PROCESSED / "bentofile.pinned.yaml"
 BENTO_TAG_FILE = DATA_PROCESSED / "bento_tag.txt"
 STATE_FILE = DATA_PROCESSED / "bento_build_state.json"
-# Snapshot-input hash and source/config fingerprint of the last staged
-# similarity build (FAISS index + metadata). Kept separate from the bento
-# state so similarity reuse never mixes with model lineage. Missing,
-# invalid, or legacy (no source fingerprint) -> treated as a rebuild.
 SIMILARITY_STATE_FILE = DATA_PROCESSED / "similarity_artifacts_state.json"
 
-# Repository-controlled sources whose exact contents shape the similarity
-# outputs without changing snapshot data: the player-list SQL/shaping that
-# supplies the index rows (serving/directory.py), the similarity vector
-# construction, embedding/PCA, weights (models/similarity.py), and the
-# canonical country/player mapping (countries.py). The similarity-tuning
-# constants live in constants.py next to unrelated settings, so only their
-# exact values are fingerprinted, not the whole file.
 SIMILARITY_SOURCE_FILES = [
     ROOT / "src" / "serving" / "directory.py",
     ROOT / "src" / "training" / "similarity.py",
     ROOT / "src" / "utils" / "countries.py",
 ]
 
-# Multi-architecture publishing: one Docker Hub manifest list for both platforms.
 MULTIARCH_PLATFORMS = ("linux/amd64", "linux/arm64")
-# Named docker-container Buildx builder reused across deploys (keeps its cache).
 BUILDX_BUILDER = "tennis-multiarch"
-# Containerfile rendered from the current Bento, written fresh on every deploy.
 BENTO_CONTAINERFILE = DEPLOY_ARTIFACTS / "Containerfile.bento"
 
-# nn_best is exported to ONNX and included as an artifact, not a BentoModel.
 BASE_BENTO_NAMES = {"linear": "linear_best", "gbdt": "gbdt_best", "nn": "nn_best"}
 
-# Keep native BLAS/OpenMP runtimes single-threaded during deployment. PyTorch,
-# FAISS, LightGBM, and XGBoost share native runtimes, and their thread pools can
-# conflict when loaded in one long-lived process.
+# Native runtimes share one process, so deployment pins them to one thread.
 NATIVE_THREAD_ENV = (
     "OMP_NUM_THREADS",
     "OPENBLAS_NUM_THREADS",
@@ -102,19 +84,12 @@ NATIVE_THREAD_ENV = (
     "BLIS_NUM_THREADS",
 )
 
-# BentoML model-metadata keys; only deploy.py writes them, so they stay local
-# (the shared FRAMEWORK_KEY comes from src.constants for the serving manifest).
 MLFLOW_URI_META_KEY = "mlflow_uri"
 MLFLOW_VERSION_META_KEY = "mlflow_version"
 
-# Model artifacts are materialized into DEPLOY_ARTIFACTS from champion lineage;
-# similarity artifacts are freshly rebuilt there from the training snapshot.
 NN_ONNX_FILE = DEPLOY_ARTIFACTS / "nn_best.onnx"
-# Packaged index for offline /similar_players requests.
 SIMILARITY_INDEX = DEPLOY_ARTIFACTS / "player_similarity.index"
 SIMILARITY_METADATA = DEPLOY_ARTIFACTS / "player_metadata.json"
-# Baked into the image; written at build time from the champion's exact lineage
-# tags (see _write_model_info). Excluded from the build-input fingerprint.
 MODEL_INFO_FILE = DEPLOY_ARTIFACTS / "model_info.json"
 AUX_FILES = [
     *[DEPLOY_ARTIFACTS / name for name in FROZEN_ARTIFACTS],
@@ -123,13 +98,6 @@ AUX_FILES = [
     NN_ONNX_FILE,
 ]
 
-# Files whose content is a build input but is NOT pinned in champion lineage.
-# Lineage-pinned artifacts (bases, scaler, and embeddings) enter the fingerprint
-# through the champion's exact tags. nn_best.onnx is a deploy-time export of the
-# pinned nn version and model_info.json is generated from the fingerprint itself,
-# so both are excluded too. The packaged runtime feature inputs below
-# can change predictions without changing service.py, so they are fingerprinted
-# directly.
 SOURCE_FINGERPRINT_FILES = [
     TEMPLATE_BENTOFILE,
     SERVICE_FILE,
@@ -192,9 +160,8 @@ def _similarity_inputs_hash(
 ) -> str:
     """SHA-256 over every snapshot input the similarity build reads."""
     payload = {
-        # Row order of profiles shapes the artifacts (index row order) and is
-        # preserved; lifetime rows only feed player-keyed merges, so they are
-        # sorted for a canonical hash regardless of snapshot row order.
+        # Preserve profile order because it shapes index rows; sort lifetime rows
+        # because merges use player keys.
         "profiles": json.loads(profiles.to_json(orient="records")),
         "lifetime": _frame_records(lifetime),
     }
@@ -219,14 +186,7 @@ def _read_similarity_inputs_hash() -> str | None:
 
 
 def _similarity_source_hash() -> str:
-    """SHA-256 over every repository-controlled source/config input that can
-    change the similarity outputs without changing snapshot data.
-
-    Hashes the exact contents of SIMILARITY_SOURCE_FILES (relative path + SHA-256
-    per file, mirroring the bento source fingerprint) plus the exact values of
-    the similarity-tuning constants. A missing allowlisted file aborts loudly
-    rather than silently weakening the fingerprint.
-    """
+    """Hash similarity source files and tuning constants."""
     hasher = hashlib.sha256()
     for path in SIMILARITY_SOURCE_FILES:
         hasher.update(f"{path.relative_to(ROOT)}:{_file_hash(path)}\n".encode())
@@ -245,11 +205,7 @@ def _similarity_source_hash() -> str:
 
 
 def _read_similarity_source_hash() -> str | None:
-    """The persisted source fingerprint of the last staged build, else None.
-
-    A state written before the source fingerprint existed has no
-    ``source_hash`` key and so reads as None, forcing a rebuild.
-    """
+    """Return the persisted similarity source fingerprint, or None."""
     try:
         return json.loads(SIMILARITY_STATE_FILE.read_text())["source_hash"]
     except (FileNotFoundError, ValueError, KeyError, TypeError):
@@ -263,13 +219,7 @@ def _write_similarity_state(inputs_hash: str, source_hash: str) -> None:
 
 
 def _lineage_pins(client: Any, production: Any) -> dict[str, dict[str, str]]:
-    """Resolve exact base pins from the champion model-version lineage tags.
-
-    05_evaluate tags the promoted ensemble version with the exact registered
-    name, version, run ID, and model URI of every base model, plus immutable
-    scaler/embedding artifact URIs and content hashes. Base models
-    carry no aliases — these tags are the only resolution authority.
-    """
+    """Resolve exact base-model and artifact pins from champion lineage tags."""
     version = client.get_model_version(PRODUCTION_MODEL, production.version)
     tags = dict(version.tags)
     tagged_features = tags.get(FEATURE_COLS_TAG)
@@ -318,9 +268,7 @@ def _lineage_pins(client: Any, production: Any) -> dict[str, dict[str, str]]:
             tag_key = f"{BASE_TAG_PREFIX}{cls}_{key}"
             if tag_key in tags:
                 pins[cls][key] = tags[tag_key]
-    # Each base's winning framework was recorded on the champion lineage by
-    # 05_evaluate from the tuning notebook; read it directly and fall back to
-    # detection only for GBDT when the tag is absent (legacy champions).
+    # Read the recorded framework; detect only legacy GBDT pins without a tag.
     for cls in BASE_BENTO_NAMES:
         framework = tags.get(f"{BASE_TAG_PREFIX}{cls}_framework")
         if cls == "gbdt" and not framework:
@@ -341,15 +289,7 @@ def _write_model_info(
     fingerprint: str,
     calibration_temperature: float = 1.0,
 ) -> Path:
-    """Write the immutable canonical champion manifest baked into the Bento.
-
-    Built directly from the champion's exact lineage tags plus the
-    non-circular build-input fingerprint: champion identity and creation time,
-    exact base and auxiliary-artifact pins, and the fingerprint. It never
-    contains the Bento tag, Docker identity, or any hash that includes the
-    generated manifest itself. The calibrated temperature is embedded (1.0 for
-    legacy champions) so serving reads it straight from the manifest.
-    """
+    """Write the immutable champion lineage manifest baked into the Bento."""
     version = client.get_model_version(PRODUCTION_MODEL, production.version)
     tags = version.tags
     manifest = {
@@ -382,22 +322,7 @@ def _write_model_info(
 
 
 def _download_aux_artifacts(client: Any, tags: dict[str, str], no_cache: bool = False) -> float:
-    """Download the champion's lineage-pinned artifacts into DEPLOY_ARTIFACTS.
-
-    Returns the resolved calibration temperature (pinned value for a tagged
-    champion, 1.0 for a legacy champion) so the caller can embed it in
-    model_info.json.
-
-    The fitted linear scaler (base lineage) is pinned on the champion model
-    version via URI+hash lineage tags; its content hash is verified before the
-    build proceeds. A local copy is reused when its content hash already
-    matches the pin and ``no_cache`` is False; otherwise the artifact is
-    downloaded fresh from its exact URI (one retry on a transient download
-    failure). The temperature-scaling calibration artifact is materialized
-    separately by _materialize_calibration (optional for legacy champions).
-    Similarity artifacts are rebuilt from the DuckDB snapshot at deploy time and
-    are never champion-pinned.
-    """
+    """Materialize and hash-verify champion-pinned artifacts."""
     import mlflow
 
     specs = [
@@ -466,22 +391,13 @@ def _validate_calibration_file(path: Path) -> float:
 
 
 def _materialize_calibration(client: Any, tags: dict[str, str], no_cache: bool = False) -> float:  # noqa: ARG001 — client kept for caller contract
-    """Resolve and verify the calibration temperature from the champion's tags.
-
-    New champions carry CALIBRATION_URI_TAG/CALIBRATION_HASH_TAG lineage tags
-    pinning the temperature-scaling artifact; it is downloaded and hash-verified
-    like the aux artifacts, and its temperature is returned for embedding in
-    model_info.json. Legacy champions carry no tags: return the explicit no-op
-    1.0 — never a failure, never an invented champion pin. When ``no_cache`` is
-    True a matching local copy is ignored and the artifact is downloaded fresh.
-    """
+    """Resolve and verify calibration, using no-op temperature for legacy champions."""
     import mlflow
 
     uri = tags.get(CALIBRATION_URI_TAG)
     hash_tag = tags.get(CALIBRATION_HASH_TAG)
     if uri is None or hash_tag is None:
-        # A legacy champion cannot pin calibration; any stale local file from a
-        # previous champion's deploy must not leak, so remove it and use 1.0.
+        # Do not reuse a calibration file from a previous champion.
         DEPLOY_ARTIFACTS.mkdir(parents=True, exist_ok=True)
         stale = DEPLOY_ARTIFACTS / CALIBRATION_ARTIFACT
         if stale.exists():
@@ -570,15 +486,7 @@ def _is_sklearn_estimator(model: Any) -> bool:
 def _materialize_native_model(
     pin: dict[str, Any], framework: str | None = None, no_cache: bool = False
 ) -> tuple[Any, str | None]:
-    """Save a pinned MLflow version as a native BentoML model.
-
-    Linear and the ensemble (sklearn estimators) go through
-    bentoml.sklearn.save_model; the GBDT goes through bentoml.xgboost or
-    bentoml.lightgbm depending on the detected framework. Returns the saved
-    BentoModel (reused when the pinned version is already materialized and
-    ``no_cache`` is False) and the GBDT framework ("xgboost"/"lightgbm", else
-    None).
-    """
+    """Materialize a pinned model using its native BentoML adapter."""
     import bentoml
     import mlflow
 
@@ -664,12 +572,7 @@ def _mlflow_import_or_reuse(pin: dict[str, Any], no_cache: bool = False) -> Any:
 def _import_or_reuse(
     pin: dict[str, Any], framework: str | None = None, no_cache: bool = False
 ) -> Any:
-    """Materialize a pinned MLflow version as a native BentoML model.
-
-    The nn_best pin is the exception: it is exported to ONNX and never becomes
-    a BentoModel, so it still takes the MLflow import path that
-    _materialize_nn_onnx relies on.
-    """
+    """Materialize a pinned model; ``nn_best`` is exported to ONNX instead."""
     if pin[LINEAGE_MODEL_NAME_KEY] == BASE_BENTO_NAMES["nn"]:
         return _mlflow_import_or_reuse(pin, no_cache=no_cache)
     return _materialize_native_model(pin, framework, no_cache=no_cache)[0]
@@ -684,7 +587,7 @@ def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
     import torch
 
     # Needed so torch.load can resolve the class — torch.save records the path.
-    from src.training.nn import TabularMLP  # type: ignore[reportUnusedImport]
+    from src.training.nn import TabularMLP  # type: ignore[reportUnusedImport]  # noqa: F401, RUF100
 
     torch.set_num_threads(1)
 
@@ -733,11 +636,7 @@ def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
 def _reuse_or_materialize_nn_onnx(
     state: dict[str, Any], nn_pin: dict[str, Any], no_cache: bool = False
 ) -> bool:
-    """Reuse an ONNX export only when it came from the exact pinned NN model.
-
-    When ``no_cache`` is True the existing export is regenerated regardless of
-    the stored model URI.
-    """
+    """Reuse ONNX only when it came from the exact pinned NN model."""
     if (
         not no_cache
         and NN_ONNX_FILE.exists()
@@ -789,16 +688,7 @@ def _validate_scaler_file(path: Path) -> None:
 
 
 def build_input_fingerprint(client: Any, production: Any) -> str:
-    """Canonical, non-circular fingerprint of every Bento build input.
-
-    Includes the champion's exact lineage tags (base versions, run IDs, model
-    URIs, and scaler/embedding artifact URIs + content hashes) and
-    hashes of on-disk source/artifact build inputs. Excludes everything the
-    build generates or records after the fact — the pinned bentofile, the
-    nn_best.onnx export, the Bento tag, the Docker image identity,
-    timestamps, and deploy state — so the fingerprint never depends on its
-    own output.
-    """
+    """Return a canonical, non-circular fingerprint of every Bento build input."""
     version = client.get_model_version(PRODUCTION_MODEL, production.version)
     parts = [f"{PRODUCTION_MODEL}@{CHAMPION_ALIAS}=v{production.version}"]
     parts.append("lineage:")
@@ -811,13 +701,7 @@ def build_input_fingerprint(client: Any, production: Any) -> str:
 
 
 def _import_models(pins: dict[str, dict[str, Any]], no_cache: bool = False) -> dict[str, str]:
-    """Materialize each pinned MLflow version as a native BentoModel; return tags.
-
-    Reuse is version-keyed via `_import_or_reuse` — the BentoML store name
-    alone cannot gate reuse, so the pinned MLflow version is stored in the
-    saved model's metadata. When ``no_cache`` is True each model is
-    rematerialized even if its pinned version is already imported.
-    """
+    """Materialize pinned MLflow versions as native BentoModels and return tags."""
     tags: dict[str, str] = {}
     for key, pin in pins.items():
         framework = pin.get(FRAMEWORK_KEY) if key == "gbdt" else None
@@ -838,15 +722,7 @@ def _write_pinned_bentofile(tags: dict[str, str]) -> Path:
 
 
 def _docker_login() -> None:
-    """Authenticate `docker push` to Docker Hub before pushing.
-
-    Reads DOCKER_TOKEN from the environment and logs in via
-    `docker login --username <user> --password-stdin` so the token is passed
-    through stdin and never appears in argv, logs, or raised exceptions. The
-    username comes from DOCKER_USERNAME, else the DOCKER_REPO owner (default
-    `swang62`). When DOCKER_TOKEN is unset, skip login and rely on an
-    already-authenticated Docker CLI (the prior convention).
-    """
+    """Authenticate Docker Hub using a token passed through stdin."""
     token = os.getenv("DOCKER_TOKEN")
     if not token:
         print("DOCKER_TOKEN unset — relying on an already-authenticated Docker CLI.")
@@ -886,11 +762,7 @@ class _Tee:
 def _run_teed(
     cmd: list[str], log: TextIO | None = None, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[bytes]:
-    """Run a deploy subprocess, streaming its output to the console AND a log file.
-
-    With `log` None the output still reaches the console — and, inside
-    deploy_bento's redirect, the deploy log — via sys.stdout.
-    """
+    """Run a deploy subprocess while streaming output to the console and log."""
     proc = subprocess.Popen(
         cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env
     )
@@ -915,13 +787,7 @@ def _run_teed(
 def _buildx_build_cmd(
     *, builder: str, containerfile: Path, context: Path, image: str, no_cache: bool = False
 ) -> list[str]:
-    """The exact `docker buildx build` invocation publishing the image.
-
-    The Buildx image is tagged with DOCKER_TAG (default dev) and pushed via
-    `--push` as part of the build, so the image is never separately tagged or
-    pushed afterwards. When ``no_cache`` is True the docker layer cache is
-    bypassed with `--no-cache`.
-    """
+    """Build and push the multi-platform Docker image."""
     cmd = [
         "docker",
         "buildx",
@@ -945,12 +811,7 @@ def _buildx_build_cmd(
 
 
 def _ensure_buildx_builder() -> str:
-    """Return the docker-container Buildx builder, creating it on first use.
-
-    Multi-platform builds require the docker-container driver; the default
-    docker driver cannot build or push multi-arch manifests. Reusing the
-    named builder keeps its layer cache across deploys.
-    """
+    """Return the reusable docker-container Buildx builder."""
     if (
         subprocess.run(
             ["docker", "buildx", "inspect", BUILDX_BUILDER],
@@ -991,13 +852,7 @@ def _write_bento_containerfile(bento: Any) -> Path:
 
 @contextlib.contextmanager
 def _buildx_context(bento: Any):
-    """Yield a portable build context: the Bento content plus its models.
-
-    A stored Bento keeps its models in the global model store, not under
-    bento.path/models, so the Containerfile's `COPY . ./` would miss them.
-    Mirror BentoML's construct_containerfile: copy the Bento and materialize
-    each model into the context so it really contains the whole Bento.
-    """
+    """Yield a build context containing the Bento and its materialized models."""
     import bentoml
 
     with tempfile.TemporaryDirectory(prefix="bento-buildx-") as tmp:
@@ -1013,12 +868,7 @@ def _buildx_context(bento: Any):
 
 
 def build_bento_image(no_cache: bool = False) -> tuple[str, int]:
-    """Build the promoted Bento and publish the multi-arch Docker Hub image.
-
-    When ``no_cache`` is True every deploy artifact is refreshed: MLflow
-    artifact downloads (scaler, calibration, aux), the ONNX NN export, the
-    similarity index, the Bento models, and the Docker Buildx layer cache.
-    """
+    """Build and publish the promoted multi-architecture Bento image."""
     for name in NATIVE_THREAD_ENV:
         os.environ[name] = "1"
 
@@ -1072,21 +922,7 @@ def build_bento_image(no_cache: bool = False) -> tuple[str, int]:
 
 
 def generate_similarity_artifacts(no_cache: bool = False) -> Path:
-    """Build and stage the FAISS similarity assets from the local DuckDB snapshot.
-
-    Stages ``data/deploy/player_similarity.index`` and
-    ``data/deploy/player_metadata.json`` from the snapshot — never downloaded
-    from MLflow or pinned on the champion. A missing snapshot aborts the
-    deploy with the snapshot helper's actionable error.
-
-    When every snapshot input that shapes the similarity outputs (profiles,
-    gold lifetime stats) and every repository-controlled source that shapes
-    them (player-list SQL/shaping, similarity vector/embedding/PCA/weights,
-    country mapping) is unchanged since the last staging and the staged
-    similarity artifacts still exist, the artifacts are reused. Any input
-    change, source/config change, missing artifact, missing/legacy state, or
-    ``no_cache`` rebuilds them.
-    """
+    """Build or reuse FAISS assets from the local DuckDB snapshot."""
     import faiss
 
     from src.db import training
@@ -1137,14 +973,7 @@ def generate_similarity_artifacts(no_cache: bool = False) -> Path:
 
 
 def deploy_bento(no_cache: bool = False) -> None:
-    """Authenticate, then build and publish the multi-arch image with Buildx.
-
-    Build output streams to the console and to a single deploy_<timestamp>.log
-    opened before the build, so a failed build still leaves a log of the
-    attempt. Docker login runs before the build because Buildx's `--push` is
-    part of the build command. When ``no_cache`` is True every deploy artifact
-    is refreshed (see ``build_bento_image``).
-    """
+    """Authenticate, build, and publish the multi-architecture image."""
     LOGS.mkdir(parents=True, exist_ok=True)
     deploy_log = LOGS / f"deploy_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     try:
