@@ -1,15 +1,3 @@
--- silver.player_matches: expand each bronze match into two player-perspective
--- rows (raw player1/player2 orientation, no canonicalization).
---
--- Activity fields are match ordinal and strictly-prior 30-day count; RANGE
--- keeps the cutoff relative to each match date. ZERO rank/points/age mean
--- missing, mapped to NULL. Return points derive from the opponent's raw serve
--- totals for similarity rates. Surface is copied; the rest of context stays in
--- bronze.
---
--- Incremental: affected-player rebuild, not append-only. Ordinals and 30-day
--- counts window over FULL history, so any player with a new match has ALL rows
--- recomputed via delete+insert on (player_id, match_id).
 
 {{ config(
     materialized="incremental",
@@ -68,7 +56,6 @@ WITH expanded AS (
         CASE WHEN winner_id = player2_id THEN 1 ELSE 0 END AS match_won
     FROM {{ source('bronze', 'match_events') }}
 ),
--- Windows over FULL history, so computed before the incremental filter trims.
 numbered AS (
     SELECT
         *,
@@ -82,8 +69,6 @@ numbered AS (
     FROM expanded
 )
 {% if is_incremental() %}
--- Affected players: missing or changed window value (also repairs a partial
--- run where this model committed before a downstream failure).
 , changed_players AS (
     SELECT DISTINCT numbered.player_id
     FROM numbered

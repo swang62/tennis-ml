@@ -1,4 +1,3 @@
-# dbt fields are derived from DATABASE_URL by entry points; this profile holds no secrets.
 tennis_ml:
   target: dev
   outputs:

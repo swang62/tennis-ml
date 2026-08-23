@@ -1,27 +1,5 @@
--- gold.tour_averages: single-row (singleton_id = 1) imputation defaults + tour
--- benchmarks over all silver snapshots/matches. Plain table rebuilt in full:
--- a global aggregate, every new match shifts the pool.
---
--- Fallback semantics (matching the former feature_defaults): rank/streak-like
--- medians, continuous rates means; an empty pool falls back to explicit
--- constants (ranking 100, rank points 500, age 26, streak 0, rates/forms 0,
--- avg ranks 100, days since 365, matches 365d 0, rate 0.5, left-handed 0,
--- years-pro 8) so every column stays non-null and finite.
---
--- Intended, reported leakage: old cold-start/currently-missing cells use the
--- same full-pool singleton; verification reports the affected row count.
---
--- pool_as_of_date is one day after the latest snapshot, or CURRENT_DATE only
--- as metadata when the pool is empty. Weighted tour comparisons are SUM()/SUM()
--- from silver.player_matches (never per-player AVG); NULL only when the
--- denominator is zero, defaults never NULL.
---
--- Query shape: pool_stats mixes pool metadata and snapshot aggregates in one
--- scan of rolling_features; activity reduces to one latest snapshot per player
--- before the 30-day window join, so it runs per player not per snapshot.
 
 WITH
--- Pool metadata + full-pool snapshot fallback aggregates (one scan).
 pool_stats AS (
     SELECT
         COALESCE(MAX(snapshot_date), CURRENT_DATE) + 1 AS pool_as_of_date,
@@ -54,7 +32,6 @@ pool_stats AS (
         AVG(hard_win_rate_10) AS hard_win_rate_10
     FROM {{ ref('rolling_features') }}
 ),
--- One latest snapshot per player: drives the 30-day window join per player.
 latest_snapshots AS (
     SELECT
         player_id,
@@ -62,8 +39,6 @@ latest_snapshots AS (
     FROM {{ ref('rolling_features') }}
     GROUP BY player_id
 ),
--- Cold-start activity defaults: rounded medians of per-player recency and
--- 30-day match count.
 activity AS (
     SELECT
         ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY days_since))
@@ -86,7 +61,6 @@ activity AS (
         ) w ON true
     ) per_player
 ),
--- Static profile pool: left-handed rate over known L/R, time-aware years-pro.
 profile_aggregates AS (
     SELECT
         AVG(CASE WHEN prof.handedness = 'L' THEN 1
@@ -96,7 +70,6 @@ profile_aggregates AS (
     FROM {{ source('bronze', 'player_profiles') }} prof
     CROSS JOIN pool_stats p
 ),
--- Weighted tour benchmarks: SUM()/SUM() over all silver.player_matches rows.
 tour_rates AS (
     SELECT
         COUNT(*) AS player_match_rows,
@@ -122,7 +95,6 @@ tour_rates AS (
         CAST(SUM(break_points_faced) AS DOUBLE PRECISION)
             / NULLIF(SUM(service_games), 0)
             AS tour_break_point_opportunities_per_return_game,
-        -- Return games won tour-wide: a converted break point ends the game.
         CAST(SUM(break_points_faced - break_points_saved) AS DOUBLE PRECISION)
             / NULLIF(SUM(service_games), 0)
             AS tour_return_games_won_pct
@@ -136,7 +108,6 @@ SELECT
     pa.profile_rows,
     tr.player_match_rows,
 
-    -- Rank/streak-like medians; empty pool falls back to constants.
     ROUND(COALESCE(p.latest_player_ranking, 100)::NUMERIC, 5)::DOUBLE PRECISION
         AS latest_player_ranking,
     ROUND(COALESCE(p.latest_player_rank_points, 500)::NUMERIC, 5)::DOUBLE PRECISION
@@ -147,7 +118,6 @@ SELECT
     ROUND(COALESCE(p.avg_rank_faced_10, 100)::NUMERIC, 5)::DOUBLE PRECISION
         AS avg_rank_faced_10,
 
-    -- Continuous means over the full pool.
     ROUND(COALESCE(p.latest_player_age, 26.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS latest_player_age,
     ROUND(COALESCE(p.weighted_form_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
@@ -168,8 +138,6 @@ SELECT
         AS serve_win_pct_10,
     ROUND(COALESCE(p.return_points_won_pct_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS return_points_won_pct_10,
-    -- Tour-average fallback dominance: mean lifetime Dominance Ratio over the
-    -- full snapshot pool; 0.0 when the pool is empty.
     ROUND(COALESCE(p.dominance, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS dominance,
     ROUND(COALESCE(p.df_rate_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
@@ -183,20 +151,17 @@ SELECT
     ROUND(COALESCE(p.hard_win_rate_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS hard_win_rate_10,
 
-    -- Cold-start activity defaults.
     ROUND(COALESCE(a.median_days_since, 365)::NUMERIC, 5)::DOUBLE PRECISION
         AS days_since_default,
     ROUND(COALESCE(a.median_matches_30d, 0)::NUMERIC, 5)::DOUBLE PRECISION
         AS matches_30d_default,
 
-    -- Fixed constants and static profile-pool means.
     0.5 AS rate_default,
     ROUND(COALESCE(pa.left_handed_rate, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS left_handed_rate,
     ROUND(COALESCE(pa.avg_years_pro, 8.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS avg_years_pro,
 
-    -- Weighted tour benchmarks (may be NULL only when denominator is zero).
     ROUND(tr.tour_ace_rate::NUMERIC, 5)::DOUBLE PRECISION AS tour_ace_rate,
     ROUND(tr.tour_first_serve_pct::NUMERIC, 5)::DOUBLE PRECISION
         AS tour_first_serve_pct,

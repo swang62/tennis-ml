@@ -2,46 +2,7 @@ version: 2
 
 models:
   - name: match_features
-    description: >
-      TWO DIRECTIONAL ROWS PER MATCH, one per player, keyed by
-      (match_id, player_id), built by pairing each player_match row with that
-      player's latest post-match snapshot strictly before match_date
-      (snapshot_date < match_date, same-date matches cannot supply it) from
-      silver.rolling_features; the (snapshot_date, match_id) DESC lateral
-      equals player_match_number DESC. The two rows of a physical match share
-      match_id and match context, exchange the paired player_*/opponent_*
-      side values, negate the signed differences and the h2h advantages
-      (h2h_advantage, h2h_surface_advantage), and carry complementary
-      match_won labels. Every
-      side-level value is imputed from the single-row gold.tour_averages
-      singleton (CROSS JOIN) BEFORE matchup differences are calculated, so
-      every FEATURE_COLS cell is non-null and finite; dbt fails when the
-      contract is violated (match_features_no_null_model_features). Ranking,
-      rank points, and age come from the PRIOR snapshot (strictly before
-      match_date), never a same-day one. `match_won` = 1 iff the row's player
-      side won. Output columns are all 37 FEATURE_COLS preceded by the metadata
-      block (match_id, match_date, player_id, opponent_id, tournament, round,
-      surface, match_won); the per-side rate-exposure columns
-      player_matches_10/opponent_matches_10 carry the prior snapshot's
-      matches_10 count (0 for cold start).
-      Current-match serve/break analysis rates are intentionally
-      absent (derived on demand from bronze). The composite grain
-      (player_id, match_id) is unique, enforced by the DB primary key
-      pk_match_features that the model's post-hook creates (dbt's incremental
-      unique_key alone is not a constraint). match_id, match_date, player_id,
-      opponent_id, surface, and match_won are non-null by construction
-      (player_matches pass-through, bronze NOT NULL surface, CASE on the
-      NOT NULL winner_id) and DB-enforced via the model's
-      ensure_not_null_sql post-hook. Surface values are enforced at
-      the bronze boundary (CHECK + normalization at ingest); match_won,
-      tournament_level, and round_encoded are guaranteed by the model's own
-      CASE derivations, so no accepted_values tests are needed.
-      Precision contract: every floating/statistical column is emitted at full
-      arithmetic precision (no truncation or rounding at the output boundary).
-      Integer identifiers, match_won, counts, 0/1 flags, encoded categoricals,
-      and integer-valued rank/rank-points/streak differences are unchanged.
-      Tour-average fallbacks are the only rounded values: gold.tour_averages
-      stores them rounded to 5 decimal places.
+    description: Two directional rows per match use prior snapshots, tour averages, and 37 finite model features.
     columns:
       - name: match_id
         description: Immutable group key for one physical match; exactly two directional rows (one per player) share it.
@@ -54,13 +15,12 @@ models:
       - name: tournament
         description: Tournament name (joined from bronze).
       - name: round
-        description: Draw round (r128, r64, r32, r16, qf, sf, f); non-draw stages such as "rr" pass through and encode as round_encoded 0.
+        description: Draw round, including non-draw stages encoded as round_encoded 0.
       - name: surface
-        description: Court surface (clay, grass, hard, carpet); blank or unknown source values are normalized to hard at ingest, so formerly-blank Davis Cup surfaces are hard.
+        description: Court surface; blank or unknown values become hard during ingestion.
       - name: match_won
-        description: 1 if the row's player side won this match, else 0 (the label); the two directional rows of a match carry complementary values.
+        description: Match outcome label; paired directional rows have complementary values.
 
-      # Matchup differences: row player side minus opponent side (imputed).
       - name: rank_diff
         description: Player ranking minus opponent ranking (prior snapshot, imputed).
       - name: rank_points_diff
@@ -94,35 +54,21 @@ models:
       - name: streak_diff
         description: player_streak - opponent_streak (signed current run).
       - name: surface_form_diff
-        description: >
-          player_surface_form - opponent_surface_form, where the per-side
-          surface form is the prior snapshot's carried win rate on the CURRENT
-          match's surface (last 10 matches on that surface, Beta(1,1)
-          smoothed, pool-mean imputed when the surface is unseen); carpet
-          matches use the neutral 0.5 rate_default on both sides.
+        description: Difference between prior surface win rates, using 0.5 for unseen carpet form.
       - name: days_since_last_match_diff
-        description: >
-          LN(1 + player_days_since_last_match) - LN(1 + opponent_days_since_last_match):
-          each side's days between the match date and its immediately preceding
-          match (the prior snapshot's date; pool median days-since
-          (days_since_default) on cold start), log-transformed to compress the
-          long rest tail. Per-side raw days-since is capped at 30 before the
-          log transform (both sides cap identically).
+        description: Log difference in prior rest days, capped at 30 and using the pool median for cold starts.
 
-      # Absolute state values where both sides matter.
       - name: player_weighted_form_10
         description: Player exponentially-decayed win form, last 10 matches before this one.
       - name: opponent_weighted_form_10
         description: Opponent exponentially-decayed win form, last 10 matches before this one.
 
-      # Per-side exposure counts backing the smoothed 10-match rates
-      # (fixed Beta(1,1) prior: smoothed_rate = (successes + 1) / (opportunities + 2)).
       - name: player_matches_10
         description: Matches actually observed in the row player's 10-match window backing its 10-match rates (0 for cold start).
       - name: opponent_matches_10
         description: Matches actually observed in the opponent's 10-match window backing its 10-match rates (0 for cold start).
       - name: player_is_left_handed
-        description: 1 if the row player is left-handed (handedness = L), 0 if right-handed (R); pool left-handed rate when missing or non-L/R.
+        description: Row player's left-handed flag, using the pool rate for unknown handedness.
       - name: opponent_is_left_handed
         description: 1 if the opponent is left-handed, 0 if right-handed; pool left-handed rate when missing or non-L/R.
       - name: player_years_pro
@@ -130,20 +76,13 @@ models:
       - name: opponent_years_pro
         description: Years the opponent has been pro as of the match date (match year - turned_pro); pool mean when missing.
 
-      # Pair-level head-to-head history (no player_/opponent_ prefix): both
-      # directional rows of a match share the same exposure; advantage is
-      # signed and complementary across the pair.
       - name: h2h_exposure
-        description: Number of the five most recent strictly-prior meetings between the two players (0 when never met). Invariant across the match's two directional rows.
+        description: Count of the five most recent prior meetings, shared by both directional rows.
       - name: h2h_advantage
-        description: Smoothed directional advantage (row player's prior wins + 1) / (prior meetings + 2) - 0.5 from those strictly-prior meetings; negates on side swap and is 0.0 when never met.
+        description: Smoothed prior head-to-head advantage from the row player's perspective.
       - name: h2h_surface_advantage
-        description: Smoothed directional advantage over recent-5 meetings on the current match's surface only, (row player's prior surface wins + 1) / (prior surface meetings + 2) - 0.5; 0.0 when no surface-restricted meetings exist. Negates on side swap.
+        description: Smoothed prior head-to-head advantage on the current surface.
 
-      # Numeric match context (one-hot surface for linear and neural models).
-      # is_clay/is_grass/is_hard derive directly from the surface domain
-      # (enforced at bronze ingest) and are covered non-null/finite by
-      # match_features_no_null_model_features; no per-flag tests.
       - name: is_clay
         description: 1 if surface = clay, else 0.
       - name: is_grass
@@ -153,21 +92,12 @@ models:
       - name: is_indoor
         description: 1 if indoor, 0 if outdoor, 0 when unknown (joined from bronze).
       - name: best_of
-        description: >
-          Best-of-N match format (1, 3, or 5) joined from bronze; an invariant
-          context shared by both directional rows of a match. Legacy/seed rows
-          whose bronze best_of is NULL fall back to 3 (the most common format
-          and the ingest default for non-Grand-Slam, non-round-robin matches),
-          so the domain is exactly {1, 3, 5} and the column is non-null.
-          Covered non-null/finite by match_features_no_null_model_features.
+        description: Best-of-N format from bronze, defaulting NULL legacy values to 3.
       - name: tournament_level
         description: Tournament tier ordinal (grand_slam=4, masters=3, atp_500=2, atp_250=1, else 0); the CASE-ELSE derivation guarantees the 0-4 domain.
       - name: round_encoded
         description: Round ordinal (r128=1 ... f=7, else 0); the CASE-ELSE derivation guarantees the 0-7 domain.
 
-      # Similarity-only serve/return style signals. NOT FEATURE_COLS model
-      # features: they are appended for PlayerSimilarity and are excluded from
-      # the non-null/finite model-feature contract.
       - name: player_first_serve_pct_10
         description: Row player's first-serve percentage, last 10 (similarity-only).
       - name: opponent_first_serve_pct_10

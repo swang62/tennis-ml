@@ -2,23 +2,10 @@ version: 2
 
 models:
   - name: player_profiles
-    description: >
-      One row per player with derived aggregates only: match counts, career
-      service/return aggregates, surface counts/win rates, career win rate,
-      latest rolling snapshot, rank points, and estimated current rank.
-      Materialized by dbt from bronze.player_profiles (player_id driver) +
-      silver.player_matches (aggregates) + silver.rolling_features (latest
-      snapshot). Identity and biography metadata lives only in
-      bronze.player_profiles — consumers join bronze metadata with this
-      table's aggregates. Zero-match players are preserved with zero counts
-      and null rates.
-      Precision contract: every emitted floating/statistical aggregate is
-      passed through at full precision (no truncation at the output boundary),
-      preserving the weighted sums/denominators exactly as computed. Integer
-      identifiers, counts, rank points, dates, and current_rank are unchanged.
+    description: One row per player with derived career aggregates and latest rolling statistics.
     columns:
       - name: player_id
-        description: Canonical ATP id; the DB primary key pk_player_profiles created by the model's post-hook enforces uniqueness and non-nullity, and ensure_not_null_sql re-applies NOT NULL explicitly.
+        description: Canonical ATP ID enforced by the post-hook primary key.
       - name: match_count
         description: Total career matches in bronze (derived COUNT(*), never NULL).
       - name: latest_match_date
@@ -34,10 +21,7 @@ models:
       - name: rank_points_delta
         description: Latest minus earliest positive rank points.
       - name: current_rank
-        description: >
-          Current ATP rank: latest official weekly ranking (bronze.rankings),
-          falling back to the player's match-time rank from their most recent
-          match when no official weekly ranking row exists.
+        description: "Current ATP rank: latest official weekly ranking (bronze.rankings), else the player's match-time rank from their most recent match."
       - name: first_serve_in_pct
         description: Career first serve in percentage (weighted).
       - name: aces_per_first_serve
@@ -61,11 +45,7 @@ models:
       - name: second_serve_return_points_won_pct
         description: Career second serve return points won (from opponent perspective).
       - name: return_games_won_pct
-        description: >
-          Career return games won percentage (from opponent perspective):
-          weighted SUM(opp break points faced - opp break points saved) /
-          SUM(opp service games), since every converted break point ends that
-          service game.
+        description: Career return games won percentage from weighted opponent break-point totals.
       - name: break_point_conversion_pct
         description: Career break point conversion percentage (from opponent perspective).
       - name: break_point_opportunities_per_return_game
@@ -85,10 +65,7 @@ models:
       - name: dominance
         description: Lifetime Dominance Ratio from full player match history.
       - name: career_win_rate
-        description: >
-          Career win rate across all matches (weighted SUM(match_won) /
-          COUNT(*)). NULL for zero-match players; used as a reputation signal
-          by player similarity.
+        description: Career win rate, used as a player-similarity reputation signal.
       - name: recent_snapshot_date
         description: Date of latest rolling features snapshot.
       - name: win_rate_10

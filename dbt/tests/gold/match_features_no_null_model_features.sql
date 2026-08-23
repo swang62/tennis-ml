@@ -1,5 +1,3 @@
--- Contract: every model feature column is non-null and finite; any returned
--- row is a violation. Similarity-only columns are intentionally not checked.
 {% set feature_cols = [
     "rank_diff",
     "rank_points_diff",

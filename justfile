@@ -2,6 +2,7 @@
 # for pnpm build; just loads it here for the deploy build args). Shell env
 # still overrides via env_var_or_default.
 set dotenv-filename := "web/.env"
+export DBT_LOG_PATH := "dbt/logs"
 
 # Run another recipe and notify on failure; preserves the original exit code.
 notify-failure *args:
