@@ -20,7 +20,6 @@ models:
         description: Court surface; blank or unknown values become hard during ingestion.
       - name: match_won
         description: Match outcome label; paired directional rows have complementary values.
-
       - name: rank_diff
         description: Player ranking minus opponent ranking (prior snapshot, imputed).
       - name: rank_points_diff
@@ -56,13 +55,11 @@ models:
       - name: surface_form_diff
         description: Difference between prior surface win rates, using 0.5 for unseen carpet form.
       - name: days_since_last_match_diff
-        description: Log difference in prior rest days, capped at 30 and using the pool median for cold starts.
-
+        description: Signed prior rest-day log difference (LN(1+player) - LN(1+opponent)), each rest day capped at 90; missing or stale ages fall back to 90 (no tour-average median).
       - name: player_weighted_form_10
         description: Player exponentially-decayed win form, last 10 matches before this one.
       - name: opponent_weighted_form_10
         description: Opponent exponentially-decayed win form, last 10 matches before this one.
-
       - name: player_matches_10
         description: Matches actually observed in the row player's 10-match window backing its 10-match rates (0 for cold start).
       - name: opponent_matches_10
@@ -75,14 +72,12 @@ models:
         description: Years the row player has been pro as of the match date (match year - turned_pro); pool mean when missing.
       - name: opponent_years_pro
         description: Years the opponent has been pro as of the match date (match year - turned_pro); pool mean when missing.
-
       - name: h2h_exposure
         description: Count of the five most recent prior meetings, shared by both directional rows.
       - name: h2h_advantage
         description: Smoothed prior head-to-head advantage from the row player's perspective.
       - name: h2h_surface_advantage
         description: Smoothed prior head-to-head advantage on the current surface.
-
       - name: is_clay
         description: 1 if surface = clay, else 0.
       - name: is_grass
@@ -97,7 +92,6 @@ models:
         description: Tournament tier ordinal (grand_slam=4, masters=3, atp_500=2, atp_250=1, else 0); the CASE-ELSE derivation guarantees the 0-4 domain.
       - name: round_encoded
         description: Round ordinal (r128=1 ... f=7, else 0); the CASE-ELSE derivation guarantees the 0-7 domain.
-
       - name: player_first_serve_pct_10
         description: Row player's first-serve percentage, last 10 (similarity-only).
       - name: opponent_first_serve_pct_10

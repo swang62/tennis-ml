@@ -216,7 +216,7 @@ _PARITY_GOLD = (
     -5.0,
     2.0,
     0.2,  # surface_form_diff (hard): 0.8 - 0.6
-    0.0,  # days_since_last_match_diff: both sides capped at 30 -> ln(31)-ln(31)
+    0.0,  # days_since_last_match_diff: S0AG/Z355 share a same-day snapshot (0 rest days)
     # 8 absolute state values (incl. matches_10 exposure pair)
     0.8,
     0.4,
@@ -267,7 +267,7 @@ _PARITY_GOLD_BA = (
     5.0,
     -2.0,
     -0.2,  # surface_form_diff (hard): 0.6 - 0.8
-    0.0,  # days_since_last_match_diff: both sides capped at 30
+    0.0,  # days_since_last_match_diff: Z355/S0AG share a same-day snapshot (0 rest days)
     # 8 absolute state values (Z355 first; matches_10 pair exchanged)
     0.4,
     0.8,
@@ -404,7 +404,6 @@ def _seed(con: duckdb.DuckDBPyConnection) -> None:
         "clay_win_rate_10": 0.55,
         "grass_win_rate_10": 0.5,
         "hard_win_rate_10": 0.7,
-        "days_since_default": 14.0,
         "matches_30d_default": 3.0,
         "rate_default": 0.5,
         "left_handed_rate": 0.12,
@@ -873,14 +872,12 @@ def test_dominance_diff_formula_and_finite():
 
 def test_surface_form_and_days_since_diffs():
     """Surface form and days-since-last-match diffs match the feature contract."""
-    # Strictly-prior snapshots at 2026-07-12: S0AG s5 (05-20, +53d), Z355 z3
-    # (02-25, +137d); both cap to 30, so the diff is ln(31) - ln(31) = 0.0.
+    # At 2026-07-12 both players have a same-day snapshot (0 rest days), so the
+    # days-since diff is 0 - 0 = 0.0 (the 90-day cap leaves 0 unchanged).
     out = build_inference_features("S0AG", "Z355", "hard", as_of_date=date(2026, 7, 12))
     row = out.iloc[0]
     assert row["surface_form_diff"] == pytest.approx(0.8 - 0.6)
     assert row["days_since_last_match_diff"] == pytest.approx(0.0)
-    # The un-capped log difference would be non-zero, proving the cap applies.
-    assert math.log(1.0 + 53.0) - math.log(1.0 + 137.0) != 0.0
     # Surface-specific selection: clay and grass read their own carried rates
     # (same player rates for all surfaces in the fixture, so both give 0.2).
     for surface in ("clay", "grass"):
@@ -889,10 +886,44 @@ def test_surface_form_and_days_since_diffs():
     # Carpet has no per-surface rate: both sides use the neutral rate_default.
     carpet = build_inference_features("S0AG", "Z355", "carpet", as_of_date=date(2026, 7, 12))
     assert carpet.iloc[0]["surface_form_diff"] == 0.0
-    # Cold start: unknown players fall back to the pool median days-since on
-    # both sides, so the days diff stays neutral.
+    # Cold start: unknown players fall back to the 90-day cap on both sides, so
+    # the days diff stays neutral (LN(1+90) - LN(1+90) = 0).
     cold = build_inference_features("ZZZZ", "YYYY", "hard", as_of_date=date(2026, 9, 1))
     assert cold.iloc[0]["days_since_last_match_diff"] == 0.0
+
+
+def test_days_since_caps_stale_and_missing_at_90():
+    """Missing and stale rest ages cap at 90, not a tour-average fallback."""
+    # Cold opponent caps to 90. A stale player (A0E2's only snapshot is
+    # 2026-02-01) far in the future also caps to 90, so the diff stays neutral.
+    stale = build_inference_features("A0E2", "ZZZZ", "hard", as_of_date=date(2026, 12, 1))
+    assert stale.iloc[0]["days_since_last_match_diff"] == pytest.approx(0.0)
+    # A fresh opponent keeps its real age, so the diff is
+    # LN(1+age) - LN(1+90), which distinguishes the 90 cap from the prior 30-day cap.
+    fresh_age = (date(2026, 3, 15) - date(2026, 2, 1)).days  # 42
+    fresh = build_inference_features("A0E2", "ZZZZ", "hard", as_of_date=date(2026, 3, 15))
+    assert fresh.iloc[0]["days_since_last_match_diff"] == pytest.approx(
+        math.log(1.0 + fresh_age) - math.log(1.0 + 90.0)
+    )
+
+
+def test_days_since_diff_boundaries_and_swap_sign():
+    """days_since_last_match_diff = LN(1+player) - LN(1+opponent); swap negates it."""
+    # S0AG has a same-day snapshot at 2026-07-12 (0 rest days); a missing
+    # opponent caps at 90. Player fresh (LN(1+0)) vs missing opponent (LN(1+90)).
+    neg = build_inference_features("S0AG", "ZZZZ", "hard", as_of_date=date(2026, 7, 12))
+    assert neg.iloc[0]["days_since_last_match_diff"] == pytest.approx(
+        math.log(1.0 + 0.0) - math.log(1.0 + 90.0)
+    )
+    # Swap the players: missing player (LN(1+90)) vs fresh opponent (LN(1+0)).
+    pos = build_inference_features("ZZZZ", "S0AG", "hard", as_of_date=date(2026, 7, 12))
+    assert pos.iloc[0]["days_since_last_match_diff"] == pytest.approx(
+        math.log(1.0 + 90.0) - math.log(1.0 + 0.0)
+    )
+    # Swapping players negates the diff exactly.
+    assert pos.iloc[0]["days_since_last_match_diff"] == pytest.approx(
+        -neg.iloc[0]["days_since_last_match_diff"]
+    )
 
 
 def test_is_indoor_1_when_indoor():

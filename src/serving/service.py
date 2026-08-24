@@ -1146,7 +1146,6 @@ class TennisPredictor:
             f" opponent_snapshot_date={meta['opponent_snapshot_date']}"
             f" player_rolling_match_number={meta['player_rolling_match_number']}"
             f" opponent_rolling_match_number={meta['opponent_rolling_match_number']}"
-            f" median_days_since={meta['median_days_since']}"
             f" build_ms={meta['build_ms']}"
             f" response_ms={(perf_counter() - started_at) * 1000:.3f}"
             f" p_win={rec['p_win']:.6f}"

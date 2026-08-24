@@ -41,8 +41,6 @@ latest_snapshots AS (
 ),
 activity AS (
     SELECT
-        ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY days_since))
-            AS median_days_since,
         ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY matches_30d))
             AS median_matches_30d
     FROM (
@@ -117,7 +115,6 @@ SELECT
         AS avg_player_rank_10,
     ROUND(COALESCE(p.avg_rank_faced_10, 100)::NUMERIC, 5)::DOUBLE PRECISION
         AS avg_rank_faced_10,
-
     ROUND(COALESCE(p.latest_player_age, 26.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS latest_player_age,
     ROUND(COALESCE(p.weighted_form_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
@@ -150,18 +147,13 @@ SELECT
         AS grass_win_rate_10,
     ROUND(COALESCE(p.hard_win_rate_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS hard_win_rate_10,
-
-    ROUND(COALESCE(a.median_days_since, 365)::NUMERIC, 5)::DOUBLE PRECISION
-        AS days_since_default,
     ROUND(COALESCE(a.median_matches_30d, 0)::NUMERIC, 5)::DOUBLE PRECISION
         AS matches_30d_default,
-
     0.5 AS rate_default,
     ROUND(COALESCE(pa.left_handed_rate, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS left_handed_rate,
     ROUND(COALESCE(pa.avg_years_pro, 8.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS avg_years_pro,
-
     ROUND(tr.tour_ace_rate::NUMERIC, 5)::DOUBLE PRECISION AS tour_ace_rate,
     ROUND(tr.tour_first_serve_pct::NUMERIC, 5)::DOUBLE PRECISION
         AS tour_first_serve_pct,
