@@ -215,3 +215,25 @@ def test_validate_bronze_row_flags_invalid_best_of():
     issues = validate_bronze_row(row)
 
     assert "best_of must be 1, 3, or 5: 2" in issues
+
+
+def test_validate_bronze_row_flags_null_match_date():
+    # match_date is part of the causal order key and must be non-null at the
+    # ingestion boundary (the DB also enforces NOT NULL).
+    row = _valid_row()
+    row["match_date"] = None
+
+    issues = validate_bronze_row(row)
+
+    assert "match_date is null" in issues
+
+
+def test_validate_bronze_row_flags_null_match_num():
+    # match_num is part of the causal order key and must be non-null (and is
+    # checked positive-int only when present); the DB also enforces NOT NULL.
+    row = _valid_row()
+    row["match_num"] = None
+
+    issues = validate_bronze_row(row)
+
+    assert "match_num is null" in issues

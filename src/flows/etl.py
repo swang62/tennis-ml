@@ -35,6 +35,7 @@ from src.constants import (
 )
 from src.db.client import CONNECT_TIMEOUT_S
 from src.db.conninfo import dbt_env
+from src.features.elo import materialize_elo
 
 DBT_BUILD_CMD = [
     "uv",
@@ -126,10 +127,20 @@ def _run_streamed(
     return subprocess.CompletedProcess(cmd, returncode)
 
 
-def _etl_log_file() -> Path:
-    """Timestamped dbt build log under artifacts/logs."""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return LOGS / f"etl_dbt_{timestamp}.log"
+def _etl_log_file(run_id: str, phase: str) -> Path:
+    """Phase-specific, timestamped dbt build log under artifacts/logs."""
+    return LOGS / f"etl_dbt_{run_id}_{phase}.log"
+
+
+# Base dbt phase: silver player/rolling features and gold tour averages/profiles.
+BASE_PHASE_MODELS = [
+    "player_matches",
+    "rolling_features",
+    "tour_averages",
+    "player_profiles",
+]
+# Final dbt phase: gold.match_features plus its dbt tests ("+" selects downstream).
+FINAL_PHASE_MODELS = ["match_features+"]
 
 
 def _incremental_watermarks() -> tuple[datetime | None, datetime | None]:
@@ -171,26 +182,79 @@ def _record_incremental_watermark(watermark: datetime | None) -> None:
 
 @task()
 def bronze_to_gold(incremental: bool = False) -> int:
-    log_file = _etl_log_file()
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     mode = "incremental" if incremental else "full_refresh"
     print(f"dbt mode: {mode}")
     source_watermark, built_watermark = _incremental_watermarks()
-    select = None
-    if (
+    profile_only = (
         incremental
         and source_watermark is not None
         and built_watermark is not None
         and source_watermark <= built_watermark
-    ):
-        select = ["player_profiles"]
-        print("no changed bronze matches: refreshing player_profiles only")
+    )
     try:
         logger = get_run_logger()
     except RuntimeError:
         logger = None
-    run_dbt_build(log_file=log_file, incremental=incremental, select=select, logger=logger)
-    if select is None:
-        _record_incremental_watermark(source_watermark)
+
+    if profile_only:
+        # No new bronze matches: refresh profiles only. Elo and match_features
+        # are skipped so unchanged rows aren't needlessly rebuilt.
+        log_file = _etl_log_file(run_id, "profiles")
+        print(
+            "no changed bronze matches: refreshing gold.player_profiles only "
+            "(skipping Elo and gold.match_features)"
+        )
+        run_dbt_build(
+            log_file=log_file,
+            incremental=incremental,
+            select=["player_profiles"],
+            logger=logger,
+        )
+        _report_phase(log_file, incremental, mode, "profiles")
+        return _current_gold_count()
+
+    # Phase 1 — base dbt models: player_matches, rolling_features, tour_averages, player_profiles.
+    base_log = _etl_log_file(run_id, "base")
+    run_dbt_build(
+        log_file=base_log, incremental=incremental, select=BASE_PHASE_MODELS, logger=logger
+    )
+    _report_phase(base_log, incremental, mode, "base")
+
+    # Phase 2 — Elo materialization. Runs between base and match_features so the
+    # newly calculated Elo is visible in the same run; its failure aborts before
+    # the watermark advances.
+    if logger is not None:
+        logger.info("materializing Elo snapshots")
+    materialize_elo()
+    print("Elo materialization complete")
+
+    # Phase 3 — final dbt models: gold.match_features and its dbt tests.
+    final_log = _etl_log_file(run_id, "final")
+    run_dbt_build(
+        log_file=final_log, incremental=incremental, select=FINAL_PHASE_MODELS, logger=logger
+    )
+    _report_phase(final_log, incremental, mode, "final")
+
+    # Only advance the watermark after every phase above succeeded.
+    _record_incremental_watermark(source_watermark)
+    return _current_gold_count()
+
+
+def _report_phase(log_file: Path, incremental: bool, mode: str, phase: str) -> None:
+    """Print this dbt phase's per-model write counts and summary line."""
+    for model, rows in _dbt_model_rows().items():
+        action = (
+            "rebuilt"
+            if not incremental or model in {"player_profiles", "tour_averages"}
+            else "inserted/replaced"
+        )
+        print(f"dbt {model}: {rows} rows {action} [{phase}]")
+    print(f"dbt ({mode}) [{phase}]: {_dbt_summary(log_file)}")
+
+
+def _current_gold_count() -> int:
+    """Return the current gold match row count and print all table sizes."""
     with (
         psycopg.connect(
             get_database_url(),
@@ -208,14 +272,6 @@ def bronze_to_gold(incremental: bool = False) -> int:
         }
     for table, count in counts.items():
         print(f"{table}: {count} current rows")
-    for model, rows in _dbt_model_rows().items():
-        action = (
-            "rebuilt"
-            if not incremental or model in {"player_profiles", "tour_averages"}
-            else "inserted/replaced"
-        )
-        print(f"dbt {model}: {rows} rows {action}")
-    print(f"dbt ({mode}): {_dbt_summary(log_file)}")
     return counts[GOLD_MATCHES_TABLE]
 
 
@@ -268,7 +324,11 @@ def _etl_flow_run_name() -> str:
 
 @flow(log_prints=True, flow_run_name=_etl_flow_run_name)
 def etl_flow(incremental: bool = False, source: str | None = None):
-    """Build bronze-to-gold models with dbt; incremental runs append new rows."""
+    """Build bronze-to-gold models with dbt, split around Elo materialization.
+
+    Phase order: base dbt models -> Elo snapshots -> gold.match_features (+ tests).
+    The bronze.etl_state watermark advances only after every phase succeeds.
+    """
     if source is not None and source not in VALID_ETL_SOURCES:
         raise ValueError(
             f"etl_flow source must be one of {sorted(VALID_ETL_SOURCES)} or None, got {source!r}"

@@ -169,6 +169,11 @@ filterwarnings = [
   "ignore:.*__get_pydantic_core_schema__.*:DeprecationWarning",
   "ignore:.*deprecated function 'Dependency'.*:DeprecationWarning",
   "ignore:.*deprecated class 'DependencyKwarg'.*:DeprecationWarning",
+  # Upstream SyntaxWarning: evidently/descriptors/text_match.py has a non-raw
+  # docstring with an invalid escape sequence ('\d'). Third-party code,
+  # cannot be patched. Compile-time SyntaxWarnings carry no module name, so the
+  # narrowest matchable filter is the category plus the specific message text.
+  "ignore:invalid escape sequence:SyntaxWarning:",
 ]
 
 [tool.pytest_env]

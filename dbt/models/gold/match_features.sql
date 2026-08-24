@@ -8,7 +8,7 @@
 WITH
 {% if is_incremental() %}
 new_matches AS (
-    SELECT match_id, player1_id, player2_id, match_date
+    SELECT match_id, player1_id, player2_id, match_date, match_num
     FROM {{ source('bronze', 'match_events') }}
     WHERE ingested_at > COALESCE(
         (SELECT source_watermark FROM bronze.etl_state WHERE pipeline = 'dbt'),
@@ -24,7 +24,8 @@ changed_match_ids AS (
     JOIN new_matches nm
       ON LEAST(pm.player_id, pm.opponent_id) = LEAST(nm.player1_id, nm.player2_id)
      AND GREATEST(pm.player_id, pm.opponent_id) = GREATEST(nm.player1_id, nm.player2_id)
-     AND pm.match_date > nm.match_date
+     AND (pm.match_date, pm.match_num, pm.match_id)
+         > (nm.match_date, nm.match_num, nm.match_id)
 ),
 {% endif %}
 player_match_enriched AS (
@@ -99,7 +100,10 @@ player_match_enriched AS (
         COALESCE(
             CAST(EXTRACT(YEAR FROM pm.match_date) - prof.turned_pro AS DOUBLE PRECISION),
             fd.avg_years_pro
-        ) AS years_pro
+        ) AS years_pro,
+
+        COALESCE(es.pre_elo, 1500.0) AS player_elo,
+        COALESCE(es.pre_elo_surface, 1500.0) AS player_elo_surface
 
     FROM {{ ref('player_matches') }} pm
 {% if is_incremental() %}
@@ -119,6 +123,9 @@ player_match_enriched AS (
         ON bron.match_id = pm.match_id
     LEFT JOIN {{ source('bronze', 'player_profiles') }} prof
         ON prof.player_id = pm.player_id
+    LEFT JOIN {{ source('silver', 'elo_snapshots') }} es
+        ON es.player_id = pm.player_id
+       AND es.match_id = pm.match_id
 ),
 pair_meetings AS (
     SELECT match_id, player_id, winner_is_current_player, meeting_surface_matches
@@ -222,6 +229,9 @@ SELECT
     p.surface_form - o.surface_form AS surface_form_diff,
     LN(1.0 + p.days_since_last_match) - LN(1.0 + o.days_since_last_match)
         AS days_since_last_match_diff,
+
+    p.player_elo - o.player_elo AS elo_diff,
+    p.player_elo_surface - o.player_elo_surface AS elo_surface_diff,
 
     p.weighted_form_10 AS player_weighted_form_10,
     o.weighted_form_10 AS opponent_weighted_form_10,

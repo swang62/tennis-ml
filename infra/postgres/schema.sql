@@ -15,6 +15,11 @@
 -- gold.match_features / gold.tour_averages / gold.player_profiles, and data
 -- is written later by just seed / etl. Nothing is baked into an image;
 -- the Compose named volume persists everything.
+--
+-- silver.elo_snapshots is Python-owned (not dbt): the per-player Elo
+-- materialization. The Elo materializer writes it; reset clears it. The shared
+-- bronze.etl_state timestamp watermark is the sole pipeline progress marker and
+-- advances only after base dbt, Elo, and gold.match_features all succeed.
 
 -- Bento workers can start concurrently; serialize this idempotent migration.
 SELECT pg_advisory_xact_lock(7910881);
@@ -302,3 +307,73 @@ CREATE TABLE IF NOT EXISTS bronze.rankings (
 --    ORDER BY player_id, ranking_date DESC (backward scan of the same index)
 CREATE INDEX IF NOT EXISTS idx_rankings_player_date
     ON bronze.rankings (player_id, ranking_date);
+
+-- Python-owned per-player Elo snapshots: two rows per physical match (one per
+-- participant). Each row carries the causal match key, the player's requested
+-- match surface, the pre/post global and current-surface Elo, the prior
+-- overall/surface match counts, and the overall/surface K values applied. The
+-- post-ratings are persisted so gold joins an exact causal lookup and so state
+-- reconstruction / as-of inference read the latest completed snapshot without an
+-- in-memory league.
+--
+-- The PK (player_id, match_id) is the exact join key for gold.match_features:
+-- no row ever reads its own or a later snapshot. Exactly one snapshot exists
+-- per (player_id, match_id).
+CREATE TABLE IF NOT EXISTS silver.elo_snapshots (
+    player_id              VARCHAR          NOT NULL,
+    match_id               VARCHAR          NOT NULL,
+    match_date             DATE             NOT NULL,  -- causal order key: date, then match_num
+    match_num              INTEGER          NOT NULL,  -- causal order key: per-tournament sequence
+    -- Causal order is (match_date, match_num, match_id). match_num is per-tournament,
+    -- so (match_date, match_num) is NOT globally unique across tournaments; match_id
+    -- (bronze.match_events PK) is the deterministic tie-breaker that makes the order
+    -- unique. No unique constraint is placed on (match_date, match_num) by design.
+    surface                VARCHAR          NOT NULL,  -- requested match surface
+    pre_elo                DOUBLE PRECISION NOT NULL,  -- pre-match global Elo
+    post_elo               DOUBLE PRECISION NOT NULL,  -- post-match global Elo
+    pre_elo_surface        DOUBLE PRECISION NOT NULL,  -- pre-match surface Elo
+    post_elo_surface       DOUBLE PRECISION NOT NULL,  -- post-match surface Elo
+    prior_overall_matches  INTEGER          NOT NULL,  -- prior overall match count
+    prior_surface_matches  INTEGER          NOT NULL,  -- prior surface match count
+    k_overall             DOUBLE PRECISION NOT NULL,  -- overall K applied
+    k_surface            DOUBLE PRECISION NOT NULL,  -- surface K applied
+    source_hash          VARCHAR,                    -- sha256 of the source match's
+                                                     -- Elo-relevant content; NULL
+                                                     -- (legacy) fails validation closed
+    PRIMARY KEY (player_id, match_id),
+    CONSTRAINT elo_snapshots_check_surface CHECK (surface IN ('clay', 'grass', 'hard', 'carpet'))
+);
+
+-- Latest overall Elo as-of query: a player's newest completed post-rating
+-- strictly before a date. The covering index returns post_elo plus the causal
+-- state columns (prior overall count + overall K) without a table lookup, and
+-- its ORDER BY matches the query so no sort is required.
+CREATE INDEX IF NOT EXISTS idx_elo_snapshots_player_overall
+    ON silver.elo_snapshots (player_id, match_date DESC, match_num DESC, match_id DESC)
+    INCLUDE (post_elo, prior_overall_matches, k_overall);
+
+-- Latest surface Elo as-of query: a player's newest completed post-rating on a
+-- surface strictly before a date.
+CREATE INDEX IF NOT EXISTS idx_elo_snapshots_player_surface
+    ON silver.elo_snapshots (player_id, surface, match_date DESC, match_num DESC, match_id DESC)
+    INCLUDE (post_elo_surface);
+
+-- Upgrade databases whose dbt-built gold.match_features predates the elo_diff /
+-- elo_surface_diff columns (the leakage test references them). dbt owns this
+-- table and creates it with these columns on a fresh build, so only add them
+-- when the table already exists (e.g. an upgraded local database). The DO block
+-- skips fresh databases where dbt has not yet materialized the table, so the
+-- migration never errors on a relation that does not exist. ADD COLUMN IF NOT
+-- EXISTS keeps reruns safe and non-destructive.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'gold' AND table_name = 'match_features'
+    ) THEN
+        ALTER TABLE gold.match_features
+            ADD COLUMN IF NOT EXISTS elo_diff DOUBLE PRECISION;
+        ALTER TABLE gold.match_features
+            ADD COLUMN IF NOT EXISTS elo_surface_diff DOUBLE PRECISION;
+    END IF;
+END $$;

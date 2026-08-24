@@ -84,6 +84,7 @@ prior_snapshot AS (
         mf.avg_rank_faced_diff, mf.rank_trend_diff,
         mf.rank_diff, mf.rank_points_diff, mf.age_diff,
         mf.surface_form_diff, mf.days_since_last_match_diff,
+        mf.elo_diff, mf.elo_surface_diff,
         mf.player_weighted_form_10, mf.opponent_weighted_form_10,
         {% for c in diff_cols %}
         prp.{{ c }} AS player_raw_{{ c }},
@@ -168,7 +169,15 @@ prior_snapshot AS (
                  ELSE po.match_date - pro.snapshot_date
             END,
             90.0
-        ) AS opponent_prior_days_since
+        ) AS opponent_prior_days_since,
+        es_p.pre_elo AS player_raw_elo,
+        es_o.pre_elo AS opponent_raw_elo,
+        COALESCE(es_p.pre_elo, 1500.0) AS player_prior_elo,
+        COALESCE(es_o.pre_elo, 1500.0) AS opponent_prior_elo,
+        es_p.pre_elo_surface AS player_raw_elo_surface,
+        es_o.pre_elo_surface AS opponent_raw_elo_surface,
+        COALESCE(es_p.pre_elo_surface, 1500.0) AS player_prior_elo_surface,
+        COALESCE(es_o.pre_elo_surface, 1500.0) AS opponent_prior_elo_surface
     FROM (
         SELECT * FROM {{ ref('match_features') }}
         WHERE match_id IN (SELECT match_id FROM sampled_matches)
@@ -193,6 +202,10 @@ prior_snapshot AS (
         ORDER BY rfo.snapshot_date DESC, rfo.match_num DESC, rfo.match_id DESC
         LIMIT 1
     ) pro ON true
+    LEFT JOIN {{ source('silver', 'elo_snapshots') }} es_p
+      ON es_p.player_id = mf.player_id AND es_p.match_id = mf.match_id
+    LEFT JOIN {{ source('silver', 'elo_snapshots') }} es_o
+      ON es_o.player_id = mf.opponent_id AND es_o.match_id = mf.match_id
     CROSS JOIN {{ ref('tour_averages') }} fd
 ),
 comparisons AS (
@@ -261,6 +274,16 @@ comparisons AS (
     SELECT match_id, player_id, 'rank_points_diff' AS feature, rank_points_diff AS mf_val,
            player_prior_rank_points - opponent_prior_rank_points AS prior_val,
            player_raw_rank_points IS NOT NULL AND opponent_raw_rank_points IS NOT NULL AS guard
+    FROM prior_snapshot
+    UNION ALL
+    SELECT match_id, player_id, 'elo_diff' AS feature, elo_diff AS mf_val,
+           player_prior_elo - opponent_prior_elo AS prior_val,
+           player_raw_elo IS NOT NULL AND opponent_raw_elo IS NOT NULL AS guard
+    FROM prior_snapshot
+    UNION ALL
+    SELECT match_id, player_id, 'elo_surface_diff' AS feature, elo_surface_diff AS mf_val,
+           player_prior_elo_surface - opponent_prior_elo_surface AS prior_val,
+           player_raw_elo_surface IS NOT NULL AND opponent_raw_elo_surface IS NOT NULL AS guard
     FROM prior_snapshot
 )
 SELECT

@@ -164,3 +164,19 @@ def test_main_threads_force_into_the_flow(monkeypatch):
     matches.main(["--force"])
 
     assert captured["force"] is True
+
+
+def test_validate_new_bronze_row_rejects_null_match_date():
+    # match_date is a causal-order key and must be non-null at the scrape boundary.
+    reason = matches.validate_new_bronze_row(_candidate_row(match_date=None))
+
+    assert reason is not None
+    assert "match_date" in reason
+
+
+def test_validate_new_bronze_row_rejects_null_match_num():
+    # match_num is a causal-order key and must be non-null at the scrape boundary.
+    reason = matches.validate_new_bronze_row(_candidate_row(match_num=None))
+
+    assert reason is not None
+    assert "match_num" in reason

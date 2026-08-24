@@ -54,6 +54,7 @@ def get_pool() -> ConnectionPool:
                     min_size=MIN_POOL_SIZE,
                     max_size=MAX_POOL_SIZE,
                     max_idle=MAX_IDLE_S,
+                    open=True,
                     kwargs={"autocommit": True, "connect_timeout": CONNECT_TIMEOUT_S},
                     check=ConnectionPool.check_connection,
                     timeout=POOL_TIMEOUT_S,

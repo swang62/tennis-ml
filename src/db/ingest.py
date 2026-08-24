@@ -16,11 +16,13 @@ import psycopg
 import requests
 
 from src.constants import (
+    BRONZE_ETL_STATE,
     BRONZE_MATCHES_TABLE,
     BRONZE_PROFILES_TABLE,
     BRONZE_RANKINGS_TABLE,
     ENRICH_WORKERS,
     ROOT,
+    SILVER_ELO_SNAPSHOTS,
     get_database_url,
     load_env,
 )
@@ -454,6 +456,18 @@ def clear_rankings() -> None:
     """Delete all bronze.rankings rows without dropping the table."""
     with connection() as conn, conn.transaction(), conn.cursor() as cur:
         cur.execute(cast(LiteralString, f"DELETE FROM {BRONZE_RANKINGS_TABLE}"))
+
+
+def clear_elo_snapshots() -> None:
+    """Delete all silver.elo_snapshots rows without dropping the table."""
+    with connection() as conn, conn.transaction(), conn.cursor() as cur:
+        cur.execute(cast(LiteralString, f"DELETE FROM {SILVER_ELO_SNAPSHOTS}"))
+
+
+def clear_etl_state() -> None:
+    """Delete the bronze.etl_state progress row without dropping the table."""
+    with connection() as conn, conn.transaction(), conn.cursor() as cur:
+        cur.execute(cast(LiteralString, f"DELETE FROM {BRONZE_ETL_STATE}"))
 
 
 def insert_bronze_rows(df: pd.DataFrame, *, overwrite: bool = False) -> int:

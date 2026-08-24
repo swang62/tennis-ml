@@ -98,13 +98,32 @@ SCHEMA_SQL = ROOT / "infra" / "postgres" / "schema.sql"
 BRONZE_MATCHES_TABLE = "bronze.match_events"
 BRONZE_PROFILES_TABLE = "bronze.player_profiles"
 BRONZE_RANKINGS_TABLE = "bronze.rankings"
+BRONZE_ETL_STATE = "bronze.etl_state"
 
 SILVER_PLAYER_MATCHES = "silver.player_matches"
 SILVER_ROLLING_FEATURES = "silver.rolling_features"
+SILVER_ELO_SNAPSHOTS = "silver.elo_snapshots"
 
 GOLD_MATCHES_TABLE = "gold.match_features"
 GOLD_PROFILES_TABLE = "gold.player_profiles"
 GOLD_TOUR_AVERAGES_TABLE = "gold.tour_averages"
+
+
+###### Elo Parameters #####
+
+# Players with no prior Elo history start at this rating.
+ELO_DEFAULT_RATING = 1500.0
+# Adaptive K: min(ELO_K_MIN, ELO_K_BASE + ELO_K_DIVISOR / (prior_matches + 1));
+# the surface K uses prior matches on that surface.
+ELO_K_BASE = 43.0
+ELO_K_MIN = 62.0
+ELO_K_DIVISOR = 800.0
+# Before a match, after ELO_INACTIVITY_GRACE_DAYS of inactivity, regress the
+# rating ELO_INACTIVITY_REGRESS_PER_7D of the remaining distance to 1500 per
+# further 7 days, capped at ELO_INACTIVITY_REGRESS_CAP.
+ELO_INACTIVITY_GRACE_DAYS = 90
+ELO_INACTIVITY_REGRESS_PER_7D = 0.01
+ELO_INACTIVITY_REGRESS_CAP = 0.50
 
 
 ###### Training and Evaluation Keys #####

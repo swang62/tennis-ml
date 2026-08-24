@@ -16,6 +16,7 @@ from src.features.columns import (
     FEATURE_COLS,
     TOUR_AVERAGES_FALLBACK_COLS,
 )
+from src.features.elo import regress_rating
 from src.features.inference import (
     build_inference_features,
     build_inference_features_bulk,
@@ -189,6 +190,80 @@ def _snap_rows() -> list[tuple[object, ...]]:
     return rows
 
 
+# One Elo snapshot per relevant player at the parity match's completion; stats
+# are constant. S0AG/Z355 share the pm-s6 same-day completed match; ELO_R is a
+# single stale (early-year) match used to exercise inactivity regression.
+_ELO_COLS = (
+    "player_id",
+    "match_id",
+    "match_date",
+    "match_num",
+    "surface",
+    "pre_elo",
+    "post_elo",
+    "pre_elo_surface",
+    "post_elo_surface",
+    "prior_overall_matches",
+    "prior_surface_matches",
+    "k_overall",
+    "k_surface",
+    "source_hash",
+)
+
+
+def _elo_rows() -> list[tuple[object, ...]]:
+    return [
+        (
+            "S0AG",
+            "pm-s6",
+            date(2026, 7, 12),
+            6,
+            "hard",
+            0.0,
+            1625.0,
+            0.0,
+            1640.0,
+            5,
+            5,
+            0.0,
+            0.0,
+            "hS0AG",
+        ),
+        (
+            "Z355",
+            "pm-s6",
+            date(2026, 7, 12),
+            6,
+            "hard",
+            0.0,
+            1575.0,
+            0.0,
+            1560.0,
+            4,
+            4,
+            0.0,
+            0.0,
+            "hZ355",
+        ),
+        (
+            "ELO_R",
+            "elo-r1",
+            date(2026, 1, 1),
+            1,
+            "hard",
+            0.0,
+            2000.0,
+            0.0,
+            2000.0,
+            0,
+            0,
+            0.0,
+            0.0,
+            "hR",
+        ),
+    ]
+
+
 # Independent hand-computed expectation for both perspectives of the parity match.
 _PARITY_GOLD = (
     # Match metadata precedes FEATURE_COLS.
@@ -197,7 +272,7 @@ _PARITY_GOLD = (
     "S0AG",
     "Z355",
     "hard",
-    # 19 matchup diffs (S0AG side minus Z355)
+    # 21 matchup diffs (S0AG side minus Z355)
     -2.0,
     6945.0,
     -4.42,
@@ -217,6 +292,8 @@ _PARITY_GOLD = (
     2.0,
     0.2,  # surface_form_diff (hard): 0.8 - 0.6
     0.0,  # days_since_last_match_diff: S0AG/Z355 share a same-day snapshot (0 rest days)
+    50.0,  # elo_diff: 1625 - 1575 (latest completed overall Elo through as_of)
+    80.0,  # elo_surface_diff: 1640 - 1560 (hard)
     # 8 absolute state values (incl. matches_10 exposure pair)
     0.8,
     0.4,
@@ -248,7 +325,7 @@ _PARITY_GOLD_BA = (
     "Z355",
     "S0AG",
     "hard",
-    # 19 matchup diffs (Z355 side minus S0AG = negated)
+    # 21 matchup diffs (Z355 side minus S0AG = negated)
     2.0,
     -6945.0,
     4.42,
@@ -268,6 +345,8 @@ _PARITY_GOLD_BA = (
     -2.0,
     -0.2,  # surface_form_diff (hard): 0.6 - 0.8
     0.0,  # days_since_last_match_diff: Z355/S0AG share a same-day snapshot (0 rest days)
+    -50.0,  # elo_diff: 1575 - 1625
+    -80.0,  # elo_surface_diff: 1560 - 1640
     # 8 absolute state values (Z355 first; matches_10 pair exchanged)
     0.4,
     0.8,
@@ -348,6 +427,23 @@ def _seed(con: duckdb.DuckDBPyConnection) -> None:
     con.executemany(
         f"INSERT INTO silver.rolling_features VALUES ({', '.join(['?'] * 27)})",
         _snap_rows(),
+    )
+    # Mirror the production silver.elo_snapshots table the inference Elo SQL
+    # reads; post_elo / post_elo_surface drive the as-of Elo ratings.
+    con.execute(
+        """
+        CREATE TABLE silver.elo_snapshots (
+            player_id VARCHAR, match_id VARCHAR, match_date DATE, match_num INTEGER,
+            surface VARCHAR, pre_elo DOUBLE, post_elo DOUBLE,
+            pre_elo_surface DOUBLE, post_elo_surface DOUBLE,
+            prior_overall_matches INTEGER, prior_surface_matches INTEGER,
+            k_overall DOUBLE, k_surface DOUBLE, source_hash VARCHAR
+        )
+        """
+    )
+    con.executemany(
+        f"INSERT INTO silver.elo_snapshots VALUES ({', '.join(['?'] * len(_ELO_COLS))})",
+        _elo_rows(),
     )
     # Mirror the production silver.player_matches table the inference SQL joins
     # on (player_id, match_id); match_num drives the latest-snapshot ordering.
@@ -931,3 +1027,56 @@ def test_is_indoor_1_when_indoor():
         "S0AG", "Z355", "hard", is_indoor=1, as_of_date=AS_OF_AFTER_ALL_MATCHES
     )
     assert out["is_indoor"].iloc[0] == 1
+
+
+# ── As-of Elo inference ──
+
+
+def test_elo_diff_present_finite_and_mirror():
+    """elo_diff / elo_surface_diff are emitted, finite, and mirror across swap."""
+    out_ab = build_inference_features("S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
+    row = out_ab.iloc[0]
+    assert row["elo_diff"] == pytest.approx(50.0)  # 1625 - 1575
+    assert row["elo_surface_diff"] == pytest.approx(80.0)  # 1640 - 1560
+    for col in ("elo_diff", "elo_surface_diff"):
+        assert math.isfinite(row[col]), col
+    out_ba = build_inference_features("Z355", "S0AG", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
+    assert out_ba.iloc[0]["elo_diff"] == pytest.approx(-50.0)
+    assert out_ba.iloc[0]["elo_surface_diff"] == pytest.approx(-80.0)
+
+
+def test_elo_cold_start_zero_diff():
+    """Two unknown players both default to 1500 Elo, giving neutral Elo diffs."""
+    out = build_inference_features("A0ZZ", "ZZ99", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
+    row = out.iloc[0]
+    assert row["elo_diff"] == 0
+    assert row["elo_surface_diff"] == 0
+    for col in FEATURE_COLS:
+        assert math.isfinite(row[col]), col
+
+
+def test_elo_regression_from_stale_match():
+    """A stale completed Elo is inactive-regressed toward 1500 by as_of_date."""
+    as_of = date(2026, 9, 1)
+    out = build_inference_features("ELO_R", "ZZZZ", "hard", as_of_date=as_of)
+    row = out.iloc[0]
+    gap = (as_of - date(2026, 1, 1)).days
+    # ZZZZ has no Elo history, so it defaults to 1500; the diff equals the
+    # regressed rating (overall and surface) minus the 1500 default.
+    assert row["elo_diff"] == pytest.approx(regress_rating(2000.0, gap) - 1500.0)
+    assert row["elo_surface_diff"] == pytest.approx(regress_rating(2000.0, gap) - 1500.0)
+
+
+@pytest.mark.parametrize("surface", ["clay", "grass", "hard"])
+def test_elo_scalar_bulk_parity(surface):
+    """Scalar and bulk builders emit identical Elo diffs for each surface."""
+    req = {
+        "player_id": "S0AG",
+        "opponent_id": "Z355",
+        "surface": surface,
+        "as_of_date": AS_OF_AFTER_ALL_MATCHES,
+    }
+    scalar = build_inference_features(**req)
+    bulk = build_inference_features_bulk([req])
+    assert scalar.iloc[0]["elo_diff"] == bulk.iloc[0]["elo_diff"]
+    assert scalar.iloc[0]["elo_surface_diff"] == bulk.iloc[0]["elo_surface_diff"]

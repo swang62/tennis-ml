@@ -126,3 +126,24 @@ sources:
             description: Official ATP singles rank (1-200).
           - name: points
             description: ATP ranking points; NULL in early eras.
+  - name: silver
+    description: Python-owned tables that dbt reads but does not materialize; silver.elo_snapshots is written by src/features/elo.py and read by gold.match_features.
+    schema: silver
+    tables:
+      - name: elo_snapshots
+        description: Two rows per physical match (one per participant) with stored pre/post global and surface Elo; gold joins the PK (player_id, match_id) and selects the pre-match ratings.
+        columns:
+          - name: player_id
+            description: Canonical ATP player id; the snapshot's participant and half of the exact gold join key.
+          - name: match_id
+            description: Match the snapshot belongs to; half of the exact gold join key.
+          - name: match_date
+            description: Match date (causal key with match_num).
+          - name: match_num
+            description: Per-tournament match sequence (causal key with match_date).
+          - name: surface
+            description: Requested match surface.
+          - name: pre_elo
+            description: Pre-match global Elo, computed strictly before the match; the causal training feature (not post_elo).
+          - name: pre_elo_surface
+            description: Pre-match surface Elo, computed strictly before the match; the causal training feature (not post_elo_surface).

@@ -17,6 +17,8 @@
     "streak_diff",
     "surface_form_diff",
     "days_since_last_match_diff",
+    "elo_diff",
+    "elo_surface_diff",
     "player_weighted_form_10",
     "opponent_weighted_form_10",
     "player_matches_10",

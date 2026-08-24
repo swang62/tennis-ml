@@ -13,6 +13,8 @@ from src.db.ingest import (
     atp_rows_to_bronze,
     canonical_match_id,
     canonical_players,
+    clear_elo_snapshots,
+    clear_etl_state,
     clear_match_events,
     clear_rankings,
     discover_ranking_csvs,
@@ -113,6 +115,16 @@ def latest_official_ranks() -> dict[str, int]:
     return resolved
 
 
+def clear_elo_progress() -> None:
+    """Clear Elo snapshots and the shared etl_state row for a clean rebuild.
+
+    Called only by --reset; a normal append seed preserves incremental state.
+    """
+    clear_elo_snapshots()
+    clear_etl_state()
+    print("Cleared silver.elo_snapshots and bronze.etl_state")
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -190,6 +202,7 @@ def main_default(enrich: bool = False, reset: bool = False) -> None:
 
     if reset:
         clear_match_events()
+        clear_elo_progress()
         print(f"Cleared {BRONZE_MATCHES_TABLE} for a clean rebuild")
     inserted = insert_bronze_rows(bronze, overwrite=False)
     if reset:
@@ -222,6 +235,7 @@ def main_all(enrich: bool = False, reset: bool = False) -> None:
 
     if reset:
         clear_match_events()
+        clear_elo_progress()
         print(f"Cleared {BRONZE_MATCHES_TABLE} for a clean rebuild")
     inserted = insert_bronze_rows(bronze, overwrite=False)
     if reset:
