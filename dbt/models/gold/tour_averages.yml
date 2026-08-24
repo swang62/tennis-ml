@@ -59,19 +59,14 @@ models:
         description: Mean grass_win_rate_10 over the full snapshot pool; 0.0 when empty.
       - name: hard_win_rate_10
         description: Mean hard_win_rate_10 over the full snapshot pool; 0.0 when empty.
-
-      - name: days_since_default
-        description: Median days since each player's latest snapshot (pool_as_of_date - latest_snapshot_date); 365 when the pool is empty.
       - name: matches_30d_default
         description: Median per-player match count in the 30 days before pool_as_of_date; 0 when the pool is empty.
-
       - name: rate_default
         description: Neutral 0.5 rate for unseen surfaces and empty-pool fallbacks.
       - name: left_handed_rate
         description: Mean left-handed rate over profiles with known L/R handedness; 0.0 when none exist.
       - name: avg_years_pro
         description: Mean years-pro across profiles at pool_as_of_date (pool year - turned_pro); 8.0 when no profiles exist.
-
       - name: tour_ace_rate
         description: Tour-wide aces per first serve (SUM(aces) / SUM(first_serves_made)).
       - name: tour_first_serve_pct
@@ -91,6 +86,6 @@ models:
       - name: tour_aces_per_svc_game
         description: Tour-wide aces per service game (SUM(aces) / SUM(service_games)); non-negative when present.
       - name: tour_break_point_opportunities_per_return_game
-        description: "Tour-wide break-point opportunities per return game (SUM(break_points_faced) / SUM(service_games)); NULL only when the denominator is zero."
+        description: "Tour-wide break-point opportunities per return game (SUM(break_points_faced) / SUM(service_games))."
       - name: tour_return_games_won_pct
         description: Tour-wide return games won percentage from break-point conversions per service game.

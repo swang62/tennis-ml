@@ -157,10 +157,18 @@ prior_snapshot AS (
         END AS opponent_prior_surface_form,
         pm.match_date - prp.snapshot_date AS player_raw_days_since,
         po.match_date - pro.snapshot_date AS opponent_raw_days_since,
-        LEAST(30, CASE WHEN prp.player_id IS NULL THEN fd.days_since_default
-             ELSE pm.match_date - prp.snapshot_date END) AS player_prior_days_since,
-        LEAST(30, CASE WHEN pro.player_id IS NULL THEN fd.days_since_default
-             ELSE po.match_date - pro.snapshot_date END) AS opponent_prior_days_since
+        LEAST(
+            CASE WHEN prp.player_id IS NULL THEN 90.0
+                 ELSE pm.match_date - prp.snapshot_date
+            END,
+            90.0
+        ) AS player_prior_days_since,
+        LEAST(
+            CASE WHEN pro.player_id IS NULL THEN 90.0
+                 ELSE po.match_date - pro.snapshot_date
+            END,
+            90.0
+        ) AS opponent_prior_days_since
     FROM (
         SELECT * FROM {{ ref('match_features') }}
         WHERE match_id IN (SELECT match_id FROM sampled_matches)

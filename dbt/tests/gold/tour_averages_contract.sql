@@ -20,7 +20,6 @@
     "clay_win_rate_10",
     "grass_win_rate_10",
     "hard_win_rate_10",
-    "days_since_default",
     "matches_30d_default",
     "rate_default",
     "left_handed_rate",

@@ -15,6 +15,7 @@ from src.constants import (
     BRONZE_MATCHES_TABLE,
     BRONZE_PROFILES_TABLE,
     BULK_MAX_ROWS,
+    DAYS_SINCE_CAP_DAYS,
     SILVER_PLAYER_MATCHES,
     SILVER_ROLLING_FEATURES,
 )
@@ -157,14 +158,12 @@ def _side_values(
         if surface != "carpet"
         else float(defaults["rate_default"])
     )
-    days_since_last_match = min(
-        (
-            float((as_of_date - _to_date(row["snapshot_date"])).days)
-            if row is not None
-            else float(defaults["days_since_default"])
-        ),
-        30.0,
+    raw_days = (
+        float((as_of_date - _to_date(row["snapshot_date"])).days)
+        if row is not None
+        else float(DAYS_SINCE_CAP_DAYS)
     )
+    days_since_last_match = min(raw_days, float(DAYS_SINCE_CAP_DAYS))
 
     return {
         "ranking": ranking,
@@ -185,7 +184,6 @@ def _side_values(
         "rank_trend_10": avg_rank_10 - ranking,
         "avg_rank_faced_10": cell("avg_rank_faced_10", "avg_rank_faced_10"),
         "streak": int(cell("streak", "streak")),
-        # Matches observed in the 10-match rolling window; cold start is literal 0.
         "matches_10": int(float(cast(Real, row["matches_10"]))) if row is not None else 0,
         "surface_form": surface_form,
         "days_since_last_match": days_since_last_match,
@@ -513,7 +511,6 @@ def _build_inference_features_with_meta(
         "snapshot_pool_players": int(float(cast(Real, ta["snapshot_pool_players"] or 0))),
         "profile_rows": int(float(cast(Real, ta["profile_rows"] or 0))),
         "player_match_rows": int(float(cast(Real, ta["player_match_rows"] or 0))),
-        "median_days_since": float(defaults["days_since_default"]),
         "player_snapshot_found": player_snapshot is not None,
         "opponent_snapshot_found": opponent_snapshot is not None,
         "player_snapshot_date": None

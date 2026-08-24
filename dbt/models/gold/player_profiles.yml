@@ -21,7 +21,7 @@ models:
       - name: rank_points_delta
         description: Latest minus earliest positive rank points.
       - name: current_rank
-        description: "Current ATP rank: latest official weekly ranking (bronze.rankings), else the player's match-time rank from their most recent match."
+        description: "Current ATP rank: latest official weekly ranking."
       - name: first_serve_in_pct
         description: Career first serve in percentage (weighted).
       - name: aces_per_first_serve

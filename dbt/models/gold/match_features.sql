@@ -83,9 +83,12 @@ player_match_enriched AS (
             ELSE fd.rate_default
         END AS surface_form,
 
-        LEAST(30, CASE WHEN pr.player_id IS NULL THEN fd.days_since_default
-             ELSE pm.match_date - pr.snapshot_date
-        END) AS days_since_last_match,
+        LEAST(
+            CASE WHEN pr.player_id IS NULL THEN 90.0
+                 ELSE pm.match_date - pr.snapshot_date
+            END,
+            90.0
+        ) AS days_since_last_match,
 
         COALESCE(
             CAST(CASE WHEN prof.handedness = 'L' THEN 1
