@@ -178,6 +178,97 @@ def test_hawkeye_to_bronze_stamps_source_metadata_winner_first():
     assert row["winner_id"] == "S0S1"
 
 
+def test_hawkeye_to_bronze_uses_normalized_match_number():
+    row = matches.hawkeye_to_bronze(
+        _HAWKEYE_MS001,
+        {
+            "match_id": "ms098",
+            "match_num": 1,
+            "match_date": "2026-08-02",
+            "player1_id": "S0S1",
+            "player2_id": "N0AE",
+            "winner_id": "S0S1",
+            "round": "r128",
+        },
+    )
+
+    assert row is not None
+    assert row["match_num"] == 1
+
+
+def test_assign_match_numbers_does_not_use_atp_ms_ids():
+    rows = [
+        {"match_id": "ms098", "round": "r128", "match_date": "2026-08-02"},
+        {"match_id": "ms048", "round": "r64", "match_date": "2026-08-04"},
+        {"match_id": "ms110", "round": "r128", "match_date": "2026-08-02"},
+        {"match_id": "ms001", "round": "f", "match_date": "2026-08-13"},
+    ]
+
+    numbered = matches.assign_match_numbers(rows)
+
+    assert [row["match_num"] for row in numbered] == [1, 2, 3, 4]
+    assert [row["match_id"] for row in numbered] == ["ms098", "ms110", "ms048", "ms001"]
+
+
+def test_assign_match_numbers_preserves_gaps_in_a_96_draw():
+    rows = [
+        *(
+            {"round": "r128", "match_date": "2026-08-02", "match_id": f"ms{i:03d}"}
+            for i in range(32)
+        ),
+        *(
+            {"round": "r64", "match_date": "2026-08-04", "match_id": f"ms{i:03d}"}
+            for i in range(31)
+        ),
+        *(
+            {"round": "r32", "match_date": "2026-08-05", "match_id": f"ms{i:03d}"}
+            for i in range(16)
+        ),
+        *({"round": "r16", "match_date": "2026-08-09", "match_id": f"ms{i:03d}"} for i in range(8)),
+        *({"round": "qf", "match_date": "2026-08-11", "match_id": f"ms{i:03d}"} for i in range(4)),
+        *({"round": "sf", "match_date": "2026-08-12", "match_id": f"ms{i:03d}"} for i in range(2)),
+        {"round": "f", "match_date": "2026-08-13", "match_id": "ms001"},
+    ]
+
+    numbered = matches.assign_match_numbers(rows, draw_size=96)
+
+    assert [row["match_num"] for row in numbered if row["round"] == "r64"] == list(range(33, 64))
+    assert numbered[-1]["match_num"] == 95
+
+
+def test_assign_match_numbers_accounts_for_byes_in_alternate_draw_sizes():
+    rows = [
+        *({"round": "r32", "match_date": "2026-08-02"} for _ in range(12)),
+        *({"round": "r16", "match_date": "2026-08-04"} for _ in range(8)),
+        *({"round": "qf", "match_date": "2026-08-05"} for _ in range(4)),
+        *({"round": "sf", "match_date": "2026-08-09"} for _ in range(2)),
+        {"round": "f", "match_date": "2026-08-11"},
+    ]
+
+    numbered = matches.assign_match_numbers(rows, draw_size=28)
+
+    assert [row["match_num"] for row in numbered if row["round"] == "r16"] == list(range(13, 21))
+    assert numbered[-1]["match_num"] == 27
+
+
+def test_bronze_id_uses_normalized_match_number_not_atp_ms_id():
+    match_id, reason, _ = matches._bronze_match_id(
+        {
+            "match_id": "ms098",
+            "match_num": 1,
+            "match_date": "2026-08-02",
+            "player1_id": "S0S1",
+            "player2_id": "N0AE",
+        },
+        {},
+        2026,
+        "421",
+    )
+
+    assert reason == ""
+    assert match_id == "2026-421-001"
+
+
 # ── Discovery → resolution: match-level skip propagation ────────────
 
 

@@ -205,6 +205,16 @@ _ROUND_TO_BRONZE = {
     "Round of 128": "r128",
 }
 
+_ROUND_ORDER = {
+    "r128": 0,
+    "r64": 1,
+    "r32": 2,
+    "r16": 3,
+    "qf": 4,
+    "sf": 5,
+    "f": 6,
+}
+
 
 def _normalize_round(text: str) -> str:
     """Bronze round for a match-header strong text; raw name when unmapped."""
@@ -697,7 +707,13 @@ def hawkeye_to_bronze(
             "match_date": _as_date(discovered_match.get("match_date"))
             if discovered_match
             else None,
-            "match_num": ms_sequence(discovered_match.get("match_id")) if discovered_match else 0,
+            "match_num": (
+                discovered_match.get("match_num")
+                if discovered_match and discovered_match.get("match_num") is not None
+                else ms_sequence(discovered_match.get("match_id"))
+                if discovered_match
+                else 0
+            ),
             "player1_id": player1_id,
             "player2_id": player2_id,
             "tournament": tier,
@@ -1282,7 +1298,7 @@ def append_raw_match_rows(
         return 0, ids
     create = not path.exists() or path.stat().st_size == 0
     with path.open("a", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=RAW_MATCH_COLUMNS)
+        writer = csv.DictWriter(fh, fieldnames=RAW_MATCH_COLUMNS, lineterminator="\n")
         if create:
             writer.writeheader()
         elif path.read_bytes()[-1:] != b"\n":
@@ -1302,7 +1318,7 @@ def sort_raw_match_csv(path: Path) -> None:
         rows = list(reader)
     rows.sort(key=lambda row: (row["tourney_date"], int(row["match_num"])))
     with path.open("w", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=RAW_MATCH_COLUMNS)
+        writer = csv.DictWriter(fh, fieldnames=RAW_MATCH_COLUMNS, lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
 
@@ -1473,9 +1489,10 @@ def _bronze_match_id(
     (date, tournament, {player ids}) key is already in bronze — orientation-free
     because the key's player set is unordered — so enrichment updates that row.
     Otherwise derives the deterministic Sackmann id (``build_match_id``) from
-    the strictly-parsed ``msNNN`` sequence (``ms_sequence``), zero-padded. A
-    missing date or a malformed/non-positive ms id is a skip, never a
-    fabricated id. The key is None exactly when a reason is returned.
+    the normalized match number, zero-padded. The ATP ``msNNN`` id is only the
+    Hawkeye fetch id and is not a stable match sequence. A missing date or a
+    malformed/non-positive sequence is a skip, never a fabricated id. The key
+    is None exactly when a reason is returned.
     """
     match_date = _as_date(item.get("match_date"))
     if match_date is None:
@@ -1485,7 +1502,12 @@ def _bronze_match_id(
     existing = physical.get((match_date, frozenset({player1.upper(), player2.upper()})))
     if existing:
         return existing, "", key
-    sequence = ms_sequence(item.get("match_id"))
+    raw_sequence = item.get("match_num")
+    sequence = (
+        raw_sequence
+        if isinstance(raw_sequence, int) and not isinstance(raw_sequence, bool)
+        else ms_sequence(item.get("match_id"))
+    )
     if sequence <= 0:
         return "", f"no positive ms sequence in {item.get('match_id')!r}", key
     return build_match_id(year, tournament_id, sequence), "", key
@@ -1517,6 +1539,50 @@ def dedupe_physical_matches(
         seen.add(key)
         unique.append(match)
     return unique, dropped
+
+
+def assign_match_numbers(
+    matches: list[dict[str, Any]], *, draw_size: int | None = None
+) -> list[dict[str, Any]]:
+    """Assign causal numbers independently of ATP ``msNNN`` ids."""
+    ordered = sorted(
+        enumerate(matches),
+        key=lambda pair: (
+            _ROUND_ORDER.get(str(pair[1].get("round") or "").lower(), len(_ROUND_ORDER)),
+            _as_date(pair[1].get("match_date")) or date.max,
+            pair[0],
+        ),
+    )
+    numbered = [dict(match) for _, match in ordered]
+    if draw_size is not None and draw_size > 1:
+        bracket_size = 1 << (draw_size - 1).bit_length()
+        round_sizes: list[int] = []
+        round_size = bracket_size
+        while round_size > 1:
+            round_sizes.append(round_size)
+            round_size //= 2
+        round_names = [f"r{size}" for size in round_sizes]
+        round_names[-3:] = ["qf", "sf", "f"]
+        round_counts = [draw_size - bracket_size // 2]
+        round_counts.extend(size // 2 for size in round_sizes[1:])
+        offsets: dict[str, int] = {}
+        offset = 1
+        for round_name, count in zip(round_names, round_counts, strict=True):
+            offsets[round_name] = offset
+            offset += count
+        round_indexes: dict[str, int] = {}
+        for match in numbered:
+            round_name = str(match.get("round") or "").lower()
+            start = offsets.get(round_name)
+            if start is None:
+                continue
+            index = round_indexes.get(round_name, 0)
+            match["match_num"] = start + index
+            round_indexes[round_name] = index + 1
+    else:
+        for match_num, match in enumerate(numbered, start=1):
+            match["match_num"] = match_num
+    return numbered
 
 
 def _id_collision(
@@ -1650,6 +1716,20 @@ def _process_tournament(
         resolved = [match for match in resolved if match.get("match_id") in match_ids]
 
     hawkeye = fetch_hawkeye_batch(resolved, year=year, tournament_id=tournament_id, page=page)
+    draw_size = next(
+        (
+            _payload_int(payload.get("Tournament", {}).get("Singles"))
+            for item in hawkeye
+            if isinstance(payload := item.get("payload"), dict)
+            and isinstance(payload.get("Tournament"), dict)
+            and _payload_int(payload["Tournament"].get("Singles")) is not None
+        ),
+        None,
+    )
+    numbered = assign_match_numbers(resolved, draw_size=draw_size)
+    match_numbers = {str(item.get("match_id")): item["match_num"] for item in numbered}
+    for item in hawkeye:
+        item["match_num"] = match_numbers.get(str(item.get("match_id")), 0)
     upsert_records: list[dict[str, Any]] = []
     for item in hawkeye:
         ms_id = str(item.get("match_id") or "")

@@ -29,12 +29,14 @@ from src.constants import (
     ROOT,
     SILVER_PLAYER_MATCHES,
     SILVER_ROLLING_FEATURES,
+    SILVER_ELO_SNAPSHOTS,
     WORK_POOL_NAME,
     get_database_url,
     load_env,
 )
 from src.db.client import CONNECT_TIMEOUT_S
 from src.db.conninfo import dbt_env
+from src.db.ingest import clear_etl_state
 from src.features.elo import materialize_elo
 
 DBT_BUILD_CMD = [
@@ -61,12 +63,17 @@ def run_dbt_build(
     incremental: bool = False,
     select: list[str] | None = None,
     logger: logging.Logger | logging.LoggerAdapter | None = None,
+    subcommand: str = "build",
 ) -> subprocess.CompletedProcess:
-    """Build dbt models, streaming output to ``log_file`` and ``logger``."""
+    """Run a dbt subcommand (``build`` includes tests, ``run`` models only).
+
+    ``select``/``incremental`` and command logging are preserved for either.
+    """
     cmd = [*DBT_BUILD_CMD]
+    cmd[3] = subcommand  # "build" (with tests) vs "run" (models only)
     if str(profiles_dir) != "dbt":
         cmd[-2:] = ["--profiles-dir", str(profiles_dir)]
-    if not incremental:
+    if not incremental and subcommand != "test":
         cmd.append("--full-refresh")
     if select:
         cmd.extend(["--select", *select])
@@ -114,10 +121,10 @@ def _run_streamed(
         raise
     returncode = proc.wait()
     if logger is not None:
-        logger.info(f"dbt build exited with code {returncode}")
+        logger.info(f"dbt command exited with code {returncode}")
     if returncode != 0:
         message = (
-            f"dbt build failed with exit code {returncode}; see the artifact log for dbt's error"
+            f"dbt command failed with exit code {returncode}; see the artifact log for dbt's error"
         )
         log.write(f"{message}\n")
         log.flush()
@@ -185,6 +192,8 @@ def bronze_to_gold(incremental: bool = False) -> int:
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     mode = "incremental" if incremental else "full_refresh"
     print(f"dbt mode: {mode}")
+    if not incremental:
+        clear_etl_state()
     source_watermark, built_watermark = _incremental_watermarks()
     profile_only = (
         incremental
@@ -210,31 +219,81 @@ def bronze_to_gold(incremental: bool = False) -> int:
             incremental=incremental,
             select=["player_profiles"],
             logger=logger,
+            subcommand="run",
         )
         _report_phase(log_file, incremental, mode, "profiles")
         return _current_gold_count()
 
     # Phase 1 — base dbt models: player_matches, rolling_features, tour_averages, player_profiles.
+    # Run without tests so they don't execute against stale Elo/match_features state.
     base_log = _etl_log_file(run_id, "base")
     run_dbt_build(
-        log_file=base_log, incremental=incremental, select=BASE_PHASE_MODELS, logger=logger
+        log_file=base_log,
+        incremental=incremental,
+        select=BASE_PHASE_MODELS,
+        logger=logger,
+        subcommand="run",
     )
     _report_phase(base_log, incremental, mode, "base")
 
     # Phase 2 — Elo materialization. Runs between base and match_features so the
     # newly calculated Elo is visible in the same run; its failure aborts before
     # the watermark advances.
+    print("\n==================== ELO ====================")
+    print("ELO phase: rate newly ingested matches and materialize player snapshots")
+    print(f"ELO source watermark: {source_watermark or '(none; rebuilding history)'}")
+    elo_before = _elo_counts()
+    print(
+        "ELO before: "
+        f"{elo_before['matches']} source matches, "
+        f"{elo_before['snapshots']} materialized matches"
+    )
     if logger is not None:
-        logger.info("materializing Elo snapshots")
-    materialize_elo()
-    print("Elo materialization complete")
+        logger.info("ELO phase: rating new matches and materializing snapshots")
+    elo_result = materialize_elo()
+    elo_after = _elo_counts()
+    skipped = max(0, elo_before["matches"] - elo_result.processed)
+    print(
+        "ELO detected: "
+        f"{elo_result.processed} matches needed rating, "
+        f"{skipped} skipped (already materialized)"
+    )
+    print(
+        "ELO changes: "
+        f"{elo_result.snapshots} snapshot rows added, "
+        f"{elo_after['snapshots'] - elo_before['snapshots']} net snapshot rows, "
+        f"{elo_after['snapshots']} total materialized matches"
+    )
+    print("ELO phase complete")
+    print("================================================\n")
 
-    # Phase 3 — final dbt models: gold.match_features and its dbt tests.
+    # Phase 3 — final dbt models: gold.match_features. Tests run separately after
+    # all five models are materialized, so base-model tests see current state.
     final_log = _etl_log_file(run_id, "final")
     run_dbt_build(
-        log_file=final_log, incremental=incremental, select=FINAL_PHASE_MODELS, logger=logger
+        log_file=final_log,
+        incremental=incremental,
+        select=FINAL_PHASE_MODELS,
+        logger=logger,
+        subcommand="run",
     )
     _report_phase(final_log, incremental, mode, "final")
+
+    # Phase 4 — all project data tests. This restores the full 9-test check
+    # while avoiding tests against stale Elo during the base phase.
+    print("\n==================== TESTS ====================")
+    print("TESTS phase: validate all dbt models after Elo and feature materialization")
+    tests_log = _etl_log_file(run_id, "tests")
+    run_dbt_build(
+        log_file=tests_log,
+        incremental=True,
+        select=["test_type:data"],
+        logger=logger,
+        subcommand="test",
+    )
+    _report_phase(tests_log, True, mode, "tests")
+    print("TESTS phase complete")
+    print("================================================\n")
 
     # Only advance the watermark after every phase above succeeded.
     _record_incremental_watermark(source_watermark)
@@ -273,6 +332,26 @@ def _current_gold_count() -> int:
     for table, count in counts.items():
         print(f"{table}: {count} current rows")
     return counts[GOLD_MATCHES_TABLE]
+
+
+def _elo_counts() -> dict[str, int]:
+    """Return distinct source-match and Elo-snapshot counts for phase logging."""
+    with (
+        psycopg.connect(
+            get_database_url(),
+            connect_timeout=CONNECT_TIMEOUT_S,
+            options="-c statement_timeout=30000",
+        ) as conn,
+        conn.cursor() as cur,
+    ):
+        cur.execute(f"SELECT COUNT(DISTINCT match_id) FROM {BRONZE_MATCHES_TABLE}")
+        source = cur.fetchone()
+        cur.execute(f"SELECT COUNT(DISTINCT match_id) FROM {SILVER_ELO_SNAPSHOTS}")
+        snapshots = cur.fetchone()
+    return {
+        "matches": int(source[0]) if source is not None else 0,
+        "snapshots": int(snapshots[0]) if snapshots is not None else 0,
+    }
 
 
 def _table_count(cur, table: str) -> int:
