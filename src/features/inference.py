@@ -126,38 +126,12 @@ ORDER BY match_date DESC, match_num DESC, match_id DESC
 LIMIT 1
 """
 
-# Latest completed surface Elo (post-match rating) for the requested surface
-# through as_of_date; inactivity-regressed in _elo_rating.
-_LATEST_ELO_SURFACE_SQL = f"""
-SELECT post_elo_surface, match_date
-FROM {SILVER_ELO_SNAPSHOTS}
-WHERE player_id = %s
-  AND surface = %s
-  AND match_date <= %s::date
-ORDER BY match_date DESC, match_num DESC, match_id DESC
-LIMIT 1
-"""
-
 _ELO_BULK_SQL = f"""
 SELECT req.player_id AS req_player_id, req.as_of_iso, s.post_elo, s.match_date
 FROM unnest(%s::text[], %s::date[]) AS req(player_id, as_of_iso)
 LEFT JOIN LATERAL (
     SELECT post_elo, match_date FROM {SILVER_ELO_SNAPSHOTS}
     WHERE player_id = req.player_id
-      AND match_date <= req.as_of_iso
-    ORDER BY match_date DESC, match_num DESC, match_id DESC
-    LIMIT 1
-) s ON true
-"""
-
-_ELO_SURFACE_BULK_SQL = f"""
-SELECT req.player_id AS req_player_id, req.surface AS req_surface, req.as_of_iso,
-       s.post_elo_surface, s.match_date
-FROM unnest(%s::text[], %s::text[], %s::date[]) AS req(player_id, surface, as_of_iso)
-LEFT JOIN LATERAL (
-    SELECT post_elo_surface, match_date FROM {SILVER_ELO_SNAPSHOTS}
-    WHERE player_id = req.player_id
-      AND surface = req.surface
       AND match_date <= req.as_of_iso
     ORDER BY match_date DESC, match_num DESC, match_id DESC
     LIMIT 1
@@ -280,13 +254,12 @@ def _profile_values(pid: str, as_of_date: date, defaults: dict[str, float]) -> d
     )
 
 
-def _elo_rating(pid: str, as_of_date: date, as_of_iso: str, surface: str) -> tuple[float, float]:
-    """Latest completed overall + requested-surface Elo through as_of_date.
+def _elo_rating(pid: str, as_of_date: date, as_of_iso: str) -> float:
+    """Latest completed overall Elo through as_of_date.
 
     Each rating is the player's most recent post-match Elo at or before
     ``as_of_date`` (inclusive of a same-day completed match), inactive-regressed
-    forward to ``as_of_date``; a missing overall or surface history defaults to
-    1500.
+    forward to ``as_of_date``; missing history defaults to 1500.
     """
     overall = execute_df(_LATEST_ELO_SQL, [pid, as_of_iso])
     elo = ELO_DEFAULT_RATING
@@ -296,28 +269,13 @@ def _elo_rating(pid: str, as_of_date: date, as_of_iso: str, surface: str) -> tup
             elo = regress_rating(
                 float(row["post_elo"]), (as_of_date - _to_date(row["match_date"])).days
             )
-    surface_row = execute_df(_LATEST_ELO_SURFACE_SQL, [pid, surface, as_of_iso])
-    elo_surface = ELO_DEFAULT_RATING
-    if not surface_row.empty:
-        row = first_row_dict(surface_row)
-        if not pd.isna(row["post_elo_surface"]):
-            elo_surface = regress_rating(
-                float(row["post_elo_surface"]),
-                (as_of_date - _to_date(row["match_date"])).days,
-            )
-    return elo, elo_surface
+    return elo
 
 
 def _elo_ratings_bulk(
     overall_keys: list[tuple[str, date]],
-    surface_keys: list[tuple[str, str, date]],
-) -> tuple[dict[tuple[str, date], float], dict[tuple[str, str, date], float]]:
-    """Set-oriented latest completed overall + surface Elo, inactivity-regressed.
-
-    Mirrors :func:`_elo_rating` but resolves every requested (player, surface,
-    as_of) tuple in two set-oriented queries, returning lookup dicts keyed by
-    ``(player_id, as_of_date)`` and ``(player_id, surface, as_of_date)``.
-    """
+) -> dict[tuple[str, date], float]:
+    """Set-oriented latest completed overall Elo, inactivity-regressed."""
     overall: dict[tuple[str, date], float] = {}
     for rec in execute_df(
         _ELO_BULK_SQL,
@@ -330,24 +288,7 @@ def _elo_ratings_bulk(
             overall[key] = regress_rating(
                 float(rec["post_elo"]), (key[1] - _to_date(rec["match_date"])).days
             )
-    surface: dict[tuple[str, str, date], float] = {}
-    for rec in execute_df(
-        _ELO_SURFACE_BULK_SQL,
-        [
-            [k[0] for k in surface_keys],
-            [k[1] for k in surface_keys],
-            [k[2] for k in surface_keys],
-        ],
-    ).to_dict("records"):
-        key = (rec["req_player_id"], rec["req_surface"], _to_date(rec["as_of_iso"]))
-        if rec["post_elo_surface"] is None or pd.isna(rec["post_elo_surface"]):
-            surface[key] = ELO_DEFAULT_RATING
-        else:
-            surface[key] = regress_rating(
-                float(rec["post_elo_surface"]),
-                (key[2] - _to_date(rec["match_date"])).days,
-            )
-    return overall, surface
+    return overall
 
 
 class _RowContext(NamedTuple):
@@ -452,8 +393,6 @@ def _assemble_row(
     h2h_surface_wins_for_requested_player: int,
     player_elo: float,
     opponent_elo: float,
-    player_elo_surface: float,
-    opponent_elo_surface: float,
 ) -> dict[str, int | float | str]:
     """Assemble one directional row in the FEATURE_COLS contract."""
     row: dict[str, int | float | str] = {}
@@ -502,7 +441,6 @@ def _assemble_row(
         1.0 + player_side["days_since_last_match"]
     ) - math.log(1.0 + opponent_side["days_since_last_match"])
     row["elo_diff"] = player_elo - opponent_elo
-    row["elo_surface_diff"] = player_elo_surface - opponent_elo_surface
 
     for name in (
         "player_weighted_form_10",
@@ -590,12 +528,8 @@ def _build_inference_features_with_meta(
     player_side.update(_profile_values(ctx.player_id, ctx.as_of_date, defaults))
     opponent_side.update(_profile_values(ctx.opponent_id, ctx.as_of_date, defaults))
 
-    player_elo, player_elo_surface = _elo_rating(
-        ctx.player_id, ctx.as_of_date, ctx.as_of_iso, ctx.surface
-    )
-    opponent_elo, opponent_elo_surface = _elo_rating(
-        ctx.opponent_id, ctx.as_of_date, ctx.as_of_iso, ctx.surface
-    )
+    player_elo = _elo_rating(ctx.player_id, ctx.as_of_date, ctx.as_of_iso)
+    opponent_elo = _elo_rating(ctx.opponent_id, ctx.as_of_date, ctx.as_of_iso)
 
     h2h_df = execute_df(
         _H2H_PRIOR_SQL,
@@ -627,8 +561,6 @@ def _build_inference_features_with_meta(
         h2h_surface_wins,
         player_elo,
         opponent_elo,
-        player_elo_surface,
-        opponent_elo_surface,
     )
 
     final_cols = [*FEATURE_COLS, "player_id", "opponent_id"]
@@ -751,11 +683,8 @@ def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame
             (str(rec["match_id"]), str(rec["winner_id"]), str(rec["surface"]))
         )
 
-    elo_overall, elo_surface_map = _elo_ratings_bulk(
-        list({(pid, c.as_of_date) for c in ctxs for pid in (c.player_id, c.opponent_id)}),
-        list(
-            {(pid, c.surface, c.as_of_date) for c in ctxs for pid in (c.player_id, c.opponent_id)}
-        ),
+    elo_overall = _elo_ratings_bulk(
+        list({(pid, c.as_of_date) for c in ctxs for pid in (c.player_id, c.opponent_id)})
     )
 
     out_rows: list[dict[str, int | float | str]] = []
@@ -782,8 +711,6 @@ def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame
         )
         player_elo = elo_overall[(ctx.player_id, ctx.as_of_date)]
         opponent_elo = elo_overall[(ctx.opponent_id, ctx.as_of_date)]
-        player_elo_surface = elo_surface_map[(ctx.player_id, ctx.surface, ctx.as_of_date)]
-        opponent_elo_surface = elo_surface_map[(ctx.opponent_id, ctx.surface, ctx.as_of_date)]
         meetings = h2h.get((ctx.player_id, ctx.opponent_id, ctx.as_of_iso), [])
         winner_id_values = [w for _, w, _ in meetings]
         surface_values = [s for _, _, s in meetings]
@@ -805,8 +732,6 @@ def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame
                 h2h_surface_wins,
                 player_elo,
                 opponent_elo,
-                player_elo_surface,
-                opponent_elo_surface,
             )
         )
 

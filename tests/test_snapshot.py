@@ -386,20 +386,14 @@ def test_refresh_snapshot_counts_stay_useful_when_table_empty(
     assert "copied gold.match_features: 0 rows" in out
 
 
-def test_expected_feature_order_carries_elo_diffs(tmp_path) -> None:
-    """The ordered contract places elo_diff / elo_surface_diff last in DIFF_COLS
-    and a snapshot built on the current FEATURE_COLS still validates."""
+def test_expected_feature_order_carries_elo_diff(tmp_path) -> None:
+    """A snapshot built on the current feature contract validates."""
     from src.features.columns import DIFF_COLS
 
-    assert DIFF_COLS[-2:] == ["elo_diff", "elo_surface_diff"]
+    assert DIFF_COLS[-1] == "elo_diff"
     assert EXPECTED_FEATURE_ORDER.index("elo_diff") == (
         EXPECTED_FEATURE_ORDER.index("days_since_last_match_diff") + 1
     )
-    assert EXPECTED_FEATURE_ORDER.index("elo_surface_diff") == (
-        EXPECTED_FEATURE_ORDER.index("elo_diff") + 1
-    )
-    # A snapshot written on the current contract (which now includes the two Elo
-    # diffs) must pass validation unchanged.
     p = tmp_path / "snap.duckdb"
     _write_valid_snapshot(p)
     snapshot.validate_snapshot(p)  # must not raise

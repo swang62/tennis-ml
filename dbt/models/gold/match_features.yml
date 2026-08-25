@@ -58,8 +58,6 @@ models:
         description: Signed prior rest-day log difference (LN(1+player) - LN(1+opponent)), each rest day capped at 90; missing or stale ages fall back to 90 (no tour-average median).
       - name: elo_diff
         description: Player pre-match global Elo minus opponent pre-match global Elo, joined from silver.elo_snapshots on the exact (player_id, match_id) PK; cold-start participants (or missing snapshot) default to 1500. Reversing player perspective negates the value.
-      - name: elo_surface_diff
-        description: Player pre-match surface Elo minus opponent pre-match surface Elo, joined from silver.elo_snapshots on the exact (player_id, match_id) PK; cold-start participants (or missing snapshot) default to 1500. Reversing player perspective negates the value.
       - name: player_weighted_form_10
         description: Player exponentially-decayed win form, last 10 matches before this one.
       - name: opponent_weighted_form_10

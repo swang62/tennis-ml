@@ -145,5 +145,3 @@ sources:
             description: Requested match surface.
           - name: pre_elo
             description: Pre-match global Elo, computed strictly before the match; the causal training feature (not post_elo).
-          - name: pre_elo_surface
-            description: Pre-match surface Elo, computed strictly before the match; the causal training feature (not post_elo_surface).

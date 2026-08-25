@@ -20,13 +20,17 @@ repository uses the project's pooled psycopg connection.
 from __future__ import annotations
 
 import hashlib
+import os
+import time
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Protocol, cast
 
+import duckdb
 import psycopg
 from psycopg.rows import tuple_row
+from tqdm.auto import tqdm
 
 from src.constants import (
     BRONZE_ETL_STATE,
@@ -38,12 +42,16 @@ from src.constants import (
     ELO_K_BASE,
     ELO_K_DIVISOR,
     ELO_K_MIN,
+    ROOT,
     SILVER_ELO_SNAPSHOTS,
+    get_database_url,
 )
 from src.db.client import connection
 
 # ETL records the shared watermark under this pipeline key; Elo reads the same row.
 ETL_PIPELINE = "dbt"
+ELO_MATCH_BATCH_SIZE = 25_000
+ELO_SNAPSHOT_PATH = ROOT / "data" / "elo_snapshot.duckdb"
 
 
 class EloHistoryChanged(RuntimeError):
@@ -75,12 +83,8 @@ class SnapshotRow:
     surface: str
     pre_elo: float
     post_elo: float
-    pre_elo_surface: float
-    post_elo_surface: float
     prior_overall_matches: int
-    prior_surface_matches: int
     k_overall: float
-    k_surface: float
     source_hash: str
 
 
@@ -171,49 +175,36 @@ def _update(
     return post_a, post_b
 
 
-def _prior_overall(repo: EloRepo, player_id: str) -> _PriorState:
-    """Participant's global state entering a match: rating, count-in, last date."""
-    row = repo.get_prior_overall(player_id)
-    if row is None:
-        return _PriorState(rating=ELO_DEFAULT_RATING, count_in=0, last_date=None)
+def _state_from_overall_row(row: tuple[float, int, date]) -> _PriorState:
     post_elo, prior_matches_stored, last_date = row
     return _PriorState(rating=post_elo, count_in=prior_matches_stored + 1, last_date=last_date)
 
 
-def _prior_surface(repo: EloRepo, player_id: str, surface: str) -> _PriorState:
-    row = repo.get_prior_surface(player_id, surface)
-    if row is None:
-        return _PriorState(rating=ELO_DEFAULT_RATING, count_in=0, last_date=None)
-    post_elo_surface, prior_surface_matches_stored, last_date = row
-    return _PriorState(
-        rating=post_elo_surface, count_in=prior_surface_matches_stored + 1, last_date=last_date
-    )
+def _process_event(
+    event: MatchEvent,
+    overall: dict[str, _PriorState],
+) -> list[SnapshotRow]:
+    """Compute both participants' snapshot rows for one match.
 
-
-def _process_event(repo: EloRepo, event: MatchEvent) -> list[SnapshotRow]:
-    """Compute both participants' snapshot rows for one match."""
+    ``overall`` is the authoritative in-memory state map, preloaded by ``_run``.
+    Every participant must already have an entry (cold state defaults fill in
+    players with no history), so this never touches the repository.
+    """
     p1, p2, surface = event.player1_id, event.player2_id, event.surface
 
-    p1o = _prior_overall(repo, p1)
-    p2o = _prior_overall(repo, p2)
-    p1s = _prior_surface(repo, p1, surface)
-    p2s = _prior_surface(repo, p2, surface)
-
+    p1o = overall[p1]
+    p2o = overall[p2]
     source_hash = elo_source_hash(event)
 
     p1_pre_o = regress_rating(p1o.rating, _gap_days(event.match_date, p1o.last_date))
     p2_pre_o = regress_rating(p2o.rating, _gap_days(event.match_date, p2o.last_date))
-    p1_pre_s = regress_rating(p1s.rating, _gap_days(event.match_date, p1s.last_date))
-    p2_pre_s = regress_rating(p2s.rating, _gap_days(event.match_date, p2s.last_date))
-
     k1_o = k_factor(p1o.count_in)
     k2_o = k_factor(p2o.count_in)
-    k1_s = k_factor(p1s.count_in)
-    k2_s = k_factor(p2s.count_in)
 
     score1 = 1 if event.winner_id == p1 else 0
     post1_o, post2_o = _update(p1_pre_o, k1_o, p2_pre_o, k2_o, score1)
-    post1_s, post2_s = _update(p1_pre_s, k1_s, p2_pre_s, k2_s, score1)
+    overall[p1] = _PriorState(post1_o, p1o.count_in + 1, event.match_date)
+    overall[p2] = _PriorState(post2_o, p2o.count_in + 1, event.match_date)
 
     snap1 = SnapshotRow(
         player_id=p1,
@@ -223,12 +214,8 @@ def _process_event(repo: EloRepo, event: MatchEvent) -> list[SnapshotRow]:
         surface=surface,
         pre_elo=float(p1_pre_o),
         post_elo=float(post1_o),
-        pre_elo_surface=float(p1_pre_s),
-        post_elo_surface=float(post1_s),
         prior_overall_matches=int(p1o.count_in),
-        prior_surface_matches=int(p1s.count_in),
         k_overall=float(k1_o),
-        k_surface=float(k1_s),
         source_hash=source_hash,
     )
     snap2 = SnapshotRow(
@@ -239,27 +226,29 @@ def _process_event(repo: EloRepo, event: MatchEvent) -> list[SnapshotRow]:
         surface=surface,
         pre_elo=float(p2_pre_o),
         post_elo=float(post2_o),
-        pre_elo_surface=float(p2_pre_s),
-        post_elo_surface=float(post2_s),
         prior_overall_matches=int(p2o.count_in),
-        prior_surface_matches=int(p2s.count_in),
         k_overall=float(k2_o),
-        k_surface=float(k2_s),
         source_hash=source_hash,
     )
     return [snap1, snap2]
 
 
-def _run(repo: EloRepo) -> EloRunResult:
+def _run(repo: EloRepo, rebuild: bool = False) -> EloRunResult:
     # Shared progress watermark (TIMESTAMPTZ) from bronze.etl_state. Elo reads it
     # but never advances it: ETL owns final advancement after every phase succeeds.
     watermark = repo.get_watermark()
 
-    # Fail closed before any mutation: every source match at/before the shared
-    # watermark must already be snapshotted with matching content. A historical
-    # insert or change slips in with an old ingested_at (<= watermark) and is
-    # caught here, since etl_state stores only a timestamp.
-    if watermark is not None:
+    if rebuild:
+        # Full rebuild: clear every stored snapshot and replay the whole source
+        # history cold, so results are reproducible from bronze alone. The
+        # append-only validation and stored-prior seeding below are skipped.
+        repo.clear_snapshots()
+    elif watermark is not None:
+        # Fail closed before any mutation: every source match at/before the shared
+        # watermark must already be snapshotted with matching content. A historical
+        # insert or change slips in with an old ingested_at (<= watermark) and is
+        # caught here, since etl_state stores only a timestamp. Runs against the
+        # local snapshot built above (same data, no per-run Postgres scans).
         if repo.count_events_through(watermark) != repo.count_snapshots_through(watermark):
             raise EloHistoryChanged(
                 "source match introduced at/before the shared ETL watermark "
@@ -271,10 +260,17 @@ def _run(repo: EloRepo) -> EloRunResult:
                 f"{watermark}; rebuild Elo explicitly"
             )
 
-    # Only matches not yet covered by the shared watermark and lacking a snapshot
-    # are eligible. The snapshot PK also guards against rating a match twice on a
-    # rerun after a later-phase failure.
-    events = repo.fetch_new_events(watermark)
+    # Copy the two Elo source tables into local DuckDB once, then run every read
+    # (validation, selection, prior-state) against that local snapshot so the
+    # rating loop never touches Postgres.
+    print("ELO SNAPSHOT: generating snapshot of matches")
+    snapshot_started = time.perf_counter()
+    events = repo.snapshot_events(None if rebuild else watermark)
+    print(
+        f"ELO SNAPSHOT: captured {len(events)} matches in "
+        f"{time.perf_counter() - snapshot_started:.1f}s"
+    )
+
     if not events:
         return EloRunResult(processed=0, snapshots=0, watermark=watermark)
 
@@ -285,15 +281,39 @@ def _run(repo: EloRepo) -> EloRunResult:
     # layer regardless of how the repository returns rows.
     events.sort(key=lambda e: (e.match_date, e.match_num, e.match_id))
 
-    repo.begin()
-    try:
-        for event in events:
-            for row in _process_event(repo, event):
-                repo.insert_snapshot(row)
-        repo.commit()
-    except Exception:
-        repo.rollback()
-        raise
+    overall: dict[str, _PriorState] = {}
+    player_ids = {event.player1_id for event in events} | {event.player2_id for event in events}
+    preloaded = repo.get_prior_overall_many(player_ids)
+    # Pre-seed every participant so per-event processing reads only this in-memory
+    # map (never the repository). Players with no stored history get cold state.
+    overall.update(
+        {player_id: _state_from_overall_row(row) for player_id, row in preloaded.items()}
+    )
+    for player_id in player_ids:
+        overall.setdefault(player_id, _PriorState(ELO_DEFAULT_RATING, 0, None))
+    n_batches = (len(events) + ELO_MATCH_BATCH_SIZE - 1) // ELO_MATCH_BATCH_SIZE
+    rating_started = time.perf_counter()
+    with tqdm(total=len(events), unit="match", desc="ELO RATING") as bar:
+        for batch_idx, start in enumerate(range(0, len(events), ELO_MATCH_BATCH_SIZE), start=1):
+            batch_started = time.perf_counter()
+            batch = events[start : start + ELO_MATCH_BATCH_SIZE]
+            repo.begin()
+            try:
+                snapshots: list[SnapshotRow] = []
+                for event in batch:
+                    snapshots.extend(_process_event(event, overall))
+                repo.insert_snapshots(snapshots)
+                repo.commit()
+            except Exception:
+                repo.rollback()
+                raise
+            bar.update(len(batch))
+            bar.set_postfix_str(f"batch {batch_idx}/{n_batches}")
+            print(
+                f"ELO BATCH: {batch_idx}/{n_batches} ({len(batch)} matches, "
+                f"{time.perf_counter() - batch_started:.2f}s)"
+            )
+    print(f"ELO RATING: rated {len(events)} matches in {time.perf_counter() - rating_started:.1f}s")
 
     return EloRunResult(processed=len(events), snapshots=len(events) * 2, watermark=watermark)
 
@@ -303,11 +323,17 @@ def _run(repo: EloRepo) -> EloRunResult:
 # --------------------------------------------------------------------------- #
 
 
-def materialize_elo(repo: EloRepo | None = None) -> EloRunResult:
+def materialize_elo(repo: EloRepo | None = None, rebuild: bool = False) -> EloRunResult:
     """Materialize Elo snapshots for all unprocessed matches.
 
     With no ``repo`` the project's PostgreSQL connection is used. Pass a
     repository (e.g. a hermetic fake) to test the logic without a database.
+
+    ``rebuild=True`` clears every stored snapshot first and replays the whole
+    source history cold, so results are reproducible from bronze alone. It is
+    used by a full-refresh ETL; the append-only path (prior-chaining from stored
+    snapshots, skipping already-snapshotted matches) is reserved for incremental
+    ingestion.
 
     This does not advance pipeline progress; ETL advances bronze.etl_state only
     after base dbt, Elo, and gold.match_features all succeed.
@@ -315,10 +341,10 @@ def materialize_elo(repo: EloRepo | None = None) -> EloRunResult:
     if repo is None:
         repo = PsycopgEloRepo()
         try:
-            return _run(repo)
+            return _run(repo, rebuild)
         finally:
             repo.close()
-    return _run(repo)
+    return _run(repo, rebuild)
 
 
 # --------------------------------------------------------------------------- #
@@ -333,10 +359,12 @@ class EloRepo(Protocol):
     def count_events_through(self, watermark: datetime) -> int: ...
     def count_snapshots_through(self, watermark: datetime) -> int: ...
     def count_mismatched_history(self, watermark: datetime) -> int: ...
-    def fetch_new_events(self, watermark: datetime | None) -> list[MatchEvent]: ...
-    def get_prior_overall(self, player_id: str) -> tuple[float, int, date] | None: ...
-    def get_prior_surface(self, player_id: str, surface: str) -> tuple[float, int, date] | None: ...
-    def insert_snapshot(self, row: SnapshotRow) -> None: ...
+    def snapshot_events(self, watermark: datetime | None) -> list[MatchEvent]: ...
+    def clear_snapshots(self) -> None: ...
+    def get_prior_overall_many(
+        self, player_ids: set[str]
+    ) -> dict[str, tuple[float, int, date]]: ...
+    def insert_snapshots(self, rows: list[SnapshotRow]) -> None: ...
     def begin(self) -> None: ...
     def commit(self) -> None: ...
     def rollback(self) -> None: ...
@@ -352,8 +380,12 @@ class PsycopgEloRepo:
         self._conn.autocommit = True
         self._cur = self._conn.cursor(row_factory=tuple_row)
         self._tx: AbstractContextManager[psycopg.Transaction] | None = None
+        self._snapshot_con: duckdb.DuckDBPyConnection | None = None
 
     def close(self) -> None:
+        if self._snapshot_con is not None:
+            self._snapshot_con.close()
+            self._snapshot_con = None
         if self._tx is not None:
             self._tx.__exit__(None, None, None)
             self._tx = None
@@ -371,6 +403,15 @@ class PsycopgEloRepo:
         return row[0]
 
     def count_events_through(self, watermark: datetime) -> int:
+        # Runs against the local DuckDB snapshot (set by snapshot_events), which
+        # is an exact copy of bronze.match_events for this run.
+        con = self._snapshot_con
+        if con is not None:
+            row = con.execute(
+                "SELECT COUNT(*) FROM bronze_match_events WHERE ingested_at <= ?",
+                (watermark,),
+            ).fetchone()
+            return int(row[0]) if row else 0
         self._cur.execute(
             f"SELECT COUNT(*) FROM {BRONZE_MATCHES_TABLE} WHERE ingested_at <= %s",
             (watermark,),
@@ -381,6 +422,15 @@ class PsycopgEloRepo:
         return int(row[0])
 
     def count_snapshots_through(self, watermark: datetime) -> int:
+        con = self._snapshot_con
+        if con is not None:
+            row = con.execute(
+                "SELECT COUNT(DISTINCT match_id) FROM silver_elo_snapshots "
+                "WHERE match_id IN (SELECT match_id FROM bronze_match_events "
+                "WHERE ingested_at <= ?)",
+                (watermark,),
+            ).fetchone()
+            return int(row[0]) if row else 0
         self._cur.execute(
             f"SELECT COUNT(DISTINCT match_id) FROM {SILVER_ELO_SNAPSHOTS} "
             f"WHERE match_id IN "
@@ -393,6 +443,42 @@ class PsycopgEloRepo:
         return int(row[0])
 
     def count_mismatched_history(self, watermark: datetime) -> int:
+        con = self._snapshot_con
+        if con is not None:
+            # Compute full source hashes locally from the snapshot and compare to
+            # the stored source_hash for every snapped match through the watermark.
+            sources = con.execute(
+                "SELECT match_id, match_date, match_num, surface, winner_id, "
+                "player1_id, player2_id FROM bronze_match_events WHERE ingested_at <= ?",
+                (watermark,),
+            ).fetchall()
+            if not sources:
+                return 0
+            ids = [r[0] for r in sources]
+            stored_rows = con.execute(
+                "SELECT DISTINCT match_id, source_hash FROM silver_elo_snapshots "
+                "WHERE match_id IN (SELECT UNNEST(?))",
+                (ids,),
+            ).fetchall()
+            snap_stored: dict[str, set[str | None]] = {}
+            for match_id, source_hash in stored_rows:
+                snap_stored.setdefault(str(match_id), set()).add(source_hash)
+            mismatches = 0
+            for r in sources:
+                event = MatchEvent(
+                    match_id=r[0],
+                    match_date=r[1],
+                    match_num=int(r[2]),
+                    surface=r[3],
+                    winner_id=r[4],
+                    player1_id=r[5],
+                    player2_id=r[6],
+                    ingested_at=watermark,
+                )
+                hashes = snap_stored.get(event.match_id)
+                if not hashes or elo_source_hash(event) not in hashes:
+                    mismatches += 1
+            return mismatches
         self._cur.execute(
             f"SELECT match_id, match_date, match_num, surface, winner_id, "
             f"player1_id, player2_id FROM {BRONZE_MATCHES_TABLE} "
@@ -408,7 +494,7 @@ class PsycopgEloRepo:
             f"WHERE match_id = ANY(%s)",
             (ids,),
         )
-        stored: dict[str, set[str]] = {}
+        stored: dict[str, set[str | None]] = {}
         for match_id, source_hash in self._cur.fetchall():
             stored.setdefault(match_id, set()).add(source_hash)
 
@@ -429,90 +515,119 @@ class PsycopgEloRepo:
                 mismatches += 1
         return mismatches
 
-    def fetch_new_events(self, watermark: datetime | None) -> list[MatchEvent]:
-        base = (
-            f"SELECT match_id, match_date, match_num, surface, winner_id, "
-            f"player1_id, player2_id, ingested_at FROM {BRONZE_MATCHES_TABLE} "
-        )
-        if watermark is None:
-            self._cur.execute(
-                base + f"WHERE match_id NOT IN "
-                f"(SELECT DISTINCT match_id FROM {SILVER_ELO_SNAPSHOTS}) "
-                f"ORDER BY match_date, match_num, match_id"  # match_id breaks ties (per-tournament match_num)
+    def snapshot_events(self, watermark: datetime | None) -> list[MatchEvent]:
+        """Copy full Elo inputs to DuckDB, then select the local work set."""
+        ELO_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = ELO_SNAPSHOT_PATH.with_name(f".{ELO_SNAPSHOT_PATH.name}.{os.getpid()}.tmp")
+        print(f"ELO SNAPSHOT: writing full source snapshot to {ELO_SNAPSHOT_PATH}")
+        con = duckdb.connect(str(tmp_path))
+        try:
+            pg_url = get_database_url().replace("'", "''")
+            con.execute(f"ATTACH '{pg_url}' AS pg (TYPE postgres)")
+            con.execute("BEGIN TRANSACTION")
+            con.execute(
+                'CREATE TABLE bronze_match_events AS SELECT * FROM pg."bronze"."match_events"'
             )
-        else:
-            self._cur.execute(
-                base + f"WHERE ingested_at > %s "
-                f"AND match_id NOT IN "
-                f"(SELECT DISTINCT match_id FROM {SILVER_ELO_SNAPSHOTS}) "
-                f"ORDER BY match_date, match_num, match_id",  # match_id breaks ties (per-tournament match_num)
-                (watermark,),
+            con.execute(
+                'CREATE TABLE silver_elo_snapshots AS SELECT * FROM pg."silver"."elo_snapshots"'
             )
+            con.execute("COMMIT")
+            if self._snapshot_con is not None:
+                self._snapshot_con.close()
+            con.close()
+            con = None
+            os.replace(tmp_path, ELO_SNAPSHOT_PATH)
+            self._snapshot_con = duckdb.connect(str(ELO_SNAPSHOT_PATH), read_only=True)
+            rows = self._snapshot_con.execute(
+                """
+                SELECT m.match_id, m.match_date, m.match_num, m.surface, m.winner_id,
+                       m.player1_id, m.player2_id, m.ingested_at
+                FROM bronze_match_events m
+                WHERE (? IS NULL OR m.ingested_at > ?)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM silver_elo_snapshots e
+                      WHERE e.match_id = m.match_id
+                  )
+                ORDER BY m.match_date, m.match_num, m.match_id
+                """,
+                (watermark, watermark),
+            ).fetchall()
+        finally:
+            if con is not None:
+                con.close()
+            if tmp_path.exists():
+                tmp_path.unlink()
         return [
             MatchEvent(
-                match_id=r[0],
-                match_date=r[1],
-                match_num=int(r[2]),
-                surface=r[3],
-                winner_id=r[4],
-                player1_id=r[5],
-                player2_id=r[6],
-                ingested_at=r[7],
+                match_id=row[0],
+                match_date=row[1],
+                match_num=int(row[2]),
+                surface=row[3],
+                winner_id=row[4],
+                player1_id=row[5],
+                player2_id=row[6],
+                ingested_at=row[7],
             )
-            for r in self._cur.fetchall()
+            for row in rows
         ]
 
-    def get_prior_overall(self, player_id: str) -> tuple[float, int, date] | None:
+    def get_prior_overall_many(self, player_ids: set[str]) -> dict[str, tuple[float, int, date]]:
+        if not player_ids:
+            return {}
+        if self._snapshot_con is not None:
+            rows = self._snapshot_con.execute(
+                """
+                SELECT DISTINCT ON (player_id) player_id, post_elo,
+                       prior_overall_matches, match_date
+                FROM silver_elo_snapshots
+                WHERE player_id IN (SELECT UNNEST(?))
+                ORDER BY player_id, match_date DESC, match_num DESC, match_id DESC
+                """,
+                (list(player_ids),),
+            ).fetchall()
+            return {row[0]: (float(row[1]), int(row[2]), row[3]) for row in rows}
         self._cur.execute(
-            f"SELECT post_elo, prior_overall_matches, match_date "
-            f"FROM {SILVER_ELO_SNAPSHOTS} "
-            f"WHERE player_id = %s "
-            f"ORDER BY match_date DESC, match_num DESC, match_id DESC LIMIT 1",
-            (player_id,),
+            f"SELECT DISTINCT ON (player_id) player_id, post_elo, prior_overall_matches, match_date "
+            f"FROM {SILVER_ELO_SNAPSHOTS} WHERE player_id = ANY(%s) "
+            f"ORDER BY player_id, match_date DESC, match_num DESC, match_id DESC",
+            (list(player_ids),),
         )
-        row = self._cur.fetchone()
-        if row is None:
-            return None
-        return (float(row[0]), int(row[1]), row[2])
+        return {row[0]: (float(row[1]), int(row[2]), row[3]) for row in self._cur.fetchall()}
 
-    def get_prior_surface(self, player_id: str, surface: str) -> tuple[float, int, date] | None:
-        self._cur.execute(
-            f"SELECT post_elo_surface, prior_surface_matches, match_date "
-            f"FROM {SILVER_ELO_SNAPSHOTS} "
-            f"WHERE player_id = %s AND surface = %s "
-            f"ORDER BY match_date DESC, match_num DESC, match_id DESC LIMIT 1",
-            (player_id, surface),
-        )
-        row = self._cur.fetchone()
-        if row is None:
-            return None
-        return (float(row[0]), int(row[1]), row[2])
+    def clear_snapshots(self) -> None:
+        # Runs in autocommit (set in __init__); truncate drops every stored row
+        # so a full rebuild replays the whole history cold. The cap_lineage PK or
+        # an FK-dependent table would block a bare TRUNCATE; none refer to this.
+        self._cur.execute(f"TRUNCATE {SILVER_ELO_SNAPSHOTS}")
 
-    def insert_snapshot(self, row: SnapshotRow) -> None:
-        self._cur.execute(
-            f"INSERT INTO {SILVER_ELO_SNAPSHOTS} "
-            f"(player_id, match_id, match_date, match_num, surface, "
-            f" pre_elo, post_elo, pre_elo_surface, post_elo_surface, "
-            f" prior_overall_matches, prior_surface_matches, k_overall, k_surface, "
-            f" source_hash) "
-            f"VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            (
-                row.player_id,
-                row.match_id,
-                row.match_date,
-                row.match_num,
-                row.surface,
-                row.pre_elo,
-                row.post_elo,
-                row.pre_elo_surface,
-                row.post_elo_surface,
-                row.prior_overall_matches,
-                row.prior_surface_matches,
-                row.k_overall,
-                row.k_surface,
-                row.source_hash,
-            ),
-        )
+    def insert_snapshots(self, rows: list[SnapshotRow]) -> None:
+        # COPY streams the whole batch in one protocol operation (fastest bulk
+        # insert for a flat table like this); the PK rejects any duplicate
+        # (player_id, match_id) before a transaction commit.
+        with (
+            self._conn.cursor() as cur,
+            cur.copy(
+                f"COPY {SILVER_ELO_SNAPSHOTS} "
+                f"(player_id, match_id, match_date, match_num, surface, "
+                f" pre_elo, post_elo, prior_overall_matches, k_overall, source_hash) "
+                f"FROM STDIN"
+            ) as copy,
+        ):
+            for row in rows:
+                copy.write_row(
+                    (
+                        row.player_id,
+                        row.match_id,
+                        row.match_date,
+                        row.match_num,
+                        row.surface,
+                        row.pre_elo,
+                        row.post_elo,
+                        row.prior_overall_matches,
+                        row.k_overall,
+                        row.source_hash,
+                    )
+                )
 
     def begin(self) -> None:
         self._conn.autocommit = False

@@ -4525,6 +4525,7 @@ dev = [
     { name = "shap" },
     { name = "tennis-ml" },
     { name = "torch" },
+    { name = "tqdm" },
     { name = "umap-learn" },
     { name = "xgboost" },
 ]
@@ -4678,6 +4679,7 @@ dev = [
     { name = "shap", specifier = ">=0.52" },
     { name = "tennis-ml", editable = "." },
     { name = "torch", specifier = ">=2.12" },
+    { name = "tqdm", specifier = ">=4.68" },
     { name = "umap-learn", specifier = ">=0.5" },
     { name = "xgboost", specifier = ">=3.2" },
 ]

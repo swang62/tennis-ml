@@ -331,12 +331,8 @@ CREATE TABLE IF NOT EXISTS silver.elo_snapshots (
     surface                VARCHAR          NOT NULL,  -- requested match surface
     pre_elo                DOUBLE PRECISION NOT NULL,  -- pre-match global Elo
     post_elo               DOUBLE PRECISION NOT NULL,  -- post-match global Elo
-    pre_elo_surface        DOUBLE PRECISION NOT NULL,  -- pre-match surface Elo
-    post_elo_surface       DOUBLE PRECISION NOT NULL,  -- post-match surface Elo
     prior_overall_matches  INTEGER          NOT NULL,  -- prior overall match count
-    prior_surface_matches  INTEGER          NOT NULL,  -- prior surface match count
     k_overall             DOUBLE PRECISION NOT NULL,  -- overall K applied
-    k_surface            DOUBLE PRECISION NOT NULL,  -- surface K applied
     source_hash          VARCHAR,                    -- sha256 of the source match's
                                                      -- Elo-relevant content; NULL
                                                      -- (legacy) fails validation closed
@@ -352,14 +348,16 @@ CREATE INDEX IF NOT EXISTS idx_elo_snapshots_player_overall
     ON silver.elo_snapshots (player_id, match_date DESC, match_num DESC, match_id DESC)
     INCLUDE (post_elo, prior_overall_matches, k_overall);
 
--- Latest surface Elo as-of query: a player's newest completed post-rating on a
--- surface strictly before a date.
-CREATE INDEX IF NOT EXISTS idx_elo_snapshots_player_surface
-    ON silver.elo_snapshots (player_id, surface, match_date DESC, match_num DESC, match_id DESC)
-    INCLUDE (post_elo_surface);
+-- Remove the retired surface Elo state from existing databases.
+ALTER TABLE silver.elo_snapshots
+    DROP COLUMN IF EXISTS pre_elo_surface,
+    DROP COLUMN IF EXISTS post_elo_surface,
+    DROP COLUMN IF EXISTS prior_surface_matches,
+    DROP COLUMN IF EXISTS k_surface;
+DROP INDEX IF EXISTS idx_elo_snapshots_player_surface;
 
--- Upgrade databases whose dbt-built gold.match_features predates the elo_diff /
--- elo_surface_diff columns (the leakage test references them). dbt owns this
+-- Upgrade databases whose dbt-built gold.match_features predates the elo_diff
+-- column. dbt owns this
 -- table and creates it with these columns on a fresh build, so only add them
 -- when the table already exists (e.g. an upgraded local database). The DO block
 -- skips fresh databases where dbt has not yet materialized the table, so the
@@ -374,6 +372,6 @@ BEGIN
         ALTER TABLE gold.match_features
             ADD COLUMN IF NOT EXISTS elo_diff DOUBLE PRECISION;
         ALTER TABLE gold.match_features
-            ADD COLUMN IF NOT EXISTS elo_surface_diff DOUBLE PRECISION;
+            DROP COLUMN IF EXISTS elo_surface_diff;
     END IF;
 END $$;

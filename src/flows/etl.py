@@ -27,9 +27,9 @@ from src.constants import (
     GOLD_PROFILES_TABLE,
     LOGS,
     ROOT,
+    SILVER_ELO_SNAPSHOTS,
     SILVER_PLAYER_MATCHES,
     SILVER_ROLLING_FEATURES,
-    SILVER_ELO_SNAPSHOTS,
     WORK_POOL_NAME,
     get_database_url,
     load_env,
@@ -241,7 +241,6 @@ def bronze_to_gold(incremental: bool = False) -> int:
     # the watermark advances.
     print("\n==================== ELO ====================")
     print("ELO phase: rate newly ingested matches and materialize player snapshots")
-    print(f"ELO source watermark: {source_watermark or '(none; rebuilding history)'}")
     elo_before = _elo_counts()
     print(
         "ELO before: "
@@ -250,7 +249,7 @@ def bronze_to_gold(incremental: bool = False) -> int:
     )
     if logger is not None:
         logger.info("ELO phase: rating new matches and materializing snapshots")
-    elo_result = materialize_elo()
+    elo_result = materialize_elo(rebuild=not incremental)
     elo_after = _elo_counts()
     skipped = max(0, elo_before["matches"] - elo_result.processed)
     print(

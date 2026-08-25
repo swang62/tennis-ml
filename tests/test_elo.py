@@ -57,7 +57,6 @@ def _snap_row(
     p1,
     p2,
     post_elo,
-    post_elo_surface,
     ingested_at=BASE,
     source_hash=None,
 ):
@@ -74,10 +73,7 @@ def _snap_row(
         "surface": surface,
         "pre_elo": 0.0,
         "post_elo": post_elo,
-        "pre_elo_surface": 0.0,
-        "post_elo_surface": post_elo_surface,
         "prior_overall_matches": 0,
-        "prior_surface_matches": 0,
         "source_hash": source_hash,
     }
 
@@ -93,7 +89,7 @@ class MemoryEloRepo:
         self._in_tx = False
         self.committed = 0
         self.begin_called = False
-        self._fail_after: int | None = None  # insert_snapshot raises after this many calls
+        self._fail_after: int | None = None  # batch insert raises after this many rows
         self._insert_calls = 0
 
     # --- snapshot tuple key for causal ordering ---
@@ -134,7 +130,7 @@ class MemoryEloRepo:
                 mismatches += 1
         return mismatches
 
-    def fetch_new_events(self, watermark):
+    def snapshot_events(self, watermark):
         snapped = self._snap_match_ids()
         if watermark is None:
             sel = [e for e in self._events if e.match_id not in snapped]
@@ -145,6 +141,9 @@ class MemoryEloRepo:
         sel.sort(key=self._key_ev)
         return list(sel)
 
+    def clear_snapshots(self):
+        self._snapshots.clear()
+
     def get_prior_overall(self, player_id):
         cands = [s for s in self._all_snapshots() if s["player_id"] == player_id]
         if not cands:
@@ -153,24 +152,20 @@ class MemoryEloRepo:
         s = cands[0]
         return (s["post_elo"], s["prior_overall_matches"], s["match_date"])
 
-    def get_prior_surface(self, player_id, surface):
-        cands = [
-            s
-            for s in self._all_snapshots()
-            if s["player_id"] == player_id and s["surface"] == surface
-        ]
-        if not cands:
-            return None
-        cands.sort(key=lambda s: (s["match_date"], s["match_num"], s["match_id"]), reverse=True)
-        s = cands[0]
-        return (s["post_elo_surface"], s["prior_surface_matches"], s["match_date"])
+    def get_prior_overall_many(self, player_ids):
+        result: dict = {}
+        for player_id in player_ids:
+            row = self.get_prior_overall(player_id)
+            if row is not None:
+                result[player_id] = row
+        return result
 
-    def insert_snapshot(self, row: SnapshotRow):
+    def insert_snapshots(self, rows: list[SnapshotRow]):
         assert self._in_tx, "insert outside transaction"
-        self._insert_calls += 1
+        self._insert_calls += len(rows)
         if self._fail_after is not None and self._insert_calls > self._fail_after:
             raise RuntimeError("simulated DB write failure")
-        self._pending.append(row)
+        self._pending.extend(rows)
 
     def begin(self):
         self._in_tx = True
@@ -249,20 +244,22 @@ def test_first_match_uses_defaults_and_moves_rating():
     assert len(repo._snapshots) == 2
 
 
-def test_surface_isolation_hard_match_leaves_clay_untouched():
-    snap_clay = _snap_row("A", "clay1", "2023-01-01", 1, "clay", "A", "A", "B", 1700.0, 1700.0)
+def test_rebuild_ignores_stored_snapshots_and_watermark():
+    events = [
+        _ev("m1", "2024-01-01", 1, "hard", "A", "A", "B"),
+        _ev("m2", "2024-01-02", 2, "hard", "B", "A", "B"),
+    ]
     repo = MemoryEloRepo(
-        events=[_ev("hard1", "2024-01-01", 1, "hard", "A", "A", "B")],
-        snapshots=[snap_clay],
-        watermark=None,
+        events=events,
+        snapshots=[_snap_row("A", "stale", "2023-01-01", 1, "hard", "A", "A", "B", 1900.0)],
+        watermark=events[-1].ingested_at,
     )
-    materialize_elo(repo=repo)
 
-    clay = [s for s in repo._snapshots if s["player_id"] == "A" and s["surface"] == "clay"]
-    assert len(clay) == 1
-    assert clay[0]["post_elo_surface"] == pytest.approx(1700.0)
-    hard = [s for s in repo._snapshots if s["surface"] == "hard"]
-    assert len(hard) == 2
+    result = materialize_elo(repo=repo, rebuild=True)
+
+    assert result.processed == 2
+    assert result.snapshots == 4
+    assert {row["match_id"] for row in repo._snapshots} == {"m1", "m2"}
 
 
 def test_same_day_ordering_second_match_sees_first_update():
@@ -285,8 +282,8 @@ def test_no_op_when_no_new_matches_without_watermark():
     repo = MemoryEloRepo(
         events=[_ev("m1", "2024-01-01", 1, "hard", "A", "A", "B")],
         snapshots=[
-            _snap_row("A", "m1", "2024-01-01", 1, "hard", "A", "A", "B", 1510.0, 1510.0),
-            _snap_row("B", "m1", "2024-01-01", 1, "hard", "A", "A", "B", 1490.0, 1490.0),
+            _snap_row("A", "m1", "2024-01-01", 1, "hard", "A", "A", "B", 1510.0),
+            _snap_row("B", "m1", "2024-01-01", 1, "hard", "A", "A", "B", 1490.0),
         ],
         watermark=wm,
     )
@@ -302,12 +299,8 @@ def test_no_op_when_no_new_matches_past_timestamp_watermark():
     repo = MemoryEloRepo(
         events=[_ev("m1", "2024-01-01", 1, "hard", "A", "A", "B", ingested_at=BASE)],
         snapshots=[
-            _snap_row(
-                "A", "m1", "2024-01-01", 1, "hard", "A", "A", "B", 1510.0, 1510.0, ingested_at=BASE
-            ),
-            _snap_row(
-                "B", "m1", "2024-01-01", 1, "hard", "A", "A", "B", 1490.0, 1490.0, ingested_at=BASE
-            ),
+            _snap_row("A", "m1", "2024-01-01", 1, "hard", "A", "A", "B", 1510.0, ingested_at=BASE),
+            _snap_row("B", "m1", "2024-01-01", 1, "hard", "A", "A", "B", 1490.0, ingested_at=BASE),
         ],
         watermark=wm,
     )
@@ -334,12 +327,8 @@ def test_incremental_selects_only_matches_after_watermark():
             ),
         ],
         snapshots=[
-            _snap_row(
-                "A", "m1", "2024-01-01", 1, "hard", "A", "A", "B", 1510.0, 1510.0, ingested_at=BASE
-            ),
-            _snap_row(
-                "B", "m1", "2024-01-01", 1, "hard", "A", "A", "B", 1490.0, 1490.0, ingested_at=BASE
-            ),
+            _snap_row("A", "m1", "2024-01-01", 1, "hard", "A", "A", "B", 1510.0, ingested_at=BASE),
+            _snap_row("B", "m1", "2024-01-01", 1, "hard", "A", "A", "B", 1490.0, ingested_at=BASE),
         ],
         watermark=wm,
     )
@@ -366,12 +355,8 @@ def test_fail_closed_on_historical_insert_before_watermark():
             _ev("m1", "2024-01-01", 1, "hard", "A", "A", "B", ingested_at=BASE),
         ],
         snapshots=[
-            _snap_row(
-                "A", "m1", "2024-01-01", 1, "hard", "A", "A", "B", 1510.0, 1510.0, ingested_at=BASE
-            ),
-            _snap_row(
-                "B", "m1", "2024-01-01", 1, "hard", "A", "A", "B", 1490.0, 1490.0, ingested_at=BASE
-            ),
+            _snap_row("A", "m1", "2024-01-01", 1, "hard", "A", "A", "B", 1510.0, ingested_at=BASE),
+            _snap_row("B", "m1", "2024-01-01", 1, "hard", "A", "A", "B", 1490.0, ingested_at=BASE),
         ],
         watermark=wm,
     )
@@ -401,7 +386,6 @@ def test_fail_closed_on_changed_processed_match():
                 "A",
                 "B",
                 1510.0,
-                1510.0,
                 ingested_at=BASE,
                 source_hash=original_hash,
             ),
@@ -414,7 +398,6 @@ def test_fail_closed_on_changed_processed_match():
                 "A",
                 "A",
                 "B",
-                1490.0,
                 1490.0,
                 ingested_at=BASE,
                 source_hash=original_hash,
@@ -481,12 +464,8 @@ def test_rerun_after_final_gold_failure_does_not_duplicate_elo():
             ),
         ],
         snapshots=[
-            _snap_row(
-                "A", "m1", "2024-01-01", 1, "hard", "A", "A", "B", 1510.0, 1510.0, ingested_at=BASE
-            ),
-            _snap_row(
-                "B", "m1", "2024-01-01", 1, "hard", "A", "A", "B", 1490.0, 1490.0, ingested_at=BASE
-            ),
+            _snap_row("A", "m1", "2024-01-01", 1, "hard", "A", "A", "B", 1510.0, ingested_at=BASE),
+            _snap_row("B", "m1", "2024-01-01", 1, "hard", "A", "A", "B", 1490.0, ingested_at=BASE),
         ],
         watermark=wm,
     )

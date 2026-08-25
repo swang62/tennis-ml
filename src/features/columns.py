@@ -140,7 +140,6 @@ DIFF_COLS: list[str] = [
     "surface_form_diff",
     "days_since_last_match_diff",
     "elo_diff",
-    "elo_surface_diff",
 ]
 
 CONTEXT_COLS: list[str] = [

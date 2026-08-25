@@ -102,8 +102,7 @@ player_match_enriched AS (
             fd.avg_years_pro
         ) AS years_pro,
 
-        COALESCE(es.pre_elo, 1500.0) AS player_elo,
-        COALESCE(es.pre_elo_surface, 1500.0) AS player_elo_surface
+        COALESCE(es.pre_elo, 1500.0) AS player_elo
 
     FROM {{ ref('player_matches') }} pm
 {% if is_incremental() %}
@@ -231,7 +230,6 @@ SELECT
         AS days_since_last_match_diff,
 
     p.player_elo - o.player_elo AS elo_diff,
-    p.player_elo_surface - o.player_elo_surface AS elo_surface_diff,
 
     p.weighted_form_10 AS player_weighted_form_10,
     o.weighted_form_10 AS opponent_weighted_form_10,
