@@ -11,7 +11,6 @@ pool_stats AS (
             AS latest_player_rank_points,
         AVG(latest_player_age) AS latest_player_age,
         ROUND(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY streak)) AS streak,
-        AVG(weighted_form_10) AS weighted_form_10,
         AVG(win_rate_10) AS win_rate_10,
         AVG(ace_rate_10) AS ace_rate_10,
         AVG(first_serve_pct_10) AS first_serve_pct_10,
@@ -117,8 +116,6 @@ SELECT
         AS avg_rank_faced_10,
     ROUND(COALESCE(p.latest_player_age, 26.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS latest_player_age,
-    ROUND(COALESCE(p.weighted_form_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
-        AS weighted_form_10,
     ROUND(COALESCE(p.win_rate_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION
         AS win_rate_10,
     ROUND(COALESCE(p.ace_rate_10, 0.0)::NUMERIC, 5)::DOUBLE PRECISION

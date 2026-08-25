@@ -66,7 +66,6 @@ _REQUIRED_STRING_COLUMNS: tuple[str, ...] = (
 )
 
 SILVER_ROLLING_COLS: list[str] = [
-    "weighted_form_10",
     "win_rate_10",
     "ace_rate_10",
     "first_serve_pct_10",
@@ -97,9 +96,13 @@ H2H_COLS: list[str] = [
 ]
 
 
+GRADIENT_COLS: list[str] = [
+    "player_elo_gradient_10",
+    "opponent_elo_gradient_10",
+]
+
+
 RATE_EXPOSURE_COLS: list[str] = [
-    "player_weighted_form_10",
-    "opponent_weighted_form_10",
     "player_matches_10",
     "opponent_matches_10",
 ]
@@ -123,7 +126,7 @@ DIFF_COLS: list[str] = [
     "rank_diff",
     "rank_points_diff",
     "age_diff",
-    "win_rate_diff",
+    "form_diff",
     "ace_rate_diff",
     "first_serve_pct_diff",
     "break_points_saved_pct_diff",
@@ -155,6 +158,7 @@ CONTEXT_COLS: list[str] = [
 # FEATURE_COLS order is shared by training, validation, inference, and serving.
 FEATURE_COLS: list[str] = [
     *DIFF_COLS,
+    *GRADIENT_COLS,
     *RATE_EXPOSURE_COLS,
     *PROFILE_COLS,
     *H2H_COLS,
@@ -166,7 +170,6 @@ TOUR_AVERAGES_FALLBACK_COLS: list[str] = [
     "latest_player_rank_points",
     "latest_player_age",
     "streak",
-    "weighted_form_10",
     "win_rate_10",
     "ace_rate_10",
     "first_serve_pct_10",

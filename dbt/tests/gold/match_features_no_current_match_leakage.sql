@@ -10,7 +10,7 @@
     "avg_rank_faced_10",
 ] %}
 {% set diff_stored = {
-    "win_rate_10": "win_rate_diff", "ace_rate_10": "ace_rate_diff",
+    "win_rate_10": "form_diff", "ace_rate_10": "ace_rate_diff",
     "first_serve_pct_10": "first_serve_pct_diff",
     "break_points_saved_pct_10": "break_points_saved_pct_diff",
     "first_serve_win_pct_10": "first_serve_win_pct_diff",
@@ -75,7 +75,7 @@ prior_snapshot AS (
         mf.opponent_id,
         pm.match_date,
         pm.surface AS match_surface,
-        mf.win_rate_diff, mf.streak_diff,
+        mf.form_diff, mf.streak_diff,
         mf.ace_rate_diff, mf.first_serve_pct_diff,
         mf.break_points_saved_pct_diff, mf.first_serve_win_pct_diff,
         mf.second_serve_win_pct_diff, mf.serve_win_pct_diff,
@@ -85,7 +85,6 @@ prior_snapshot AS (
         mf.rank_diff, mf.rank_points_diff, mf.age_diff,
         mf.surface_form_diff, mf.days_since_last_match_diff,
         mf.elo_diff,
-        mf.player_weighted_form_10, mf.opponent_weighted_form_10,
         {% for c in diff_cols %}
         prp.{{ c }} AS player_raw_{{ c }},
         pro.{{ c }} AS opponent_raw_{{ c }},
@@ -96,12 +95,6 @@ prior_snapshot AS (
         pro.streak AS opponent_raw_streak,
         COALESCE(prp.streak, fd.streak) AS player_prior_streak,
         COALESCE(pro.streak, fd.streak) AS opponent_prior_streak,
-        prp.weighted_form_10 AS player_raw_weighted_form_10,
-        pro.weighted_form_10 AS opponent_raw_weighted_form_10,
-        COALESCE(prp.weighted_form_10, fd.weighted_form_10)
-            AS player_prior_weighted_form_10,
-        COALESCE(pro.weighted_form_10, fd.weighted_form_10)
-            AS opponent_prior_weighted_form_10,
         prp.avg_player_rank_10 AS player_raw_avg_rank_10,
         pro.avg_player_rank_10 AS opponent_raw_avg_rank_10,
         COALESCE(prp.avg_player_rank_10, fd.avg_player_rank_10)
@@ -230,21 +223,9 @@ comparisons AS (
     SELECT match_id, player_id, 'rank_trend_diff' AS feature, rank_trend_diff AS mf_val,
            (player_prior_avg_rank_10 - player_prior_ranking)
                - (opponent_prior_avg_rank_10 - opponent_prior_ranking) AS prior_val,
-           player_raw_avg_rank_10 IS NOT NULL AND player_raw_ranking IS NOT NULL
-           AND opponent_raw_avg_rank_10 IS NOT NULL AND opponent_raw_ranking IS NOT NULL
-           AS guard
-    FROM prior_snapshot
-    UNION ALL
-    SELECT match_id, player_id, 'player_weighted_form_10' AS feature,
-           player_weighted_form_10 AS mf_val,
-           player_prior_weighted_form_10 AS prior_val,
-           player_raw_weighted_form_10 IS NOT NULL AS guard
-    FROM prior_snapshot
-    UNION ALL
-    SELECT match_id, player_id, 'opponent_weighted_form_10' AS feature,
-           opponent_weighted_form_10 AS mf_val,
-           opponent_prior_weighted_form_10 AS prior_val,
-           opponent_raw_weighted_form_10 IS NOT NULL AS guard
+            player_raw_avg_rank_10 IS NOT NULL AND player_raw_ranking IS NOT NULL
+            AND opponent_raw_avg_rank_10 IS NOT NULL AND opponent_raw_ranking IS NOT NULL
+            AS guard
     FROM prior_snapshot
     UNION ALL
     SELECT match_id, player_id, 'player_matches_10' AS feature,

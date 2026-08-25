@@ -4,7 +4,6 @@
     "latest_player_rank_points",
     "latest_player_age",
     "streak",
-    "weighted_form_10",
     "win_rate_10",
     "ace_rate_10",
     "first_serve_pct_10",

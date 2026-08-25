@@ -26,8 +26,8 @@ models:
         description: Player rank points minus opponent rank points (prior snapshot, imputed).
       - name: age_diff
         description: Player age minus opponent age (prior snapshot, imputed).
-      - name: win_rate_diff
-        description: player_win_rate_10 - opponent_win_rate_10.
+      - name: form_diff
+        description: player_win_rate_10 - opponent_win_rate_10; both Laplace-smoothed independently (Beta(1,1) prior).
       - name: ace_rate_diff
         description: player_ace_rate_10 - opponent_ace_rate_10 (prior snapshot).
       - name: first_serve_pct_diff
@@ -58,10 +58,10 @@ models:
         description: Signed prior rest-day log difference (LN(1+player) - LN(1+opponent)), each rest day capped at 90; missing or stale ages fall back to 90 (no tour-average median).
       - name: elo_diff
         description: Player pre-match global Elo minus opponent pre-match global Elo, joined from silver.elo_snapshots on the exact (player_id, match_id) PK; cold-start participants (or missing snapshot) default to 1500. Reversing player perspective negates the value.
-      - name: player_weighted_form_10
-        description: Player exponentially-decayed win form, last 10 matches before this one.
-      - name: opponent_weighted_form_10
-        description: Opponent exponentially-decayed win form, last 10 matches before this one.
+      - name: player_elo_gradient_10
+        description: OLS slope of the row player's prior 10 post_elo snapshots (silver.elo_snapshots) against consecutive match indexes, ordered chronologically and strictly preceding the target causal key (match_date, match_num, match_id); 0 when fewer than two prior observations. Increasing prior Elo history yields a positive slope. The row player keeps its own gradient (no negation across orientations).
+      - name: opponent_elo_gradient_10
+        description: OLS slope of the opponent's prior 10 post_elo snapshots (silver.elo_snapshots) against consecutive match indexes, ordered chronologically and strictly preceding the target causal key (match_date, match_num, match_id); 0 when fewer than two prior observations. Increasing prior Elo history yields a positive slope. The opponent keeps its own gradient (no negation across orientations).
       - name: player_matches_10
         description: Matches actually observed in the row player's 10-match window backing its 10-match rates (0 for cold start).
       - name: opponent_matches_10
@@ -75,7 +75,7 @@ models:
       - name: opponent_years_pro
         description: Years the opponent has been pro as of the match date (match year - turned_pro); pool mean when missing.
       - name: h2h_exposure
-        description: Count of the five most recent prior meetings, shared by both directional rows.
+        description: Count of every causally prior meeting between the pair (strictly before the target match), shared by both directional rows.
       - name: h2h_advantage
         description: Smoothed prior head-to-head advantage from the row player's perspective.
       - name: h2h_surface_advantage

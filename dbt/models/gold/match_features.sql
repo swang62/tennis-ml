@@ -51,7 +51,6 @@ player_match_enriched AS (
              ELSE CAST(pr.matches_10 AS INTEGER)
         END AS matches_10,
 
-        COALESCE(pr.weighted_form_10, fd.weighted_form_10) AS weighted_form_10,
         COALESCE(pr.win_rate_10, fd.win_rate_10) AS win_rate_10,
         COALESCE(pr.ace_rate_10, fd.ace_rate_10) AS ace_rate_10,
         COALESCE(pr.first_serve_pct_10, fd.first_serve_pct_10) AS first_serve_pct_10,
@@ -102,7 +101,10 @@ player_match_enriched AS (
             fd.avg_years_pro
         ) AS years_pro,
 
-        COALESCE(es.pre_elo, 1500.0) AS player_elo
+        COALESCE(es.pre_elo, 1500.0) AS player_elo,
+
+        COALESCE(pgrad.elo_gradient_10, 0.0) AS player_elo_gradient_10,
+        COALESCE(ograd.elo_gradient_10, 0.0) AS opponent_elo_gradient_10
 
     FROM {{ ref('player_matches') }} pm
 {% if is_incremental() %}
@@ -125,64 +127,79 @@ player_match_enriched AS (
     LEFT JOIN {{ source('silver', 'elo_snapshots') }} es
         ON es.player_id = pm.player_id
        AND es.match_id = pm.match_id
-),
-pair_meetings AS (
-    SELECT match_id, player_id, winner_is_current_player, meeting_surface_matches
-    FROM (
+    LEFT JOIN LATERAL (
         SELECT
-            match_id,
-            player_id,
-            (winner_id = player_id) AS winner_is_current_player,
-            (meeting_surface = surface) AS meeting_surface_matches,
-            ROW_NUMBER() OVER (
-                PARTITION BY match_id, player_id
-                ORDER BY match_date DESC, meeting_match_num DESC, meeting_match_id DESC
-            ) AS rn
+            CASE WHEN COUNT(*) < 2 THEN 0.0
+            ELSE (COUNT(*) * SUM(idx * post_elo) - SUM(idx) * SUM(post_elo))
+                 / (COUNT(*) * SUM(idx * idx) - SUM(idx) * SUM(idx))
+            END AS elo_gradient_10
         FROM (
             SELECT
-                current_match.match_id,
-                current_match.player_id,
-                meeting.winner_id,
-                meeting.match_date,
-                meeting.match_id AS meeting_match_id,
-                meeting.match_num AS meeting_match_num,
-                meeting.surface AS meeting_surface,
-                current_match.surface
-            FROM player_match_enriched current_match
-            CROSS JOIN LATERAL (
-                SELECT winner_id, match_date, match_id, match_num, surface
-                FROM {{ source('bronze', 'match_events') }} meeting
-                WHERE meeting.player1_id = current_match.player_id
-                  AND meeting.player2_id = current_match.opponent_id
-                  AND (meeting.match_date, meeting.match_num, meeting.match_id)
-                    < (current_match.match_date, current_match.match_num, current_match.match_id)
-                ORDER BY meeting.match_date DESC, meeting.match_num DESC, meeting.match_id DESC
-                LIMIT 5
-            ) meeting
-            UNION ALL
+                s.post_elo,
+                ROW_NUMBER() OVER (
+                    ORDER BY s.match_date, s.match_num, s.match_id
+                ) AS idx
+            FROM {{ source('silver', 'elo_snapshots') }} s
+            WHERE s.player_id = pm.player_id
+              AND (s.match_date, s.match_num, s.match_id)
+                  < (pm.match_date, pm.match_num, pm.match_id)
+            ORDER BY s.match_date DESC, s.match_num DESC, s.match_id DESC
+            LIMIT 10
+        ) graded
+    ) pgrad ON true
+    LEFT JOIN LATERAL (
+        SELECT
+            CASE WHEN COUNT(*) < 2 THEN 0.0
+            ELSE (COUNT(*) * SUM(idx * post_elo) - SUM(idx) * SUM(post_elo))
+                 / (COUNT(*) * SUM(idx * idx) - SUM(idx) * SUM(idx))
+            END AS elo_gradient_10
+        FROM (
             SELECT
-                current_match.match_id,
-                current_match.player_id,
-                meeting.winner_id,
-                meeting.match_date,
-                meeting.match_id AS meeting_match_id,
-                meeting.match_num AS meeting_match_num,
-                meeting.surface AS meeting_surface,
-                current_match.surface
-            FROM player_match_enriched current_match
-            CROSS JOIN LATERAL (
-                SELECT winner_id, match_date, match_id, match_num, surface
-                FROM {{ source('bronze', 'match_events') }} meeting
-                WHERE meeting.player1_id = current_match.opponent_id
-                  AND meeting.player2_id = current_match.player_id
-                  AND (meeting.match_date, meeting.match_num, meeting.match_id)
-                    < (current_match.match_date, current_match.match_num, current_match.match_id)
-                ORDER BY meeting.match_date DESC, meeting.match_num DESC, meeting.match_id DESC
-                LIMIT 5
-            ) meeting
-        ) meetings_union
-    ) ranked
-    WHERE rn <= 5
+                s.post_elo,
+                ROW_NUMBER() OVER (
+                    ORDER BY s.match_date, s.match_num, s.match_id
+                ) AS idx
+            FROM {{ source('silver', 'elo_snapshots') }} s
+            WHERE s.player_id = pm.opponent_id
+              AND (s.match_date, s.match_num, s.match_id)
+                  < (pm.match_date, pm.match_num, pm.match_id)
+            ORDER BY s.match_date DESC, s.match_num DESC, s.match_id DESC
+            LIMIT 10
+        ) graded
+    ) ograd ON true
+),
+pair_meetings AS (
+    SELECT
+        current_match.match_id,
+        current_match.player_id,
+        (meeting.winner_id = current_match.player_id) AS winner_is_current_player,
+        (meeting.surface = current_match.surface) AS meeting_surface_matches
+    FROM player_match_enriched current_match
+    CROSS JOIN LATERAL (
+        SELECT winner_id, surface
+        FROM {{ source('bronze', 'match_events') }} meeting
+        WHERE meeting.player1_id = current_match.player_id
+          AND meeting.player2_id = current_match.opponent_id
+          AND (meeting.match_date, meeting.match_num, meeting.match_id)
+            < (current_match.match_date, current_match.match_num, current_match.match_id)
+        ORDER BY meeting.match_date DESC, meeting.match_num DESC, meeting.match_id DESC
+    ) meeting
+    UNION ALL
+    SELECT
+        current_match.match_id,
+        current_match.player_id,
+        (meeting.winner_id = current_match.player_id) AS winner_is_current_player,
+        (meeting.surface = current_match.surface) AS meeting_surface_matches
+    FROM player_match_enriched current_match
+    CROSS JOIN LATERAL (
+        SELECT winner_id, surface
+        FROM {{ source('bronze', 'match_events') }} meeting
+        WHERE meeting.player1_id = current_match.opponent_id
+          AND meeting.player2_id = current_match.player_id
+          AND (meeting.match_date, meeting.match_num, meeting.match_id)
+            < (current_match.match_date, current_match.match_num, current_match.match_id)
+        ORDER BY meeting.match_date DESC, meeting.match_num DESC, meeting.match_id DESC
+    ) meeting
 ),
 prior_h2h AS (
     SELECT
@@ -209,7 +226,7 @@ SELECT
     p.player_ranking - o.player_ranking AS rank_diff,
     p.player_rank_points - o.player_rank_points AS rank_points_diff,
     p.player_age - o.player_age AS age_diff,
-    p.win_rate_10 - o.win_rate_10 AS win_rate_diff,
+    p.win_rate_10 - o.win_rate_10 AS form_diff,
     p.ace_rate_10 - o.ace_rate_10 AS ace_rate_diff,
     p.first_serve_pct_10 - o.first_serve_pct_10 AS first_serve_pct_diff,
     p.break_points_saved_pct_10 - o.break_points_saved_pct_10
@@ -231,8 +248,9 @@ SELECT
 
     p.player_elo - o.player_elo AS elo_diff,
 
-    p.weighted_form_10 AS player_weighted_form_10,
-    o.weighted_form_10 AS opponent_weighted_form_10,
+    p.player_elo_gradient_10 AS player_elo_gradient_10,
+    o.player_elo_gradient_10 AS opponent_elo_gradient_10,
+
     p.matches_10            AS player_matches_10,
     o.matches_10            AS opponent_matches_10,
     p.is_left_handed        AS player_is_left_handed,

@@ -30,8 +30,6 @@ VALID_SURFACES = CANONICAL_SURFACES
 VALID_TOURNAMENT_LEVELS = {0, 1, 2, 3, 4}
 VALID_ROUND_ENCODINGS = {0, 1, 2, 3, 4, 5, 6, 7}
 
-H2H_PRIOR_MEETINGS = 5
-
 _TOURNAMENT_LEVELS = {
     "grand_slam": 4,
     "masters": 3,
@@ -69,9 +67,8 @@ SELECT match_id, winner_id, surface
 FROM {BRONZE_MATCHES_TABLE}
 WHERE ((player1_id = %s AND player2_id = %s)
     OR (player1_id = %s AND player2_id = %s))
-  AND match_date <= %s::date
+  AND match_date < %s::date
 ORDER BY match_date DESC, match_num DESC, match_id DESC
-LIMIT {H2H_PRIOR_MEETINGS}
 """
 
 _PROFILE_SQL = f"""
@@ -109,9 +106,8 @@ LEFT JOIN LATERAL (
     FROM {BRONZE_MATCHES_TABLE}
     WHERE ((req.player_id = player1_id AND req.opponent_id = player2_id)
         OR (req.opponent_id = player1_id AND req.player_id = player2_id))
-      AND match_date <= req.as_of_iso::date
+      AND match_date < req.as_of_iso::date
     ORDER BY match_date DESC, match_num DESC, match_id DESC
-    LIMIT {H2H_PRIOR_MEETINGS}
 ) h ON true
 """
 
@@ -135,6 +131,21 @@ LEFT JOIN LATERAL (
       AND match_date <= req.as_of_iso
     ORDER BY match_date DESC, match_num DESC, match_id DESC
     LIMIT 1
+) s ON true
+"""
+
+# Up-to-ten completed post-match Elo ratings strictly before as_of_date, used to
+# fit each side's Elo-gradient (OLS slope). Same-day/future matches are excluded
+# to mirror the gold match_features.sql strictly-before gradient window.
+_GRADIENT_BULK_SQL = f"""
+SELECT req.player_id AS req_player_id, req.as_of_iso, s.post_elo, s.match_date, s.match_num, s.match_id
+FROM unnest(%s::text[], %s::date[]) AS req(player_id, as_of_iso)
+LEFT JOIN LATERAL (
+    SELECT post_elo, match_date, match_num, match_id FROM {SILVER_ELO_SNAPSHOTS}
+    WHERE player_id = req.player_id
+      AND match_date < req.as_of_iso
+    ORDER BY match_date DESC, match_num DESC, match_id DESC
+    LIMIT 10
 ) s ON true
 """
 
@@ -195,7 +206,6 @@ def _side_values(
         "ranking": ranking,
         "rank_points": rank_points,
         "age": age,
-        "weighted_form_10": cell("weighted_form_10", "weighted_form_10"),
         "win_rate_10": cell("win_rate_10", "win_rate_10"),
         "ace_rate_10": cell("ace_rate_10", "ace_rate_10"),
         "first_serve_pct_10": cell("first_serve_pct_10", "first_serve_pct_10"),
@@ -289,6 +299,66 @@ def _elo_ratings_bulk(
                 float(rec["post_elo"]), (key[1] - _to_date(rec["match_date"])).days
             )
     return overall
+
+
+def _elo_gradient_from_records(records: list[dict[str, object]]) -> float:
+    """OLS slope of post_elo over the chronological index of up to 10 snapshots.
+
+    Snapshots are the most-recent completed ratings strictly before as_of; fewer
+    than two yields exactly 0.0, matching the gold match_features.sql formula
+    (COUNT(*) < 2 THEN 0; else the ordinary-least-squares slope on idx).
+    """
+    ordered: list[tuple[date, int, str, float]] = []
+    for rec in records:
+        pe = rec["post_elo"]
+        if not isinstance(pe, Real) or pe != pe:  # skip None and NaN (mirrors _side_values)
+            continue
+        ordered.append(
+            (
+                _to_date(rec["match_date"]),
+                int(float(cast(Real, rec["match_num"]))),
+                str(rec["match_id"]),
+                float(pe),
+            )
+        )
+    ordered.sort(key=lambda t: (t[0], t[1], t[2]))
+    ys = [t[3] for t in ordered]
+    n = len(ys)
+    if n < 2:
+        return 0.0
+    xs = list(range(1, n + 1))
+    sx = sum(xs)
+    sy = sum(ys)
+    sxx = sum(x * x for x in xs)
+    sxy = sum(x * y for x, y in zip(xs, ys, strict=True))
+    denom = n * sxx - sx * sx
+    if denom == 0:
+        return 0.0
+    return (n * sxy - sx * sy) / denom
+
+
+def _elo_gradients_bulk(
+    keys: list[tuple[str, date]],
+) -> dict[tuple[str, date], float]:
+    """Set-oriented Elo-gradient (OLS slope) per (player, as_of_date).
+
+    One query for all requested players; no per-request DB loops. Same-day and
+    future Elo snapshots are excluded by the SQL window, so a player with fewer
+    than two strictly-before ratings defaults to 0.0.
+    """
+    by_key: dict[tuple[str, date], list[dict[str, object]]] = {}
+    for rec in execute_df(
+        _GRADIENT_BULK_SQL,
+        [[k[0] for k in keys], [k[1] for k in keys]],
+    ).to_dict("records"):
+        key = (rec["req_player_id"], _to_date(rec["as_of_iso"]))
+        by_key.setdefault(key, [])
+        if isinstance(rec["post_elo"], Real) and rec["post_elo"] == rec["post_elo"]:
+            by_key[key].append(cast(dict[str, object], rec))
+    grads = {key: _elo_gradient_from_records(recs) for key, recs in by_key.items()}
+    for key in keys:
+        grads.setdefault(key, 0.0)
+    return grads
 
 
 class _RowContext(NamedTuple):
@@ -393,6 +463,8 @@ def _assemble_row(
     h2h_surface_wins_for_requested_player: int,
     player_elo: float,
     opponent_elo: float,
+    player_elo_gradient_10: float,
+    opponent_elo_gradient_10: float,
 ) -> dict[str, int | float | str]:
     """Assemble one directional row in the FEATURE_COLS contract."""
     row: dict[str, int | float | str] = {}
@@ -408,7 +480,7 @@ def _assemble_row(
     row["rank_diff"] = player_side["ranking"] - opponent_side["ranking"]
     row["rank_points_diff"] = player_side["rank_points"] - opponent_side["rank_points"]
     row["age_diff"] = player_side["age"] - opponent_side["age"]
-    row["win_rate_diff"] = player_side["win_rate_10"] - opponent_side["win_rate_10"]
+    row["form_diff"] = player_side["win_rate_10"] - opponent_side["win_rate_10"]
     row["ace_rate_diff"] = player_side["ace_rate_10"] - opponent_side["ace_rate_10"]
     row["first_serve_pct_diff"] = (
         player_side["first_serve_pct_10"] - opponent_side["first_serve_pct_10"]
@@ -441,10 +513,10 @@ def _assemble_row(
         1.0 + player_side["days_since_last_match"]
     ) - math.log(1.0 + opponent_side["days_since_last_match"])
     row["elo_diff"] = player_elo - opponent_elo
+    row["player_elo_gradient_10"] = player_elo_gradient_10
+    row["opponent_elo_gradient_10"] = opponent_elo_gradient_10
 
     for name in (
-        "player_weighted_form_10",
-        "opponent_weighted_form_10",
         "player_matches_10",
         "opponent_matches_10",
         "player_is_left_handed",
@@ -531,6 +603,11 @@ def _build_inference_features_with_meta(
     player_elo = _elo_rating(ctx.player_id, ctx.as_of_date, ctx.as_of_iso)
     opponent_elo = _elo_rating(ctx.opponent_id, ctx.as_of_date, ctx.as_of_iso)
 
+    grad_pairs = [(ctx.player_id, ctx.as_of_date), (ctx.opponent_id, ctx.as_of_date)]
+    grads = _elo_gradients_bulk(grad_pairs)
+    player_grad = grads[(ctx.player_id, ctx.as_of_date)]
+    opponent_grad = grads[(ctx.opponent_id, ctx.as_of_date)]
+
     h2h_df = execute_df(
         _H2H_PRIOR_SQL,
         [ctx.player_id, ctx.opponent_id, ctx.opponent_id, ctx.player_id, ctx.as_of_iso],
@@ -561,6 +638,8 @@ def _build_inference_features_with_meta(
         h2h_surface_wins,
         player_elo,
         opponent_elo,
+        player_grad,
+        opponent_grad,
     )
 
     final_cols = [*FEATURE_COLS, "player_id", "opponent_id"]
@@ -686,6 +765,9 @@ def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame
     elo_overall = _elo_ratings_bulk(
         list({(pid, c.as_of_date) for c in ctxs for pid in (c.player_id, c.opponent_id)})
     )
+    grad_overall = _elo_gradients_bulk(
+        list({(pid, c.as_of_date) for c in ctxs for pid in (c.player_id, c.opponent_id)})
+    )
 
     out_rows: list[dict[str, int | float | str]] = []
     for ctx in ctxs:
@@ -711,6 +793,8 @@ def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame
         )
         player_elo = elo_overall[(ctx.player_id, ctx.as_of_date)]
         opponent_elo = elo_overall[(ctx.opponent_id, ctx.as_of_date)]
+        player_grad = grad_overall[(ctx.player_id, ctx.as_of_date)]
+        opponent_grad = grad_overall[(ctx.opponent_id, ctx.as_of_date)]
         meetings = h2h.get((ctx.player_id, ctx.opponent_id, ctx.as_of_iso), [])
         winner_id_values = [w for _, w, _ in meetings]
         surface_values = [s for _, _, s in meetings]
@@ -732,6 +816,8 @@ def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame
                 h2h_surface_wins,
                 player_elo,
                 opponent_elo,
+                player_grad,
+                opponent_grad,
             )
         )
 

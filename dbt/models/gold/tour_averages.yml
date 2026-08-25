@@ -31,8 +31,6 @@ models:
 
       - name: latest_player_age
         description: Mean latest_player_age over the full snapshot pool; 26.0 when empty.
-      - name: weighted_form_10
-        description: Mean weighted_form_10 over the full snapshot pool; 0.0 when empty.
       - name: win_rate_10
         description: Mean win_rate_10 over the full snapshot pool; 0.0 when empty.
       - name: ace_rate_10

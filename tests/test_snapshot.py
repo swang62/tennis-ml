@@ -397,3 +397,60 @@ def test_expected_feature_order_carries_elo_diff(tmp_path) -> None:
     p = tmp_path / "snap.duckdb"
     _write_valid_snapshot(p)
     snapshot.validate_snapshot(p)  # must not raise
+
+
+def test_feature_contract_uses_revised_schema() -> None:
+    """The shared contract carries the revised form/gradient fields exactly once
+    and drops the removed weighted-form pair; the snapshot validates this order."""
+    from src.features.columns import FEATURE_COLS
+
+    # Present exactly once.
+    for col in (
+        "form_diff",
+        "surface_form_diff",
+        "player_elo_gradient_10",
+        "opponent_elo_gradient_10",
+    ):
+        assert FEATURE_COLS.count(col) == 1
+
+    # Gradient columns sit right after the diff block (matching gold/serving order).
+    assert EXPECTED_FEATURE_ORDER.index("player_elo_gradient_10") == (
+        EXPECTED_FEATURE_ORDER.index("elo_diff") + 1
+    )
+    assert EXPECTED_FEATURE_ORDER.index("opponent_elo_gradient_10") == (
+        EXPECTED_FEATURE_ORDER.index("player_elo_gradient_10") + 1
+    )
+
+    # Removed names must not leak into the contract.
+    for removed in (
+        "win_rate_diff",
+        "weighted_form_10",
+        "player_weighted_form_10",
+        "opponent_weighted_form_10",
+        "weighted_form_diff",
+    ):
+        assert removed not in FEATURE_COLS
+
+
+def test_validate_rejects_removed_weighted_form_order(tmp_path) -> None:
+    """A snapshot still carrying the old weighted-form pair fails the exact-order
+    contract (old artifacts are intentionally incompatible)."""
+    p = tmp_path / "snap.duckdb"
+    columns = (
+        *_META,
+        "rank_diff",
+        "player_weighted_form_10",
+        "opponent_weighted_form_10",
+    )
+    con = duckdb.connect(str(p))
+    try:
+        con.execute("CREATE SCHEMA gold")
+        con.execute("CREATE SCHEMA bronze")
+        col_sql = ", ".join(f'"{c}" INTEGER' for c in columns)
+        con.execute(f"CREATE TABLE gold.match_features ({col_sql})")
+        con.execute("CREATE TABLE gold.player_profiles (player_id VARCHAR PRIMARY KEY)")
+        con.execute("CREATE TABLE bronze.player_profiles (player_id VARCHAR PRIMARY KEY)")
+    finally:
+        con.close()
+    with pytest.raises(snapshot.SnapshotError, match="do not match"):
+        snapshot.validate_snapshot(p)

@@ -99,10 +99,6 @@ SELECT
     s.player_rank_points AS latest_player_rank_points,
     s.player_age AS latest_player_age,
 
-    SUM(s.match_won * POW(0.9, s.player_max_match_number - s.player_match_number)) OVER w10
-        / NULLIF(SUM(POW(0.9, s.player_max_match_number - s.player_match_number)) OVER w10, 0)
-        AS weighted_form_10,
-
     (SUM(s.match_won) OVER w10 + 1.0) / (COUNT(*) OVER w10 + 2.0)
         AS win_rate_10,
     (SUM(s.aces) OVER w10 + 1.0) / (SUM(s.first_serves_made) OVER w10 + 2.0)

@@ -2,7 +2,7 @@
 
 import math
 import re
-from datetime import date
+from datetime import date, timedelta
 
 import duckdb
 import pandas as pd
@@ -62,7 +62,6 @@ _S0AG = (
     11500.0,
     24.43,
     0.8,
-    0.8,
     0.2,
     0.7,
     0.6,
@@ -84,7 +83,6 @@ _Z355 = (
     4.0,
     4555.0,
     28.85,
-    0.4,
     0.5,
     0.1,
     0.6,
@@ -107,7 +105,6 @@ _MINOR = (
     1.0,
     12050.0,
     22.7,
-    0.4,
     0.5,
     0.15,
     0.65,
@@ -131,7 +128,6 @@ _SNAP_COLS = (
     "latest_player_ranking",
     "latest_player_rank_points",
     "latest_player_age",
-    "weighted_form_10",
     "win_rate_10",
     "ace_rate_10",
     "first_serve_pct_10",
@@ -277,19 +273,19 @@ _PARITY_GOLD = (
     0.2,  # surface_form_diff (hard): 0.8 - 0.6
     0.0,  # days_since_last_match_diff: S0AG/Z355 share a same-day snapshot (0 rest days)
     50.0,  # elo_diff: 1625 - 1575 (latest completed overall Elo through as_of)
-    # 8 absolute state values (incl. matches_10 exposure pair)
-    0.8,
-    0.4,
+    0.0,  # player_elo_gradient_10: only a same-day completed Elo (excluded by strict <)
+    0.0,  # opponent_elo_gradient_10
+    # 6 absolute state values (matches_10 exposure pair)
     6.0,  # player_matches_10 (S0AG s6, inclusive as-of)
     4.0,  # opponent_matches_10 (Z355 z4, inclusive as-of)
     0.0,
     0.0,
     8.0,
     13.0,
-    # 3 pair-level head-to-head (inclusive as-of includes the match itself)
-    1.0,
-    (1 + 1) / (1 + 2) - 0.5,  # h2h_advantage: A won the 1 prior meeting
-    (1 + 1) / (1 + 2) - 0.5,  # h2h_surface_advantage: hard meeting
+    # 3 pair-level head-to-head (strictly before as_of excludes the match itself)
+    0.0,
+    (0 + 1) / (0 + 2) - 0.5,  # h2h_advantage: no prior meetings -> 0.0
+    (0 + 1) / (0 + 2) - 0.5,  # h2h_surface_advantage: 0.0
     # 7 context values (is_clay, is_grass, is_hard, is_indoor, best_of,
     # tournament_level, round_encoded)
     0.0,
@@ -329,19 +325,19 @@ _PARITY_GOLD_BA = (
     -0.2,  # surface_form_diff (hard): 0.6 - 0.8
     0.0,  # days_since_last_match_diff: Z355/S0AG share a same-day snapshot (0 rest days)
     -50.0,  # elo_diff: 1575 - 1625
-    # 8 absolute state values (Z355 first; matches_10 pair exchanged)
-    0.4,
-    0.8,
+    0.0,  # player_elo_gradient_10: Z355 (same-day Elo excluded)
+    0.0,  # opponent_elo_gradient_10: S0AG (same-day Elo excluded)
+    # 6 absolute state values (Z355 first; matches_10 pair exchanged)
     4.0,  # player_matches_10 (Z355 z4, inclusive as-of)
     6.0,  # opponent_matches_10 (S0AG s6, inclusive as-of)
     0.0,
     0.0,
     13.0,
     8.0,
-    # 3 pair-level head-to-head (inclusive as-of includes the match itself)
-    1.0,
-    (0 + 1) / (1 + 2) - 0.5,  # h2h_advantage: Z355 lost the 1 prior meeting
-    (0 + 1) / (1 + 2) - 0.5,  # h2h_surface_advantage: hard meeting
+    # 3 pair-level head-to-head (strictly before as_of excludes the match itself)
+    0.0,
+    (0 + 1) / (0 + 2) - 0.5,  # h2h_advantage: no prior meetings -> 0.0
+    (0 + 1) / (0 + 2) - 0.5,  # h2h_surface_advantage: 0.0
     # 7 context values
     0.0,
     0.0,
@@ -407,7 +403,7 @@ def _seed(con: duckdb.DuckDBPyConnection) -> None:
     )
 
     con.executemany(
-        f"INSERT INTO silver.rolling_features VALUES ({', '.join(['?'] * 27)})",
+        f"INSERT INTO silver.rolling_features VALUES ({', '.join(['?'] * 26)})",
         _snap_rows(),
     )
     # Mirror the production silver.elo_snapshots table the inference Elo SQL
@@ -450,8 +446,8 @@ def _seed(con: duckdb.DuckDBPyConnection) -> None:
             ("Z355", 198.0, "R", 2013),
         ],
     )
-    # Pool aggregates over the 12 snapshots: weighted_form_10 -> 0.6,
-    # hard_win_rate_10 -> 0.7, win_rate_10 -> 0.65, median streak -> 2.5.
+    # Pool aggregates over the 12 snapshots: hard_win_rate_10 -> 0.7,
+    # win_rate_10 -> 0.65, median streak -> 2.5.
     singleton = {
         "singleton_id": 1,
         "pool_as_of_date": date(2026, 8, 9),
@@ -463,7 +459,6 @@ def _seed(con: duckdb.DuckDBPyConnection) -> None:
         "latest_player_rank_points": 1000.0,
         "latest_player_age": 26.0,
         "streak": 2.5,
-        "weighted_form_10": 0.6,
         "win_rate_10": 0.65,
         "ace_rate_10": 0.15,
         "first_serve_pct_10": 0.65,
@@ -627,7 +622,7 @@ def test_historical_as_of_excludes_later_snapshots():
     out = build_inference_features("S0AG", "Z355", "hard", as_of_date=date(2026, 6, 30))
     # Cross-check the expected snapshot directly in the fixture table.
     snapshot = execute_df(
-        f"SELECT player_match_number, win_rate_10, weighted_form_10 "
+        f"SELECT player_match_number, win_rate_10 "
         f"FROM {SILVER_ROLLING_FEATURES} "
         "WHERE player_id = %s AND snapshot_date < %s::date "
         "ORDER BY player_match_number DESC LIMIT 1",
@@ -635,10 +630,8 @@ def test_historical_as_of_excludes_later_snapshots():
     ).iloc[0]
     assert snapshot["player_match_number"] == 5
     assert float(snapshot["win_rate_10"]) == 0.8
-    # The inference row's per-side weighted form equals that snapshot's value.
-    assert out.loc[0, "player_weighted_form_10"] == pytest.approx(
-        float(snapshot["weighted_form_10"])
-    )
+    # The inference row's per-side observed-matches equals that snapshot's window.
+    assert out.loc[0, "player_matches_10"] == pytest.approx(5.0)
 
 
 @pytest.mark.parametrize(
@@ -658,22 +651,14 @@ def test_one_missing_player_imputed_no_nans(args):
     for col in FEATURE_COLS:
         assert math.isfinite(row[col]), f"{col} is not finite: {row[col]!r}"
     # The known player's form differs from the pool default (diff exists).
-    assert row["win_rate_diff"] != 0
-    # Check exposed values that use the same pool as the builder.
-    pool = execute_df(
-        "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY streak) AS streak, "
-        "AVG(weighted_form_10) AS weighted_form_10, "
-        "AVG(win_rate_10) AS win_rate_10 "
-        f"FROM {SILVER_ROLLING_FEATURES} WHERE snapshot_date < %s::date",
-        ["2026-09-01"],
-    ).iloc[0]
+    assert row["form_diff"] != 0
     assert row["streak_diff"] != 0  # known streak vs pool-mean streak differ
-    # The unknown side is pool-imputed; the known side carries its own values.
+    # The unknown side is a cold start (no snapshot): zero observed matches, while
+    # the known side carries its own window. matches_10 is the clearest signal.
     unknown_prefix = "player" if player_id == "UNKNOWN_ID" else "opponent"
     known_prefix = "opponent" if unknown_prefix == "player" else "player"
-    assert row[f"{unknown_prefix}_weighted_form_10"] == pytest.approx(
-        float(pool["weighted_form_10"])
-    )
+    assert row[f"{unknown_prefix}_matches_10"] == 0
+    assert row[f"{known_prefix}_matches_10"] > 0
     # Unknown profile features come from the finite, bounded tour-average singleton.
     assert 0.0 <= row[f"{unknown_prefix}_is_left_handed"] <= 1.0, (
         f"left_handed_rate out of bounds: {row[f'{unknown_prefix}_is_left_handed']}"
@@ -758,7 +743,7 @@ def test_null_handedness_falls_back_to_pool_rate(monkeypatch):
 
 
 def test_h2h_first_and_second_meeting_boundaries():
-    """Strictly-before the first meeting has zero priors; inclusive as-of then grows."""
+    """Same-day meetings are excluded; strictly-before priors accumulate."""
     a, b = "H2H_F", "H2H_G"
     _insert_prior_meetings(a, b, [("h2h-f1", "2026-05-20", 1, "clay")])
     # The day before the first meeting: no priors yet.
@@ -767,29 +752,30 @@ def test_h2h_first_and_second_meeting_boundaries():
     assert row1["h2h_exposure"] == 0
     assert row1["h2h_advantage"] == 0.0
     assert row1["h2h_surface_advantage"] == 0.0
-    # A second meeting: both priors are now inclusive, A won the first, B the second.
+    # A second meeting on 2026-06-20.
     _insert_prior_meetings(a, b, [("h2h-f2", "2026-06-20", 0, "clay")])
-    out2 = build_inference_features(a, b, "clay", as_of_date=date(2026, 6, 20))
-    row2 = out2.iloc[0]
-    assert row2["h2h_exposure"] == 2
-    assert row2["h2h_advantage"] == pytest.approx((1 + 1) / (2 + 2) - 0.5)  # 0.0
-    assert row2["h2h_surface_advantage"] == pytest.approx((1 + 1) / (2 + 2) - 0.5)
-    # After the second meeting: both priors, 1 win each side -> neutral.
-    out3 = build_inference_features(a, b, "clay", as_of_date=date(2026, 6, 21))
-    row3 = out3.iloc[0]
-    assert row3["h2h_exposure"] == 2
-    assert row3["h2h_advantage"] == pytest.approx((1 + 1) / (2 + 2) - 0.5)  # 0.0
-    assert row3["h2h_surface_advantage"] == pytest.approx((1 + 1) / (2 + 2) - 0.5)
+    # Same-day as the second meeting: it is excluded (strictly before as_of).
+    out_same_day = build_inference_features(a, b, "clay", as_of_date=date(2026, 6, 20))
+    row_sd = out_same_day.iloc[0]
+    assert row_sd["h2h_exposure"] == 1  # only f1; f2 is same-day, excluded
+    assert row_sd["h2h_advantage"] == pytest.approx((1 + 1) / (1 + 2) - 0.5)
+    assert row_sd["h2h_surface_advantage"] == pytest.approx((1 + 1) / (1 + 2) - 0.5)
+    # Strictly after both meetings: both priors count, A won f1, B won f2.
+    out_after = build_inference_features(a, b, "clay", as_of_date=date(2026, 6, 21))
+    row_after = out_after.iloc[0]
+    assert row_after["h2h_exposure"] == 2
+    assert row_after["h2h_advantage"] == pytest.approx((1 + 1) / (2 + 2) - 0.5)  # 0.0
+    assert row_after["h2h_surface_advantage"] == pytest.approx((1 + 1) / (2 + 2) - 0.5)
 
 
-def test_h2h_last5_recency_drops_oldest():
-    """Only the five most recent meetings contribute to H2H advantage."""
+def test_h2h_complete_history_uses_every_prior_meeting():
+    """Every causally prior meeting contributes; no recency cap drops old results."""
     a, b = "H2H_C", "H2H_D"
     _insert_prior_meetings(
         a,
         b,
         [
-            ("h2h-r1", "2026-01-05", 1, "hard"),  # oldest; A's only win -> dropped
+            ("h2h-r1", "2026-01-05", 1, "hard"),  # oldest; A's only win, still counted
             ("h2h-r2", "2026-02-05", 0, "hard"),
             ("h2h-r3", "2026-03-05", 0, "hard"),
             ("h2h-r4", "2026-04-05", 0, "hard"),
@@ -799,20 +785,25 @@ def test_h2h_last5_recency_drops_oldest():
     )
     out = build_inference_features(a, b, "hard", as_of_date=date(2026, 7, 1))
     row = out.iloc[0]
-    assert row["h2h_exposure"] == 5  # five most recent, not lifetime
-    assert row["h2h_advantage"] == pytest.approx((0 + 1) / (5 + 2) - 0.5)  # -0.3571
-    # All five window meetings are hard: surface advantage matches the overall.
-    assert row["h2h_surface_advantage"] == pytest.approx((0 + 1) / (5 + 2) - 0.5)
+    # All six prior meetings count (no five-meeting cap).
+    assert row["h2h_exposure"] == 6
+    # A won exactly one of the six: advantage uses the complete history.
+    assert row["h2h_advantage"] == pytest.approx((1 + 1) / (6 + 2) - 0.5)
+    # All six window meetings are hard: surface advantage matches the overall.
+    assert row["h2h_surface_advantage"] == pytest.approx((1 + 1) / (6 + 2) - 0.5)
+    # Reversing sides preserves exposure and negates both advantages.
+    row_ba = build_inference_features(b, a, "hard", as_of_date=date(2026, 7, 1))
+    _assert_mirror(row, row_ba.iloc[0])
 
 
-def test_h2h_surface_advantage_filters_bounded_window():
-    """Surface H2H advantage uses matching surfaces within the recent-five window."""
+def test_h2h_surface_advantage_filters_complete_history():
+    """Surface H2H advantage uses every prior meeting on the matching surface."""
     a, b = "H2H_L", "H2H_M"
     _insert_prior_meetings(
         a,
         b,
         [
-            ("h2h-v1", "2026-01-05", 1, "clay"),  # oldest clay win, outside window
+            ("h2h-v1", "2026-01-05", 1, "clay"),  # oldest clay win, now counted
             ("h2h-v2", "2026-02-05", 1, "clay"),
             ("h2h-v3", "2026-03-05", 0, "clay"),
             ("h2h-v4", "2026-04-05", 0, "clay"),
@@ -822,14 +813,47 @@ def test_h2h_surface_advantage_filters_bounded_window():
     )
     out = build_inference_features(a, b, "clay", as_of_date=date(2026, 7, 1))
     row = out.iloc[0]
-    # The recent-5 window is v2..v6: two clay wins and two overall wins.
-    assert row["h2h_exposure"] == 5
-    assert row["h2h_surface_advantage"] == pytest.approx((2 + 1) / (4 + 2) - 0.5)  # 0.0
-    assert row["h2h_advantage"] == pytest.approx((2 + 1) / (5 + 2) - 0.5)  # -1/14
-    # The old clay win (v1) is outside the window: a clay request must NOT see it.
-    assert row["h2h_surface_advantage"] != pytest.approx((3 + 1) / (5 + 2) - 0.5)
+    # All six prior meetings count; A won three of them overall.
+    assert row["h2h_exposure"] == 6
+    assert row["h2h_advantage"] == pytest.approx((3 + 1) / (6 + 2) - 0.5)  # 0.0
+    # Five of the six are clay; A won three clay meetings, including the oldest
+    # v1 (no longer dropped by a recency cap), so the surface advantage counts it.
+    assert row["h2h_surface_advantage"] == pytest.approx((3 + 1) / (5 + 2) - 0.5)
+    # A recency-capped window would have excluded v1 and given a different value.
+    assert row["h2h_surface_advantage"] != pytest.approx((2 + 1) / (4 + 2) - 0.5)
     row_ba = build_inference_features(b, a, "clay", as_of_date=date(2026, 7, 1))
     _assert_mirror(row, row_ba.iloc[0])
+
+
+def test_h2h_complete_history_scalar_bulk_parity():
+    """Scalar and bulk builders agree on complete (>5) prior-meeting H2H history."""
+    a, b = "H2H_P", "H2H_Q"
+    _insert_prior_meetings(
+        a,
+        b,
+        [
+            ("h2h-p1", "2026-01-05", 1, "hard"),
+            ("h2h-p2", "2026-02-05", 1, "hard"),
+            ("h2h-p3", "2026-03-05", 0, "hard"),
+            ("h2h-p4", "2026-04-05", 0, "hard"),
+            ("h2h-p5", "2026-05-05", 0, "hard"),
+            ("h2h-p6", "2026-06-05", 1, "hard"),
+            ("h2h-p7", "2026-07-05", 0, "clay"),
+        ],
+    )
+    req = {
+        "player_id": a,
+        "opponent_id": b,
+        "surface": "hard",
+        "as_of_date": date(2026, 8, 1),
+    }
+    scalar = build_inference_features(**req)
+    bulk = build_inference_features_bulk([req])
+    pd.testing.assert_frame_equal(bulk, scalar, check_exact=True)
+    # All seven priors count (six hard, one clay) in exposure and advantage.
+    assert scalar.iloc[0]["h2h_exposure"] == 7
+    assert scalar.iloc[0]["h2h_advantage"] == pytest.approx((3 + 1) / (7 + 2) - 0.5)
+    assert scalar.iloc[0]["h2h_surface_advantage"] == pytest.approx((3 + 1) / (6 + 2) - 0.5)
 
 
 # ── Train/inference parity ──
@@ -943,6 +967,53 @@ def test_dominance_diff_formula_and_finite():
     assert float(snap["dominance"]) == pytest.approx(_lifetime_dominance(0.42, 0.63), abs=1e-5)
 
 
+def test_form_diff_is_unweighted_prior_win_rate_diff():
+    """form_diff is the simple difference of each side's prior trailing-10 win
+    rate (revised form smoothing: no EWMA/weighted blend). It equals the latest
+    strictly-before snapshot win_rate_10 gap, not a pooled or averaged value."""
+    out = build_inference_features("S0AG", "Z355", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
+    row = out.iloc[0]
+
+    def _latest_wr(pid: str) -> float:
+        return float(
+            execute_df(
+                f"SELECT win_rate_10 FROM {SILVER_ROLLING_FEATURES} "
+                "WHERE player_id = %s AND snapshot_date < %s::date "
+                "ORDER BY player_match_number DESC LIMIT 1",
+                [pid, AS_OF_AFTER_ALL_MATCHES.isoformat()],
+            ).iloc[0]["win_rate_10"]
+        )
+
+    player_wr, opponent_wr = _latest_wr("S0AG"), _latest_wr("Z355")
+    # Simple unweighted difference.
+    assert row["form_diff"] == pytest.approx(player_wr - opponent_wr)
+    # A weighted/pooled blend (near the mean) would be a different value, so the
+    # contract explicitly rejects it.
+    assert row["form_diff"] != pytest.approx((player_wr + opponent_wr) / 2.0)
+
+
+def test_inference_gradient_excludes_same_day_post_elo():
+    """Leakage guard: the inferred gradient equals the OLS slope over post_elo
+    strictly before as_of. A same-day post_elo (e.g. the target match's outcome)
+    is excluded, so it cannot enter the gradient history."""
+    rows = [
+        ("GL", f"gl{i}", date(2026, 1, 1) + timedelta(days=10 * i), i, 1500.0 + 10.0 * i)
+        for i in range(8)
+    ]
+    _insert_elo_rows(rows)
+    as_of = date(2026, 6, 1)
+    # A same-day post_elo must be ignored by the strict < window.
+    _insert_elo_rows([("GL", "gl-leak", as_of, 99, 9999.0)])
+    out = build_inference_features("GL", "ZZZH", "hard", as_of_date=as_of)
+    # Only the eight strictly-before snapshots (1500..1570) drive the slope of 10.
+    assert out.iloc[0]["player_elo_gradient_10"] == pytest.approx(10.0)
+    # Bulk path agrees (parity of the leakage guard).
+    bulk = build_inference_features_bulk(
+        [{"player_id": "GL", "opponent_id": "ZZZH", "surface": "hard", "as_of_date": as_of}]
+    )
+    assert bulk.iloc[0]["player_elo_gradient_10"] == pytest.approx(10.0)
+
+
 # ── surface_form_diff and days_since_last_match_diff ──
 
 
@@ -1054,3 +1125,121 @@ def test_elo_scalar_bulk_parity(surface):
     scalar = build_inference_features(**req)
     bulk = build_inference_features_bulk([req])
     assert scalar.iloc[0]["elo_diff"] == bulk.iloc[0]["elo_diff"]
+
+
+# ── Elo-gradient (player_elo_gradient_10 / opponent_elo_gradient_10) ──
+
+
+def _insert_elo_rows(rows):
+    """Insert raw Elo snapshots: rows of (player_id, match_id, date, match_num, post_elo)."""
+    assert _DB is not None
+    _DB.executemany(
+        "INSERT INTO silver.elo_snapshots "
+        "(player_id, match_id, match_date, match_num, surface, pre_elo, "
+        "post_elo, prior_overall_matches, k_overall, source_hash) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (pid, mid, d, num, "hard", 0.0, pe, 0, 0.0, f"h{pid}{num}")
+            for pid, mid, d, num, pe in rows
+        ],
+    )
+
+
+def test_gradient_zero_history_defaults_to_zero():
+    """A player with no Elo history before as_of yields gradient exactly 0."""
+    out = build_inference_features("ZZZG", "ZZZH", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
+    row = out.iloc[0]
+    assert row["player_elo_gradient_10"] == 0.0
+    assert row["opponent_elo_gradient_10"] == 0.0
+    for col in FEATURE_COLS:
+        assert math.isfinite(row[col]), col
+
+
+def test_gradient_single_history_defaults_to_zero():
+    """Fewer than two strictly-before snapshots -> gradient 0 (gold parity)."""
+    _insert_elo_rows([("G1", "g1", date(2026, 3, 1), 1, 1600.0)])
+    out = build_inference_features("G1", "ZZZH", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
+    assert out.iloc[0]["player_elo_gradient_10"] == 0.0
+
+
+def test_gradient_partial_history_ols_slope():
+    """Three strictly-before snapshots produce the OLS slope (b = 20)."""
+    rows = [
+        ("G2", f"g{i}", date(2026, 1, 1) + timedelta(days=30 * i), i, 1500.0 + 20.0 * i)
+        for i in range(3)
+    ]
+    _insert_elo_rows(rows)
+    out = build_inference_features("G2", "ZZZH", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
+    assert out.iloc[0]["player_elo_gradient_10"] == pytest.approx(20.0)
+
+
+def test_gradient_full_history_uses_last_ten():
+    """Twelve snapshots: only the most recent ten drive the slope (b = 10)."""
+    rows = [
+        ("G3", f"g{i}", date(2026, 1, 1) + timedelta(days=10 * i), i, 1500.0 + 10.0 * i)
+        for i in range(12)
+    ]
+    _insert_elo_rows(rows)
+    out = build_inference_features("G3", "ZZZH", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
+    # Last ten are i=2..11 -> 1520..1610, slope 10.
+    assert out.iloc[0]["player_elo_gradient_10"] == pytest.approx(10.0)
+
+
+def test_gradient_strict_date_boundary_excludes_same_day():
+    """Same-day and future snapshots are excluded from the gradient window."""
+    as_of = date(2026, 6, 1)
+    rows = [
+        ("G4", "ga", date(2026, 5, 25), 1, 1500.0),
+        ("G4", "gb", date(2026, 5, 26), 2, 1530.0),
+        ("G4", "gc", date(2026, 5, 27), 3, 1560.0),
+        ("G4", "gd", date(2026, 6, 1), 4, 9999.0),  # same-day, excluded
+        ("G4", "ge", date(2026, 6, 2), 5, 8888.0),  # future, excluded
+    ]
+    _insert_elo_rows(rows)
+    out = build_inference_features("G4", "ZZZH", "hard", as_of_date=as_of)
+    # Only the three strictly-before snapshots (slope 30) contribute.
+    assert out.iloc[0]["player_elo_gradient_10"] == pytest.approx(30.0)
+
+
+def test_gradient_scalar_bulk_parity():
+    """Scalar and bulk builders emit identical gradient columns."""
+    rows = [
+        ("G5", f"g{i}", date(2026, 1, 1) + timedelta(days=10 * i), i, 1500.0 + 7.0 * i)
+        for i in range(5)
+    ]
+    _insert_elo_rows(rows)
+    req = {
+        "player_id": "G5",
+        "opponent_id": "ZZZH",
+        "surface": "hard",
+        "as_of_date": AS_OF_AFTER_ALL_MATCHES,
+    }
+    scalar = build_inference_features(**req)
+    bulk = build_inference_features_bulk([req])
+    assert scalar.iloc[0]["player_elo_gradient_10"] == bulk.iloc[0]["player_elo_gradient_10"]
+    assert scalar.iloc[0]["opponent_elo_gradient_10"] == bulk.iloc[0]["opponent_elo_gradient_10"]
+
+
+def test_gradient_swap_exchanges_raw_values():
+    """Swap negates form/elo diffs but exchanges the raw gradient values."""
+    _insert_elo_rows(
+        [
+            ("GA", f"ga{i}", date(2026, 1, 1) + timedelta(days=10 * i), i, 1500.0 + 5.0 * i)
+            for i in range(4)
+        ]
+        + [
+            ("GB", f"gb{i}", date(2026, 1, 1) + timedelta(days=10 * i), i, 1700.0 + 15.0 * i)
+            for i in range(4)
+        ]
+    )
+    out_ab = build_inference_features("GA", "GB", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
+    out_ba = build_inference_features("GB", "GA", "hard", as_of_date=AS_OF_AFTER_ALL_MATCHES)
+    row_ab, row_ba = out_ab.iloc[0], out_ba.iloc[0]
+    # GA slope 5, GB slope 15; swap exchanges the raw per-player values.
+    assert row_ab["player_elo_gradient_10"] == pytest.approx(5.0)
+    assert row_ab["opponent_elo_gradient_10"] == pytest.approx(15.0)
+    assert row_ba["player_elo_gradient_10"] == pytest.approx(15.0)
+    assert row_ba["opponent_elo_gradient_10"] == pytest.approx(5.0)
+    # Signed diffs still negate while gradients exchange.
+    assert row_ab["elo_diff"] == pytest.approx(-row_ba["elo_diff"])
+    assert row_ab["form_diff"] == pytest.approx(-row_ba["form_diff"])

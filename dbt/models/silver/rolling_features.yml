@@ -20,8 +20,6 @@ models:
         description: The player's ATP rank points at the snapshot match (NULL when missing, 0->NULL); backs inference rank_points_diff; not a model feature.
       - name: latest_player_age
         description: The player's age in fractional years at the snapshot match (NULL when missing, 0->NULL).
-      - name: weighted_form_10
-        description: Exponentially decayed win rate over the last 10 matches.
       - name: win_rate_10
         description: Beta-smoothed win rate over the last 10 completed matches.
       - name: ace_rate_10

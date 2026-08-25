@@ -1,7 +1,11 @@
 """Local deployment artifact and manifest tests."""
 
+import contextlib
 import importlib
+import subprocess
 from pathlib import Path
+
+import pytest
 
 
 def _deploy():
@@ -359,3 +363,105 @@ def test_generate_similarity_artifacts_no_cache_forces_rebuild(monkeypatch, tmp_
     assert built.get("ran") is None  # reused
     d.generate_similarity_artifacts(no_cache=True)
     assert built["ran"] is True  # forced rebuild
+
+
+# --- Task 7: quiet Bento Buildx output during deploy_bento ---
+
+
+def _fake_mlflow(monkeypatch):
+    """Disable MLflow side effects used by the success path of deploy_bento."""
+    import mlflow
+
+    monkeypatch.setattr(mlflow, "set_experiment", lambda *_a, **_k: None)
+    monkeypatch.setattr(mlflow, "set_experiment_tag", lambda *_a, **_k: None)
+    monkeypatch.setattr(mlflow, "log_param", lambda *_a, **_k: None)
+    monkeypatch.setattr(mlflow, "log_artifact", lambda *_a, **_k: None)
+    monkeypatch.setattr(mlflow, "start_run", lambda **_k: contextlib.nullcontext(_FakeRun()))
+    monkeypatch.setattr(
+        "mlflow.tracking.client.MlflowClient",
+        lambda: _MlflowClientStub(),
+    )
+
+
+class _FakeRun:
+    info = type("Info", (), {"run_id": "test-run-id"})()
+
+
+class _MlflowClientStub:
+    def set_model_version_tag(self, *_args, **_kwargs):
+        return None
+
+
+def test_run_teed_streams_to_console_when_not_quiet(capsys):
+    """A direct (non-deploy) caller keeps the current console-streaming behavior."""
+    d = _deploy()
+    marker = "DIRECT_BUILDX_LINE"
+    d._run_teed(["echo", marker], quiet=False, log=None)
+    assert marker in capsys.readouterr().out
+
+
+def test_run_teed_quiet_writes_log_only(tmp_path, capsys):
+    """In quiet mode child output lands fully in the log and stays off the console."""
+    d = _deploy()
+    marker = "QUIET_BUILDX_LINE"
+    log = tmp_path / "build.log"
+    with log.open("w") as f:
+        d._run_teed(["echo", marker], quiet=True, log=f)
+    assert marker not in capsys.readouterr().out
+    assert marker in log.read_text()
+
+
+def test_deploy_bento_quiets_buildx_but_logs_it(tmp_path, monkeypatch, capsys):
+    """During deploy the routine Buildx stream is absent from the console but
+    present completely in the timestamped deploy log, while progress messages
+    stay visible on the console."""
+    d = _deploy()
+    monkeypatch.setattr(d, "LOGS", tmp_path / "logs")
+    monkeypatch.setattr(d, "STATE_FILE", tmp_path / "state.json")
+    _fake_mlflow(monkeypatch)
+    monkeypatch.setattr(d, "_docker_login", lambda: None)
+
+    marker = "BUILDX_PROGRESS_LINE_123"
+
+    def fake_build(no_cache=False, quiet=False, log=None):  # noqa: ARG001
+        d._run_teed(["echo", marker], quiet=quiet, log=log)
+        return "img:dev", 7
+
+    monkeypatch.setattr(d, "build_bento_image", fake_build)
+
+    d.deploy_bento()
+
+    out = capsys.readouterr().out
+    assert marker not in out  # routine Buildx output absent from console
+    assert "Published" in out  # deployment progress message stays visible
+
+    logs = list((tmp_path / "logs").glob("deploy_*.log"))
+    assert len(logs) == 1
+    assert marker in logs[0].read_text()  # present completely in the deploy log
+
+
+def test_deploy_bento_failure_raises_and_logs_diagnostic(tmp_path, monkeypatch, capsys):
+    """A Buildx failure still raises, keeps the child output in the deploy log,
+    and records the failure diagnostic both on the console and in the log."""
+    d = _deploy()
+    monkeypatch.setattr(d, "LOGS", tmp_path / "logs")
+    monkeypatch.setattr(d, "STATE_FILE", tmp_path / "state.json")
+    monkeypatch.setattr(d, "_docker_login", lambda: None)
+
+    def fake_build_fail(no_cache=False, quiet=False, log=None):  # noqa: ARG001
+        d._run_teed(["sh", "-c", "echo CHILD_ERR_LINE; exit 3"], quiet=quiet, log=log)
+        return "img:dev", 7
+
+    monkeypatch.setattr(d, "build_bento_image", fake_build_fail)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        d.deploy_bento()
+
+    out = capsys.readouterr().out
+    assert "Deploy step failed" in out  # diagnostic visible on console
+
+    logs = list((tmp_path / "logs").glob("deploy_*.log"))
+    assert logs
+    log_text = logs[0].read_text()
+    assert "CHILD_ERR_LINE" in log_text  # child output retained in the log
+    assert "Deploy step failed" in log_text  # failure diagnostic logged too

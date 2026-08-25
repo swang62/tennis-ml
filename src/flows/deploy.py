@@ -761,9 +761,18 @@ class _Tee:
 
 
 def _run_teed(
-    cmd: list[str], log: TextIO | None = None, env: dict[str, str] | None = None
+    cmd: list[str],
+    log: TextIO | None = None,
+    quiet: bool = False,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
-    """Run a deploy subprocess while streaming output to the console and log."""
+    """Run a deploy subprocess, streaming child output to console and/or log.
+
+    When ``quiet`` is set, routine Docker Buildx output is written only to
+    ``log`` (the deploy log) so it does not spam the console while deployment
+    progress messages stay visible; the caller must pass ``log`` so child
+    output is never lost. When unset, behavior is unchanged.
+    """
     proc = subprocess.Popen(
         cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env
     )
@@ -773,6 +782,16 @@ def _run_teed(
         # Docker push/buildx re-renders the full layer status table on every
         # change, spamming `Waiting` for layers that are already cached; drop those.
         if text.strip().endswith(": Waiting"):
+            continue
+        if quiet:
+            # Quiet-only: route the noisy Buildx stream to the deploy log and
+            # keep it off the console. Fall back to console if no log was given.
+            if log is not None:
+                log.write(text)
+                log.flush()
+            else:
+                sys.stdout.write(text)
+                sys.stdout.flush()
             continue
         sys.stdout.write(text)
         sys.stdout.flush()
@@ -868,8 +887,15 @@ def _buildx_context(bento: Any):
         yield context
 
 
-def build_bento_image(no_cache: bool = False) -> tuple[str, int]:
-    """Build and publish the promoted multi-architecture Bento image."""
+def build_bento_image(
+    no_cache: bool = False, quiet: bool = False, log: TextIO | None = None
+) -> tuple[str, int]:
+    """Build and publish the promoted multi-architecture Bento image.
+
+    Pass ``quiet=True`` and ``log`` from a deploy entrypoint to keep routine
+    Docker Buildx output in the deploy log only; direct callers stream to the
+    console as before.
+    """
     for name in NATIVE_THREAD_ENV:
         os.environ[name] = "1"
 
@@ -917,7 +943,9 @@ def build_bento_image(no_cache: bool = False) -> tuple[str, int]:
                 context=context,
                 image=image,
                 no_cache=no_cache,
-            )
+            ),
+            quiet=quiet,
+            log=log,
         )
     return image, int(production.version)
 
@@ -984,12 +1012,15 @@ def deploy_bento(no_cache: bool = False) -> None:
             redirect_stderr(_Tee(sys.stderr, log)),
         ):
             _docker_login()
-            _image, production_version = build_bento_image(no_cache=no_cache)
+            _image, production_version = build_bento_image(no_cache=no_cache, quiet=True, log=log)
     except subprocess.CalledProcessError as exc:
-        print(
+        diagnostic = (
             f"Deploy step failed ({exc}); image was not published: "
             f"{DOCKER_REPO}/{IMAGE_NAME}:{DOCKER_TAG}"
         )
+        print(diagnostic)
+        with deploy_log.open("a") as log:
+            log.write(diagnostic + "\n")
         raise
 
     image = f"{DOCKER_REPO}/{IMAGE_NAME}:{DOCKER_TAG}"
