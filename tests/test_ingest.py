@@ -585,11 +585,11 @@ def test_atp_rows_to_bronze_indoor_O_maps_to_0():
     assert df.iloc[0]["is_indoor"] == 0
 
 
-def test_atp_rows_to_bronze_indoor_missing_maps_to_nan():
+def test_atp_rows_to_bronze_indoor_missing_defaults_to_outdoor():
     row = _raw_row()
     row["indoor"] = None
     df = ingest.atp_rows_to_bronze([row])
-    assert pd.isna(df.iloc[0]["is_indoor"])
+    assert df.iloc[0]["is_indoor"] == 0
 
 
 # ── IOC normalization in load_atp_profiles ────────────────────────

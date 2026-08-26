@@ -580,8 +580,13 @@ def hawkeye_to_bronze(
     surface: str | None = None,
     rank_points: dict[str, int] | None = None,
     ages: dict[str, float] | None = None,
+    is_indoor: int = 0,
 ) -> dict[str, Any] | None:
-    """Map a Hawkeye payload into one winner-first bronze row."""
+    """Map a Hawkeye payload into one winner-first bronze row.
+
+    ATP's Hawkeye payload does not reliably include indoor status; the caller
+    supplies the tournament-name mapping result.
+    """
     if not isinstance(payload, dict) or not isinstance(payload.get("Match"), dict):
         _report("payload has no Match object", discovered_match)
         return None
@@ -718,6 +723,7 @@ def hawkeye_to_bronze(
             "tournament_name": str(tournament_name) if tournament_name else None,
             "round": round_value,
             "surface": surface or _canonical_surface(tournament.get("Court")),
+            "is_indoor": is_indoor,
             "score": score,
         }
     )
@@ -1312,6 +1318,47 @@ def sort_raw_match_csv(path: Path) -> None:
 # reported, never guessed.
 TIER_ELIGIBLE = frozenset({"grand_slam", "masters", "atp_500", "atp_250"})
 
+# Indoor events observed in the local ATP CSV history from 2022 through 2026.
+# The tier guard keeps names such as Dallas and Astana from crossing levels.
+INDOOR_TOURNAMENT_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "masters": ("paris",),
+    "atp_finals": ("finals",),
+    "atp_500": (
+        "astana",
+        "basel",
+        "dallas",
+        "laver cup",
+        "next gen",
+        "nextgen",
+        "rotterdam",
+        "vienna",
+    ),
+    "atp_250": (
+        "almaty",
+        "antwerp",
+        "astana",
+        "athens",
+        "belgrade",
+        "brussels",
+        "dallas",
+        "florence",
+        "gijon",
+        "marseille",
+        "metz",
+        "montpellier",
+        "sofia",
+        "stockholm",
+        "tel aviv",
+    ),
+}
+
+
+def indoor_for_tournament(name: str, tier: str) -> int:
+    """Return 1 for a known indoor event at this tier, otherwise outdoor."""
+    normalized = re.sub(r"[^a-z0-9]+", " ", name.lower()).strip()
+    return int(any(keyword in normalized for keyword in INDOOR_TOURNAMENT_KEYWORDS.get(tier, ())))
+
+
 # Per-page navigation budget for archive/results pages (same class of timeout as
 # the Hawkeye requests; a slow page is a per-item skip, never an abort).
 RESULTS_NAV_TIMEOUT_MS = HAWKEYE_NAV_TIMEOUT_MS
@@ -1654,6 +1701,7 @@ def _process_tournament(
     """
     tournament_id = str(tournament.get("tournament_id") or "")
     name = tournament.get("name")
+    is_indoor = indoor_for_tournament(str(name or ""), tier)
     result: dict[str, Any] = {
         "tournament_id": tournament_id,
         "discovered": 0,
@@ -1752,6 +1800,7 @@ def _process_tournament(
             surface=surface,
             rank_points=rank_points,
             ages=ages,
+            is_indoor=is_indoor,
         )
         if row is None:
             # hawkeye_to_bronze printed the detailed skip reason.

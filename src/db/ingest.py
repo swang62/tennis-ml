@@ -179,10 +179,10 @@ def _float_stat(row: dict[str, Any], key: str) -> float:
         return 0.0
 
 
-def _normalize_indoor(value: Any) -> int | None:
-    """Map ATP indoor markers to 1, 0, or None for unknown values."""
+def _normalize_indoor(value: Any) -> int:
+    """Map ATP indoor markers to 1 or 0; unknown values default to outdoor."""
     if value is None or (isinstance(value, float) and pd.isna(value)):
-        return None
+        return 0
     if isinstance(value, int):
         return value
     s = str(value).strip().upper()
@@ -192,7 +192,7 @@ def _normalize_indoor(value: Any) -> int | None:
         return 0
     if s in {"0", "1"}:
         return int(s)
-    return None
+    return 0
 
 
 def _canonical_surface(value: Any) -> str:

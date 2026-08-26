@@ -87,6 +87,16 @@ def test_build_match_id_reduces_date_like_year_to_edition_year():
     assert matches.build_match_id(19670220, "1967-southern-pro", 1) == "1967-southern-pro-001"
 
 
+def test_indoor_tournament_mapping_requires_the_matching_tier():
+    assert matches.indoor_for_tournament("Paris Masters", "masters") == 1
+    assert matches.indoor_for_tournament("Dallas", "atp_500") == 1
+    assert matches.indoor_for_tournament("Dallas", "atp_250") == 1
+    assert matches.indoor_for_tournament("Dallas", "masters") == 0
+    assert matches.indoor_for_tournament("ATP Finals", "atp_finals") == 1
+    assert matches.indoor_for_tournament("ATP Tour Finals", "atp_finals") == 1
+    assert matches.indoor_for_tournament("Cincinnati Open", "masters") == 0
+
+
 # Minimal inline Hawkeye payload: only the fields the mapper and the
 # assertions below read. Side A (PlayerTeam1) is the winner, so its seed lands
 # in the winner slot; draw_size/best_of/minutes fill their raw columns; absent
@@ -176,6 +186,7 @@ def test_hawkeye_to_bronze_stamps_source_metadata_winner_first():
     assert row["player1_name"] == "Ben Shelton"
     assert row["player2_name"] == "Brandon Nakashima"
     assert row["winner_id"] == "S0S1"
+    assert row["is_indoor"] == 0
 
 
 def test_hawkeye_to_bronze_uses_normalized_match_number():
