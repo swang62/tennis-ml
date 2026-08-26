@@ -51,7 +51,7 @@ class _FrozenToday(date):
 
 
 def test_latest_completed_monday():
-    assert scrape.latest_completed_monday(date(2026, 1, 5)) == date(2025, 12, 29)
+    assert scrape.latest_completed_monday(date(2026, 1, 5)) == date(2026, 1, 5)
     assert scrape.latest_completed_monday(date(2026, 1, 6)) == date(2026, 1, 5)
     assert scrape.latest_completed_monday(date(2026, 1, 11)) == date(2026, 1, 5)
 
@@ -79,6 +79,27 @@ def test_missing_weeks_default_is_only_previous_week(monkeypatch):
     watermark, weeks = scrape.missing_ranking_mondays.fn()
     assert watermark == date(2026, 1, 5)
     assert weeks == [date(2026, 1, 12), date(2026, 1, 19)]
+
+
+def test_missing_weeks_includes_current_monday(monkeypatch):
+    monkeypatch.setattr(scrape, "stored_ranking_mondays", lambda: {date(2026, 1, 5)})
+    _FrozenToday._today = date(2026, 1, 19)
+    monkeypatch.setattr(scrape, "date", _FrozenToday)
+
+    _watermark, weeks = scrape.missing_ranking_mondays.fn()
+
+    assert weeks == [date(2026, 1, 12), date(2026, 1, 19)]
+
+
+def test_missing_weeks_resume_across_year_boundary(monkeypatch):
+    monkeypatch.setattr(scrape, "stored_ranking_mondays", lambda: {date(2025, 12, 29)})
+    _FrozenToday._today = date(2026, 1, 21)
+    monkeypatch.setattr(scrape, "date", _FrozenToday)
+
+    watermark, weeks = scrape.missing_ranking_mondays.fn()
+
+    assert watermark == date(2025, 12, 29)
+    assert weeks == [date(2026, 1, 5), date(2026, 1, 12), date(2026, 1, 19)]
 
 
 def test_missing_weeks_backfill_to_end_date(monkeypatch):
@@ -137,8 +158,8 @@ def test_missing_weeks_no_week_before_stored_max_ever_fetched(monkeypatch):
     assert weeks == []
 
 
-def test_missing_weeks_explicit_historical_start_clamped_to_current_year(monkeypatch):
-    # Starts before the current year are clamped to this year's floor.
+def test_missing_weeks_explicit_historical_start_resumes_after_watermark(monkeypatch):
+    # Starts before the current year still resume after the stored watermark.
     monkeypatch.setattr(scrape, "stored_ranking_mondays", lambda: {date(2026, 1, 5)})
     _FrozenToday._today = date(2026, 2, 3)
     monkeypatch.setattr(scrape, "date", _FrozenToday)
@@ -175,14 +196,14 @@ def test_missing_weeks_end_only_presence_based(monkeypatch):
 
 
 def test_missing_weeks_start_only_presence_based(monkeypatch):
-    # start_date-only (upper bound = most recent completed Monday): the stored
+    # start_date-only (upper bound = current or most recent completed Monday): the stored
     # week is skipped, absent weeks are fetched.
     monkeypatch.setattr(scrape, "stored_ranking_mondays", lambda: {date(2026, 1, 5)})
     _FrozenToday._today = date(2026, 1, 26)
     monkeypatch.setattr(scrape, "date", _FrozenToday)
     watermark, weeks = scrape.missing_ranking_mondays.fn(start_date=date(2026, 1, 12))
     assert watermark == date(2026, 1, 5)
-    assert weeks == [date(2026, 1, 12), date(2026, 1, 19)]
+    assert weeks == [date(2026, 1, 12), date(2026, 1, 19), date(2026, 1, 26)]
 
 
 def test_force_backfill_includes_stored_and_missing_weeks(monkeypatch):
@@ -202,14 +223,14 @@ def test_force_backfill_includes_stored_and_missing_weeks(monkeypatch):
     assert weeks == [date(2026, 5, 4), date(2026, 5, 11), date(2026, 5, 18)]
 
 
-def test_fetch_week_skips_on_failure(monkeypatch, capsys):
+def test_fetch_week_propagates_runtime_failure(monkeypatch):
     def fail_fetch(*_):
         raise TimeoutError("selector timed out")
 
     monkeypatch.setattr(scrape, "_fetch_week_html", fail_fetch)
 
-    assert scrape.fetch_and_upsert_week(None, date(2026, 1, 5)) is None
-    assert "Week 2026-01-05: skipped (could not load or parse)" in capsys.readouterr().out
+    with pytest.raises(TimeoutError, match="selector timed out"):
+        scrape.fetch_and_upsert_week(None, date(2026, 1, 5))
 
 
 def test_fetch_week_returns_rendered_rows(monkeypatch):
@@ -268,7 +289,7 @@ def test_fetch_week_missing_option_after_filter_appears_skips_immediately(monkey
         def content(self):
             return ""
 
-    with pytest.raises(scrape.RankingsParseError, match="never published"):
+    with pytest.raises(scrape.RankingsNotPublishedError, match="2026-01-12"):
         scrape._fetch_week_html(Page(), "https://example.test/rankings", date(2026, 1, 12))
 
 

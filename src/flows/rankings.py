@@ -61,11 +61,13 @@ class RankingsParseError(ValueError):
     """Raised when a fetched rankings page has no parseable rankings table."""
 
 
+class RankingsNotPublishedError(LookupError):
+    """Raised when ATP has not published the requested ranking week."""
+
+
 def latest_completed_monday(today: date) -> date:
-    """Most recent Monday strictly before ``today``."""
+    """Most recent Monday on or before ``today``."""
     days_since_monday = today.weekday()
-    if days_since_monday == 0:
-        return today - timedelta(days=7)
     return today - timedelta(days=days_since_monday)
 
 
@@ -121,9 +123,8 @@ def missing_ranking_mondays(
         start = watermark + timedelta(days=7)
     else:
         start = start_date + timedelta(days=(7 - start_date.weekday()) % 7)
-    # Keep the scan within the current year and after the stored watermark.
-    floor = max(watermark + timedelta(days=7), date(today.year, 1, 1))
-    start = max(start, floor)
+    # Resume strictly after the last successful Monday, including across years.
+    start = max(start, watermark + timedelta(days=7))
     start += timedelta(days=(7 - start.weekday()) % 7)
     weeks: list[date] = []
     monday = start
@@ -180,7 +181,9 @@ def extract_rankings_from_html(html: str) -> list[dict[str, Any]]:
     raise RankingsParseError("no rankings table with player links found in page HTML")
 
 
-def translate_rank_rows(rows: list[dict[str, Any]]) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
+def translate_rank_rows(
+    rows: list[dict[str, Any]],
+) -> tuple[pd.DataFrame, list[dict[str, Any]]]:
     """Convert every parsed live ATP ranking row to a bronze row."""
     kept: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -280,14 +283,14 @@ def _fetch_week_html(page, url: str, week: date) -> str:
             "(Cloudflare or widget verification failed)"
         ) from exc
     if not _week_in_filter(page, week):
-        raise RankingsParseError(
-            f"week {week.isoformat()} not present in #dateWeek-filter (never published)"
-        )
+        raise RankingsNotPublishedError(week.isoformat())
     deadline = time.monotonic() + CHALLENGE_RESOLVE_BUDGET_S
     while True:
         with suppress(Exception):
             page.wait_for_selector(
-                RANKINGS_TABLE_SELECTOR, state="attached", timeout=RANKINGS_TABLE_TIMEOUT_MS
+                RANKINGS_TABLE_SELECTOR,
+                state="attached",
+                timeout=RANKINGS_TABLE_TIMEOUT_MS,
             )
         html = page.content()
         if _PLAYER_LINK_RE.search(html) or time.monotonic() >= deadline:
@@ -314,10 +317,13 @@ def fetch_and_upsert_week(
     print(f"Week {week.isoformat()}: fetching {url}")
     try:
         html = _fetch_week_html(page, url, week)
-        rows = extract_rankings_from_html(html)
-    except Exception as exc:
-        print(f"Week {week.isoformat()}: skipped (could not load or parse): {exc}")
-        return None
+    except RankingsNotPublishedError:
+        print(f"Week {week.isoformat()}: no rankings published")
+        return 0
+    if not html:
+        print(f"Week {week.isoformat()}: no rankings published")
+        return 0
+    rows = extract_rankings_from_html(html)
 
     frame, skipped = translate_rank_rows(rows)
     frame = (
@@ -402,7 +408,10 @@ def _append_current_rankings(frame: pd.DataFrame) -> None:
     with open(CURRENT_RANKINGS_CSV, "a", newline="") as f:
         writer = csv.writer(f, lineterminator="\n")
         for row in frame.to_dict(orient="records"):
-            key = (pd.Timestamp(row["ranking_date"]).strftime("%Y%m%d"), str(row["player_id"]))
+            key = (
+                pd.Timestamp(row["ranking_date"]).strftime("%Y%m%d"),
+                str(row["player_id"]),
+            )
             if key not in existing:
                 writer.writerow(
                     [
@@ -466,12 +475,6 @@ def rankings_flow(
 ):
     """Fetch missing ranking weeks while preserving the watermark and browser invariants."""
     load_env()
-    today = date.today()
-    if start_date is not None and start_date < date(today.year, 1, 1):
-        print(
-            f"WARNING: start_date {start_date.isoformat()} is before Jan 1 {today.year}; "
-            "the scan is clamped to this year."
-        )
     watermark, weeks = missing_ranking_mondays(start_date, end_date, force)
     if watermark is None and not force:
         print(
@@ -588,11 +591,11 @@ if __name__ == "__main__":
 # ── Deployment ─────────────────────────────────────────────────────
 
 RANKINGS_DEPLOYMENT_NAME = "rankings"
-RANKINGS_CRON = "0 22 * * 0"
+RANKINGS_CRON = "0 22 * * 2"
 
 
 def register_deployment() -> None:
-    """Create or update the Sunday-scheduled rankings deployment."""
+    """Create or update the scheduled rankings deployment."""
     repo_root = Path(__file__).resolve().parent.parent.parent
     # Leave dates unset so scheduled runs resolve the current watermark.
     deployment = cast(

@@ -516,21 +516,63 @@ class PsycopgEloRepo:
         return mismatches
 
     def snapshot_events(self, watermark: datetime | None) -> list[MatchEvent]:
-        """Copy full Elo inputs to DuckDB, then select the local work set."""
+        """Copy the Elo work set and required prior state to DuckDB."""
+        if watermark is not None:
+            self._cur.execute(
+                f"""
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM {BRONZE_MATCHES_TABLE} m
+                    WHERE m.ingested_at > %s
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM {SILVER_ELO_SNAPSHOTS} e
+                          WHERE e.match_id = m.match_id
+                      )
+                )
+                """,
+                (watermark,),
+            )
+            row = self._cur.fetchone()
+            if row is None or not row[0]:
+                return []
+
         ELO_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = ELO_SNAPSHOT_PATH.with_name(f".{ELO_SNAPSHOT_PATH.name}.{os.getpid()}.tmp")
-        print(f"ELO SNAPSHOT: writing full source snapshot to {ELO_SNAPSHOT_PATH}")
+        scope = "full source" if watermark is None else "incremental work set"
+        print(f"ELO SNAPSHOT: writing {scope} to {ELO_SNAPSHOT_PATH}")
         con = duckdb.connect(str(tmp_path))
         try:
             pg_url = get_database_url().replace("'", "''")
             con.execute(f"ATTACH '{pg_url}' AS pg (TYPE postgres)")
             con.execute("BEGIN TRANSACTION")
-            con.execute(
-                'CREATE TABLE bronze_match_events AS SELECT * FROM pg."bronze"."match_events"'
-            )
-            con.execute(
-                'CREATE TABLE silver_elo_snapshots AS SELECT * FROM pg."silver"."elo_snapshots"'
-            )
+            if watermark is None:
+                con.execute(
+                    'CREATE TABLE bronze_match_events AS SELECT * FROM pg."bronze"."match_events"'
+                )
+                con.execute(
+                    'CREATE TABLE silver_elo_snapshots AS SELECT * FROM pg."silver"."elo_snapshots"'
+                )
+            else:
+                con.execute(
+                    "CREATE TABLE bronze_match_events AS "
+                    'SELECT * FROM pg."bronze"."match_events" m '
+                    "WHERE m.ingested_at > ? "
+                    "AND NOT EXISTS ( "
+                    'SELECT 1 FROM pg."silver"."elo_snapshots" e '
+                    "WHERE e.match_id = m.match_id "
+                    ")",
+                    (watermark,),
+                )
+                con.execute(
+                    "CREATE TABLE silver_elo_snapshots AS "
+                    'SELECT e.* FROM pg."silver"."elo_snapshots" e '
+                    "WHERE e.player_id IN ( "
+                    "SELECT player1_id FROM bronze_match_events "
+                    "UNION "
+                    "SELECT player2_id FROM bronze_match_events "
+                    ")"
+                )
             con.execute("COMMIT")
             if self._snapshot_con is not None:
                 self._snapshot_con.close()

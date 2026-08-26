@@ -45,7 +45,7 @@ models:
       - name: return_points_won
         description: Return points won, derived from the opponent's unwon serve points.
       - name: return_points_available
-        description: "Return points available while returning: the opponent's total serve points in this match; denominator of rolling_features' return_points_won_pct_10."
+        description: Return points available while returning the opponent's total serve points in this match
       - name: player_match_number
         description: 1-based ordinal of this player's matches ordered by match_date, match_id; 1 for the first match.
       - name: matches_30d_before

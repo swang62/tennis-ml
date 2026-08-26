@@ -178,11 +178,12 @@ pair_meetings AS (
     CROSS JOIN LATERAL (
         SELECT winner_id, surface
         FROM {{ source('bronze', 'match_events') }} meeting
-        WHERE meeting.player1_id = current_match.player_id
+         WHERE meeting.player1_id = current_match.player_id
           AND meeting.player2_id = current_match.opponent_id
           AND (meeting.match_date, meeting.match_num, meeting.match_id)
             < (current_match.match_date, current_match.match_num, current_match.match_id)
-        ORDER BY meeting.match_date DESC, meeting.match_num DESC, meeting.match_id DESC
+         ORDER BY meeting.match_date DESC, meeting.match_num DESC, meeting.match_id DESC
+         LIMIT 10
     ) meeting
     UNION ALL
     SELECT
@@ -194,11 +195,12 @@ pair_meetings AS (
     CROSS JOIN LATERAL (
         SELECT winner_id, surface
         FROM {{ source('bronze', 'match_events') }} meeting
-        WHERE meeting.player1_id = current_match.opponent_id
+         WHERE meeting.player1_id = current_match.opponent_id
           AND meeting.player2_id = current_match.player_id
           AND (meeting.match_date, meeting.match_num, meeting.match_id)
             < (current_match.match_date, current_match.match_num, current_match.match_id)
-        ORDER BY meeting.match_date DESC, meeting.match_num DESC, meeting.match_id DESC
+         ORDER BY meeting.match_date DESC, meeting.match_num DESC, meeting.match_id DESC
+         LIMIT 10
     ) meeting
 ),
 prior_h2h AS (

@@ -481,13 +481,15 @@ def register_automation() -> None:
         with suppress(ValueError):
             cast(Automation, Automation.read(name=name)).delete()
 
-    automation = build_scrape_etl_automation("matches", deployment.id)
-    automation.create()
-    print(
-        f"Registered automation {automation.name!r}: "
-        f"{MATCHES_FLOW_NAME} success -> {etl_flow.name}/{ETL_DEPLOYMENT_NAME} "
-        "(source=matches)"
-    )
+    for source in ("rankings", "matches"):
+        automation = build_scrape_etl_automation(source, deployment.id)
+        automation.create()
+        flow_name = RANKINGS_FLOW_NAME if source == "rankings" else MATCHES_FLOW_NAME
+        print(
+            f"Registered automation {automation.name!r}: "
+            f"{flow_name} success -> {etl_flow.name}/{ETL_DEPLOYMENT_NAME} "
+            f"(source={source})"
+        )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

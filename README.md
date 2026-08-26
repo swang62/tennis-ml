@@ -6,23 +6,22 @@ Tennis match predictions end to end. I made this repo with the goal of learning 
 
 ## Core Features
 
-- **Weekly ATP scrape** — Prefect rankings + match-stats ingestion with self-healing backfills (rankings Sunday 22:00 UTC, matches 22:30 UTC; each triggers incremental ETL on success).
-- **Warehouse pipeline** — PostgreSQL bronze → dbt silver → dbt gold.
-- **Model training** — Optuna tunes linear, GBDT, and neural-network models before an OOF-trained logistic stacker combines them.
+- **Weekly ATP scrape** — Prefect rankings + match-stats ingestion with self-healing backfills
+- **Data warehouse pipeline** — Automated ETL with dbt PostgreSQL models.
+- **Model training** — Optuna tunes linear, GBDT, and neural-network models, before an OOF-trained logistic stacker combines them.
 - **Reproducible deployment** — MLflow lineage, a single `@champion` alias, and BentoML serving.
 - **Monitoring** — Evidently drift checks and current-window performance checks.
 
 ## Tech Stack
 
-| Layer               | Tool                                      |
-| ------------------- | ----------------------------------------- |
-| Orchestration       | Prefect (cron, retries, ETL triggers)     |
-| Experiment tracking | MLflow (model registry, trial comparison) |
-| Model serving       | BentoML, Docker Compose                  |
+| Layer               | Tool                                       |
+| ------------------- | ------------------------------------------ |
+| Orchestration       | Prefect (cron, retries, ETL triggers)      |
+| Experiment tracking | MLflow (model registry, trial comparison)  |
+| Model serving       | BentoML, Docker Compose                    |
 | Web app             | React, TypeScript, Vite, TanStack, ECharts |
-| Data warehouse      | PostgreSQL                                |
-| Development         | Jupyter + Papermill                       |
-
+| Data warehouse      | PostgreSQL                                 |
+| Development         | Jupyter + Papermill                        |
 
 ## Web App Dashboard
 
@@ -58,7 +57,7 @@ serviceman logs tennis-prefect-worker
 ## Data Architecture
 
 ```
-Rankings and match data → PostgreSQL bronze raw data
+Rankings and match data → PostgreSQL bronze raw match and player data
                         → dbt silver: player-perspective matches and rolling features
                         → dbt gold: training rows, player profiles, and tour averages
                         → training and evaluation
@@ -83,7 +82,7 @@ Training uses gold match features: each physical match produces both orientation
 
 - **Linear family:** logistic regression and Gaussian Naive Bayes.
 - **Gradient boosting:** XGBoost and LightGBM, with early stopping.
-- **Neural network:** a tabular/bio-feature MLP trained with Adam and binary cross-entropy with logits (`BCEWithLogitsLoss`).
+- **Neural network:** a MLP trained with Adam and binary cross-entropy with logits (`BCEWithLogitsLoss`).
 
 ### Evaluation and Promotion
 
@@ -94,8 +93,6 @@ Candidate and production models are compared on held-out test predictions using:
 - **Brier score** — probability calibration to actual match wins.
 - **Accuracy** — used only for inspecting classification quality.
 
-A candidate is promoted when its test log loss is strictly lower than the incumbent's and its ROC-AUC does not fall by more than the configured tolerance.
-
 ### Drift Monitoring
 
 The weekly drift flow scores new production data through the champion Bento and compares it with a size-matched historical reference window. It checks:
@@ -105,9 +102,8 @@ The weekly drift flow scores new production data through the champion Bento and 
 
 ## Data Pipelines
 
-- `rankings.py` — weekly ATP rankings catch-up (scheduled deployment `rankings-flow/rankings`, Sunday 22:00 UTC; rankings trigger ETL on success).
-- `matches.py` — match-stats enrichment (scheduled deployment `matches-flow/matches`, Sunday 22:30 UTC; matches trigger ETL on success).
-- Rankings and matches are independent Prefect flows — there is no combined scrape flow.
+- `rankings.py` — weekly ATP rankings catch-up (scheduled deployment `rankings-flow/rankings`, Tuesday 22:00 UTC; rankings trigger ETL on success).
+- `matches.py` — match-stats enrichment (scheduled deployment `matches-flow/matches`, Tuesday 22:30 UTC; matches trigger ETL on success).
 - `seed.py` — load matches and rankings into bronze, with optional enrichment.
 - `etl.py` — build bronze → silver → gold with dbt.
 - `pipeline.py` — snapshot data, train models, build the ensemble, evaluate, and promote.
@@ -118,25 +114,21 @@ The weekly drift flow scores new production data through the champion Bento and 
 
 ### Docker Overview
 
-| Service    | Image source                  | Host port | Purpose                  |
-| ---------- | ----------------------------- | --------- | ------------------------ |
-| `postgres` | `postgres:18.4`               | 6543      | Feature data             |
-| `bento`    | `swang62/tennis-bento`        | internal  | Model API                |
-| `web`      | `swang62/tennis-web`          | 8187      | Dashboard                |
+| Service    | Image source           | Host port | Purpose      |
+| ---------- | ---------------------- | --------- | ------------ |
+| `postgres` | `postgres:18.4`        | 6543      | Feature data |
+| `bento`    | `swang62/tennis-bento` | internal  | Model API    |
+| `web`      | `swang62/tennis-web`   | 8187      | Dashboard    |
 
-### Standalone Compose deployment
-
-The stack runs from published images. The only host requirement is Docker.
+| Var                 | Purpose                                                                     |
+| ------------------- | --------------------------------------------------------------------------- |
+| `POSTGRES_PASSWORD` | PostgreSQL password; bento's `DATABASE_URL` derives from it                 |
+| `BENTO_API_KEY`     | Authenticates the `/api/model_info` and `/api/predict_from_ids_bulk` routes |
 
 ```bash
 cp .env.example .env
 docker compose up -d
 ```
-
-| Var                 | Purpose                                                      |
-| ------------------- | ------------------------------------------------------------ |
-| `POSTGRES_PASSWORD` | PostgreSQL password; bento's `DATABASE_URL` derives from it  |
-| `BENTO_API_KEY`     | Authenticates the `/api/model_info` and `/api/predict_from_ids_bulk` routes |
 
 ### Inference schema
 
@@ -150,7 +142,6 @@ The `/predict_from_ids` endpoint accepts a JSON object with the following fields
 | `tournament`  | no       | —       | `grand_slam` / `masters` / `atp_500` / `atp_250`   |
 | `round`       | no       | —       | `r128` / `r64` / `r32` / `r16` / `qf` / `sf` / `f` |
 | `as_of_date`  | no       | today   | `datetime.date`                                    |
-
 
 ## Acknowledgements
 

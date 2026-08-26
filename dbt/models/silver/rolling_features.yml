@@ -35,14 +35,13 @@ models:
       - name: serve_win_pct_10
         description: (first_serve_points_won + second_serve_points_won + 1) / (total_serve_points + 2) over the last 10 matches including this one; smoothed, never NULL.
       - name: return_points_won_pct_10
-        description: "Beta(1,1)-smoothed return percentage over last 10 matches: (return_points_won+1)/(return_points_available+2); never NULL; consumed only by PlayerSimilarity."
+        description: "Beta(1,1)-smoothed return percentage over last 10 matches: (return_points_won+1)/(return_points_available+2); never NULL"
       - name: aces_per_svc_game_10
         description: Aces per service game over the last 10 matches.
       - name: df_rate_10
         description: (double_faults + 1) / (total_serve_points + 2) over the last 10 matches including this one; smoothed, never NULL.
       - name: matches_10
         description: Number of matches backing the last-10 rates.
-
       - name: avg_player_rank_10
         description: Average of the player's own ranking over the last 10 matches; match_features derives rank_trend_10 from it.
       - name: avg_rank_faced_10

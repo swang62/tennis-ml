@@ -17,7 +17,6 @@ models:
         description: Number of rows in bronze.player_profiles used by profile aggregates.
       - name: player_match_rows
         description: Player-perspective rows from silver.player_matches used by the weighted tour rates.
-
       - name: latest_player_ranking
         description: Median latest_player_ranking over the full snapshot pool; 100 when the pool is empty.
       - name: latest_player_rank_points
@@ -28,7 +27,6 @@ models:
         description: Median avg_player_rank_10 over the full snapshot pool; 100 when empty.
       - name: avg_rank_faced_10
         description: Median avg_rank_faced_10 over the full snapshot pool; 100 when empty.
-
       - name: latest_player_age
         description: Mean latest_player_age over the full snapshot pool; 26.0 when empty.
       - name: win_rate_10

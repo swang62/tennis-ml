@@ -662,7 +662,7 @@ def _csv_row_state(path: str | Path, row: dict[str, str], columns: list[str]) ->
 def _append_csv_row(path: str | Path, row: dict[str, str], columns: list[str]) -> None:
     """Append one fully-quoted row. Callers validate with ``_csv_row_state`` first."""
     with open(path, "a", newline="") as f:
-        writer = csv.writer(f, quoting=csv.QUOTE_ALL, lineterminator="\r\n")
+        writer = csv.writer(f, quoting=csv.QUOTE_ALL, lineterminator="\n")
         writer.writerow([row[c] for c in columns])
 
 
@@ -686,7 +686,7 @@ def _upsert_csv_row(path: str | Path, row: dict[str, str], columns: list[str]) -
     if not replaced:
         output.append(replacement)
     with open(path, "w", newline="") as f:
-        csv.writer(f, quoting=csv.QUOTE_ALL, lineterminator="\r\n").writerows(output)
+        csv.writer(f, quoting=csv.QUOTE_ALL, lineterminator="\n").writerows(output)
 
 
 def _validate_discovery_candidate(candidate: dict[str, object]) -> dict[str, str]:

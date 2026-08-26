@@ -768,65 +768,67 @@ def test_h2h_first_and_second_meeting_boundaries():
     assert row_after["h2h_surface_advantage"] == pytest.approx((1 + 1) / (2 + 2) - 0.5)
 
 
-def test_h2h_complete_history_uses_every_prior_meeting():
-    """Every causally prior meeting contributes; no recency cap drops old results."""
+def test_h2h_uses_ten_most_recent_prior_meetings():
+    """H2H features use at most the ten most recent causally prior meetings."""
     a, b = "H2H_C", "H2H_D"
     _insert_prior_meetings(
         a,
         b,
         [
-            ("h2h-r1", "2026-01-05", 1, "hard"),  # oldest; A's only win, still counted
+            ("h2h-r1", "2026-01-05", 1, "hard"),  # excluded by the ten-meeting cap
             ("h2h-r2", "2026-02-05", 0, "hard"),
             ("h2h-r3", "2026-03-05", 0, "hard"),
             ("h2h-r4", "2026-04-05", 0, "hard"),
             ("h2h-r5", "2026-05-05", 0, "hard"),
             ("h2h-r6", "2026-06-05", 0, "hard"),
+            ("h2h-r7", "2026-07-05", 0, "hard"),
+            ("h2h-r8", "2026-08-05", 0, "hard"),
+            ("h2h-r9", "2026-09-05", 0, "hard"),
+            ("h2h-r10", "2026-10-05", 0, "hard"),
+            ("h2h-r11", "2026-11-05", 0, "hard"),
         ],
     )
-    out = build_inference_features(a, b, "hard", as_of_date=date(2026, 7, 1))
+    out = build_inference_features(a, b, "hard", as_of_date=date(2026, 12, 1))
     row = out.iloc[0]
-    # All six prior meetings count (no five-meeting cap).
-    assert row["h2h_exposure"] == 6
-    # A won exactly one of the six: advantage uses the complete history.
-    assert row["h2h_advantage"] == pytest.approx((1 + 1) / (6 + 2) - 0.5)
-    # All six window meetings are hard: surface advantage matches the overall.
-    assert row["h2h_surface_advantage"] == pytest.approx((1 + 1) / (6 + 2) - 0.5)
+    assert row["h2h_exposure"] == 10
+    assert row["h2h_advantage"] == pytest.approx((0 + 1) / (10 + 2) - 0.5)
+    assert row["h2h_surface_advantage"] == pytest.approx((0 + 1) / (10 + 2) - 0.5)
     # Reversing sides preserves exposure and negates both advantages.
-    row_ba = build_inference_features(b, a, "hard", as_of_date=date(2026, 7, 1))
+    row_ba = build_inference_features(b, a, "hard", as_of_date=date(2026, 12, 1))
     _assert_mirror(row, row_ba.iloc[0])
 
 
-def test_h2h_surface_advantage_filters_complete_history():
-    """Surface H2H advantage uses every prior meeting on the matching surface."""
+def test_h2h_surface_advantage_uses_the_ten_meeting_window():
+    """Surface H2H advantage is derived from the capped overall H2H window."""
     a, b = "H2H_L", "H2H_M"
     _insert_prior_meetings(
         a,
         b,
         [
-            ("h2h-v1", "2026-01-05", 1, "clay"),  # oldest clay win, now counted
+            ("h2h-v1", "2026-01-05", 1, "clay"),  # excluded by the ten-meeting cap
             ("h2h-v2", "2026-02-05", 1, "clay"),
             ("h2h-v3", "2026-03-05", 0, "clay"),
             ("h2h-v4", "2026-04-05", 0, "clay"),
             ("h2h-v5", "2026-05-05", 0, "hard"),
             ("h2h-v6", "2026-06-05", 1, "clay"),
+            ("h2h-v7", "2026-07-05", 0, "hard"),
+            ("h2h-v8", "2026-08-05", 0, "hard"),
+            ("h2h-v9", "2026-09-05", 0, "hard"),
+            ("h2h-v10", "2026-10-05", 0, "hard"),
+            ("h2h-v11", "2026-11-05", 0, "hard"),
         ],
     )
-    out = build_inference_features(a, b, "clay", as_of_date=date(2026, 7, 1))
+    out = build_inference_features(a, b, "clay", as_of_date=date(2026, 12, 1))
     row = out.iloc[0]
-    # All six prior meetings count; A won three of them overall.
-    assert row["h2h_exposure"] == 6
-    assert row["h2h_advantage"] == pytest.approx((3 + 1) / (6 + 2) - 0.5)  # 0.0
-    # Five of the six are clay; A won three clay meetings, including the oldest
-    # v1 (no longer dropped by a recency cap), so the surface advantage counts it.
-    assert row["h2h_surface_advantage"] == pytest.approx((3 + 1) / (5 + 2) - 0.5)
-    # A recency-capped window would have excluded v1 and given a different value.
-    assert row["h2h_surface_advantage"] != pytest.approx((2 + 1) / (4 + 2) - 0.5)
-    row_ba = build_inference_features(b, a, "clay", as_of_date=date(2026, 7, 1))
+    assert row["h2h_exposure"] == 10
+    assert row["h2h_advantage"] == pytest.approx((2 + 1) / (10 + 2) - 0.5)
+    assert row["h2h_surface_advantage"] == pytest.approx((2 + 1) / (4 + 2) - 0.5)
+    row_ba = build_inference_features(b, a, "clay", as_of_date=date(2026, 12, 1))
     _assert_mirror(row, row_ba.iloc[0])
 
 
-def test_h2h_complete_history_scalar_bulk_parity():
-    """Scalar and bulk builders agree on complete (>5) prior-meeting H2H history."""
+def test_h2h_capped_history_scalar_bulk_parity():
+    """Scalar and bulk builders agree when H2H history exceeds ten meetings."""
     a, b = "H2H_P", "H2H_Q"
     _insert_prior_meetings(
         a,
@@ -839,21 +841,24 @@ def test_h2h_complete_history_scalar_bulk_parity():
             ("h2h-p5", "2026-05-05", 0, "hard"),
             ("h2h-p6", "2026-06-05", 1, "hard"),
             ("h2h-p7", "2026-07-05", 0, "clay"),
+            ("h2h-p8", "2026-08-05", 0, "hard"),
+            ("h2h-p9", "2026-09-05", 0, "hard"),
+            ("h2h-p10", "2026-10-05", 0, "hard"),
+            ("h2h-p11", "2026-11-05", 0, "hard"),
         ],
     )
     req = {
         "player_id": a,
         "opponent_id": b,
         "surface": "hard",
-        "as_of_date": date(2026, 8, 1),
+        "as_of_date": date(2026, 12, 1),
     }
     scalar = build_inference_features(**req)
     bulk = build_inference_features_bulk([req])
     pd.testing.assert_frame_equal(bulk, scalar, check_exact=True)
-    # All seven priors count (six hard, one clay) in exposure and advantage.
-    assert scalar.iloc[0]["h2h_exposure"] == 7
-    assert scalar.iloc[0]["h2h_advantage"] == pytest.approx((3 + 1) / (7 + 2) - 0.5)
-    assert scalar.iloc[0]["h2h_surface_advantage"] == pytest.approx((3 + 1) / (6 + 2) - 0.5)
+    assert scalar.iloc[0]["h2h_exposure"] == 10
+    assert scalar.iloc[0]["h2h_advantage"] == pytest.approx((2 + 1) / (10 + 2) - 0.5)
+    assert scalar.iloc[0]["h2h_surface_advantage"] == pytest.approx((2 + 1) / (9 + 2) - 0.5)
 
 
 # ── Train/inference parity ──

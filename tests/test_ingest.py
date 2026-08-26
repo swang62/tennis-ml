@@ -664,14 +664,12 @@ def _init_persist_files(tmp_path: Path) -> tuple[Path, Path]:
     profiles = tmp_path / "ATP_player_database.csv"
     profiles.write_text(
         "id,player,atpname,birthdate,weight,height,turnedpro,birthplace,"
-        "coaches,hand,backhand,ioc\r\n"
+        "coaches,hand,backhand,ioc\n"
         '"P001","Existing One","E. One","19900101","75","180",'
-        '"2015","","","R","2H","FRA"\r\n'
+        '"2015","","","R","2H","FRA"\n'
     )
     map_csv = tmp_path / "ranking_player_map.csv"
-    map_csv.write_text(
-        'ranking_player_id,ranking_name,player_id\r\n"P001","Existing One","P001"\r\n'
-    )
+    map_csv.write_text('ranking_player_id,ranking_name,player_id\n"P001","Existing One","P001"\n')
     return profiles, map_csv
 
 

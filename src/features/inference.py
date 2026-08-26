@@ -67,8 +67,9 @@ SELECT match_id, winner_id, surface
 FROM {BRONZE_MATCHES_TABLE}
 WHERE ((player1_id = %s AND player2_id = %s)
     OR (player1_id = %s AND player2_id = %s))
-  AND match_date < %s::date
-ORDER BY match_date DESC, match_num DESC, match_id DESC
+    AND match_date < %s::date
+    ORDER BY match_date DESC, match_num DESC, match_id DESC
+    LIMIT 10
 """
 
 _PROFILE_SQL = f"""
@@ -106,8 +107,9 @@ LEFT JOIN LATERAL (
     FROM {BRONZE_MATCHES_TABLE}
     WHERE ((req.player_id = player1_id AND req.opponent_id = player2_id)
         OR (req.opponent_id = player1_id AND req.player_id = player2_id))
-      AND match_date < req.as_of_iso::date
+       AND match_date < req.as_of_iso::date
     ORDER BY match_date DESC, match_num DESC, match_id DESC
+    LIMIT 10
 ) h ON true
 """
 

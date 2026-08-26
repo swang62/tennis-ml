@@ -38,7 +38,7 @@ from src.flows import rankings
 from src.flows.rankings import scrape_run_name
 
 MATCHES_DEPLOYMENT_NAME = "matches"
-MATCHES_CRON = "30 22 * * 0"
+MATCHES_CRON = "30 22 * * 2"
 
 _ARCHIVE_LI_RE = re.compile(r"<li\b[^>]*>(.*?)</li>", re.S)
 _PROFILE_LINK_RE = re.compile(r"/en/tournaments/([^/]+)/(\d+)/overview")
@@ -295,10 +295,14 @@ def extract_matches_from_results(html: str, tournament_id: str, year: int) -> li
             block2 = card[stats[1] : footer_start]
             score = _score_from_blocks(_score_items(block1), _score_items(block2))
 
+        round_name = _normalize_round(round_match.group(1)) if round_match else None
+        if round_name not in _ROUND_ORDER:
+            continue
+
         matches.append(
             {
                 "match_id": stats_link.group(3),
-                "round": _normalize_round(round_match.group(1)) if round_match else None,
+                "round": round_name,
                 "player1_id": player1.group(2).upper() if player1 else None,
                 "player1_slug": player1.group(1) if player1 else None,
                 "player2_id": player2.group(2).upper() if player2 else None,
@@ -411,16 +415,10 @@ HAWKEYE_NAV_TIMEOUT_MS = 60_000
 # Randomized human-like gap between Hawkeye requests (bot-detection hygiene).
 HAWKEYE_SLEEP_MIN_S = 3.0
 HAWKEYE_SLEEP_MAX_S = 8.0
-# A challenge response is transient more often than a malformed payload; retry
-# it twice with a slightly longer pause before reporting a per-match skip.
-HAWKEYE_CHALLENGE_RETRIES = 2
-HAWKEYE_RETRY_SLEEP_MIN_S = 8.0
-HAWKEYE_RETRY_SLEEP_MAX_S = 14.0
 
 # JSON is served raw, but CloakBrowser renders it wrapped in an HTML shell
-# (<html>...<pre>{...}</pre>... — seen in the probes and the live run), so an
-# HTML body is only a challenge when it carries no recoverable JSON object.
-# _JSON_BODY_RE recovers that embedded object.
+# (<html>...<pre>{...}</pre>... — seen in the probes and the live run); the
+# embedded object is recovered with _JSON_BODY_RE.
 _HTML_BODY_RE = re.compile(r"<\s*(?:!doctype|html)\b", re.I)
 _JSON_BODY_RE = re.compile(r"(\{.*\})", re.S)
 
@@ -743,56 +741,40 @@ def fetch_hawkeye_match(
 ) -> tuple[dict[str, Any] | None, str]:
     """Fetch one Hawkeye Complete stats payload; (payload, "") or (None, reason).
 
-    Classify navigation, challenge, JSON, and payload errors as skip reasons so
-    the batch continues. Use the run's shared page.
+    Navigation, JSON, and payload errors become skip reasons so the batch
+    continues. Use the run's shared page.
     """
     url = HAWKEYE_URL.format(year=year, tournament_id=tournament_id, match_id=match_id)
-    for attempt in range(HAWKEYE_CHALLENGE_RETRIES + 1):
-        if attempt:
-            delay = random.uniform(HAWKEYE_RETRY_SLEEP_MIN_S, HAWKEYE_RETRY_SLEEP_MAX_S)
-            print(f"  Hawkeye {match_id}: challenge retry {attempt}/{HAWKEYE_CHALLENGE_RETRIES}")
-            time.sleep(delay)
-        rankings._jitter()
-        try:
-            page.goto(url, wait_until="domcontentloaded", timeout=HAWKEYE_NAV_TIMEOUT_MS)
-        except Exception as exc:
-            return None, f"navigation failed ({type(exc).__name__}: {exc})"
-        try:
-            body = page.content()
-        except Exception as exc:
-            return None, f"page content failed ({type(exc).__name__}: {exc})"
-        if _HTML_BODY_RE.search(body[:2048]):
-            # CloakBrowser wraps the raw JSON in an HTML shell; recover it before
-            # classifying the shell as a challenge.
-            embedded = _JSON_BODY_RE.search(body)
-            if embedded is None:
-                reason = f"HTML/challenge response ({len(body)} bytes)"
-                if attempt < HAWKEYE_CHALLENGE_RETRIES:
-                    continue
-                return None, reason
-            try:
-                payload = json.loads(embedded.group(1))
-            except ValueError:
-                reason = f"HTML/challenge response ({len(body)} bytes)"
-                if attempt < HAWKEYE_CHALLENGE_RETRIES:
-                    continue
-                return None, reason
-        else:
-            try:
-                payload = json.loads(body)
-            except ValueError:
-                return None, f"invalid JSON response ({len(body)} bytes)"
-        if not isinstance(payload, dict):
-            return None, f"unexpected JSON shape ({type(payload).__name__})"
-        match = payload.get("Match")
-        if (
-            not isinstance(match, dict)
-            or not isinstance(match.get("PlayerTeam"), dict)
-            or not isinstance(match.get("OpponentTeam"), dict)
-        ):
-            return None, "payload missing Match/PlayerTeam/OpponentTeam"
-        return payload, ""
-    raise AssertionError("unreachable")
+    rankings._jitter()
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=HAWKEYE_NAV_TIMEOUT_MS)
+    except Exception as exc:
+        raise RuntimeError(f"Hawkeye {match_id}: navigation failed") from exc
+    try:
+        body = page.content()
+    except Exception as exc:
+        raise RuntimeError(f"Hawkeye {match_id}: page content failed") from exc
+    # CloakBrowser wraps the raw JSON in an HTML shell; recover the embedded
+    # object before parsing so a wrapped payload still parses as JSON.
+    if _HTML_BODY_RE.search(body[:2048]):
+        embedded = _JSON_BODY_RE.search(body)
+        candidate = embedded.group(1) if embedded is not None else body
+    else:
+        candidate = body
+    try:
+        payload = json.loads(candidate)
+    except ValueError:
+        return None, f"invalid JSON response ({len(body)} bytes)"
+    if not isinstance(payload, dict):
+        return None, f"unexpected JSON shape ({type(payload).__name__})"
+    match = payload.get("Match")
+    if (
+        not isinstance(match, dict)
+        or not isinstance(match.get("PlayerTeam"), dict)
+        or not isinstance(match.get("OpponentTeam"), dict)
+    ):
+        return None, "payload missing Match/PlayerTeam/OpponentTeam"
+    return payload, ""
 
 
 def fetch_hawkeye_batch(
@@ -1489,10 +1471,9 @@ def _bronze_match_id(
     (date, tournament, {player ids}) key is already in bronze — orientation-free
     because the key's player set is unordered — so enrichment updates that row.
     Otherwise derives the deterministic Sackmann id (``build_match_id``) from
-    the normalized match number, zero-padded. The ATP ``msNNN`` id is only the
-    Hawkeye fetch id and is not a stable match sequence. A missing date or a
-    malformed/non-positive sequence is a skip, never a fabricated id. The key
-    is None exactly when a reason is returned.
+    the page-order match number, zero-padded. The ATP ``msNNN`` id is only the
+    Hawkeye fetch id. A missing date or match number is a skip, never a
+    fabricated id. The key is None exactly when a reason is returned.
     """
     match_date = _as_date(item.get("match_date"))
     if match_date is None:
@@ -1502,14 +1483,11 @@ def _bronze_match_id(
     existing = physical.get((match_date, frozenset({player1.upper(), player2.upper()})))
     if existing:
         return existing, "", key
-    raw_sequence = item.get("match_num")
-    sequence = (
-        raw_sequence
-        if isinstance(raw_sequence, int) and not isinstance(raw_sequence, bool)
-        else ms_sequence(item.get("match_id"))
-    )
+    sequence = item.get("match_num")
+    if not isinstance(sequence, int) or isinstance(sequence, bool):
+        sequence = 0
     if sequence <= 0:
-        return "", f"no positive ms sequence in {item.get('match_id')!r}", key
+        return "", f"no positive match number in {item.get('match_id')!r}", key
     return build_match_id(year, tournament_id, sequence), "", key
 
 
@@ -1570,15 +1548,31 @@ def assign_match_numbers(
         for round_name, count in zip(round_names, round_counts, strict=True):
             offsets[round_name] = offset
             offset += count
+        round_limits = dict(zip(round_names, round_counts, strict=True))
         round_indexes: dict[str, int] = {}
+        used: set[int] = set()
         for match in numbered:
             round_name = str(match.get("round") or "").lower()
             start = offsets.get(round_name)
-            if start is None:
+            limit = round_limits.get(round_name)
+            if start is None or limit is None:
                 continue
             index = round_indexes.get(round_name, 0)
-            match["match_num"] = start + index
             round_indexes[round_name] = index + 1
+            if index < limit:
+                match_num = start + index
+                match["match_num"] = match_num
+                used.add(match_num)
+        # Assign unmatched or overflow matches the smallest unused positive number.
+        next_num = 1
+        for match in numbered:
+            if match.get("match_num") is not None:
+                continue
+            while next_num in used:
+                next_num += 1
+            match["match_num"] = next_num
+            used.add(next_num)
+            next_num += 1
     else:
         for match_num, match in enumerate(numbered, start=1):
             match["match_num"] = match_num
@@ -1613,25 +1607,25 @@ def _fetch_page(page: Any, url: str, label: str) -> tuple[str, str]:
     """(html, "") or ("", reason) — one shared page, jitter around navigation.
 
     The run's single browser page navigates every archive year, tournament
-    results page, and Hawkeye URL, so the persistent profile's Cloudflare
-    clearance carries across all of them. Humanize discipline matches the
-    rankings flow: ``rankings._jitter()`` before and after the goto; the 3-8s
-    tournament/request pacing lives in the callers. A navigation/content
-    failure is classified into a skip reason — never raised, so one bad page
-    does not abort the run.
+    results page, and Hawkeye URL, so the persistent profile's session carries
+    across all of them. Humanize discipline matches the rankings flow:
+    ``rankings._jitter()`` before the goto and before the content inspection;
+    the 3-8s tournament/request pacing lives in the callers.
+
+    A navigation or content failure raises a runtime error; otherwise the
+    page's content is the successful response. A valid empty archive or results
+    page (no content) is still a successful response.
     """
     rankings._jitter()
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=RESULTS_NAV_TIMEOUT_MS)
     except Exception as exc:
-        return "", f"{label}: navigation failed ({type(exc).__name__}: {exc})"
+        raise RuntimeError(f"{label}: navigation failed") from exc
     rankings._jitter()
     try:
         body = page.content()
     except Exception as exc:
-        return "", f"{label}: page content failed ({type(exc).__name__}: {exc})"
-    if not body or not body.strip():
-        return "", f"{label}: empty page content"
+        raise RuntimeError(f"{label}: page content failed") from exc
     return body, ""
 
 
@@ -1716,16 +1710,18 @@ def _process_tournament(
         resolved = [match for match in resolved if match.get("match_id") in match_ids]
 
     hawkeye = fetch_hawkeye_batch(resolved, year=year, tournament_id=tournament_id, page=page)
-    draw_size = next(
-        (
-            _payload_int(payload.get("Tournament", {}).get("Singles"))
-            for item in hawkeye
-            if isinstance(payload := item.get("payload"), dict)
-            and isinstance(payload.get("Tournament"), dict)
-            and _payload_int(payload["Tournament"].get("Singles")) is not None
-        ),
-        None,
-    )
+    draw_size = None
+    for item in hawkeye:
+        payload = item.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        tournament_meta = payload.get("Tournament")
+        if not isinstance(tournament_meta, dict):
+            continue
+        parsed_draw_size = _payload_int(tournament_meta.get("Singles"))
+        if parsed_draw_size is not None and parsed_draw_size > 1:
+            draw_size = parsed_draw_size
+            break
     numbered = assign_match_numbers(resolved, draw_size=draw_size)
     match_numbers = {str(item.get("match_id")): item["match_num"] for item in numbered}
     for item in hawkeye:
@@ -1893,19 +1889,18 @@ def matches_flow(
             if err:
                 print(f"  Archive {year}: skipped ({err})")
                 continue
+            any_page_ok = True
             tournaments = extract_tournaments_from_archive(html, year)
             if not tournaments:
                 if year > date.today().year:
                     # A future archive legitimately lists nothing yet.
                     print(f"  Archive {year}: future year, no tournaments listed")
-                    any_page_ok = True
                 else:
                     print(
                         f"  Archive {year}: no tournaments parsed "
-                        "(Cloudflare challenge or markup change?)"
+                        "(no matches available or archive markup changed)"
                     )
                 continue
-            any_page_ok = True
             print(f"Archive {year}: {len(tournaments)} tournament(s) parsed")
             for tournament in in_window(tournaments, start, end):
                 tournament_id = tournament.get("tournament_id")
@@ -2002,7 +1997,7 @@ if __name__ == "__main__":
 
 
 def register_deployment() -> None:
-    """Create or update the Sunday-scheduled matches deployment."""
+    """Create or update the Tuesday-scheduled matches deployment."""
     repo_root = Path(__file__).resolve().parent.parent.parent
     # Prefect's sync return is typed as a coroutine union here.
     deployment = cast(
