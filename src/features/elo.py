@@ -46,6 +46,7 @@ from src.constants import (
     get_database_url,
 )
 from src.db.client import connection
+from src.features.elo_math import regress_rating
 
 # ETL records the shared watermark under this pipeline key; Elo reads the same row.
 ETL_PIPELINE = "dbt"
@@ -118,24 +119,6 @@ def expected_score(rating_a: float, rating_b: float) -> float:
 def k_factor(prior_matches: int) -> float:
     """Adaptive K: min(ELO_K_MIN, ELO_K_BASE + ELO_K_DIVISOR / (prior + 1))."""
     return min(ELO_K_MIN, ELO_K_BASE + ELO_K_DIVISOR / (prior_matches + 1))
-
-
-def regress_rating(rating: float, gap_days: int | None) -> float:
-    """Pull a stale rating toward 1500 after the inactivity grace period.
-
-    No regression through ``ELO_INACTIVITY_GRACE_DAYS``; then 1% of the
-    remaining distance to 1500 per further 7 days, capped at a total 50%
-    regression of the original distance.
-    """
-    if gap_days is None or gap_days <= ELO_INACTIVITY_GRACE_DAYS:
-        return rating
-    excess = gap_days - ELO_INACTIVITY_GRACE_DAYS
-    periods = excess // 7
-    if periods <= 0:
-        return rating
-    factor = (1.0 - ELO_INACTIVITY_REGRESS_PER_7D) ** periods
-    factor = max(factor, 1.0 - ELO_INACTIVITY_REGRESS_CAP)
-    return ELO_DEFAULT_RATING + (rating - ELO_DEFAULT_RATING) * factor
 
 
 def elo_source_hash(event: MatchEvent) -> str:

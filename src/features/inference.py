@@ -23,7 +23,7 @@ from src.constants import (
 )
 from src.db.client import execute_df, first_row_dict
 from src.features.columns import CANONICAL_SURFACES, FEATURE_COLS
-from src.features.elo import regress_rating
+from src.features.elo_math import regress_rating
 from src.features.tour_averages import load_tour_averages
 
 VALID_SURFACES = CANONICAL_SURFACES
