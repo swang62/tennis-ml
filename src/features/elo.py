@@ -9,8 +9,7 @@ TIMESTAMPTZ). ETL advances that watermark only after base dbt, this Elo phase,
 and the final ``gold.match_features`` build all succeed. This materializer reads
 the shared watermark to select new matches and to fail closed on historical
 corrections; it never advances progress itself, so a rerun after a later-phase
-failure rebuilds or reuses the snapshots it already wrote without rating a match
-twice.
+failure reuses the snapshots it already wrote without rating a match twice.
 
 The core is pure (the per-match math) and the database boundary is a small
 repository protocol, so behavior is testable without a live database. The real
@@ -233,17 +232,12 @@ def _process_event(
     return [snap1, snap2]
 
 
-def _run(repo: EloRepo, rebuild: bool = False) -> EloRunResult:
+def _run(repo: EloRepo) -> EloRunResult:
     # Shared progress watermark (TIMESTAMPTZ) from bronze.etl_state. Elo reads it
     # but never advances it: ETL owns final advancement after every phase succeeds.
     watermark = repo.get_watermark()
 
-    if rebuild:
-        # Full rebuild: clear every stored snapshot and replay the whole source
-        # history cold, so results are reproducible from bronze alone. The
-        # append-only validation and stored-prior seeding below are skipped.
-        repo.clear_snapshots()
-    elif watermark is not None:
+    if watermark is not None:
         # Fail closed before any mutation: every source match at/before the shared
         # watermark must already be snapshotted with matching content. A historical
         # insert or change slips in with an old ingested_at (<= watermark) and is
@@ -252,12 +246,12 @@ def _run(repo: EloRepo, rebuild: bool = False) -> EloRunResult:
         if repo.count_events_through(watermark) != repo.count_snapshots_through(watermark):
             raise EloHistoryChanged(
                 "source match introduced at/before the shared ETL watermark "
-                f"{watermark}; rebuild Elo explicitly"
+                f"{watermark}; run seed --reset before rebuilding"
             )
         if repo.count_mismatched_history(watermark) > 0:
             raise EloHistoryChanged(
                 "source match content changed at/before the shared ETL watermark "
-                f"{watermark}; rebuild Elo explicitly"
+                f"{watermark}; run seed --reset before rebuilding"
             )
 
     # Copy the two Elo source tables into local DuckDB once, then run every read
@@ -265,7 +259,7 @@ def _run(repo: EloRepo, rebuild: bool = False) -> EloRunResult:
     # rating loop never touches Postgres.
     print("ELO SNAPSHOT: generating snapshot of matches")
     snapshot_started = time.perf_counter()
-    events = repo.snapshot_events(None if rebuild else watermark)
+    events = repo.snapshot_events(watermark)
     print(
         f"ELO SNAPSHOT: captured {len(events)} matches in "
         f"{time.perf_counter() - snapshot_started:.1f}s"
@@ -323,17 +317,13 @@ def _run(repo: EloRepo, rebuild: bool = False) -> EloRunResult:
 # --------------------------------------------------------------------------- #
 
 
-def materialize_elo(repo: EloRepo | None = None, rebuild: bool = False) -> EloRunResult:
+def materialize_elo(repo: EloRepo | None = None) -> EloRunResult:
     """Materialize Elo snapshots for all unprocessed matches.
 
     With no ``repo`` the project's PostgreSQL connection is used. Pass a
     repository (e.g. a hermetic fake) to test the logic without a database.
 
-    ``rebuild=True`` clears every stored snapshot first and replays the whole
-    source history cold, so results are reproducible from bronze alone. It is
-    used by a full-refresh ETL; the append-only path (prior-chaining from stored
-    snapshots, skipping already-snapshotted matches) is reserved for incremental
-    ingestion.
+    It preserves existing snapshots and processes only matches without snapshots.
 
     This does not advance pipeline progress; ETL advances bronze.etl_state only
     after base dbt, Elo, and gold.match_features all succeed.
@@ -341,10 +331,10 @@ def materialize_elo(repo: EloRepo | None = None, rebuild: bool = False) -> EloRu
     if repo is None:
         repo = PsycopgEloRepo()
         try:
-            return _run(repo, rebuild)
+            return _run(repo)
         finally:
             repo.close()
-    return _run(repo, rebuild)
+    return _run(repo)
 
 
 # --------------------------------------------------------------------------- #
@@ -360,7 +350,6 @@ class EloRepo(Protocol):
     def count_snapshots_through(self, watermark: datetime) -> int: ...
     def count_mismatched_history(self, watermark: datetime) -> int: ...
     def snapshot_events(self, watermark: datetime | None) -> list[MatchEvent]: ...
-    def clear_snapshots(self) -> None: ...
     def get_prior_overall_many(
         self, player_ids: set[str]
     ) -> dict[str, tuple[float, int, date]]: ...
@@ -635,12 +624,6 @@ class PsycopgEloRepo:
             (list(player_ids),),
         )
         return {row[0]: (float(row[1]), int(row[2]), row[3]) for row in self._cur.fetchall()}
-
-    def clear_snapshots(self) -> None:
-        # Runs in autocommit (set in __init__); truncate drops every stored row
-        # so a full rebuild replays the whole history cold. The cap_lineage PK or
-        # an FK-dependent table would block a bare TRUNCATE; none refer to this.
-        self._cur.execute(f"TRUNCATE {SILVER_ELO_SNAPSHOTS}")
 
     def insert_snapshots(self, rows: list[SnapshotRow]) -> None:
         # COPY streams the whole batch in one protocol operation (fastest bulk

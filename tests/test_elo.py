@@ -141,9 +141,6 @@ class MemoryEloRepo:
         sel.sort(key=self._key_ev)
         return list(sel)
 
-    def clear_snapshots(self):
-        self._snapshots.clear()
-
     def get_prior_overall(self, player_id):
         cands = [s for s in self._all_snapshots() if s["player_id"] == player_id]
         if not cands:
@@ -242,24 +239,6 @@ def test_first_match_uses_defaults_and_moves_rating():
     assert snaps["A"]["k_overall"] == pytest.approx(62.0)
     assert snaps["B"]["k_overall"] == pytest.approx(62.0)
     assert len(repo._snapshots) == 2
-
-
-def test_rebuild_ignores_stored_snapshots_and_watermark():
-    events = [
-        _ev("m1", "2024-01-01", 1, "hard", "A", "A", "B"),
-        _ev("m2", "2024-01-02", 2, "hard", "B", "A", "B"),
-    ]
-    repo = MemoryEloRepo(
-        events=events,
-        snapshots=[_snap_row("A", "stale", "2023-01-01", 1, "hard", "A", "A", "B", 1900.0)],
-        watermark=events[-1].ingested_at,
-    )
-
-    result = materialize_elo(repo=repo, rebuild=True)
-
-    assert result.processed == 2
-    assert result.snapshots == 4
-    assert {row["match_id"] for row in repo._snapshots} == {"m1", "m2"}
 
 
 def test_same_day_ordering_second_match_sees_first_update():

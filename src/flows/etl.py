@@ -249,7 +249,7 @@ def bronze_to_gold(incremental: bool = False) -> int:
     )
     if logger is not None:
         logger.info("ELO phase: rating new matches and materializing snapshots")
-    elo_result = materialize_elo(rebuild=not incremental)
+    elo_result = materialize_elo()
     elo_after = _elo_counts()
     skipped = max(0, elo_before["matches"] - elo_result.processed)
     print(
