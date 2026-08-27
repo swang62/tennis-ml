@@ -65,6 +65,13 @@ def selected_notebooks(promote_only: bool) -> list[str]:
     return ["04_evaluate.ipynb"] if promote_only else NB_ORDER
 
 
+def notebook_parameters(name: str, force_promote: bool) -> dict | None:
+    """Build the Papermill parameter dict for a notebook."""
+    if name == "04_evaluate.ipynb":
+        return {"force_promote": force_promote}
+    return None
+
+
 class _Tee:
     """Write to two streams: the real console and a capture file."""
 
@@ -113,11 +120,11 @@ if __name__ == "__main__":
             "Promotion-only pipeline starting..." if args.promote_only else "Pipeline starting..."
         )
         for name in selected_notebooks(args.promote_only):
-            parameters = (
-                {"force_promote": args.force_promote} if name == "04_evaluate.ipynb" else None
-            )
             # Tagged parameter cells own notebook defaults.
-            run_notebook(name, parameters=parameters)
+            run_notebook(
+                name,
+                parameters=notebook_parameters(name, args.force_promote),
+            )
 
         print(f"\n{'=' * 60}")
         print(" Pipeline complete.")

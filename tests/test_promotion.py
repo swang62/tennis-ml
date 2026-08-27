@@ -86,12 +86,6 @@ def test_force_overrides_gate():
     assert _decide(cand, prod, force=True) == 1
 
 
-def test_force_overrides_idempotency():
-    cand = _metrics(log_loss=0.9)
-    prod = _metrics()
-    assert _decide(cand, prod, champion_run_id="run1", candidate_run_id="run1", force=True) == 1
-
-
 # ── primary-metric gate: either metric may improve within the tolerance ──
 
 

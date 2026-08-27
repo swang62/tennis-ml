@@ -12,6 +12,7 @@ from sklearn.preprocessing import StandardScaler
 from starlette.testclient import TestClient
 
 from src.constants import STACK_ORDER
+from src.features import nn_inference as ni
 from src.features.columns import FEATURE_COLS, TOUR_AVERAGES_FALLBACK_COLS
 from src.serving.service import (
     DATA_APP,
@@ -459,10 +460,11 @@ class _ProbaModel:
 
 
 class _ONNXSession:
-    """Tiny ONNX-session stand-in returning a positive logit."""
+    """Tiny ONNX-session stand-in returning a positive logit per batch row."""
 
-    def run(self, _output_names: object, _inputs: object) -> list[np.ndarray]:
-        return [np.array([[2.0]])]  # sigmoid(2) ~ 0.88
+    def run(self, _output_names: object, inputs: Any) -> list[np.ndarray]:
+        batch = len(inputs["player_hist"])
+        return [np.full((batch, 1), 2.0)]  # sigmoid(2) ~ 0.88 per row
 
 
 def _fake_execute_df(sql: str, _params: list[object] | None = None) -> pd.DataFrame:
@@ -499,10 +501,20 @@ def test_predict_from_ids_preserves_caller_order():
     pred.gbdt = _ProbaModel(0.8)
     pred.production = _ProbaModel(0.9)
     pred.nn_session = _ONNXSession()
+    # Trivial identity preprocessing so the GRU input builder runs hermetically.
+    pred.nn_preprocessing = ni.GRUPreprocessing(
+        fill_stats=np.zeros(ni.N_RAW, dtype=np.float32),
+        scale_mean=np.zeros(ni.N_RAW, dtype=np.float32),
+        scale_scale=np.ones(ni.N_RAW, dtype=np.float32),
+    )
+
+    def _empty_gru_history(_sql, _params=None):
+        return pd.DataFrame()
 
     with (
         patch("src.features.inference.execute_df", side_effect=_fake_execute_df),
         patch("src.features.tour_averages.execute_df", side_effect=_fake_execute_df),
+        patch("src.features.nn_inference.execute_df", side_effect=_empty_gru_history),
     ):
         ab = pred.predict_from_ids(
             PredictFromIdsRow(
@@ -527,6 +539,61 @@ def test_predict_from_ids_preserves_caller_order():
     assert ba["player_id"] == "Z355"
     assert ba["opponent_id"] == "S0AG"
     assert ba["predicted_winner"] == "Z355"
+
+
+def _make_predictor() -> Any:
+    """Return a partially-initialized TennisPredictor for hermetic prediction tests."""
+    pred = cast(Any, object.__new__(TennisPredictor.inner))  # type: ignore[attr-defined,arg-type]
+    pred._stack_order = list(STACK_ORDER)
+    pred.scaler = StandardScaler().fit(
+        pd.DataFrame(np.zeros((1, len(FEATURE_COLS))), columns=FEATURE_COLS)
+    )
+    pred.linear = _ProbaModel(0.8)
+    pred.gbdt = _ProbaModel(0.8)
+    pred.production = _ProbaModel(0.9)
+    pred.nn_session = _ONNXSession()
+    pred.nn_preprocessing = ni.GRUPreprocessing(
+        fill_stats=np.zeros(ni.N_RAW, dtype=np.float32),
+        scale_mean=np.zeros(ni.N_RAW, dtype=np.float32),
+        scale_scale=np.ones(ni.N_RAW, dtype=np.float32),
+    )
+    return pred
+
+
+def test_predict_from_ids_bulk_preserves_caller_order_and_gru_path():
+    """Bulk prediction builds paired GRU inputs per row and preserves input order."""
+    pred = _make_predictor()
+
+    def _empty_gru_history(_sql, _params=None):
+        return pd.DataFrame()
+
+    def _fake_bulk_build(rows):
+        out = []
+        for r in rows:
+            pid = r["player_id"] if isinstance(r, dict) else r.player_id
+            oid = r["opponent_id"] if isinstance(r, dict) else r.opponent_id
+            out.append({**dict.fromkeys(FEATURE_COLS, 0.0), "player_id": pid, "opponent_id": oid})
+        return pd.DataFrame(out)
+
+    rows = [
+        PredictFromIdsRow(
+            player_id="S0AG", opponent_id="Z355", surface=Surface.HARD, best_of=BestOf.BO3
+        ),
+        PredictFromIdsRow(
+            player_id="Z355", opponent_id="S0AG", surface=Surface.CLAY, best_of=BestOf.BO5
+        ),
+    ]
+    with (
+        patch("src.features.inference.build_inference_features_bulk", side_effect=_fake_bulk_build),
+        patch("src.features.nn_inference.execute_df", side_effect=_empty_gru_history),
+    ):
+        out = pred.predict_from_ids_bulk(rows)
+
+    assert [r["player_id"] for r in out] == ["S0AG", "Z355"]
+    assert [r["opponent_id"] for r in out] == ["Z355", "S0AG"]
+    for r in out:
+        assert "p_nn" in r
+        assert 0.0 <= float(r["p_nn"]) <= 1.0
 
 
 def test_predict_from_ids_schema_derives_context_and_defaults():

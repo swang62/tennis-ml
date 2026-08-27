@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import builtins
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.features.nn_inference import GRUBatch, GRUPreprocessing
 import math
 from datetime import date, datetime
 from numbers import Real
@@ -826,3 +830,19 @@ def build_inference_features_bulk(rows: list[dict[str, object]]) -> pd.DataFrame
     out = pd.DataFrame(out_rows, columns=[*FEATURE_COLS, "player_id", "opponent_id"])
     assert not out.isnull().to_numpy().any(), "bulk inference rows contain NaN"
     return out
+
+
+def build_gru_request_inputs(
+    rows: list[dict[str, object]],
+    preprocessing: GRUPreprocessing,
+) -> GRUBatch:
+    """Build runtime GRU (``nn``) tensors from raw request dicts.
+
+    Delegates to :mod:`src.features.nn_inference`, which first builds the
+    validated directional rows via :func:`build_inference_features_bulk`, then
+    constructs set-wise GRU history/context tensors. Imported lazily to keep the
+    heavy GRU transform path out of callers that never need it.
+    """
+    from src.features import nn_inference
+
+    return nn_inference.build_gru_request_inputs(rows, preprocessing)

@@ -1,12 +1,12 @@
-"""Causal sequence-history preparation for the GRU discovery notebook.
+"""Causal sequence-history preparation for the production GRU (``nn``) workflow.
 
 Reads the needed columns from the DuckDB training snapshot's
 ``silver.player_matches`` table once, in a single globally-ordered query, and
 builds an in-RAM ``float32`` history store keyed by ``(player_id, match_id)``.
 Each entry holds the player's up-to-10 causal prior matches, left-padded. Missing
-numeric values remain NaN until fit-band imputation. The store is shared
-by all discovery trials; imputation is applied separately per fit band so it
-stays fold-safe.
+numeric values remain NaN until fit-band imputation. The store is shared by the
+production workflow; imputation and standardization are applied separately per
+fit band (e.g. each OOF fold) so they stay fold-safe.
 
 No per-target queries, no dataframe self-joins, no Postgres/network access at
 history-build time, no rolling aggregates, and no dbt/schema/cache changes here.
@@ -18,16 +18,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-import duckdb
 import numpy as np
 import pandas as pd
 
 from src.db.snapshot import SNAPSHOT_PATH
 
-# Fixed history geometry shared by the discovery model.
+# Fixed history geometry shared by the production GRU (nn) model.
 HISTORY_LEN = 10
 N_RAW = 18  # raw timestep values retained from each player-perspective row
-STORE_WIDTH = N_RAW  # missing values are fit-band imputed before batching
+STORE_WIDTH = N_RAW  # missing values are fit-band imputed and scaled before batching
 
 # Raw timestep feature order. Missing numeric values remain NaN until fit-band
 # imputation; valid_mask still distinguishes padding from a real record.
@@ -99,7 +98,7 @@ ORDER BY match_date, match_num, match_id
 
 
 def read_player_match_history_df(
-    snapshot: str | Path | duckdb.DuckDBPyConnection | pd.DataFrame = SNAPSHOT_PATH,
+    snapshot: str | Path | object | pd.DataFrame = SNAPSHOT_PATH,
 ) -> pd.DataFrame:
     """Fetch all player-perspective rows once, globally ordered for causality.
 
@@ -116,6 +115,8 @@ def read_player_match_history_df(
     if isinstance(snapshot, pd.DataFrame):
         df = snapshot.copy()
     else:
+        import duckdb
+
         con = (
             duckdb.connect(str(snapshot), read_only=True)
             if not isinstance(snapshot, duckdb.DuckDBPyConnection)
@@ -144,6 +145,10 @@ class HistoryStore:
         """Return a finite store copy filled with fit-band statistics."""
         fill = compute_fill_stats(self, np.asarray(fit_store_indices))
         return apply_imputation(self, fill)
+
+    def impute_and_scale(self, fit_store_indices: np.ndarray) -> np.ndarray:
+        """Finite, standardized copy from fit-band imputation and scaling."""
+        return impute_and_scale(self, fit_store_indices)
 
     def gather(
         self,
@@ -203,7 +208,7 @@ def _transform_rows(df: pd.DataFrame) -> np.ndarray:
     return raw
 
 
-def build_history_store(df: pd.DataFrame) -> HistoryStore:
+def build_history_store(df: pd.DataFrame, strict_as_of: bool = False) -> HistoryStore:
     """Build the causal history store from an ordered player-match frame.
 
     ``df`` must be sorted by ``(match_date, match_num, match_id)``; use
@@ -211,6 +216,12 @@ def build_history_store(df: pd.DataFrame) -> HistoryStore:
     hermetic frame in tests. Each entry's history is the snapshot of that
     player's rolling buffer taken *before* the current row is appended, so the
     target's own row never enters either its own or its opponent's history.
+
+    When ``strict_as_of`` is true, a prior row is only included if its match date
+    is strictly before the current row's match date, dropping same-date rows.
+    This mirrors the serving time boundary, where a request as-of date excludes
+    every match on that date. The default (False) keeps same-day-earlier matches
+    as legitimate priors, which the discovery tests rely on.
     """
     required = {
         "match_id",
@@ -222,8 +233,8 @@ def build_history_store(df: pd.DataFrame) -> HistoryStore:
         "match_won",
         "player_ranking",
         "player_rank_points",
-        "opponent_rank_points",
         "opponent_ranking",
+        "opponent_rank_points",
         "aces",
         "double_faults",
         "first_serves_made",
@@ -248,20 +259,37 @@ def build_history_store(df: pd.DataFrame) -> HistoryStore:
     valid_mask = np.zeros((n, HISTORY_LEN), dtype=bool)
     player_ids = work["player_id"].to_numpy()
     match_ids = work["match_id"].to_numpy()
+    match_dates = work["match_date"].to_numpy()
     index: dict[tuple[str, str], int] = {}
 
     buffers: dict[str, list[int]] = {}
+    buffer_dates: dict[str, list] = {}
     for i in range(n):
         pid = player_ids[i]
+        d_i = match_dates[i]
         buf = buffers.setdefault(pid, [])
-        count = len(buf)
-        for pos, src in enumerate(buf):
-            slot = HISTORY_LEN - count + pos
+        bdates = buffer_dates.setdefault(pid, [])
+        if strict_as_of:
+            prior = [(s, dt) for s, dt in zip(buf, bdates, strict=True) if dt < d_i]
+        else:
+            prior = list(zip(buf, bdates, strict=True))
+        window = prior[-HISTORY_LEN:] if len(prior) > HISTORY_LEN else prior
+        n_valid = len(window)
+        for pos, (src, _dt) in enumerate(window):
+            slot = HISTORY_LEN - n_valid + pos
             histories[i, slot] = raw[src]
             valid_mask[i, slot] = True
         buf.append(i)
-        if len(buf) > HISTORY_LEN:
+        bdates.append(d_i)
+        if strict_as_of:
+            # Keep the current date unpruned until it ends; same-day rows are
+            # invalid for today's targets but become valid priors tomorrow.
+            if i + 1 == n or match_dates[i + 1] != d_i:
+                buf[:] = buf[-HISTORY_LEN:]
+                bdates[:] = bdates[-HISTORY_LEN:]
+        elif len(buf) > HISTORY_LEN:
             buf.pop(0)
+            bdates.pop(0)
         index[(pid, match_ids[i])] = i
 
     return HistoryStore(
@@ -326,3 +354,49 @@ def apply_imputation(store: HistoryStore, fill: np.ndarray) -> np.ndarray:
         target = v & ~np.isfinite(out[..., j])
         out[..., j][target] = fill[j]
     return out
+
+
+def compute_scale_stats(
+    store: HistoryStore, fit_store_indices: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-raw-column mean/std over finite valid history entries of fit targets.
+
+    Computed from strictly-earlier fit data only; used to standardize valid
+    timesteps while leaving zero padding untouched.
+    """
+    h = store.histories[np.asarray(fit_store_indices)]
+    v = store.valid_mask[np.asarray(fit_store_indices)]
+    mean = np.zeros(N_RAW, dtype=np.float32)
+    scale = np.ones(N_RAW, dtype=np.float32)
+    for j in range(N_RAW):
+        present = v & np.isfinite(h[..., j])
+        vals = h[..., j][present]
+        if vals.size:
+            mean[j] = vals.mean()
+            std = vals.std()
+            scale[j] = std if std > 0 else 1.0
+    return mean, scale
+
+
+def apply_scaling(
+    histories: np.ndarray, valid_mask: np.ndarray, mean: np.ndarray, scale: np.ndarray
+) -> np.ndarray:
+    """Standardize valid timesteps only; zero-padded slots stay at zero."""
+    out = histories.copy()
+    for j in range(N_RAW):
+        tgt = valid_mask & np.isfinite(out[..., j])
+        out[..., j][tgt] = ((out[..., j][tgt] - mean[j]) / scale[j]).astype(np.float32)
+    return out
+
+
+def impute_and_scale(store: HistoryStore, fit_store_indices: np.ndarray) -> np.ndarray:
+    """Finite, standardized copy from fit-band imputation and scaling.
+
+    Imputation fills missing valid values with the per-column fit mean; scaling
+    standardizes every valid entry. Zero padding is preserved untouched so the
+    model's length/mask handling remains correct.
+    """
+    fit_store_indices = np.unique(np.asarray(fit_store_indices, dtype=np.int64))
+    imputed = store.impute(fit_store_indices)
+    mean, scale = compute_scale_stats(store, fit_store_indices)
+    return apply_scaling(imputed, store.valid_mask, mean, scale)

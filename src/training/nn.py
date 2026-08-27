@@ -103,15 +103,22 @@ class SymmetricGRU(L.LightningModule):
         cols = torch.arange(seq_len, device=hist.device).unsqueeze(0)
         src = (seq_len - lengths.unsqueeze(1) + cols).clamp(min=0, max=seq_len - 1)
         aligned = hist.gather(1, src.unsqueeze(-1).expand(*src.shape, hist.size(2)))
-        # Pack with clamped lengths; empties fall back to the zero-history embedding.
-        packed = nn.utils.rnn.pack_padded_sequence(
-            aligned, lengths.clamp(min=1).cpu(), batch_first=True, enforce_sorted=False
+        # Run the full (left-aligned) sequence and read the hidden state at the
+        # last valid timestep. This is numerically identical to packing (which
+        # stops after the last valid step) but exports cleanly to ONNX Runtime.
+        out, _ = self.gru(aligned)
+        last = (
+            (lengths.clamp(min=1) - 1)
+            .unsqueeze(1)
+            .unsqueeze(2)
+            .expand(batch, 1, self.gru.hidden_size)
         )
-        _, h_n = self.gru(packed)
-        emb = h_n.squeeze(0)
+        emb = out.gather(1, last).squeeze(1)
+        # Trailing padding (after the last valid step) never affects `last`;
+        # empties fall back to the zero-history embedding (branchless so the
+        # graph stays exportable to ONNX Runtime).
         empty = lengths == 0
-        if bool(empty.any()):
-            emb = torch.where(empty.unsqueeze(1), self.zero_emb.unsqueeze(0), emb)
+        emb = torch.where(empty.unsqueeze(1), self.zero_emb.unsqueeze(0), emb)
         return emb
 
     def _score(
