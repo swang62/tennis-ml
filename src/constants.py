@@ -57,8 +57,8 @@ SIM_SURFACE_WEIGHT = 0.25
 BATCH_MAX_SIZE_ROWS = 1000
 BULK_MAX_ROWS = 1000
 CV_FOLDS = 5
+DAYS_SINCE_LAST_MATCH_MAX = 90
 ENRICH_WORKERS = 4
-MIN_TRAINING_DATE = date(1990, 1, 1)
 OPTUNA_PRUNER_INTERVAL_STEPS = 10
 OPTUNA_PRUNER_MIN_TRIALS = 10
 OPTUNA_PRUNER_STARTUP_TRIALS = 30
@@ -66,14 +66,11 @@ OPTUNA_PRUNER_WARMUP_STEPS = 50
 PROMOTION_TOLERANCE = 0.01
 RECENCY_HALF_LIFE_DAYS = 8 * 365.25
 
-###### Feature Engineering Parameters #####
+###### Data split #####
 
-# Upper bound (days) for the prior rest-days feature: known ages and missing or
-# stale (no snapshot) ages both cap at this value; no tour-average fallback.
-DAYS_SINCE_CAP_DAYS = 90
-
-TRAIN_FRACTION = 0.85
-TEST_FRACTION = 0.10
+MIN_TRAINING_DATE = date(1990, 1, 1)
+TRAIN_FRACTION = 0.9
+TEST_FRACTION = 0.05
 VAL_FRACTION = 0.05
 
 assert abs(TRAIN_FRACTION + VAL_FRACTION + TEST_FRACTION - 1.0) < 1e-9

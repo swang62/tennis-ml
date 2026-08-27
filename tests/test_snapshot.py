@@ -60,10 +60,13 @@ def _write_valid_snapshot(
     try:
         con.execute("CREATE SCHEMA gold")
         con.execute("CREATE SCHEMA bronze")
+        con.execute("CREATE SCHEMA silver")
         col_sql = ", ".join(f'"{c}" INTEGER' for c in columns)
         con.execute(f"CREATE TABLE gold.match_features ({col_sql})")
         con.execute("CREATE TABLE gold.player_profiles (player_id VARCHAR PRIMARY KEY)")
         con.execute("CREATE TABLE bronze.player_profiles (player_id VARCHAR PRIMARY KEY)")
+        con.execute("CREATE TABLE silver.player_matches (match_id INTEGER)")
+        con.execute("INSERT INTO silver.player_matches VALUES (1)")
         if extra_table:
             con.execute(f"CREATE TABLE gold.{extra_table} (x INTEGER)")
         if not empty:
@@ -198,10 +201,13 @@ def test_validate_rejects_missing_best_of_column(tmp_path) -> None:
     try:
         con.execute("CREATE SCHEMA gold")
         con.execute("CREATE SCHEMA bronze")
+        con.execute("CREATE SCHEMA silver")
         col_sql = ", ".join(f'"{c}" INTEGER' for c in columns)
         con.execute(f"CREATE TABLE gold.match_features ({col_sql})")
         con.execute("CREATE TABLE gold.player_profiles (player_id VARCHAR PRIMARY KEY)")
         con.execute("CREATE TABLE bronze.player_profiles (player_id VARCHAR PRIMARY KEY)")
+        con.execute("CREATE TABLE silver.player_matches (match_id INTEGER)")
+        con.execute("INSERT INTO silver.player_matches VALUES (1)")
         placeholders = ", ".join(["?"] * len(columns))
         con.executemany(
             f"INSERT INTO gold.match_features VALUES ({placeholders})",
@@ -254,8 +260,7 @@ def test_refresh_failure_cleans_temp_when_validation_fails(tmp_path, monkeypatch
 
 
 def test_refresh_snapshot_copies_exactly_the_snapshot_tables(tmp_path, monkeypatch) -> None:
-    """refresh_snapshot installs exactly the snapshot tables (two gold tables
-    plus bronze profile metadata), exact column order, atomically."""
+    """refresh_snapshot installs exactly the snapshot tables atomically."""
     p = tmp_path / "live_snap.duckdb"
 
     def fake_copy(tmp: "os.PathLike[str]", _pg_url: str) -> None:
@@ -446,10 +451,13 @@ def test_validate_rejects_removed_weighted_form_order(tmp_path) -> None:
     try:
         con.execute("CREATE SCHEMA gold")
         con.execute("CREATE SCHEMA bronze")
+        con.execute("CREATE SCHEMA silver")
         col_sql = ", ".join(f'"{c}" INTEGER' for c in columns)
         con.execute(f"CREATE TABLE gold.match_features ({col_sql})")
         con.execute("CREATE TABLE gold.player_profiles (player_id VARCHAR PRIMARY KEY)")
         con.execute("CREATE TABLE bronze.player_profiles (player_id VARCHAR PRIMARY KEY)")
+        con.execute("CREATE TABLE silver.player_matches (match_id INTEGER)")
+        con.execute("INSERT INTO silver.player_matches VALUES (1)")
     finally:
         con.close()
     with pytest.raises(snapshot.SnapshotError, match="do not match"):
