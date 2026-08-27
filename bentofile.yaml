@@ -7,6 +7,7 @@ include:
   - "infra/postgres/schema.sql"
   - "models/deploy/linear_scaler.pkl"
   - "models/deploy/nn_best.onnx"
+  - "models/deploy/nn_preprocessing.json"
   - "models/deploy/player_similarity.index"
   - "models/deploy/player_metadata.json"
   - "models/deploy/model_info.json"

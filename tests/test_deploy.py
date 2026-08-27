@@ -1,10 +1,13 @@
 """Local deployment artifact and manifest tests."""
 
 import contextlib
+import hashlib
 import importlib
+import json
 import subprocess
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 
@@ -465,3 +468,96 @@ def test_deploy_bento_failure_raises_and_logs_diagnostic(tmp_path, monkeypatch, 
     log_text = logs[0].read_text()
     assert "CHILD_ERR_LINE" in log_text  # child output retained in the log
     assert "Deploy step failed" in log_text  # failure diagnostic logged too
+
+
+# --- GRU (nn) preprocessing artifact: validation and download ---
+
+
+def _good_gru_preprocessing_artifact():
+    """Build a notebook-shaped ``nn_preprocessing.json`` matching the producer."""
+    import src.constants as c
+    import src.features.nn_inference as ni
+
+    artifact = {
+        "artifact_name": c.NN_PREPROCESSING_ARTIFACT,
+        "history_len": ni.HISTORY_LEN,
+        "n_raw_features": ni.N_RAW,
+        "n_context_features": len(ni.GRU_CONTEXT_NAMES),
+        "raw_feature_names": list(ni.GRU_RAW_NAMES),
+        "context_feature_names": list(ni.GRU_CONTEXT_NAMES),
+        "fill": [0.0] * ni.N_RAW,
+        "history_mean": [0.0] * ni.N_RAW,
+        "history_scale": [1.0] * ni.N_RAW,
+        "context_mean": [0.0] * len(ni.GRU_CONTEXT_NAMES),
+        "context_scale": [1.0] * len(ni.GRU_CONTEXT_NAMES),
+    }
+    artifact["content_hash"] = hashlib.sha256(
+        json.dumps(
+            {k: v for k, v in artifact.items() if k != "artifact_name"}, sort_keys=True
+        ).encode()
+    ).hexdigest()
+    return artifact
+
+
+def test_load_gru_preprocessing_roundtrip_and_rejects_bad_schema(tmp_path):
+    """A valid artifact loads; schema/name mismatches are rejected."""
+    import src.constants as c
+    from src.features.nn_inference import load_gru_preprocessing
+
+    good = _good_gru_preprocessing_artifact()
+    path = tmp_path / c.NN_PREPROCESSING_ARTIFACT
+    path.write_text(json.dumps(good))
+
+    loaded = load_gru_preprocessing(path)
+    assert list(loaded.raw_names) == good["raw_feature_names"]
+    assert list(loaded.context_names) == good["context_feature_names"]
+
+    bad2 = dict(good)
+    bad2["context_feature_names"] = ["wrong"]
+    bad2_path = tmp_path / "bad2.json"
+    bad2_path.write_text(json.dumps(bad2))
+    with pytest.raises(RuntimeError, match="context_feature_names"):
+        load_gru_preprocessing(bad2_path)
+
+
+def test_materialize_nn_preprocessing_downloads_and_validates(monkeypatch, tmp_path):
+    """A tagged champion preprocessing artifact is downloaded, hash-verified,
+    and schema-validated before packaging."""
+    import mlflow.artifacts
+
+    import src.constants as c
+
+    d = _deploy()
+    monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", tmp_path)
+
+    good = _good_gru_preprocessing_artifact()
+    src_file = tmp_path / "remote" / c.NN_PREPROCESSING_ARTIFACT
+    src_file.parent.mkdir(parents=True, exist_ok=True)
+    src_file.write_text(json.dumps(good))
+    tags = {
+        c.NN_PREPROCESSING_URI_TAG: f"runs:/run-nn/{c.NN_PREPROCESSING_ARTIFACT}",
+        c.NN_PREPROCESSING_HASH_TAG: d._file_hash(src_file),
+    }
+
+    downloaded = []
+
+    def fake_download(uri, dst_path=None):
+        target = Path(dst_path or ".") / c.NN_PREPROCESSING_ARTIFACT
+        target.write_bytes(src_file.read_bytes())
+        downloaded.append(uri)
+        return str(target)
+
+    monkeypatch.setattr(mlflow.artifacts, "download_artifacts", fake_download)
+    d._materialize_nn_preprocessing(None, tags)
+    assert downloaded == [tags[c.NN_PREPROCESSING_URI_TAG]]
+    assert (tmp_path / c.NN_PREPROCESSING_ARTIFACT).exists()
+
+
+def test_materialize_nn_preprocessing_requires_tags(monkeypatch, tmp_path):
+    """A GRU build without the preprocessing lineage tags fails fast."""
+    import src.constants as c
+
+    d = _deploy()
+    monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", tmp_path)
+    with pytest.raises(RuntimeError, match="preprocessing lineage tags"):
+        d._materialize_nn_preprocessing(None, {c.CALIBRATION_URI_TAG: "x"})

@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.training import gru_history as gh
+from src.training import nn_history as gh
 
 RAW = gh.GRU_RAW_NAMES
 HIST = gh.HISTORY_LEN

@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 import torch
 
-from src.training import gru_history as gh
+from src.training import nn_history as gh
 from src.training.nn import SymmetricGRU
 
 HIST_DIM = gh.STORE_WIDTH  # 15

@@ -6,7 +6,7 @@ import logging
 import math
 import os
 import pickle
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import date, datetime
 from decimal import Decimal
 from enum import IntEnum, StrEnum
@@ -36,6 +36,7 @@ from src.constants import (
     FRAMEWORK_KEY,
     GOLD_PROFILES_TABLE,
     GOLD_TOUR_AVERAGES_TABLE,
+    NN_PREPROCESSING_ARTIFACT,
     PRODUCTION_MODEL,
     SILVER_PLAYER_MATCHES,
     STACK_ORDER,
@@ -51,6 +52,11 @@ from src.features.inference import (
     _build_inference_features_with_meta,
     _to_date,
     build_inference_features_bulk,
+)
+from src.features.nn_inference import (
+    GRUBatch,
+    build_gru_inputs_bulk,
+    load_gru_preprocessing,
 )
 from src.serving.directory import PLAYERS_SQL, directory_players
 from src.training.similarity import PlayerSimilarity
@@ -366,6 +372,18 @@ def _positive_class_probability(model: Any, features: Any) -> np.ndarray:
     return np.asarray(model.predict_proba(features))[:, matches[0]]
 
 
+def _antisymmetric_nn_probs(nn_ab: Any, nn_ba: Any) -> tuple[np.ndarray, np.ndarray]:
+    """Combine AB/BA GRU logits into one antisymmetric logit and complementary probs.
+
+    The GRU forward is antisymmetric by construction, but the combined logit
+    ``(logit_ab - logit_ba) / 2`` makes the pairing exact: swapping the
+    orientation negates it, so ``p_nn_ab + p_nn_ba == 1`` to floating point.
+    """
+    combined = 0.5 * (np.asarray(nn_ab, dtype=float) - np.asarray(nn_ba, dtype=float))
+    p_ab = 1.0 / (1.0 + np.exp(-combined))
+    return p_ab, 1.0 - p_ab
+
+
 def _stack_evidence(
     pairs: dict[str, tuple[float, float]],
     stacker: Any,
@@ -469,9 +487,10 @@ def _predict_from_ids_bulk_impl(
     ]
     feature_ab = build_inference_features_bulk(normalized)
     feature_ba = build_inference_features_bulk(reversed_)
-    proba_df = cast(Callable[[pd.DataFrame, pd.DataFrame], pd.DataFrame], predict_proba)(
-        feature_ab, feature_ba
-    )
+    as_of_dates = [_to_date(r["as_of_date"]) for r in normalized]
+    proba_df = cast(
+        Callable[[pd.DataFrame, pd.DataFrame, Sequence[date]], pd.DataFrame], predict_proba
+    )(feature_ab, feature_ba, as_of_dates)
     out = feature_ab.copy()
     for col in ("p_linear", "p_gbdt", "p_nn", "p_win"):
         out[col] = proba_df[col].to_numpy()
@@ -985,6 +1004,10 @@ class TennisPredictor:
             if _old_omp is not None:
                 os.environ["OMP_NUM_THREADS"] = _old_omp
         self.production: Any = bentoml.sklearn.load_model(self.bento_production)
+        # GRU (nn) serving: the raw model is exported to ONNX; its preprocessing
+        # statistics are loaded alongside so histories use the exact fit-band
+        # fill/scale applied during training. No Torch/MLflow at runtime.
+        self.nn_preprocessing = load_gru_preprocessing(AUX_DIR / NN_PREPROCESSING_ARTIFACT)
         self.nn_session = ort.InferenceSession(str(AUX_DIR / "nn_best.onnx"))
 
         with open(AUX_DIR / "linear_scaler.pkl", "rb") as f:
@@ -992,7 +1015,24 @@ class TennisPredictor:
         _validate_feature_contract(self.scaler, "linear_scaler.pkl")
         self.temperature = _load_serving_temperature()
 
-    def _predict_proba(self, row_ab: pd.DataFrame, row_ba: pd.DataFrame) -> pd.DataFrame:
+    def _gru_logits(self, batch: GRUBatch) -> np.ndarray:
+        """Run the GRU ONNX session over a paired batch; return [B] logits."""
+        inputs = {
+            "player_hist": batch.player_hist.astype(np.float32),
+            "opponent_hist": batch.opponent_hist.astype(np.float32),
+            "player_valid": batch.player_mask.astype(np.float32),
+            "opponent_valid": batch.opponent_mask.astype(np.float32),
+            "context": batch.context.astype(np.float32),
+        }
+        out = self.nn_session.run(None, inputs)[0]
+        return np.asarray(out).reshape(-1)
+
+    def _predict_proba(
+        self,
+        row_ab: pd.DataFrame,
+        row_ba: pd.DataFrame,
+        as_of_dates: Sequence[date],
+    ) -> pd.DataFrame:
         """Score paired orientations through the stacker without an HTTP call."""
         started_at = perf_counter()
         if len(row_ab) != len(row_ba):
@@ -1015,14 +1055,19 @@ class TennisPredictor:
         p_gbdt_ab = _positive_class_probability(self.gbdt, features_ab)
         p_gbdt_ba = _positive_class_probability(self.gbdt, features_ba)
         gbdt_ms = (perf_counter() - gbdt_started_at) * 1000
-        # ONNX input matches the training forward signature (tab-only).
-        nn_inputs_ab = {"tab": scaled_ab.astype(np.float32)}
-        nn_inputs_ba = {"tab": scaled_ba.astype(np.float32)}
+        # GRU path: build both paired orientations from PostgreSQL and score each
+        # with ONNX Runtime. The combined antisymmetric logit enforces the
+        # p_nn_ab + p_nn_ba == 1 symmetry boundary.
         nn_started_at = perf_counter()
-        nn_ab = np.asarray(self.nn_session.run(None, nn_inputs_ab)[0])
-        nn_ba = np.asarray(self.nn_session.run(None, nn_inputs_ba)[0])
-        p_nn_ab = 1.0 / (1.0 + np.exp(-nn_ab.reshape(-1)))
-        p_nn_ba = 1.0 / (1.0 + np.exp(-nn_ba.reshape(-1)))
+        gru_ab = build_gru_inputs_bulk(
+            row_ab, as_of_dates=as_of_dates, preprocessing=self.nn_preprocessing
+        )
+        gru_ba = build_gru_inputs_bulk(
+            row_ba, as_of_dates=as_of_dates, preprocessing=self.nn_preprocessing
+        )
+        nn_ab = self._gru_logits(gru_ab)
+        nn_ba = self._gru_logits(gru_ba)
+        p_nn_ab, p_nn_ba = _antisymmetric_nn_probs(nn_ab, nn_ba)
         nn_ms = (perf_counter() - nn_started_at) * 1000
 
         # Stack antisymmetric evidence per row through the no-intercept stacker.
@@ -1114,7 +1159,11 @@ class TennisPredictor:
                 best_of=row.best_of.value,
             )
             # Reuse the shared prediction path (no nested HTTP - see _predict_proba).
-            out_df = self._predict_proba(row_ab, row_ba)
+            out_df = self._predict_proba(
+                row_ab,
+                row_ba,
+                [_to_date(meta["as_of_date"])],
+            )
         except Exception:
             _log.exception("predict_from_ids failed")
             raise InvalidArgument("prediction failed - check input parameters") from None

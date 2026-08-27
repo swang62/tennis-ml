@@ -41,6 +41,9 @@ from src.constants import (
     LINEAGE_VERSION_KEY,
     LOGS,
     MODELS_ARTIFACTS,
+    NN_PREPROCESSING_ARTIFACT,
+    NN_PREPROCESSING_HASH_TAG,
+    NN_PREPROCESSING_URI_TAG,
     PRODUCTION_MODEL,
     ROOT,
     SIM_EXPERIENCE_K,
@@ -88,6 +91,7 @@ MLFLOW_URI_META_KEY = "mlflow_uri"
 MLFLOW_VERSION_META_KEY = "mlflow_version"
 
 NN_ONNX_FILE = DEPLOY_ARTIFACTS / "nn_best.onnx"
+NN_PREPROCESSING_FILE = DEPLOY_ARTIFACTS / NN_PREPROCESSING_ARTIFACT
 SIMILARITY_INDEX = DEPLOY_ARTIFACTS / "player_similarity.index"
 SIMILARITY_METADATA = DEPLOY_ARTIFACTS / "player_metadata.json"
 MODEL_INFO_FILE = DEPLOY_ARTIFACTS / "model_info.json"
@@ -97,6 +101,7 @@ AUX_FILES = [
     SIMILARITY_INDEX,
     SIMILARITY_METADATA,
     NN_ONNX_FILE,
+    NN_PREPROCESSING_FILE,
 ]
 
 SOURCE_FINGERPRINT_FILES = [
@@ -305,6 +310,11 @@ def _write_model_info(
         "aux_artifacts": {key: tags[f"{AUX_TAG_PREFIX}{key}"] for key in LINEAGE_AUX_KEYS},
         "build_input_fingerprint": fingerprint,
     }
+    if NN_PREPROCESSING_URI_TAG in tags and NN_PREPROCESSING_HASH_TAG in tags:
+        manifest["aux_artifacts"]["nn_preprocessing"] = {
+            "uri": tags[NN_PREPROCESSING_URI_TAG],
+            "sha256": tags[NN_PREPROCESSING_HASH_TAG],
+        }
     if CALIBRATION_URI_TAG in tags and CALIBRATION_HASH_TAG in tags:
         manifest["calibration"] = {
             "uri": tags.get(CALIBRATION_URI_TAG),
@@ -580,48 +590,75 @@ def _import_or_reuse(
 
 
 def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
-    """Export the pinned PyTorch nn_best model to the service's ONNX artifact."""
+    """Export the pinned GRU (``nn_best``) model to a single ONNX artifact.
+
+    The export wraps the raw ``SymmetricGRU`` with five named inputs — player
+    and opponent histories, their validity masks/lengths, and the 12-value
+    current context — each with a dynamic batch dimension, so the service can
+    score paired AB/BA orientations directly through ONNX Runtime.
+    """
     import logging
     import warnings
 
     import bentoml
     import torch
 
-    # Needed so torch.load can resolve the class — torch.save records the path.
-    from src.training.nn import TabularMLP  # type: ignore[reportUnusedImport]  # noqa: F401, RUF100
+    from src.training import nn_history as gh
+    from src.training.nn import SymmetricGRU
 
     torch.set_num_threads(1)
 
-    # The MLP uses standard ONNX ops; suppress unrelated exporter warnings.
     logging.getLogger("torch.onnx").setLevel(logging.ERROR)
     warnings.filterwarnings("ignore", category=UserWarning, module="torch.*")
-    warnings.filterwarnings("ignore", category=FutureWarning, message=".*LeafSpec.*")
 
     _log(
         "bento",
-        f"materializing nn_best ONNX from models:/"
+        f"materializing nn_best GRU ONNX from models:/"
         f"{nn_pin[LINEAGE_MODEL_NAME_KEY]}/{nn_pin[LINEAGE_VERSION_KEY]}",
     )
     stored = _import_or_reuse(nn_pin)
 
     pyfunc = bentoml.mlflow.load_model(stored.tag)
-    raw = pyfunc.get_raw_model()  # TabularMLP
+    raw = pyfunc.get_raw_model()  # SymmetricGRU
+    if not isinstance(raw, SymmetricGRU):
+        raise TypeError(f"nn_best raw model is not a SymmetricGRU: {type(raw).__name__}")
     raw.eval()
 
-    tab_dim = raw.hparams["tab_dim"]
-    dummy_tab = torch.zeros(1, tab_dim, dtype=torch.float32)
-    batch = torch.export.Dim("batch")
+    hist_len, n_raw = gh.HISTORY_LEN, gh.N_RAW
+    ctx_dim = len(gh.GRU_CONTEXT_NAMES)
+    # Dummy batch of two so the dynamic batch axis is exercised at export time.
+    dummy = (
+        torch.zeros(2, hist_len, n_raw, dtype=torch.float32),
+        torch.zeros(2, hist_len, n_raw, dtype=torch.float32),
+        torch.zeros(2, hist_len, dtype=torch.float32),
+        torch.zeros(2, hist_len, dtype=torch.float32),
+        torch.zeros(2, ctx_dim, dtype=torch.float32),
+    )
+    batch_dim = torch.export.Dim("batch")
+    dynamic_shapes = {
+        "player_hist": {0: batch_dim},
+        "opponent_hist": {0: batch_dim},
+        "player_valid": {0: batch_dim},
+        "opponent_valid": {0: batch_dim},
+        "context": {0: batch_dim},
+    }
 
     NN_ONNX_FILE.parent.mkdir(parents=True, exist_ok=True)
     with torch.inference_mode():
         torch.onnx.export(
             raw,
-            (dummy_tab,),
+            dummy,
             str(NN_ONNX_FILE),
-            input_names=["tab"],
+            input_names=[
+                "player_hist",
+                "opponent_hist",
+                "player_valid",
+                "opponent_valid",
+                "context",
+            ],
             output_names=["logit"],
             opset_version=18,
-            dynamic_shapes={"tab": {0: batch}},
+            dynamic_shapes=dynamic_shapes,
             # Single-file artifact: keep weights inline so ONNX Runtime needs
             # no nn_best.onnx.data sidecar in the image.
             external_data=False,
@@ -631,7 +668,62 @@ def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
     stale_data = NN_ONNX_FILE.with_suffix(".onnx.data")
     if stale_data.exists():
         stale_data.unlink()
-    _log("bento", f"wrote nn_best ONNX: {NN_ONNX_FILE} ({NN_ONNX_FILE.stat().st_size} bytes)")
+    _log("bento", f"wrote nn_best GRU ONNX: {NN_ONNX_FILE} ({NN_ONNX_FILE.stat().st_size} bytes)")
+
+
+def _materialize_nn_preprocessing(
+    client: Any,
+    tags: dict[str, str],
+    no_cache: bool = False,  # noqa: ARG001 — kept for caller contract
+) -> None:
+    """Download, hash-verify, and schema-validate the GRU preprocessing artifact.
+
+    The champion lineage pins the exact ``nn_preprocessing.json`` via
+    ``base_nn_preprocessing_uri``/``base_nn_preprocessing_hash``; deployment
+    refuses to build a GRU Bento without it.
+    """
+    import mlflow
+
+    from src.features.nn_inference import load_gru_preprocessing
+
+    uri = tags.get(NN_PREPROCESSING_URI_TAG)
+    hash_tag = tags.get(NN_PREPROCESSING_HASH_TAG)
+    if uri is None or hash_tag is None:
+        raise RuntimeError(
+            f"champion {PRODUCTION_MODEL} is missing GRU preprocessing lineage tags "
+            f"{NN_PREPROCESSING_URI_TAG!r}/{NN_PREPROCESSING_HASH_TAG!r} — promote "
+            "through a full GRU training run (`just train`) before deploy"
+        )
+    local = DEPLOY_ARTIFACTS / NN_PREPROCESSING_ARTIFACT
+    DEPLOY_ARTIFACTS.mkdir(parents=True, exist_ok=True)
+    if not no_cache and local.exists() and _file_hash(local) == hash_tag:
+        load_gru_preprocessing(local)  # re-validate schema/names before serving
+        print(f"Reusing {NN_PREPROCESSING_ARTIFACT} (hash ok)")
+        return
+    download_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            local = Path(
+                mlflow.artifacts.download_artifacts(  # type: ignore[reportPrivateImportUsage]  # conditional export
+                    uri, dst_path=str(DEPLOY_ARTIFACTS)
+                )
+            )
+            break
+        except Exception as exc:
+            download_error = exc
+            if attempt == 0:
+                print(f"Download of {NN_PREPROCESSING_ARTIFACT} from {uri} failed; retrying once")
+    else:
+        raise RuntimeError(
+            f"failed to download {NN_PREPROCESSING_ARTIFACT} from {uri}: {download_error}"
+        ) from download_error
+    if _file_hash(local) != hash_tag:
+        raise RuntimeError(
+            f"sha256 mismatch for {NN_PREPROCESSING_ARTIFACT}: expected {hash_tag}, "
+            f"got {_file_hash(local)}"
+        )
+    load_gru_preprocessing(local)  # validates schema/names before serving
+    print(f"Downloaded {NN_PREPROCESSING_ARTIFACT} from {uri} (sha256 ok)")
 
 
 def _reuse_or_materialize_nn_onnx(
@@ -911,6 +1003,7 @@ def build_bento_image(
     pins = _lineage_pins(client, production)
     _reuse_or_materialize_nn_onnx(state, pins["nn"], no_cache=no_cache)
     version_tags = client.get_model_version(PRODUCTION_MODEL, production.version).tags
+    _materialize_nn_preprocessing(client, version_tags, no_cache=no_cache)
     calibration_temperature = _download_aux_artifacts(client, version_tags, no_cache=no_cache)
     generate_similarity_artifacts(no_cache=no_cache)
     fingerprint = build_input_fingerprint(client, production)
