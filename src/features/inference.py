@@ -15,7 +15,7 @@ from src.constants import (
     BRONZE_MATCHES_TABLE,
     BRONZE_PROFILES_TABLE,
     BULK_MAX_ROWS,
-    DAYS_SINCE_CAP_DAYS,
+    DAYS_SINCE_LAST_MATCH_MAX,
     ELO_DEFAULT_RATING,
     SILVER_ELO_SNAPSHOTS,
     SILVER_PLAYER_MATCHES,
@@ -200,9 +200,9 @@ def _side_values(
     raw_days = (
         float((as_of_date - _to_date(row["snapshot_date"])).days)
         if row is not None
-        else float(DAYS_SINCE_CAP_DAYS)
+        else float(DAYS_SINCE_LAST_MATCH_MAX)
     )
-    days_since_last_match = min(raw_days, float(DAYS_SINCE_CAP_DAYS))
+    days_since_last_match = min(raw_days, float(DAYS_SINCE_LAST_MATCH_MAX))
 
     return {
         "ranking": ranking,

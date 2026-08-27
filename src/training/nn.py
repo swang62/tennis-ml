@@ -12,17 +12,21 @@ class TabularMLP(L.LightningModule):
         self,
         tab_dim,
         hidden_dim=64,
-        n_layers=1,
         dropout=0.0,
         lr=1e-3,  # noqa: ARG002 — persisted via save_hyperparameters()
         weight_decay=0.0,  # noqa: ARG002 — persisted via save_hyperparameters()
     ):
         super().__init__()
         self.save_hyperparameters()
-        layers: list[nn.Module] = [nn.Linear(tab_dim, hidden_dim), nn.ReLU(), nn.Dropout(dropout)]
-        for _ in range(n_layers - 1):
-            layers += [nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), nn.Dropout(dropout)]
-        layers += [nn.Linear(hidden_dim, 32), nn.ReLU(), nn.Dropout(dropout), nn.Linear(32, 1)]
+        layers: list[nn.Module] = [
+            nn.Linear(tab_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 32),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(32, 1),
+        ]
         self.net = nn.Sequential(*layers)
 
     def forward(self, tab):
@@ -55,6 +59,105 @@ class TabularMLP(L.LightningModule):
     def predict_step(self, batch, _batch_idx, _dataloader_idx=0):
         tab, _labels = batch
         return torch.sigmoid(self(tab))
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(
+            self.parameters(), lr=self.hparams["lr"], weight_decay=self.hparams["weight_decay"]
+        )
+
+
+class SymmetricGRU(L.LightningModule):
+    """Compact symmetric GRU over per-side histories with one shared scorer."""
+
+    def __init__(
+        self,
+        hist_dim: int,
+        context_dim: int = 7,
+        hidden_dim: int = 32,
+        dropout: float = 0.0,
+        lr: float = 1e-3,  # noqa: ARG002 — persisted via save_hyperparameters()
+        weight_decay: float = 0.0,  # noqa: ARG002 — persisted via save_hyperparameters()
+    ):
+        super().__init__()
+        self.save_hyperparameters()
+        self.gru = nn.GRU(hist_dim, hidden_dim, batch_first=True)
+        self.zero_emb = nn.Parameter(torch.zeros(hidden_dim))
+        layers: list[nn.Module] = [
+            nn.Linear(hidden_dim * 2 + context_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1),
+        ]
+        self.head = nn.Sequential(*layers)
+
+    def _lengths(self, valid: torch.Tensor, seq_len: int) -> torch.Tensor:
+        lengths = valid if valid.dim() == 1 else valid.sum(dim=1)
+        return lengths.long().clamp(max=seq_len)
+
+    def _encode(self, hist: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
+        batch = hist.size(0)
+        seq_len = hist.size(1)
+        if seq_len == 0:
+            return self.zero_emb.unsqueeze(0).expand(batch, -1)
+        # Left-align the right-justified valid window so leading padding is dropped.
+        cols = torch.arange(seq_len, device=hist.device).unsqueeze(0)
+        src = (seq_len - lengths.unsqueeze(1) + cols).clamp(min=0, max=seq_len - 1)
+        aligned = hist.gather(1, src.unsqueeze(-1).expand(*src.shape, hist.size(2)))
+        # Pack with clamped lengths; empties fall back to the zero-history embedding.
+        packed = nn.utils.rnn.pack_padded_sequence(
+            aligned, lengths.clamp(min=1).cpu(), batch_first=True, enforce_sorted=False
+        )
+        _, h_n = self.gru(packed)
+        emb = h_n.squeeze(0)
+        empty = lengths == 0
+        if bool(empty.any()):
+            emb = torch.where(empty.unsqueeze(1), self.zero_emb.unsqueeze(0), emb)
+        return emb
+
+    def _score(
+        self, player_emb: torch.Tensor, opponent_emb: torch.Tensor, context: torch.Tensor
+    ) -> torch.Tensor:
+        return self.head(torch.cat([player_emb, opponent_emb, context], dim=-1)).squeeze(-1)
+
+    def forward(
+        self,
+        player_hist: torch.Tensor,
+        opponent_hist: torch.Tensor,
+        player_valid: torch.Tensor,
+        opponent_valid: torch.Tensor,
+        context: torch.Tensor,
+    ) -> torch.Tensor:
+        p_emb = self._encode(player_hist, self._lengths(player_valid, player_hist.size(1)))
+        o_emb = self._encode(opponent_hist, self._lengths(opponent_valid, opponent_hist.size(1)))
+        return self._score(p_emb, o_emb, context) - self._score(o_emb, p_emb, context)
+
+    def training_step(self, batch, _batch_idx):
+        if len(batch) == 7:
+            ph, oh, pv, ov, ctx, labels, weights = batch
+        else:
+            ph, oh, pv, ov, ctx, labels = batch
+            weights = None
+        logits = self(ph, oh, pv, ov, ctx)
+        if weights is None:
+            loss = nn.functional.binary_cross_entropy_with_logits(logits, labels)
+        else:
+            # Normalized weighted BCE for training only; validation/predict stay unweighted.
+            bce = nn.functional.binary_cross_entropy_with_logits(logits, labels, reduction="none")
+            loss = (bce * weights).mean()
+        self.log("train_loss", loss, prog_bar=True)
+        return loss
+
+    def validation_step(self, batch, _batch_idx):
+        ph, oh, pv, ov, ctx, labels = batch[:6]
+        logits = self(ph, oh, pv, ov, ctx)
+        loss = nn.functional.binary_cross_entropy_with_logits(logits, labels)
+        probs = torch.sigmoid(logits)
+        self.log("val_loss", loss, prog_bar=True, sync_dist=True)
+        return {"probs": probs, "labels": labels}
+
+    def predict_step(self, batch, _batch_idx, _dataloader_idx=0):
+        ph, oh, pv, ov, ctx = batch[:5]
+        return torch.sigmoid(self(ph, oh, pv, ov, ctx))
 
     def configure_optimizers(self):
         return torch.optim.Adam(

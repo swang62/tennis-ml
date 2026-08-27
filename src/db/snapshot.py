@@ -8,7 +8,7 @@ from urllib.parse import unquote, urlsplit, urlunsplit
 
 import duckdb
 
-from src.constants import DATA_PROCESSED, GOLD_MATCHES_TABLE, ROOT, get_database_url
+from src.constants import GOLD_MATCHES_TABLE, ROOT, get_database_url
 from src.features.columns import FEATURE_COLS, SIMILARITY_COLS
 
 SNAPSHOT_PATH = ROOT / "data" / "training_snapshot.duckdb"
@@ -17,6 +17,7 @@ SNAPSHOT_TABLES = (
     ("gold", "match_features"),
     ("gold", "player_profiles"),
     ("bronze", "player_profiles"),
+    ("silver", "player_matches"),
 )
 
 META_COLS = (
@@ -44,6 +45,7 @@ def _copy_tables(tmp_path: Path, pg_url: str) -> None:
         con.execute(f"ATTACH '{pg_url}' AS pg (TYPE postgres)")
         con.execute("CREATE SCHEMA IF NOT EXISTS gold")
         con.execute("CREATE SCHEMA IF NOT EXISTS bronze")
+        con.execute("CREATE SCHEMA IF NOT EXISTS silver")
         con.execute("BEGIN TRANSACTION")
         for schema, table in SNAPSHOT_TABLES:
             con.execute(
