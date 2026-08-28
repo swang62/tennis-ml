@@ -6,24 +6,17 @@ Tennis match predictions end to end. I made this repo with the goal of learning 
 
 ## Core Features
 
-- **Weekly ATP scrape** — Prefect rankings + match-stats ingestion with self-healing backfills
-- **Data warehouse pipeline** — Automated ETL with dbt PostgreSQL models.
-- **Model training** — Optuna tunes linear, GBDT, and neural-network models, before an OOF-trained logistic stacker combines them.
-- **Reproducible deployment** — MLflow lineage, a single `@champion` alias, and BentoML serving.
-- **Monitoring** — Evidently drift checks and current-window performance checks.
-
-## Tech Stack
-
 | Layer               | Tool                                       |
 | ------------------- | ------------------------------------------ |
-| Orchestration       | Prefect (cron, retries, ETL triggers)      |
+| Orchestration       | Prefect (cron, scraping, ETL triggers)     |
 | Experiment tracking | MLflow (model registry, trial comparison)  |
-| Model serving       | BentoML, Docker Compose                    |
+| Model serving       | BentoML, Docker                            |
 | Web app             | React, TypeScript, Vite, TanStack, ECharts |
-| Data warehouse      | PostgreSQL                                 |
-| Development         | Jupyter + Papermill                        |
+| Data warehouse      | PostgreSQL, dbt                            |
+| Development         | Jupyter + Papermill, Optuna                |
+| Monitoring          | Evidently drift checks, Brier calibration  |
 
-## Web App Dashboard
+## Web Dashboard
 
 React 19 + TypeScript dashboard built with Vite, Tailwind CSS 4, TanStack, and ECharts.
 
@@ -72,21 +65,22 @@ Training uses gold match features: each physical match produces both orientation
 
 ### Validation and tuning
 
-- **Time-forward CV folds** — validation uses later date bands while training uses strictly earlier matches. Out-of-fold (OOF) predictions are used for ensemble training to avoid contamination
+- **Time-forward CV folds** — training uses strictly earlier matches compared to validation/test sets. Out-of-fold (OOF) predictions for ensemble training
 - **Match-safe grouping** — both orientations of a physical match stay in the same fold, preventing leakage.
 - **Stratification** — every validation fold preserves the one-positive/one-negative directional label balance.
 - **Optuna tuning** — each model family is tuned independently against validation log loss.
-- **Early stopping** — GBDT models stop when validation loss stops improving; neural networks use validation BCE with patience and pruning.
+- **Early stopping** — GBDT models stop when validation loss stops improving
+- **Recency Weighting** - Recent matches are weighted more heavily to reflect the current tennis meta. Exponential decay with a half-life.
 
 ### Base models
 
 - **Linear family:** logistic regression and Gaussian Naive Bayes.
 - **Gradient boosting:** XGBoost and LightGBM, with early stopping.
-- **Neural network:** a MLP trained with Adam and binary cross-entropy with logits (`BCEWithLogitsLoss`).
+- **Neural network:** GRU encodes each player's temporal match-sequence features into per-side embeddings.
 
 ### Evaluation and Promotion
 
-Candidate and production models are compared on held-out test predictions using:
+Candidate and production models are compared on cross-fitted held-out test predictions using:
 
 - **Log loss** — primary probability-quality metric.
 - **ROC-AUC** — secondary ranking quality.
@@ -98,27 +92,28 @@ Candidate and production models are compared on held-out test predictions using:
 The weekly drift flow scores new production data through the champion Bento and compares it with a size-matched historical reference window. It checks:
 
 - PSI for monitored input features and prediction probabilities.
-- Current-window ROC-AUC and calibration against the champion's pinned metrics when enough matches are available.
+- Current-window ROC-AUC and calibration against the champion's pinned metrics.
 
 ## Data Pipelines
 
-- `rankings.py` — weekly ATP rankings catch-up (scheduled deployment `rankings-flow/rankings`, Tuesday 22:00 UTC; rankings trigger ETL on success).
-- `matches.py` — match-stats enrichment (scheduled deployment `matches-flow/matches`, Tuesday 22:30 UTC; matches trigger ETL on success).
-- `seed.py` — load matches and rankings into bronze, with optional enrichment.
-- `etl.py` — build bronze → silver → gold with dbt.
-- `pipeline.py` — snapshot data, train models, build the ensemble, evaluate, and promote.
+- `rankings.py` — weekly ATP rankings catch-up (scheduled deployment).
+- `matches.py` — match-stats enrichment (scheduled deployment).
+- `seed.py` — load matches and rankings into bronze, with optional Wikipedia enrichment.
+- `etl.py` — build bronze → silver → gold tables with dbt. 3 phase with stateful ELO calculations.
+- `pipeline.py` — snapshot production data, train and score base models, build the ensemble stacker, evaluate, and promote.
 - `drift.py` — compare current production data and performance with the champion.
-- `deploy.py` — materialize the champion's serving artifacts and publish the Bento image.
+- `deploy.py` — materialize the champion's serving artifacts and publish the Bento image. Full lineage tracking of experiments and parameters.
 
 ## Production Serving & Inference
 
 ### Docker Overview
 
-| Service    | Image source           | Host port | Purpose      |
-| ---------- | ---------------------- | --------- | ------------ |
-| `postgres` | `postgres:18.4`        | 6543      | Feature data |
-| `bento`    | `swang62/tennis-bento` | internal  | Model API    |
-| `web`      | `swang62/tennis-web`   | 8187      | Dashboard    |
+| Service    | Image source           | Host port      | Purpose       |
+| ---------- | ---------------------- | -------------- | ------------- |
+| `postgres` | `postgres:18.4`        | 6543           | Feature store |
+| `bento`    | `swang62/tennis-bento` | internal proxy | Model API     |
+| `web`      | `swang62/tennis-web`   | 8187           | Dashboard     |
+| `metabase` | `metabase/metabase`    | 3000           | BI analytics  |
 
 | Var                 | Purpose                                                                     |
 | ------------------- | --------------------------------------------------------------------------- |
@@ -147,7 +142,7 @@ The `/predict_from_ids` endpoint accepts a JSON object with the following fields
 
 Big shoutout to [TennisMyLife](https://stats.tennismylife.org/) for providing me with the inspiration.
 
-- [Jeff Sackmann](https://github.com/JeffSackmann) — decades of match-level results, despite removing them from GitHub :(
+- [Jeff Sackmann](https://github.com/JeffSackmann) — decades of match-level results, despite removing them from GitHub recently
 - [Prefect](https://www.prefect.io/) — workflow orchestration for the weekly scrape, ETL, and drift monitoring
 - [MLflow](https://mlflow.org/) — experiment tracking and the model registry behind the `@champion` alias
 - [BentoML](https://www.bentoml.com/) — model serving
