@@ -36,14 +36,10 @@ from src.constants import (
     DRIFT_REF_MAX,
     DRIFT_REF_MIN,
     DRIFT_SHARE_THRESHOLD,
-    EVAL_MAX_DATE_KEY,
-    EVAL_SPLIT_SIZE_KEY,
-    METRIC_PREFIX,
     MODEL_INFO_ROUTE,
     PREDICT_BATCH_ROUTE,
     PRODUCTION_BENTO_URL,
     PRODUCTION_MODEL,
-    TRAIN_DATA_MAX_DATE_KEY,
     WORK_POOL_NAME,
     load_env,
 )
@@ -131,7 +127,7 @@ def _champion_cutoff_date(client: Any) -> date | None:
     if champion is None:
         return None
     version = client.get_model_version(PRODUCTION_MODEL, champion.version)
-    raw = version.tags.get(TRAIN_DATA_MAX_DATE_KEY)
+    raw = version.tags.get("train_data_max_match_date")
     if raw:
         return date.fromisoformat(raw)
     return datetime.fromtimestamp(champion.creation_timestamp / 1000, tz=UTC).date()
@@ -142,14 +138,14 @@ def _pinned_metrics(client: Any, champion: Any) -> dict[str, Any]:
     tags = client.get_model_version(PRODUCTION_MODEL, champion.version).tags or {}
     pinned: dict[str, Any] = {}
     for name in METRIC_NAMES:
-        raw = tags.get(f"{METRIC_PREFIX}{name}")
+        raw = tags.get(f"metric_{name}")
         if raw is not None:
             pinned[name] = float(raw)
-    for key, label in ((EVAL_SPLIT_SIZE_KEY, "eval_split_size"),):
+    for key, label in (("metric_eval_split_size", "eval_split_size"),):
         raw = tags.get(key)
         if raw is not None:
             pinned[label] = float(raw)
-    raw_max_date = tags.get(EVAL_MAX_DATE_KEY)
+    raw_max_date = tags.get("metric_eval_max_date")
     if raw_max_date is not None:
         pinned["eval_max_date"] = raw_max_date
     return pinned

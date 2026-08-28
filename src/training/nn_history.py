@@ -22,51 +22,15 @@ import numpy as np
 import pandas as pd
 
 from src.db.snapshot import SNAPSHOT_PATH
-
-# Fixed history geometry shared by the production GRU (nn) model.
-HISTORY_LEN = 10
-N_RAW = 18  # raw timestep values retained from each player-perspective row
-STORE_WIDTH = N_RAW  # missing values are fit-band imputed and scaled before batching
-
-# Raw timestep feature order. Missing numeric values remain NaN until fit-band
-# imputation; valid_mask still distinguishes padding from a real record.
-GRU_RAW_NAMES: list[str] = [
-    "match_won",
-    "log_player_ranking",
-    "log_player_rank_points",
-    "log_opponent_ranking",
-    "log_opponent_rank_points",
-    "is_clay",
-    "is_grass",
-    "is_hard",
-    "ace_per_svc_game",
-    "fs_in_pct",
-    "fs_win_pct",
-    "second_serve_win_pct",
-    "return_won_pct",
-    "double_faults",
-    "break_points_saved",
-    "break_points_faced",
-    "log_gap_days",
-    "log_total_svc_pts",
-]
-
-# Context tensor: surface one-hot (three), indoor, best-of, tournament level,
-# round, Elo difference, and age difference. Carpet is implied by the flags.
-GRU_CONTEXT_NAMES: list[str] = [
-    "is_clay",
-    "is_grass",
-    "is_hard",
-    "is_indoor",
-    "best_of",
-    "tournament_level",
-    "round_encoded",
-    "elo_diff",
-    "age_diff",
-    "h2h_exposure",
-    "h2h_advantage",
-    "h2h_surface_advantage",
-]
+from src.features.nn_runtime import (
+    GRU_CONTEXT_NAMES,
+    GRU_RAW_NAMES,
+    HISTORY_LEN,
+    N_RAW,
+    STORE_WIDTH,
+    build_context_tensor,
+    transform_history_rows,
+)
 
 HISTORY_QUERY = """
 SELECT
@@ -165,49 +129,6 @@ class HistoryStore:
         )
 
 
-def _safe_rate(num: np.ndarray, den: np.ndarray) -> np.ndarray:
-    """Element-wise num/den, NaN where den <= 0 or either side is null."""
-    out = np.full(len(num), np.nan, dtype=np.float32)
-    ok = (den > 0) & (~np.isnan(den)) & (~np.isnan(num))
-    out[ok] = (num[ok] / den[ok]).astype(np.float32)
-    return out
-
-
-def _transform_rows(df: pd.DataFrame) -> np.ndarray:
-    """Vectorize raw timestep values for every player-match row."""
-    ts = df["total_serve_points"].to_numpy(dtype=np.float32)
-    fsm = df["first_serves_made"].to_numpy(dtype=np.float32)
-    svc_g = df["service_games"].to_numpy(dtype=np.float32)
-    rpa = df["return_points_available"].to_numpy(dtype=np.float32)
-
-    # Gap in days since this player's immediately preceding match (NaN if none).
-    prev_date = df.groupby("player_id")["match_date"].shift(1)
-    gap = (df["match_date"] - prev_date).dt.days.to_numpy(dtype=np.float32)
-
-    raw = np.zeros((len(df), N_RAW), dtype=np.float32)
-    raw[:, 0] = df["match_won"].to_numpy(dtype=np.float32)
-    raw[:, 1] = np.log1p(df["player_ranking"].to_numpy(dtype=np.float32))
-    raw[:, 2] = np.log1p(df["player_rank_points"].to_numpy(dtype=np.float32))
-    raw[:, 3] = np.log1p(df["opponent_ranking"].to_numpy(dtype=np.float32))
-    raw[:, 4] = np.log1p(df["opponent_rank_points"].to_numpy(dtype=np.float32))
-    surf = df["surface"].to_numpy()
-    raw[:, 5] = (surf == "clay").astype(np.float32)
-    raw[:, 6] = (surf == "grass").astype(np.float32)
-    raw[:, 7] = (surf == "hard").astype(np.float32)
-    raw[:, 8] = _safe_rate(df["aces"].to_numpy(dtype=np.float32), svc_g)
-    raw[:, 9] = _safe_rate(df["first_serves_made"].to_numpy(dtype=np.float32), ts)
-    raw[:, 10] = _safe_rate(df["first_serve_points_won"].to_numpy(dtype=np.float32), fsm)
-    raw[:, 11] = _safe_rate(df["second_serve_points_won"].to_numpy(dtype=np.float32), ts - fsm)
-    raw[:, 12] = _safe_rate(df["return_points_won"].to_numpy(dtype=np.float32), rpa)
-    raw[:, 13] = df["double_faults"].to_numpy(dtype=np.float32)
-    raw[:, 14] = df["break_points_saved"].to_numpy(dtype=np.float32)
-    raw[:, 15] = df["break_points_faced"].to_numpy(dtype=np.float32)
-    raw[:, 16] = np.where(np.isnan(gap), np.nan, np.log1p(gap)).astype(np.float32)
-    raw[:, 17] = np.where(np.isnan(ts), np.nan, np.log1p(ts)).astype(np.float32)
-
-    return raw
-
-
 def build_history_store(df: pd.DataFrame, strict_as_of: bool = False) -> HistoryStore:
     """Build the causal history store from an ordered player-match frame.
 
@@ -252,7 +173,7 @@ def build_history_store(df: pd.DataFrame, strict_as_of: bool = False) -> History
         raise ValueError(f"history frame missing columns: {sorted(missing)}")
 
     work = df.reset_index(drop=True)
-    raw = _transform_rows(work)
+    raw = transform_history_rows(work)
 
     n = len(work)
     histories = np.zeros((n, HISTORY_LEN, STORE_WIDTH), dtype=np.float32)
@@ -325,15 +246,6 @@ def map_split_indices(store: HistoryStore, info: pd.DataFrame) -> tuple[np.ndarr
     return player_idx, opponent_idx
 
 
-def build_context_tensor(X: pd.DataFrame) -> np.ndarray:
-    """Select the reduced current context from an existing ``X_*`` frame."""
-    present = list(GRU_CONTEXT_NAMES)
-    missing = set(present) - set(X.columns)
-    if missing:
-        raise ValueError(f"context frame missing columns: {sorted(missing)}")
-    return X[present].to_numpy(dtype=np.float32)
-
-
 def compute_fill_stats(store: HistoryStore, fit_store_indices: np.ndarray) -> np.ndarray:
     """Per-raw-column means over finite history entries of the fit targets."""
     h = store.histories[np.asarray(fit_store_indices)]
@@ -376,6 +288,15 @@ def compute_scale_stats(
             std = vals.std()
             scale[j] = std if std > 0 else 1.0
     return mean, scale
+
+
+def gru_preprocessing_from_store(store: HistoryStore, fit_store_indices: np.ndarray):
+    """Build the served preprocessing artifact from an offline fit band."""
+    from src.features.nn_inference import GRUPreprocessing
+
+    fill = compute_fill_stats(store, fit_store_indices)
+    mean, scale = compute_scale_stats(store, fit_store_indices)
+    return GRUPreprocessing(fill_stats=fill, scale_mean=mean, scale_scale=scale)
 
 
 def apply_scaling(

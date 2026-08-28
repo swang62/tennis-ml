@@ -9,9 +9,6 @@ from typing import Any
 
 from src.constants import (
     CHAMPION_ALIAS,
-    FEATURE_COLS_HASH_TAG,
-    FEATURE_COLS_TAG,
-    METRIC_PREFIX,
     PRODUCTION_MODEL,
     PROMOTION_TOLERANCE,
 )
@@ -101,8 +98,8 @@ def resolve_champion_feature_contract(
         return True, None
     version = client.get_model_version(PRODUCTION_MODEL, champion.version)
     tags = dict(getattr(version, "tags", None) or {})
-    raw_cols = tags.get(FEATURE_COLS_TAG)
-    raw_hash = tags.get(FEATURE_COLS_HASH_TAG)
+    raw_cols = tags.get("feature_cols")
+    raw_hash = tags.get("feature_cols_hash")
     if raw_cols is None or raw_hash is None:
         return True, None
     try:
@@ -126,7 +123,7 @@ def read_champion_metrics(client: Any, champion: Any) -> dict[str, float]:
     tags = dict(getattr(version, "tags", None) or {})
     metrics: dict[str, float] = {}
     for metric in METRIC_NAMES:
-        tag = f"{METRIC_PREFIX}{metric}"
+        tag = f"metric_{metric}"
         raw = tags.get(tag)
         if raw is None:
             raise RuntimeError(

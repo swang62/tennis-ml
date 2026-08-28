@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+
 from src.features import nn_inference as ni
 from src.training import nn_history as gh
 
@@ -82,7 +83,7 @@ def _features_df(player_id, opponent_id, **ctx_over):
 
 
 def _preproc_from(store, idx):
-    return ni.gru_preprocessing_from_store(store, np.asarray(idx))
+    return gh.gru_preprocessing_from_store(store, np.asarray(idx))
 
 
 # --- cold start -------------------------------------------------------------

@@ -18,13 +18,13 @@ from src.constants import (
     SILVER_PLAYER_MATCHES,
 )
 from src.db.client import execute_df
-from src.training import nn_history as gh
+from src.features import nn_runtime as gr
 
 # Re-exported shared contract so Task 3/4 import a single source of truth.
-HISTORY_LEN = gh.HISTORY_LEN
-N_RAW = gh.N_RAW
-GRU_RAW_NAMES = gh.GRU_RAW_NAMES
-GRU_CONTEXT_NAMES = gh.GRU_CONTEXT_NAMES
+HISTORY_LEN = gr.HISTORY_LEN
+N_RAW = gr.N_RAW
+GRU_RAW_NAMES = gr.GRU_RAW_NAMES
+GRU_CONTEXT_NAMES = gr.GRU_CONTEXT_NAMES
 
 # Raw player-perspective columns needed to reproduce the offline transform.
 _HISTORY_COLS = [
@@ -160,15 +160,6 @@ class GRUBatch:
         )
 
 
-def gru_preprocessing_from_store(
-    store: gh.HistoryStore, fit_store_indices: np.ndarray
-) -> GRUPreprocessing:
-    """Build the served preprocessing artifact from an offline fit band."""
-    fill = gh.compute_fill_stats(store, fit_store_indices)
-    mean, scale = gh.compute_scale_stats(store, fit_store_indices)
-    return GRUPreprocessing(fill_stats=fill, scale_mean=mean, scale_scale=scale)
-
-
 def load_gru_preprocessing(path: str | Path) -> GRUPreprocessing:
     """Load and validate the served GRU preprocessing JSON artifact."""
     data = json.loads(Path(path).read_text())
@@ -270,7 +261,7 @@ def _sequence_for_rows(
         return seq, mask
 
     ordered = group.sort_values(["match_date", "match_num", "match_id"]).reset_index(drop=True)
-    raw = gh._transform_rows(ordered)  # [n, N_RAW] chronological, gap via shift(1)
+    raw = gr.transform_history_rows(ordered)  # [n, N_RAW] chronological, gap via shift(1)
     kept = raw[-preproc.history_len :]  # last up to HISTORY_LEN rows
     start = preproc.history_len - kept.shape[0]
     seq[start:] = kept
@@ -358,7 +349,7 @@ def _build_gru_batch(
         om[i] = omsk
         ol[i] = int(omsk.sum())
 
-    ctx = gh.build_context_tensor(features_df)
+    ctx = gr.build_context_tensor(features_df)
     ctx = ((ctx - preproc.context_mean) / preproc.context_scale).astype(np.float32)
     return GRUBatch(ph, oh, pl, ol, pm, om, ctx, preproc)
 

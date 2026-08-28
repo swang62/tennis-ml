@@ -84,7 +84,7 @@ def test_download_aux_artifacts_requires_no_navigation_tags(monkeypatch, tmp_pat
     assert not (artifacts_dir / "player_directory.json").exists()
 
 
-# --- Calibration artifact materialization (CALIBRATION_URI_TAG/HASH_TAG) ---
+# --- Calibration artifact materialization (calibration_uri / calibration_hash tags) ---
 
 
 def _calibration_source(tmp_path, temperature=1.7):
@@ -103,8 +103,8 @@ def _pin_calibration(tmp_path, tags, temperature=1.7):
     import src.constants as c
 
     src = _calibration_source(tmp_path, temperature)
-    tags[c.CALIBRATION_URI_TAG] = f"runs:/run-aux/{c.CALIBRATION_ARTIFACT}"
-    tags[c.CALIBRATION_HASH_TAG] = _deploy()._file_hash(src)
+    tags["calibration_uri"] = f"runs:/run-aux/{c.CALIBRATION_ARTIFACT}"
+    tags["calibration_hash"] = _deploy()._file_hash(src)
     return src
 
 
@@ -117,8 +117,8 @@ def test_download_aux_artifacts_legacy_champion_writes_noop_calibration(monkeypa
     d = _deploy()
     _specs, tags, _downloaded, artifacts_dir = _aux_tags_and_files(tmp_path, d, pre_populate=True)
     monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", artifacts_dir)
-    assert c.CALIBRATION_URI_TAG not in tags
-    assert c.CALIBRATION_HASH_TAG not in tags
+    assert "calibration_uri" not in tags
+    assert "calibration_hash" not in tags
 
     temperature = d._download_aux_artifacts(None, tags)
 
@@ -180,7 +180,7 @@ def test_calibration_rejects_malformed_verified_artifact(monkeypatch, tmp_path):
     _pin_calibration(tmp_path, tags)
     src = tmp_path / "remote" / c.CALIBRATION_ARTIFACT
     src.write_text("{not json")
-    tags[c.CALIBRATION_HASH_TAG] = d._file_hash(src)
+    tags["calibration_hash"] = d._file_hash(src)
     (artifacts_dir / c.CALIBRATION_ARTIFACT).write_text("{not json")
     monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", artifacts_dir)
 
@@ -201,7 +201,7 @@ def test_calibration_rejects_non_positive_verified_temperature(monkeypatch, tmp_
     _pin_calibration(tmp_path, tags)
     src = tmp_path / "remote" / c.CALIBRATION_ARTIFACT
     src.write_text(json.dumps({"temperature": 0.0}))
-    tags[c.CALIBRATION_HASH_TAG] = d._file_hash(src)
+    tags["calibration_hash"] = d._file_hash(src)
     (artifacts_dir / c.CALIBRATION_ARTIFACT).write_text(json.dumps({"temperature": 0.0}))
     monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", artifacts_dir)
 
@@ -269,17 +269,13 @@ def test_build_lineage_tags_flattens_exact_pins():
             "model_uri": "runs:/run-nn/nn_model",
         },
     }
-    # No model-lineage aux artifacts remain; an empty map is expected.
-    aux_pins: dict[str, str] = {}
-    tags = c.build_lineage_tags(base_pins, aux_pins)
+    tags = c.build_lineage_tags(base_pins)
 
     assert tags["base_linear_version"] == "3"
     assert tags["base_linear_scaler_uri"] == "runs:/run-linear/linear_scaler.pkl"
     assert "base_gbdt_scaler_uri" not in tags  # only linear has a scaler
     assert tags["base_gbdt_run_id"] == "run-gbdt"
     assert tags["base_nn_model_uri"] == "runs:/run-nn/nn_model"
-    # No aux lineage tags are produced.
-    assert not any(key.startswith("aux_") for key in tags)
     # Navigation artifacts (similarity index/metadata, player directory) are not
     # model lineage: build_lineage_tags never emits their tags.
     for nav_key in (
@@ -535,8 +531,8 @@ def test_materialize_nn_preprocessing_downloads_and_validates(monkeypatch, tmp_p
     src_file.parent.mkdir(parents=True, exist_ok=True)
     src_file.write_text(json.dumps(good))
     tags = {
-        c.NN_PREPROCESSING_URI_TAG: f"runs:/run-nn/{c.NN_PREPROCESSING_ARTIFACT}",
-        c.NN_PREPROCESSING_HASH_TAG: d._file_hash(src_file),
+        "base_nn_preprocessing_uri": f"runs:/run-nn/{c.NN_PREPROCESSING_ARTIFACT}",
+        "base_nn_preprocessing_hash": d._file_hash(src_file),
     }
 
     downloaded = []
@@ -549,7 +545,7 @@ def test_materialize_nn_preprocessing_downloads_and_validates(monkeypatch, tmp_p
 
     monkeypatch.setattr(mlflow.artifacts, "download_artifacts", fake_download)
     d._materialize_nn_preprocessing(None, tags)
-    assert downloaded == [tags[c.NN_PREPROCESSING_URI_TAG]]
+    assert downloaded == [tags["base_nn_preprocessing_uri"]]
     assert (tmp_path / c.NN_PREPROCESSING_ARTIFACT).exists()
 
 
@@ -560,4 +556,4 @@ def test_materialize_nn_preprocessing_requires_tags(monkeypatch, tmp_path):
     d = _deploy()
     monkeypatch.setattr(d, "DEPLOY_ARTIFACTS", tmp_path)
     with pytest.raises(RuntimeError, match="preprocessing lineage tags"):
-        d._materialize_nn_preprocessing(None, {c.CALIBRATION_URI_TAG: "x"})
+        d._materialize_nn_preprocessing(None, {"calibration_uri": "x"})
