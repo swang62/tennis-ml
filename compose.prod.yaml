@@ -68,5 +68,25 @@ services:
     entrypoint: [ "/bin/sh", "-c" ]
     pull_policy: always
 
+  metabase:
+    image: metabase/metabase:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    volumes:
+      - tennis-ml-metabase:/metabase-data
+    environment:
+      MB_DB_FILE: /metabase-data/metabase.db
+    healthcheck:
+      test: [ "CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/api/health || exit 1" ]
+      interval: 60s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+
 volumes:
   tennis-ml-postgres:
+  tennis-ml-metabase:
