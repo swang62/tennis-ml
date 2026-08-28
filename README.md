@@ -113,7 +113,7 @@ The weekly drift flow scores new production data through the champion Bento and 
 | `postgres` | `postgres:18.4`        | 6543           | Feature store |
 | `bento`    | `swang62/tennis-bento` | internal proxy | Model API     |
 | `web`      | `swang62/tennis-web`   | 8187           | Dashboard     |
-| `metabase` | `metabase/metabase`    | 3000           | BI analytics (app DB in a separate `metabase` Postgres database; the `tennis` feature DB is added as a data source in the UI) |
+| `metabase` | `metabase/metabase`    | 3000           | BI analytics  |
 
 | Var                 | Purpose                                                                     |
 | ------------------- | --------------------------------------------------------------------------- |
@@ -140,7 +140,7 @@ The `/predict_from_ids` endpoint accepts a JSON object with the following fields
 
 ## Acknowledgements
 
-Big shoutout to [TennisMyLife](https://stats.tennismylife.org/) for providing me with the inspiration.
+Huge shoutout to [TennisMyLife](https://stats.tennismylife.org/) for providing me with the inspiration and data sources.
 
 - [Jeff Sackmann](https://github.com/JeffSackmann) — decades of match-level results, despite removing them from GitHub recently
 - [Prefect](https://www.prefect.io/) — workflow orchestration for the weekly scrape, ETL, and drift monitoring
