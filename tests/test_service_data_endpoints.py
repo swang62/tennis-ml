@@ -584,7 +584,7 @@ def test_predict_from_ids_bulk_preserves_caller_order_and_gru_path():
         ),
     ]
     with (
-        patch("src.features.inference.build_inference_features_bulk", side_effect=_fake_bulk_build),
+        patch("src.serving.service.build_inference_features_bulk", side_effect=_fake_bulk_build),
         patch("src.features.nn_inference.execute_df", side_effect=_empty_gru_history),
     ):
         out = pred.predict_from_ids_bulk(rows)
