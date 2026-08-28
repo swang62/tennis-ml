@@ -15,7 +15,7 @@ from psycopg.rows import tuple_row
 from psycopg_pool import ConnectionPool, PoolTimeout
 
 MIN_POOL_SIZE = 0
-MAX_POOL_SIZE = 4
+MAX_POOL_SIZE = None
 
 MAX_IDLE_S = 10.0
 
@@ -49,10 +49,14 @@ def get_pool() -> ConnectionPool:
                     raise RuntimeError(
                         "DATABASE_URL not set — set it to postgresql://user@host:port/db in your shell or .env"
                     )
+                # psycopg_pool has no unbounded mode: it coerces max_size=None to
+                # min_size, which is invalid when min_size is 0. None here means
+                # "grow on demand per worker", so map it to a large concrete cap.
+                max_size = MAX_POOL_SIZE if MAX_POOL_SIZE is not None else 1024
                 _pool = ConnectionPool(
                     url,
                     min_size=MIN_POOL_SIZE,
-                    max_size=MAX_POOL_SIZE,
+                    max_size=max_size,
                     max_idle=MAX_IDLE_S,
                     open=True,
                     kwargs={"autocommit": True, "connect_timeout": CONNECT_TIMEOUT_S},
@@ -128,7 +132,11 @@ def clear_active_sessions() -> tuple[list[int], list[int]]:
 @contextmanager
 def transaction() -> Iterator[psycopg.Cursor[Any]]:
     """Run a multi-step write atomically on one pooled connection."""
-    with connection() as conn, conn.transaction(), conn.cursor(row_factory=tuple_row) as cur:
+    with (
+        connection() as conn,
+        conn.transaction(),
+        conn.cursor(row_factory=tuple_row) as cur,
+    ):
         yield cur
 
 

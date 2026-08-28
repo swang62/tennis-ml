@@ -90,7 +90,7 @@ class FakePool:
         conninfo: str,
         *,
         min_size: int = 1,
-        max_size: int = 2,
+        max_size: int | None = 2,
         max_idle: float | None = None,
         kwargs: dict[str, object] | None = None,
         check=None,
@@ -111,7 +111,11 @@ class FakePool:
         self.waited = False
         self.wait_timeout: float | None = None
         self.closed = False
-        self._free: list[FakeConn] = [FakeConn() for _ in range(max_size)]
+        # None max_size means the pool grows on demand (no upper bound). Seed one
+        # connection so tests that poke _free[0] still have a handle to prime.
+        self._free: list[FakeConn] = (
+            [FakeConn() for _ in range(max_size)] if max_size else [FakeConn()]
+        )
         self._in_use: set[FakeConn] = set()
         self._cv = threading.Condition()
 
@@ -161,8 +165,8 @@ class FakePool:
                                 continue
                         self._in_use.add(conn)
                         return conn
-                if len(self._in_use) < self.max_size:
-                    self._free.append(FakeConn())  # expand, never past max_size
+                if self.max_size is None or len(self._in_use) < self.max_size:
+                    self._free.append(FakeConn())  # expand (unbounded if max_size is None)
                     continue
                 self._cv.wait(0.05)  # wait for a checkout to be returned
             raise RuntimeError("pool is closed")
@@ -175,8 +179,9 @@ class FakePool:
 
 @pytest.fixture
 def fake_pool(monkeypatch):
-    # Mirrors production bounds (min 0 / max 4 per worker, 10s idle close) so
-    # checkout tests exercise the same caps the deployed Bento workers use.
+    # Mirrors production bounds (min 0 / max None = grow on demand per worker,
+    # 10s idle close) so checkout tests exercise the same behavior the deployed
+    # Bento workers use.
     pool = FakePool(
         "postgresql://test@localhost:5432/test",
         min_size=db_client.MIN_POOL_SIZE,
@@ -339,10 +344,10 @@ def test_concurrent_callers_acquire_parallel_connections(fake_pool):
     assert peak_in_use == 3  # all three held simultaneously, below the cap
 
 
-def test_concurrent_callers_expand_to_the_pool_cap(fake_pool):
-    """Concurrent callers get distinct connections up to the pool cap."""
+def test_concurrent_callers_each_get_a_distinct_connection(fake_pool):
+    """Concurrent callers each get their own connection; the pool grows on demand."""
     assert db_client.get_pool() is fake_pool
-    n = db_client.MAX_POOL_SIZE  # 4
+    n = 6  # more than the old finite cap, proving the pool is no longer bounded
     start = threading.Barrier(n)
     hold = threading.Barrier(n)
     observed: list[int] = []
@@ -369,7 +374,7 @@ def test_concurrent_callers_expand_to_the_pool_cap(fake_pool):
     assert errors == []
     assert len(observed) == n  # every caller completed
     assert len(set(observed)) == n  # each got its own connection
-    assert peak_in_use == db_client.MAX_POOL_SIZE  # expanded to the cap
+    assert peak_in_use == n  # pool expanded to serve all callers (no cap)
 
 
 # --- Broken connection resilience (regression: severed/cached conn) ---

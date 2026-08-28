@@ -963,8 +963,8 @@ class _LGBMProbaAdapter:
     description=SERVICE_DESCRIPTION,
     traffic={"timeout": 120},
     resources={"cpu": "500m"},
-    # Two workers x four max pooled DB connections each: at most eight app
-    # connections, none held while idle.
+    # Two workers; the DB pool grows on demand (no hard max) and sheds idle
+    # connections after 10s, so none are held while the service is idle.
     workers=2,
 )
 @bentoml.asgi_app(DATA_APP, path="/")

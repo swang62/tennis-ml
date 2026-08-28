@@ -113,7 +113,7 @@ The weekly drift flow scores new production data through the champion Bento and 
 | `postgres` | `postgres:18.4`        | 6543           | Feature store |
 | `bento`    | `swang62/tennis-bento` | internal proxy | Model API     |
 | `web`      | `swang62/tennis-web`   | 8187           | Dashboard     |
-| `metabase` | `metabase/metabase`    | 3000           | BI analytics  |
+| `metabase` | `metabase/metabase`    | 3000           | BI analytics (app DB in a separate `metabase` Postgres database; the `tennis` feature DB is added as a data source in the UI) |
 
 | Var                 | Purpose                                                                     |
 | ------------------- | --------------------------------------------------------------------------- |
