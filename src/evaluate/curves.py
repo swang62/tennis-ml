@@ -9,7 +9,7 @@ from typing import Any
 
 import numpy as np
 
-from src.constants import CHAMPION_CURVE_URI_TAG, PRODUCTION_MODEL
+from src.constants import PRODUCTION_MODEL
 
 
 @dataclass(frozen=True)
@@ -77,7 +77,7 @@ def resolve_champion_curves(client: Any, champion: Any) -> CurveData | None:
     from mlflow.artifacts import download_artifacts
 
     version = client.get_model_version(PRODUCTION_MODEL, champion.version)
-    uri = (getattr(version, "tags", None) or {}).get(CHAMPION_CURVE_URI_TAG)
+    uri = (getattr(version, "tags", None) or {}).get("champion_curve_uri")
     if not uri:
         return None
     try:

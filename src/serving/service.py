@@ -33,7 +33,6 @@ from src.constants import (
     BRONZE_RANKINGS_TABLE,
     BULK_MAX_ROWS,
     DEPLOY_ARTIFACTS,
-    FRAMEWORK_KEY,
     GOLD_PROFILES_TABLE,
     GOLD_TOUR_AVERAGES_TABLE,
     NN_PREPROCESSING_ARTIFACT,
@@ -988,7 +987,7 @@ class TennisPredictor:
             )
         # Fixed evidence stack order shared by training and serving.
         self._stack_order: list[str] = list(STACK_ORDER)
-        gbdt_framework = normalize_gbdt_framework(manifest["bases"]["gbdt"][FRAMEWORK_KEY])
+        gbdt_framework = normalize_gbdt_framework(manifest["bases"]["gbdt"]["framework"])
         # xgboost/lightgbm use OpenMP, which can deadlock inside BentoML's
         # forked worker processes. Force single-threaded during model load.
         _old_omp = os.environ.get("OMP_NUM_THREADS")

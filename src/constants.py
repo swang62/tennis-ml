@@ -117,53 +117,19 @@ ELO_INACTIVITY_REGRESS_PER_7D = 0.01
 ELO_INACTIVITY_REGRESS_CAP = 0.50
 
 
-###### Training and Evaluation Keys #####
+###### Model Artifacts #####
 
-EVAL_MAX_DATE_KEY = "metric_eval_max_date"
-EVAL_SPLIT_SIZE_KEY = "metric_eval_split_size"
-METRIC_PREFIX = "metric_"
-MIN_TRAINING_DATE_KEY = "min_training_date"
-RECENCY_CUTOFF_KEY = "recency_cutoff_date"
-RECENCY_HALF_LIFE_KEY = "recency_half_life_days"
-TEST_FRACTION_KEY = "test_fraction"
-TRAIN_DATA_MAX_DATE_KEY = "train_data_max_match_date"
-TRAIN_FRACTION_KEY = "train_fraction"
-VAL_FRACTION_KEY = "val_fraction"
-
-
-###### Lineage and Metadata/Artifacts #####
-
-AUX_TAG_PREFIX = "aux_"
-BASE_TAG_PREFIX = "base_"
-CALIBRATION_ARTIFACT = "calibration_t.json"
-CALIBRATION_HASH_TAG = "calibration_hash"
-CALIBRATION_STATE = MODELS_ARTIFACTS / CALIBRATION_ARTIFACT
-CALIBRATION_URI_TAG = "calibration_uri"
 CANDIDATE_MANIFEST = MODELS_ARTIFACTS / "candidate_manifest.json"
-CHAMPION_ALIAS = "champion"
-CHAMPION_CURVE_ARTIFACT = "champion_curves.json"
-CHAMPION_CURVE_HASH_TAG = "champion_curve_hash"
-CHAMPION_CURVE_URI_TAG = "champion_curve_uri"
-FEATURE_COLS_HASH_TAG = "feature_cols_hash"
-FEATURE_COLS_TAG = "feature_cols"
-FRAMEWORK_KEY = "framework"
-FROZEN_ARTIFACTS = ("linear_scaler.pkl",)
-LINEAGE_AUX_KEYS = ()
-LINEAGE_MODEL_NAME_KEY = "registered_model_name"
-LINEAGE_MODEL_URI_KEY = "model_uri"
-LINEAGE_RUN_ID_KEY = "run_id"
-LINEAGE_SCALER_KEYS = ("scaler_uri", "scaler_hash")
-LINEAGE_VERSION_KEY = "version"
-LINEAGE_BASE_KEYS = (
-    LINEAGE_MODEL_NAME_KEY,
-    LINEAGE_VERSION_KEY,
-    LINEAGE_RUN_ID_KEY,
-    LINEAGE_MODEL_URI_KEY,
-)
 NN_PREPROCESSING_ARTIFACT = "nn_preprocessing.json"
-NN_PREPROCESSING_HASH_TAG = "base_nn_preprocessing_hash"
-NN_PREPROCESSING_URI_TAG = "base_nn_preprocessing_uri"
-PIPELINE_SOURCE_RUN_ID_TAG = "pipeline_source_run_id"
+CALIBRATION_ARTIFACT = "calibration_t.json"
+CALIBRATION_STATE = MODELS_ARTIFACTS / CALIBRATION_ARTIFACT
+CHAMPION_CURVE_ARTIFACT = "champion_curves.json"
+FROZEN_ARTIFACTS = ("linear_scaler.pkl",)
+
+
+###### Model Registry #####
+
+CHAMPION_ALIAS = "champion"
 PRODUCTION_MODEL = "ensemble_lr_model"
 
 
@@ -179,22 +145,18 @@ STACK_ORDER = ("linear", "gbdt", "nn")
 WORK_POOL_NAME = "tennis-pool"
 
 
-def build_lineage_tags(
-    base_pins: dict[str, dict[str, str]], aux_pins: dict[str, str]
-) -> dict[str, str]:
-    """Flatten base and auxiliary lineage pins into champion version tags."""
+def build_lineage_tags(base_pins: dict[str, dict[str, str]]) -> dict[str, str]:
+    """Flatten base-model lineage pins into champion version tags."""
     tags: dict[str, str] = {}
     for name, pin in base_pins.items():
-        if "preprocessing_uri" in pin and "preprocessing_sha256" in pin:
-            tags[f"{BASE_TAG_PREFIX}{name}_preprocessing_uri"] = str(pin["preprocessing_uri"])
-            tags[f"{BASE_TAG_PREFIX}{name}_preprocessing_hash"] = str(pin["preprocessing_sha256"])
-        for key in LINEAGE_BASE_KEYS:
-            tags[f"{BASE_TAG_PREFIX}{name}_{key}"] = str(pin[key])
-        for key in LINEAGE_SCALER_KEYS:
+        if name == "nn" and "preprocessing_uri" in pin and "preprocessing_sha256" in pin:
+            tags["base_nn_preprocessing_uri"] = str(pin["preprocessing_uri"])
+            tags["base_nn_preprocessing_hash"] = str(pin["preprocessing_sha256"])
+        for key in ("registered_model_name", "version", "run_id", "model_uri"):
+            tags[f"base_{name}_{key}"] = str(pin[key])
+        for key in ("scaler_uri", "scaler_hash"):
             if key in pin:
-                tags[f"{BASE_TAG_PREFIX}{name}_{key}"] = str(pin[key])
-    for key in LINEAGE_AUX_KEYS:
-        tags[f"{AUX_TAG_PREFIX}{key}"] = str(aux_pins[key])
+                tags[f"base_{name}_{key}"] = str(pin[key])
     return tags
 
 

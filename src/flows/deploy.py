@@ -20,30 +20,14 @@ import pandas as pd
 
 from src.config import suppress_insecure_tls_warning
 from src.constants import (
-    AUX_TAG_PREFIX,
-    BASE_TAG_PREFIX,
     CALIBRATION_ARTIFACT,
-    CALIBRATION_HASH_TAG,
-    CALIBRATION_URI_TAG,
     CHAMPION_ALIAS,
     DEPLOY_ARTIFACTS,
-    FEATURE_COLS_HASH_TAG,
-    FEATURE_COLS_TAG,
-    FRAMEWORK_KEY,
     FROZEN_ARTIFACTS,
     IMAGE_NAME,
-    LINEAGE_AUX_KEYS,
-    LINEAGE_BASE_KEYS,
-    LINEAGE_MODEL_NAME_KEY,
-    LINEAGE_MODEL_URI_KEY,
-    LINEAGE_RUN_ID_KEY,
-    LINEAGE_SCALER_KEYS,
-    LINEAGE_VERSION_KEY,
     LOGS,
     MODELS_ARTIFACTS,
     NN_PREPROCESSING_ARTIFACT,
-    NN_PREPROCESSING_HASH_TAG,
-    NN_PREPROCESSING_URI_TAG,
     PRODUCTION_MODEL,
     ROOT,
     SIM_EXPERIENCE_K,
@@ -86,9 +70,6 @@ NATIVE_THREAD_ENV = (
     "NUMEXPR_NUM_THREADS",
     "BLIS_NUM_THREADS",
 )
-
-MLFLOW_URI_META_KEY = "mlflow_uri"
-MLFLOW_VERSION_META_KEY = "mlflow_version"
 
 NN_ONNX_FILE = DEPLOY_ARTIFACTS / "nn_best.onnx"
 NN_PREPROCESSING_FILE = DEPLOY_ARTIFACTS / NN_PREPROCESSING_ARTIFACT
@@ -228,8 +209,8 @@ def _lineage_pins(client: Any, production: Any) -> dict[str, dict[str, str]]:
     """Resolve exact base-model and artifact pins from champion lineage tags."""
     version = client.get_model_version(PRODUCTION_MODEL, production.version)
     tags = dict(version.tags)
-    tagged_features = tags.get(FEATURE_COLS_TAG)
-    tagged_hash = tags.get(FEATURE_COLS_HASH_TAG)
+    tagged_features = tags.get("feature_cols")
+    tagged_hash = tags.get("feature_cols_hash")
     current_hash = _feature_cols_hash(list(FEATURE_COLS))
     try:
         tagged_columns = json.loads(tagged_features) if tagged_features is not None else None
@@ -250,10 +231,10 @@ def _lineage_pins(client: Any, production: Any) -> dict[str, dict[str, str]]:
             + (f", tagged {tagged_hash}" if tagged_hash else ""),
         )
     missing = [
-        f"{BASE_TAG_PREFIX}{cls}_{key}"
+        f"base_{cls}_{key}"
         for cls in BASE_BENTO_NAMES
-        for key in LINEAGE_BASE_KEYS
-        if f"{BASE_TAG_PREFIX}{cls}_{key}" not in tags
+        for key in ("registered_model_name", "version", "run_id", "model_uri")
+        if f"base_{cls}_{key}" not in tags
     ]
     if missing:
         raise RuntimeError(
@@ -262,29 +243,32 @@ def _lineage_pins(client: Any, production: Any) -> dict[str, dict[str, str]]:
         )
     pins: dict[str, dict[str, str]] = {
         "production": {
-            LINEAGE_MODEL_NAME_KEY: PRODUCTION_MODEL,
-            LINEAGE_VERSION_KEY: str(production.version),
-            LINEAGE_RUN_ID_KEY: production.run_id,
-            LINEAGE_MODEL_URI_KEY: f"models:/{PRODUCTION_MODEL}/{production.version}",
+            "registered_model_name": PRODUCTION_MODEL,
+            "version": str(production.version),
+            "run_id": production.run_id,
+            "model_uri": f"models:/{PRODUCTION_MODEL}/{production.version}",
         }
     }
     for cls in BASE_BENTO_NAMES:
-        pins[cls] = {key: tags[f"{BASE_TAG_PREFIX}{cls}_{key}"] for key in LINEAGE_BASE_KEYS}
-        for key in LINEAGE_SCALER_KEYS:
-            tag_key = f"{BASE_TAG_PREFIX}{cls}_{key}"
+        pins[cls] = {
+            key: tags[f"base_{cls}_{key}"]
+            for key in ("registered_model_name", "version", "run_id", "model_uri")
+        }
+        for key in ("scaler_uri", "scaler_hash"):
+            tag_key = f"base_{cls}_{key}"
             if tag_key in tags:
                 pins[cls][key] = tags[tag_key]
     # Read the recorded framework; detect only legacy GBDT pins without a tag.
     for cls in BASE_BENTO_NAMES:
-        framework = tags.get(f"{BASE_TAG_PREFIX}{cls}_framework")
+        framework = tags.get(f"base_{cls}_framework")
         if cls == "gbdt" and not framework:
-            framework = _cached_gbdt_framework(
-                pins["gbdt"][LINEAGE_VERSION_KEY]
-            ) or _gbdt_framework(pins["gbdt"][LINEAGE_MODEL_URI_KEY])
+            framework = _cached_gbdt_framework(pins["gbdt"]["version"]) or _gbdt_framework(
+                pins["gbdt"]["model_uri"]
+            )
         if cls == "gbdt" and framework:
             framework = normalize_gbdt_framework(framework).value
         if framework:
-            pins[cls][FRAMEWORK_KEY] = framework
+            pins[cls]["framework"] = framework
     return pins
 
 
@@ -300,31 +284,31 @@ def _write_model_info(
     tags = version.tags
     manifest = {
         "champion": {
-            LINEAGE_MODEL_NAME_KEY: PRODUCTION_MODEL,
-            LINEAGE_VERSION_KEY: str(production.version),
-            LINEAGE_RUN_ID_KEY: production.run_id,
-            LINEAGE_MODEL_URI_KEY: f"models:/{PRODUCTION_MODEL}/{production.version}",
+            "registered_model_name": PRODUCTION_MODEL,
+            "version": str(production.version),
+            "run_id": production.run_id,
+            "model_uri": f"models:/{PRODUCTION_MODEL}/{production.version}",
             "creation_timestamp_ms": int(version.creation_timestamp),
         },
         "bases": {cls: pins[cls] for cls in BASE_BENTO_NAMES},
-        "aux_artifacts": {key: tags[f"{AUX_TAG_PREFIX}{key}"] for key in LINEAGE_AUX_KEYS},
+        "aux_artifacts": {},
         "build_input_fingerprint": fingerprint,
     }
-    if NN_PREPROCESSING_URI_TAG in tags and NN_PREPROCESSING_HASH_TAG in tags:
+    if "base_nn_preprocessing_uri" in tags and "base_nn_preprocessing_hash" in tags:
         manifest["aux_artifacts"]["nn_preprocessing"] = {
-            "uri": tags[NN_PREPROCESSING_URI_TAG],
-            "sha256": tags[NN_PREPROCESSING_HASH_TAG],
+            "uri": tags["base_nn_preprocessing_uri"],
+            "sha256": tags["base_nn_preprocessing_hash"],
         }
-    if CALIBRATION_URI_TAG in tags and CALIBRATION_HASH_TAG in tags:
+    if "calibration_uri" in tags and "calibration_hash" in tags:
         manifest["calibration"] = {
-            "uri": tags.get(CALIBRATION_URI_TAG),
-            "sha256": tags.get(CALIBRATION_HASH_TAG),
+            "uri": tags.get("calibration_uri"),
+            "sha256": tags.get("calibration_hash"),
             "temperature": calibration_temperature,
         }
-    if FEATURE_COLS_TAG in tags and FEATURE_COLS_HASH_TAG in tags:
+    if "feature_cols" in tags and "feature_cols_hash" in tags:
         manifest["feature_contract"] = {
-            "columns": json.loads(tags[FEATURE_COLS_TAG]),
-            "sha256": tags[FEATURE_COLS_HASH_TAG],
+            "columns": json.loads(tags["feature_cols"]),
+            "sha256": tags["feature_cols_hash"],
         }
     MODEL_INFO_FILE.parent.mkdir(parents=True, exist_ok=True)
     MODEL_INFO_FILE.write_text(json.dumps(manifest, indent=2) + "\n")
@@ -405,8 +389,8 @@ def _materialize_calibration(client: Any, tags: dict[str, str], no_cache: bool =
     """Resolve and verify calibration, using no-op temperature for legacy champions."""
     import mlflow
 
-    uri = tags.get(CALIBRATION_URI_TAG)
-    hash_tag = tags.get(CALIBRATION_HASH_TAG)
+    uri = tags.get("calibration_uri")
+    hash_tag = tags.get("calibration_hash")
     if uri is None or hash_tag is None:
         # Do not reuse a calibration file from a previous champion.
         DEPLOY_ARTIFACTS.mkdir(parents=True, exist_ok=True)
@@ -478,9 +462,9 @@ def _cached_gbdt_framework(version: str) -> str | None:
     except Exception:
         return None
     metadata = stored.info.metadata
-    if metadata.get(MLFLOW_VERSION_META_KEY) != str(version):
+    if metadata.get("mlflow_version") != str(version):
         return None
-    framework = metadata.get(FRAMEWORK_KEY)
+    framework = metadata.get("framework")
     if not isinstance(framework, str):
         return None
     try:
@@ -501,8 +485,8 @@ def _materialize_native_model(
     import bentoml
     import mlflow
 
-    registered_name = pin[LINEAGE_MODEL_NAME_KEY]
-    version = str(pin[LINEAGE_VERSION_KEY])
+    registered_name = pin["registered_model_name"]
+    version = str(pin["version"])
     uri = f"models:/{registered_name}/{version}"
     if registered_name == BASE_BENTO_NAMES["gbdt"] and framework is not None:
         framework = normalize_gbdt_framework(framework).value
@@ -511,9 +495,9 @@ def _materialize_native_model(
     except Exception:
         stored = None
     metadata = stored.info.metadata if stored is not None else {}
-    same_version = metadata.get(MLFLOW_VERSION_META_KEY) == version
+    same_version = metadata.get("mlflow_version") == version
     if registered_name == BASE_BENTO_NAMES["gbdt"]:
-        stored_framework = metadata.get(FRAMEWORK_KEY)
+        stored_framework = metadata.get("framework")
         try:
             same_framework = (
                 isinstance(stored_framework, str)
@@ -531,9 +515,9 @@ def _materialize_native_model(
     if registered_name == BASE_BENTO_NAMES["gbdt"]:
         framework = framework or _detect_gbdt_framework(raw)
         metadata = {
-            MLFLOW_URI_META_KEY: uri,
-            MLFLOW_VERSION_META_KEY: version,
-            FRAMEWORK_KEY: framework,
+            "mlflow_uri": uri,
+            "mlflow_version": version,
+            "framework": framework,
         }
         save = (
             bentoml.xgboost.save_model
@@ -547,7 +531,7 @@ def _materialize_native_model(
         bentoml.sklearn.save_model(
             registered_name,
             raw,
-            metadata={MLFLOW_URI_META_KEY: uri, MLFLOW_VERSION_META_KEY: version},
+            metadata={"mlflow_uri": uri, "mlflow_version": version},
         ),
         None,
     )
@@ -557,8 +541,8 @@ def _mlflow_import_or_reuse(pin: dict[str, Any], no_cache: bool = False) -> Any:
     """Import or reuse a pinned MLflow version by exact version, never alias."""
     import bentoml
 
-    registered_name = pin[LINEAGE_MODEL_NAME_KEY]
-    version = str(pin[LINEAGE_VERSION_KEY])
+    registered_name = pin["registered_model_name"]
+    version = str(pin["version"])
     uri = f"models:/{registered_name}/{version}"
     try:
         stored = bentoml.models.get(registered_name)
@@ -567,14 +551,14 @@ def _mlflow_import_or_reuse(pin: dict[str, Any], no_cache: bool = False) -> Any:
     if (
         not no_cache
         and stored is not None
-        and stored.info.metadata.get(MLFLOW_VERSION_META_KEY) == version
+        and stored.info.metadata.get("mlflow_version") == version
     ):
         _log("bento", f"reusing {registered_name} ({stored.tag}, MLflow v{version})")
         return stored
     stored = bentoml.mlflow.import_model(
         registered_name,
         uri,
-        metadata={MLFLOW_URI_META_KEY: uri, MLFLOW_VERSION_META_KEY: version},
+        metadata={"mlflow_uri": uri, "mlflow_version": version},
     )
     _log("bento", f"imported {registered_name} ({uri} -> {stored.tag})")
     return stored
@@ -584,7 +568,7 @@ def _import_or_reuse(
     pin: dict[str, Any], framework: str | None = None, no_cache: bool = False
 ) -> Any:
     """Materialize a pinned model; ``nn_best`` is exported to ONNX instead."""
-    if pin[LINEAGE_MODEL_NAME_KEY] == BASE_BENTO_NAMES["nn"]:
+    if pin["registered_model_name"] == BASE_BENTO_NAMES["nn"]:
         return _mlflow_import_or_reuse(pin, no_cache=no_cache)
     return _materialize_native_model(pin, framework, no_cache=no_cache)[0]
 
@@ -603,18 +587,17 @@ def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
     import bentoml
     import torch
 
-    from src.training import nn_history as gh
+    from src.features import nn_runtime as gr
     from src.training.nn import SymmetricGRU
 
     torch.set_num_threads(1)
 
     logging.getLogger("torch.onnx").setLevel(logging.ERROR)
-    warnings.filterwarnings("ignore", category=UserWarning, module="torch.*")
 
     _log(
         "bento",
         f"materializing nn_best GRU ONNX from models:/"
-        f"{nn_pin[LINEAGE_MODEL_NAME_KEY]}/{nn_pin[LINEAGE_VERSION_KEY]}",
+        f"{nn_pin['registered_model_name']}/{nn_pin['version']}",
     )
     stored = _import_or_reuse(nn_pin)
 
@@ -624,8 +607,8 @@ def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
         raise TypeError(f"nn_best raw model is not a SymmetricGRU: {type(raw).__name__}")
     raw.eval()
 
-    hist_len, n_raw = gh.HISTORY_LEN, gh.N_RAW
-    ctx_dim = len(gh.GRU_CONTEXT_NAMES)
+    hist_len, n_raw = gr.HISTORY_LEN, gr.N_RAW
+    ctx_dim = len(gr.GRU_CONTEXT_NAMES)
     # Dummy batch of two so the dynamic batch axis is exercised at export time.
     dummy = (
         torch.zeros(2, hist_len, n_raw, dtype=torch.float32),
@@ -644,7 +627,17 @@ def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
     }
 
     NN_ONNX_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with torch.inference_mode():
+    with warnings.catch_warnings(), torch.inference_mode():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"The tensor attributes self\.gru\._flat_weights.*",
+            category=UserWarning,
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=r"`isinstance\(treespec, LeafSpec\)` is deprecated.*",
+            category=FutureWarning,
+        )
         torch.onnx.export(
             raw,
             dummy,
@@ -672,9 +665,9 @@ def _materialize_nn_onnx(nn_pin: dict[str, Any]) -> None:
 
 
 def _materialize_nn_preprocessing(
-    client: Any,
+    _client: Any,
     tags: dict[str, str],
-    no_cache: bool = False,  # noqa: ARG001 — kept for caller contract
+    no_cache: bool = False,
 ) -> None:
     """Download, hash-verify, and schema-validate the GRU preprocessing artifact.
 
@@ -686,12 +679,12 @@ def _materialize_nn_preprocessing(
 
     from src.features.nn_inference import load_gru_preprocessing
 
-    uri = tags.get(NN_PREPROCESSING_URI_TAG)
-    hash_tag = tags.get(NN_PREPROCESSING_HASH_TAG)
+    uri = tags.get("base_nn_preprocessing_uri")
+    hash_tag = tags.get("base_nn_preprocessing_hash")
     if uri is None or hash_tag is None:
         raise RuntimeError(
             f"champion {PRODUCTION_MODEL} is missing GRU preprocessing lineage tags "
-            f"{NN_PREPROCESSING_URI_TAG!r}/{NN_PREPROCESSING_HASH_TAG!r} — promote "
+            f"{'base_nn_preprocessing_uri'!r}/{'base_nn_preprocessing_hash'!r} — promote "
             "through a full GRU training run (`just train`) before deploy"
         )
     local = DEPLOY_ARTIFACTS / NN_PREPROCESSING_ARTIFACT
@@ -733,9 +726,9 @@ def _reuse_or_materialize_nn_onnx(
     if (
         not no_cache
         and NN_ONNX_FILE.exists()
-        and state.get("nn_onnx_model_uri") == nn_pin[LINEAGE_MODEL_URI_KEY]
+        and state.get("nn_onnx_model_uri") == nn_pin["model_uri"]
     ):
-        _log("bento", f"reusing nn_best ONNX for {nn_pin[LINEAGE_MODEL_URI_KEY]}")
+        _log("bento", f"reusing nn_best ONNX for {nn_pin['model_uri']}")
         return True
     _materialize_nn_onnx(nn_pin)
     return False
@@ -797,7 +790,7 @@ def _import_models(pins: dict[str, dict[str, Any]], no_cache: bool = False) -> d
     """Materialize pinned MLflow versions as native BentoModels and return tags."""
     tags: dict[str, str] = {}
     for key, pin in pins.items():
-        framework = pin.get(FRAMEWORK_KEY) if key == "gbdt" else None
+        framework = pin.get("framework") if key == "gbdt" else None
         tags[key] = str(_import_or_reuse(pin, framework, no_cache=no_cache).tag)
     return tags
 
@@ -1019,7 +1012,7 @@ def build_bento_image(
             **state,
             "fingerprint": fingerprint,
             "tag": tag,
-            "nn_onnx_model_uri": pins["nn"][LINEAGE_MODEL_URI_KEY],
+            "nn_onnx_model_uri": pins["nn"]["model_uri"],
         }
     )
     print(f"Built {tag} from {pinned}")
