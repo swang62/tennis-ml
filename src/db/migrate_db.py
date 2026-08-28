@@ -41,6 +41,11 @@ def migrate() -> None:
             print(f"PostgreSQL database created: {database}")
         except DuplicateDatabase:
             pass
+        try:
+            cur.execute(pg_sql.SQL("CREATE DATABASE {}").format(pg_sql.Identifier("metabase")))
+            print("PostgreSQL database created: metabase")
+        except DuplicateDatabase:
+            pass
     schema_sql = SCHEMA_SQL.read_text()
     with (
         psycopg.connect(
