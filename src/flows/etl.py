@@ -27,6 +27,7 @@ from src.constants import (
     GOLD_PROFILES_TABLE,
     LOGS,
     ROOT,
+    PREFECT_FLOW_TIMEOUT_SECONDS,
     SILVER_ELO_SNAPSHOTS,
     SILVER_PLAYER_MATCHES,
     SILVER_ROLLING_FEATURES,
@@ -400,7 +401,11 @@ def _etl_flow_run_name() -> str:
     return etl_run_name(params.get("source"))
 
 
-@flow(log_prints=True, flow_run_name=_etl_flow_run_name)
+@flow(
+    log_prints=True,
+    flow_run_name=_etl_flow_run_name,
+    timeout_seconds=PREFECT_FLOW_TIMEOUT_SECONDS,
+)
 def etl_flow(incremental: bool = False, source: str | None = None):
     """Build bronze-to-gold models with dbt, split around Elo materialization.
 

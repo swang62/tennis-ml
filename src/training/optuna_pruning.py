@@ -18,7 +18,7 @@ def report_and_maybe_prune(trial: optuna.trial.Trial, value: float, step: int) -
 # ── xgboost adapter ──────────────────────────────────────────────────────────
 
 
-def make_xgboost_pruning_callback(trial: optuna.trial.Trial) -> Any:
+def make_xgboost_pruning_callback(trial: optuna.trial.Trial, step_offset: int = 0) -> Any:
     """Build an XGBoost callback that reports validation ``logloss``."""
     from xgboost.callback import TrainingCallback
 
@@ -32,7 +32,7 @@ def make_xgboost_pruning_callback(trial: optuna.trial.Trial) -> Any:
             for metrics in evals_log.values():
                 history = metrics.get("logloss")
                 if history:
-                    report_and_maybe_prune(trial, float(history[-1]), epoch)
+                    report_and_maybe_prune(trial, float(history[-1]), step_offset + epoch)
                     return False  # never stop training ourselves; pruner raises instead
             return False
 
@@ -42,7 +42,9 @@ def make_xgboost_pruning_callback(trial: optuna.trial.Trial) -> Any:
 # ── lightgbm adapter ─────────────────────────────────────────────────────────
 
 
-def make_lightgbm_pruning_callback(trial: optuna.trial.Trial) -> Callable[..., None]:
+def make_lightgbm_pruning_callback(
+    trial: optuna.trial.Trial, step_offset: int = 0
+) -> Callable[..., None]:
     """Build a LightGBM callback that reports validation ``binary_logloss``."""
 
     class _LightGBMPruningCallback:
@@ -53,7 +55,7 @@ def make_lightgbm_pruning_callback(trial: optuna.trial.Trial) -> Callable[..., N
                 return
             for _, metric_name, value, *_ in env.evaluation_result_list:
                 if metric_name == "binary_logloss":
-                    report_and_maybe_prune(trial, float(value), env.iteration)
+                    report_and_maybe_prune(trial, float(value), step_offset + env.iteration)
                     break
 
     return _LightGBMPruningCallback()

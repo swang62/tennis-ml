@@ -80,12 +80,14 @@ class _Tee:
         self.log = log
 
     def write(self, s: str) -> int:
-        self.log.write(s)
+        if not self.log.closed:
+            self.log.write(s)
         return self.console.write(s)
 
     def flush(self) -> None:
         self.console.flush()
-        self.log.flush()
+        if not self.log.closed:
+            self.log.flush()
 
 
 if __name__ == "__main__":

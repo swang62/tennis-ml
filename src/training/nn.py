@@ -151,7 +151,7 @@ class SymmetricGRU(L.LightningModule):
             # Normalized weighted BCE for training only; validation/predict stay unweighted.
             bce = nn.functional.binary_cross_entropy_with_logits(logits, labels, reduction="none")
             loss = (bce * weights).mean()
-        self.log("train_loss", loss, prog_bar=True)
+        self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
         return loss
 
     def validation_step(self, batch, _batch_idx):
@@ -159,7 +159,7 @@ class SymmetricGRU(L.LightningModule):
         logits = self(ph, oh, pv, ov, ctx)
         loss = nn.functional.binary_cross_entropy_with_logits(logits, labels)
         probs = torch.sigmoid(logits)
-        self.log("val_loss", loss, prog_bar=True, sync_dist=True)
+        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         return {"probs": probs, "labels": labels}
 
     def predict_step(self, batch, _batch_idx, _dataloader_idx=0):

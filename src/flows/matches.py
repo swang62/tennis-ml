@@ -16,7 +16,13 @@ from typing import Any, cast
 import pandas as pd
 from prefect import flow
 
-from src.constants import BRONZE_MATCHES_TABLE, ROOT, WORK_POOL_NAME, load_env
+from src.constants import (
+    BRONZE_MATCHES_TABLE,
+    PREFECT_FLOW_TIMEOUT_SECONDS,
+    ROOT,
+    WORK_POOL_NAME,
+    load_env,
+)
 from src.db.client import connection, execute_df, first_row_dict
 from src.db.ingest import (
     LEVEL_MAP,
@@ -1873,7 +1879,12 @@ def _scrape_flow_run_name() -> str:
     return scrape_run_name(params.get("start_date"), params.get("end_date"))
 
 
-@flow(log_prints=True, retries=1, flow_run_name=_scrape_flow_run_name)
+@flow(
+    log_prints=True,
+    retries=1,
+    flow_run_name=_scrape_flow_run_name,
+    timeout_seconds=PREFECT_FLOW_TIMEOUT_SECONDS,
+)
 def matches_flow(
     start_date: date | None = None,
     end_date: date | None = None,

@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from typing import Any
 
 from mlflow.entities import ViewType
@@ -13,8 +14,9 @@ def full_reset_mlflow_registry(client: Any | None = None) -> None:
     models = client.search_registered_models()
     experiments = [
         experiment
-        for experiment in client.search_experiments(view_type=ViewType.ACTIVE_ONLY)
+        for experiment in client.search_experiments(view_type=ViewType.ALL)
         if experiment.experiment_id != "0"
+        and not (experiment.lifecycle_stage == "deleted" and "__reset_" in experiment.name)
     ]
     print(
         f"MLflow reset target: {len(models)} registered model(s), "
@@ -28,15 +30,22 @@ def full_reset_mlflow_registry(client: Any | None = None) -> None:
         print("MLflow reset cancelled.")
         return
 
+    for experiment in experiments:
+        if experiment.lifecycle_stage == "deleted":
+            client.restore_experiment(experiment.experiment_id)
+        archived_name = f"{experiment.name}__reset_{datetime.now(UTC):%Y%m%dT%H%M%SZ}_{experiment.experiment_id}"
+        client.rename_experiment(experiment.experiment_id, archived_name)
+        client.delete_experiment(experiment.experiment_id)
+        print(f"Archived experiment: {experiment.name} ({experiment.experiment_id})")
+
     for model in models:
         client.delete_registered_model(name=model.name)
         print(f"Deleted registered model: {model.name}")
 
-    for experiment in experiments:
-        client.delete_experiment(experiment.experiment_id)
-        print(f"Deleted experiment: {experiment.name} ({experiment.experiment_id})")
-
-    print("MLflow reset complete (the default experiment is retained by MLflow).")
+    print(
+        "MLflow reset complete (the default experiment is retained; DagsHub retains archived "
+        "experiments but their original names are available)."
+    )
 
 
 if __name__ == "__main__":

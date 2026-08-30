@@ -11,7 +11,10 @@ notify-failure *args:
     just {{ args }}
     status=$?
     if (( status != 0 )); then
-        osascript -e 'display notification "just {{ args }} failed" with title "tennis-ml" sound name "Glass"'
+        ghostty="/Applications/Ghostty.app/Contents/MacOS/ghostty"
+        opencode="$$(command -v opencode)"
+        printf -v click_command '%q -e %q %q' "$$ghostty" "$$opencode" "$$PWD"
+        terminal-notifier -message "just {{ args }} failed" -title "tennis-ml" -sound Glass -execute "$$click_command"
     fi
     exit $status
 
@@ -74,7 +77,7 @@ full-pipeline *args:
     just notify-failure _full-pipeline {{ args }}
 
 # seed: --all, --enrich, --reset, etl: --incremental, train: --force-promote, deploy: --no-cache
-_full-pipeline *args: deps lint test cluster-create probe migrate
+_full-pipeline *args: deps lint test probe migrate
     just seed {{ args }}
     just etl {{ args }}
     just snapshot

@@ -5,6 +5,7 @@ import sys
 from datetime import date
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -61,6 +62,7 @@ DAYS_SINCE_LAST_MATCH_MAX = 90
 ENRICH_WORKERS = 4
 OPTUNA_PRUNER_INTERVAL_STEPS = 10
 OPTUNA_PRUNER_MIN_TRIALS = 10
+OPTUNA_N_TRIALS = 60
 OPTUNA_PRUNER_STARTUP_TRIALS = 30
 OPTUNA_PRUNER_WARMUP_STEPS = 50
 PROMOTION_TOLERANCE = 0.01
@@ -143,9 +145,10 @@ PREDICT_BATCH_ROUTE = "/api/predict_from_ids_bulk"
 PRODUCTION_BENTO_URL = os.getenv("PRODUCTION_BENTO_URL", "http://127.0.0.1:8187")
 STACK_ORDER = ("linear", "gbdt", "nn")
 WORK_POOL_NAME = "tennis-pool"
+PREFECT_FLOW_TIMEOUT_SECONDS = 60 * 60
 
 
-def build_lineage_tags(base_pins: dict[str, dict[str, str]]) -> dict[str, str]:
+def build_lineage_tags(base_pins: dict[str, dict[str, Any]]) -> dict[str, str]:
     """Flatten base-model lineage pins into champion version tags."""
     tags: dict[str, str] = {}
     for name, pin in base_pins.items():
@@ -157,12 +160,15 @@ def build_lineage_tags(base_pins: dict[str, dict[str, str]]) -> dict[str, str]:
         for key in ("scaler_uri", "scaler_hash"):
             if key in pin:
                 tags[f"base_{name}_{key}"] = str(pin[key])
+        if "selected_framework" in pin:
+            tags[f"base_{name}_selected_framework"] = str(pin["selected_framework"])
     return tags
 
 
 class LinearFramework(StrEnum):
     LOGISTIC_REGRESSION = "logistic_regression"
     GAUSSIAN_NAIVE_BAYES = "gaussian_naive_bayes"
+    SGD_CLASSIFIER = "sgd_classifier"
 
 
 class GBDTFramework(StrEnum):

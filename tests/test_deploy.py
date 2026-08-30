@@ -255,18 +255,56 @@ def test_build_lineage_tags_flattens_exact_pins():
             "model_uri": "runs:/run-linear/linear_model",
             "scaler_uri": "runs:/run-linear/linear_scaler.pkl",
             "scaler_hash": "aaa",
+            "selected_framework": "logistic_regression",
+            "selection_metrics": {
+                "logistic_regression": {
+                    "inner_cv_log_loss": 0.60,
+                    "outer_val_log_loss": 0.61,
+                    "outer_val_roc_auc": 0.72,
+                },
+                "gaussian_naive_bayes": {
+                    "inner_cv_log_loss": 0.62,
+                    "outer_val_log_loss": 0.63,
+                    "outer_val_roc_auc": 0.70,
+                },
+                "sgd_classifier": {
+                    "inner_cv_log_loss": 0.61,
+                    "outer_val_log_loss": 0.63,
+                    "outer_val_roc_auc": 0.71,
+                },
+            },
         },
         "gbdt": {
             "registered_model_name": "gbdt_best",
             "version": "2",
             "run_id": "run-gbdt",
             "model_uri": "runs:/run-gbdt/gbdt_model",
+            "selected_framework": "xgboost",
+            "selection_metrics": {
+                "xgboost": {
+                    "inner_cv_log_loss": 0.59,
+                    "outer_val_log_loss": 0.60,
+                    "outer_val_roc_auc": 0.72,
+                },
+                "lightgbm": {
+                    "inner_cv_log_loss": 0.60,
+                    "outer_val_log_loss": 0.61,
+                    "outer_val_roc_auc": 0.71,
+                },
+            },
         },
         "nn": {
             "registered_model_name": "nn_best",
             "version": "1",
             "run_id": "run-nn",
             "model_uri": "runs:/run-nn/nn_model",
+            "selected_framework": "symmetric_gru",
+            "selection_metrics": {
+                "symmetric_gru": {
+                    "outer_val_log_loss": 0.62,
+                    "outer_val_roc_auc": 0.70,
+                }
+            },
         },
     }
     tags = c.build_lineage_tags(base_pins)
@@ -276,6 +314,18 @@ def test_build_lineage_tags_flattens_exact_pins():
     assert "base_gbdt_scaler_uri" not in tags  # only linear has a scaler
     assert tags["base_gbdt_run_id"] == "run-gbdt"
     assert tags["base_nn_model_uri"] == "runs:/run-nn/nn_model"
+    # The champion records which framework won per base; candidate metrics stay
+    # on the pinned base model versions so it stays inference-lean.
+    assert tags["base_linear_selected_framework"] == "logistic_regression"
+    assert tags["base_gbdt_selected_framework"] == "xgboost"
+    assert tags["base_nn_selected_framework"] == "symmetric_gru"
+    for metric_key in (
+        "base_linear_logistic_regression_outer_val_log_loss",
+        "base_linear_sgd_classifier_inner_cv_log_loss",
+        "base_gbdt_lightgbm_outer_val_roc_auc",
+        "base_nn_symmetric_gru_outer_val_log_loss",
+    ):
+        assert metric_key not in tags
     # Navigation artifacts (similarity index/metadata, player directory) are not
     # model lineage: build_lineage_tags never emits their tags.
     for nav_key in (
@@ -284,6 +334,37 @@ def test_build_lineage_tags_flattens_exact_pins():
         "aux_player_directory_uri",
     ):
         assert nav_key not in tags
+
+
+def test_lineage_pins_prefers_selected_framework_and_keeps_legacy_fallback():
+    from types import SimpleNamespace
+
+    import src.flows.deploy as deploy
+
+    tags = {
+        "feature_cols": json.dumps(list(deploy.FEATURE_COLS)),
+        "feature_cols_hash": deploy._feature_cols_hash(list(deploy.FEATURE_COLS)),
+    }
+    for name in deploy.BASE_BENTO_NAMES:
+        tags |= {
+            f"base_{name}_registered_model_name": f"{name}_best",
+            f"base_{name}_version": "1",
+            f"base_{name}_run_id": f"run-{name}",
+            f"base_{name}_model_uri": f"models:/{name}_best/1",
+        }
+    tags["base_gbdt_framework"] = "lightgbm"
+    tags["base_gbdt_selected_framework"] = "xgboost"
+
+    class Client:
+        def get_model_version(self, _name, _version):
+            return SimpleNamespace(tags=tags)
+
+    production = SimpleNamespace(version="1", run_id="production-run")
+    pins = deploy._lineage_pins(Client(), production)
+    assert pins["gbdt"]["framework"] == "xgboost"
+
+    del tags["base_gbdt_selected_framework"]
+    assert deploy._lineage_pins(Client(), production)["gbdt"]["framework"] == "lightgbm"
 
 
 # --- Navigation boundary contracts ---

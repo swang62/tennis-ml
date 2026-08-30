@@ -38,6 +38,7 @@ from src.constants import (
     DRIFT_SHARE_THRESHOLD,
     MODEL_INFO_ROUTE,
     PREDICT_BATCH_ROUTE,
+    PREFECT_FLOW_TIMEOUT_SECONDS,
     PRODUCTION_BENTO_URL,
     PRODUCTION_MODEL,
     WORK_POOL_NAME,
@@ -503,7 +504,7 @@ def _recommendation(
     return "healthy"
 
 
-@flow(log_prints=True)
+@flow(log_prints=True, timeout_seconds=PREFECT_FLOW_TIMEOUT_SECONDS)
 def drift_flow(cutoff: date | None = None) -> int:
     """Build ETL, score current/reference windows, and publish a drift verdict."""
     load_env()

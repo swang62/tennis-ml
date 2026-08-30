@@ -258,9 +258,9 @@ def _lineage_pins(client: Any, production: Any) -> dict[str, dict[str, str]]:
             tag_key = f"base_{cls}_{key}"
             if tag_key in tags:
                 pins[cls][key] = tags[tag_key]
-    # Read the recorded framework; detect only legacy GBDT pins without a tag.
+    # Prefer the immutable base pin; retain the legacy tag fallback for existing champions.
     for cls in BASE_BENTO_NAMES:
-        framework = tags.get(f"base_{cls}_framework")
+        framework = tags.get(f"base_{cls}_selected_framework") or tags.get(f"base_{cls}_framework")
         if cls == "gbdt" and not framework:
             framework = _cached_gbdt_framework(pins["gbdt"]["version"]) or _gbdt_framework(
                 pins["gbdt"]["model_uri"]
@@ -508,9 +508,10 @@ def _materialize_native_model(
     else:
         same_framework = True
     if not no_cache and stored is not None and same_version and same_framework:
-        _log("bento", f"reusing {registered_name} ({stored.tag}, MLflow v{version})")
+        _log("bento", f"reusing local cache: {registered_name} ({stored.tag}, MLflow v{version})")
         return stored, framework
 
+    _log("bento", f"downloading fresh from MLflow: {uri}")
     raw = mlflow.pyfunc.load_model(uri).get_raw_model()
     if registered_name == BASE_BENTO_NAMES["gbdt"]:
         framework = framework or _detect_gbdt_framework(raw)
@@ -524,17 +525,18 @@ def _materialize_native_model(
             if framework == GBDTFramework.XGBOOST
             else bentoml.lightgbm.save_model
         )
-        return save(registered_name, raw, metadata=metadata), framework
+        stored = save(registered_name, raw, metadata=metadata)
+        _log("bento", f"staged fresh {registered_name} v{version} as {stored.tag}")
+        return stored, framework
     if not _is_sklearn_estimator(raw):
         raise RuntimeError(f"{registered_name} is not an sklearn estimator: {type(raw).__name__}")
-    return (
-        bentoml.sklearn.save_model(
-            registered_name,
-            raw,
-            metadata={"mlflow_uri": uri, "mlflow_version": version},
-        ),
-        None,
+    stored = bentoml.sklearn.save_model(
+        registered_name,
+        raw,
+        metadata={"mlflow_uri": uri, "mlflow_version": version},
     )
+    _log("bento", f"staged fresh {registered_name} v{version} as {stored.tag}")
+    return stored, None
 
 
 def _mlflow_import_or_reuse(pin: dict[str, Any], no_cache: bool = False) -> Any:
@@ -553,14 +555,15 @@ def _mlflow_import_or_reuse(pin: dict[str, Any], no_cache: bool = False) -> Any:
         and stored is not None
         and stored.info.metadata.get("mlflow_version") == version
     ):
-        _log("bento", f"reusing {registered_name} ({stored.tag}, MLflow v{version})")
+        _log("bento", f"reusing local cache: {registered_name} ({stored.tag}, MLflow v{version})")
         return stored
+    _log("bento", f"downloading fresh from MLflow: {uri}")
     stored = bentoml.mlflow.import_model(
         registered_name,
         uri,
         metadata={"mlflow_uri": uri, "mlflow_version": version},
     )
-    _log("bento", f"imported {registered_name} ({uri} -> {stored.tag})")
+    _log("bento", f"staged fresh {registered_name} v{version} as {stored.tag}")
     return stored
 
 
@@ -994,6 +997,13 @@ def build_bento_image(
 
     state = _read_state()
     pins = _lineage_pins(client, production)
+    _log("bento", f"packaging champion {PRODUCTION_MODEL} v{production.version}")
+    for key in ("linear", "gbdt", "nn"):
+        pin = pins[key]
+        _log(
+            "bento",
+            f"pinned {key}: {pin['registered_model_name']} v{pin['version']} ({pin['model_uri']})",
+        )
     _reuse_or_materialize_nn_onnx(state, pins["nn"], no_cache=no_cache)
     version_tags = client.get_model_version(PRODUCTION_MODEL, production.version).tags
     _materialize_nn_preprocessing(client, version_tags, no_cache=no_cache)
