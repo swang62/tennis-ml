@@ -1,6 +1,6 @@
 # tennis-ml
 
-![](web/public/og-image.png)
+![](docs/tennis-ml-architecture.visual-check.2048x1320.dark.png)
 
 Tennis match predictions end to end. I made this repo with the goal of learning modern MLOps, deploying a full stack pipeline with automated ingestion, training, evaluation, promotion, deployment, and a nice UI to boot. I love tennis, and so I built a simple and fun way to look up stats and match predictions, and avoiding the ATP website as much as possible (which is a true eyesore).
 

@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Tennis ML: Train to Production",
+    "output": "tennis-ml-architecture.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/swang62/tennis-ml.git",
+      "revision": "26897ab0331c068f62bc953f3ae94e285c840f01"
+    },
+    "views": [
+      {
+        "id": "data-foundation",
+        "label": "Data foundation",
+        "focus": ["atp", "scrapers", "postgres", "etl", "snapshot"],
+        "note": "Follow scheduled collection into the feature source of truth and training snapshot."
+      },
+      {
+        "id": "model-lifecycle",
+        "label": "Model lifecycle",
+        "focus": ["snapshot", "split", "tune_gbdt", "tune_linear", "tune_nn", "ensemble", "evaluate", "mlflow", "deploy"],
+        "note": "See how time-forward training becomes a pinned champion artifact."
+      },
+      {
+        "id": "production-runtime",
+        "label": "Production runtime",
+        "focus": ["deploy", "bento", "stats", "inference", "postgres"],
+        "note": "Trace deployment packaging and the live prediction request path."
+      }
+    ]
+  },
+  "components": [
+    { "id": "atp", "type": "external", "label": "ATP data sources", "sublabel": "feeds", "pos": [30, 285], "size": [125, 64], "tag": "external", "sources": [{ "path": "src/flows/rankings.py", "line": 34 }, { "path": "src/flows/matches.py", "line": 1888 }] },
+    { "id": "scrapers", "type": "backend", "label": "Prefect scrape flows", "sublabel": "rankings + matches", "pos": [190, 285], "size": [130, 64], "tag": "scheduled", "sources": [{ "path": "src/flows/rankings.py", "line": 475 }, { "path": "src/flows/matches.py", "line": 1888 }] },
+    { "id": "postgres", "type": "database", "label": "PostgreSQL", "sublabel": "bronze / silver / gold", "pos": [350, 285], "size": [130, 64], "tag": "feature source of truth", "sources": [{ "path": "src/flows/etl.py", "line": 409 }, { "path": "src/db/snapshot.py", "line": 253 }] },
+    { "id": "etl", "type": "backend", "label": "dbt + Elo ETL", "sublabel": "silver to gold", "pos": [510, 285], "size": [125, 64], "tag": "automation-triggered", "sources": [{ "path": "src/flows/etl.py", "line": 409 }, { "path": "src/features/elo.py", "line": 303 }] },
+    { "id": "snapshot", "type": "database", "label": "DuckDB snapshot", "sublabel": "training data", "pos": [670, 285], "size": [130, 64], "tag": "as-of features", "sources": [{ "path": "src/db/snapshot.py", "line": 14 }, { "path": "src/db/snapshot.py", "line": 253 }] },
+    { "id": "split", "type": "backend", "label": "Test/validation split", "sublabel": "chronological", "pos": [730, 130], "size": [145, 52], "tag": "notebook", "sources": [{ "path": "src/flows/pipeline.py", "line": 25 }] },
+    { "id": "tune_gbdt", "type": "backend", "label": "GBDT model", "sublabel": "Optuna tuning", "pos": [900, 110], "size": [120, 52], "tag": "XGBoost / LightGBM", "sources": [{ "path": "src/flows/pipeline.py", "line": 27 }] },
+    { "id": "tune_linear", "type": "backend", "label": "Linear model", "sublabel": "Optuna tuning", "pos": [900, 205], "size": [120, 52], "tag": "LR / Gaussian NB", "sources": [{ "path": "src/flows/pipeline.py", "line": 28 }] },
+    { "id": "tune_nn", "type": "backend", "label": "GRU model", "sublabel": "Optuna tuning", "pos": [900, 300], "size": [120, 52], "tag": "neural sequence", "sources": [{ "path": "src/flows/pipeline.py", "line": 29 }] },
+    { "id": "ensemble", "type": "backend", "label": "Ensemble model", "sublabel": "OOF stacker", "pos": [1040, 180], "size": [125, 52], "tag": "logistic stacker", "sources": [{ "path": "src/flows/pipeline.py", "line": 30 }] },
+    { "id": "evaluate", "type": "backend", "label": "Evaluation gate", "sublabel": "metrics + promote", "pos": [1040, 300], "size": [125, 52], "tag": "@champion", "sources": [{ "path": "src/flows/pipeline.py", "line": 31 }] },
+    { "id": "mlflow", "type": "cloud", "label": "MLflow registry", "sublabel": "runs + pins", "pos": [1200, 285], "size": [125, 64], "tag": "champion gate", "sources": [{ "path": "src/constants.py", "line": 132 }, { "path": "src/flows/deploy.py", "line": 123 }] },
+    { "id": "deploy", "type": "backend", "label": "Deploy flow", "sublabel": "materialize + package", "pos": [1200, 500], "size": [125, 64], "tag": "Docker Buildx", "sources": [{ "path": "src/flows/deploy.py", "line": 978 }, { "path": "src/flows/deploy.py", "line": 1100 }] },
+    { "id": "bento", "type": "backend", "label": "BentoML service", "sublabel": "ONNX + native models", "pos": [830, 500], "size": [135, 64], "tag": "prediction + data API", "sources": [{ "path": "src/serving/service.py", "line": 971 }, { "path": "src/serving/service.py", "line": 1132 }] },
+    { "id": "stats", "type": "frontend", "label": "Player stats UI", "sublabel": "profiles + H2H", "pos": [670, 500], "size": [135, 64], "tag": "React / Vite", "sources": [{ "path": "web/src/api.ts", "line": 247 }, { "path": "web/src/pages/Profile.tsx", "line": 141 }] },
+    { "id": "inference", "type": "frontend", "label": "Inference UI", "sublabel": "match context", "pos": [510, 500], "size": [130, 64], "tag": "React / Vite", "sources": [{ "path": "web/src/api.ts", "line": 290 }, { "path": "web/src/api.ts", "line": 302 }] },
+    { "id": "drift", "type": "backend", "label": "Monitoring flow", "sublabel": "drift + quality", "pos": [1040, 420], "size": [130, 64], "tag": "Prefect flow", "sources": [{ "path": "src/flows/drift.py", "line": 507 }, { "path": "src/flows/drift.py", "line": 440 }] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "Data and feature platform", "wraps": ["scrapers", "postgres", "etl", "snapshot"], "pad": 22 },
+    { "kind": "region", "label": "Training pipeline", "wraps": ["split", "tune_gbdt", "tune_linear", "tune_nn", "ensemble", "evaluate"], "pad": 22 },
+    { "kind": "region", "label": "MLOps control plane", "wraps": ["mlflow", "deploy", "drift"], "pad": 22 },
+    { "kind": "security-group", "label": "Docker Compose production runtime", "wraps": ["bento", "stats", "inference"], "pad": 18 }
+  ],
+  "connections": [
+    { "from": "atp", "to": "scrapers", "variant": "emphasis" },
+    { "from": "scrapers", "to": "postgres", "variant": "emphasis" },
+    { "from": "postgres", "to": "etl", "variant": "emphasis" },
+    { "from": "etl", "to": "snapshot", "variant": "emphasis" },
+    { "from": "snapshot", "to": "split", "variant": "emphasis", "fromSide": "top", "toSide": "top", "via": [[735, 90], [802.5, 90]] },
+    { "from": "split", "to": "tune_gbdt", "variant": "emphasis" },
+    { "from": "split", "to": "tune_linear", "variant": "emphasis" },
+    { "from": "split", "to": "tune_nn", "variant": "emphasis" },
+    { "from": "tune_gbdt", "to": "ensemble", "variant": "emphasis" },
+    { "from": "tune_linear", "to": "ensemble", "variant": "emphasis" },
+    { "from": "tune_nn", "to": "ensemble", "variant": "emphasis" },
+    { "from": "ensemble", "to": "evaluate", "variant": "emphasis" },
+    { "from": "evaluate", "to": "mlflow", "variant": "emphasis" },
+    { "from": "mlflow", "to": "deploy", "variant": "security", "fromSide": "bottom", "toSide": "top" },
+    { "from": "deploy", "to": "bento", "variant": "emphasis" },
+    { "from": "stats", "to": "bento", "variant": "emphasis", "route": "straight" },
+    { "from": "inference", "to": "bento", "variant": "emphasis", "fromSide": "top", "toSide": "top", "via": [[575, 460], [897.5, 460]] },
+    { "from": "bento", "to": "postgres", "label": "as-of lookup", "labelAt": [650, 365], "variant": "dashed", "fromSide": "top", "toSide": "bottom", "via": [[897.5, 380], [415, 380]] },
+    { "from": "drift", "to": "bento", "label": "live Bento scoring", "labelAt": [1003, 400], "variant": "dashed" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Orchestration + data", "items": ["Prefect contains rankings, matches, incremental ETL, and monthly drift deployments", "Successful scrapes emit events that trigger incremental ETL", "PostgreSQL rolling snapshots are the feature source of truth"] },
+    { "dot": "violet", "title": "Training pipeline", "items": ["Test/validation split feeds parallel GBDT, linear model, and GRU tuning", "Ensemble model consumes OOF evidence from all three model families", "Evaluation + promotion computes log loss, ROC-AUC, accuracy, and Brier, then promotes @champion"] },
+    { "dot": "emerald", "title": "Inference + monitoring", "items": ["Player stats use Bento data endpoints; inference independently POSTs match context to /predict_from_ids", "Bento derives as-of features, scores linear/GBDT/ONNX GRU, then applies the ensemble and calibration", "Drift uses Evidently PSI, prediction drift, calibration delta, and AUC drop to recommend retraining"] }
+  ]
+}
