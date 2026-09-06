@@ -504,7 +504,11 @@ def _recommendation(
     return "healthy"
 
 
-@flow(log_prints=True, timeout_seconds=PREFECT_FLOW_TIMEOUT_SECONDS)
+@flow(
+    log_prints=True,
+    flow_run_name="drift-check",
+    timeout_seconds=PREFECT_FLOW_TIMEOUT_SECONDS,
+)
 def drift_flow(cutoff: date | None = None) -> int:
     """Build ETL, score current/reference windows, and publish a drift verdict."""
     load_env()
