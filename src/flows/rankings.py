@@ -13,6 +13,7 @@ from typing import Any, cast
 
 import pandas as pd
 from prefect import flow, task
+from prefect.events import emit_event
 
 from src.constants import PREFECT_FLOW_TIMEOUT_SECONDS, WORK_POOL_NAME, load_env
 from src.db.client import connection
@@ -29,6 +30,7 @@ from src.utils.scrape import (
     PAGE_NAVIGATION_TIMEOUT_MS,
     _jitter,
     discover_players,
+    wait_out_challenge,
 )
 
 RANKINGS_URL = "https://www.atptour.com/en/rankings/singles?rankRange=0-200&dateWeek={date}"
@@ -273,14 +275,14 @@ def _fetch_week_html(page, url: str, week: date) -> str:
     _jitter()
     page.goto(url, wait_until="domcontentloaded", timeout=PAGE_NAVIGATION_TIMEOUT_MS)
     _jitter()
+    wait_out_challenge(page, f"week {week.isoformat()}", ready_marker="rankings")
     try:
         page.wait_for_selector(
             FILTER_SELECTOR, state="attached", timeout=FILTER_VERIFY_BUDGET_S * 1000
         )
     except Exception as exc:
         raise RankingsParseError(
-            f"week {week.isoformat()}: #dateWeek-filter unavailable "
-            "(Cloudflare or widget verification failed)"
+            f"week {week.isoformat()}: #dateWeek-filter unavailable (widget never rendered)"
         ) from exc
     if not _week_in_filter(page, week):
         raise RankingsNotPublishedError(week.isoformat())
@@ -466,6 +468,21 @@ def _scrape_flow_run_name() -> str:
     return scrape_run_name(params.get("start_date"), params.get("end_date"))
 
 
+def _emit_rankings_scraped(row_count: int, watermark: date | None) -> None:
+    """Emit the ``rankings.scraped`` domain event; log and swallow failures."""
+    payload: dict[str, object] = {"row_count": row_count}
+    if watermark is not None:
+        payload["watermark"] = watermark.isoformat()
+    try:
+        emit_event(
+            event="rankings.scraped",
+            resource={"prefect.resource.id": "tennis.bronze.rankings"},
+            payload=payload,
+        )
+    except Exception as exc:
+        print(f"Failed to emit rankings.scraped event: {exc}")
+
+
 @flow(
     log_prints=True,
     retries=1,
@@ -540,6 +557,8 @@ def rankings_flow(
     if not dry_run:
         sort_current_rankings_csv()
     print(f"Scrape complete: {stored} rows stored")
+    if stored > 0 and not dry_run:
+        _emit_rankings_scraped(stored, watermark)
 
 
 def _fail_if_no_data_found(found_data: bool, weeks: list[date]) -> None:

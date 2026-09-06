@@ -16,7 +16,7 @@ from src.db.ingest import persist_atp_player
 from src.utils.countries import valid_ioc
 
 # Shared page-load budget for rankings and player-overview navigation.
-PAGE_NAVIGATION_TIMEOUT_MS = 60_000
+PAGE_NAVIGATION_TIMEOUT_MS = 10_000
 
 PLAYER_OVERVIEW_URL = "https://www.atptour.com/en/players/{slug}/{player_id}/overview"
 
@@ -44,6 +44,41 @@ _FLAG_SRC_RE = re.compile(r"flags\.svg#flag-([a-z]{3})")
 def _jitter() -> None:
     """Human-like random pause between navigation steps (bot-detection resistance)."""
     time.sleep(random.uniform(0.8, 2.5))
+
+
+# Shared by every scrape flow: the Cloudflare interstitial fires
+# domcontentloaded like any page, so readiness is judged on content, never on
+# the goto event. Budget covers the challenge plus its redirect to real content.
+CLOUDFLARE_RESOLVE_BUDGET_S = 10
+
+
+def wait_out_challenge(page: Any, label: str, ready_marker: str) -> str:
+    """Poll until ``ready_marker`` appears in the body; raise on timeout.
+
+    Positive readiness check only: challenge scripts persist in the DOM of
+    resolved ATP pages, so load state is judged by expected content, never
+    by interstitial markers.
+    """
+    deadline = time.monotonic() + CLOUDFLARE_RESOLVE_BUDGET_S
+    while True:
+        try:
+            body = page.content()
+        except Exception as exc:
+            # Transient while the challenge reloads the document; wait inside
+            # the budget instead of failing the run on the first poll.
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"{label}: page content failed") from exc
+            print(f"{label}: page content unavailable ({type(exc).__name__}); waiting")
+            time.sleep(1)
+            continue
+        if ready_marker.lower() in body.lower():
+            return body
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                f"{label}: {ready_marker!r} not found within {CLOUDFLARE_RESOLVE_BUDGET_S}s"
+            )
+        print(f"{label}: waiting for {ready_marker!r}")
+        time.sleep(1)
 
 
 def _fetch_overview_html(page: Any, slug: str, player_id: str) -> tuple[str, str]:

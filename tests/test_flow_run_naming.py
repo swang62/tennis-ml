@@ -1,8 +1,6 @@
-"""Tests for scrape and ETL run-name helpers and source validation."""
+"""Tests for scrape and ETL run-name helpers."""
 
 from datetime import date
-
-import pytest
 
 import src.flows.etl as etl
 import src.flows.rankings as rankings
@@ -45,19 +43,3 @@ def test_etl_run_name_by_source():
 def test_etl_run_name_manual_when_unset_or_unknown():
     assert etl.etl_run_name(None) == "etl-manual"
     assert etl.etl_run_name("drift") == "etl-manual"
-
-
-# ── ETL flow validates the source parameter ──────────────────────
-
-
-def test_etl_flow_rejects_invalid_source():
-    with pytest.raises(ValueError, match="source"):
-        etl.etl_flow.fn(source="drift")
-
-
-def test_etl_flow_accepts_known_sources_and_none(monkeypatch):
-    # Patch the body so the guard is the only thing exercised (no DB/work).
-    monkeypatch.setattr(etl, "load_env", lambda: None)
-    monkeypatch.setattr(etl, "bronze_to_gold", lambda **_kwargs: 0)
-    for source in ("rankings", "matches", None):
-        etl.etl_flow.fn(source=source)  # must not raise

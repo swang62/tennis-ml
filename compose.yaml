@@ -70,4 +70,3 @@ services:
 
 volumes:
   tennis-ml-postgres:
-  tennis-ml-metabase:

@@ -8,8 +8,9 @@ import re
 import shlex
 import subprocess
 import sys
+import urllib.parse
 from contextlib import suppress
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TextIO, cast
 from uuid import UUID
@@ -17,17 +18,19 @@ from uuid import UUID
 import psycopg
 from prefect import flow, get_run_logger, task
 from prefect.automations import Automation
-from prefect.client.orchestration import get_client
-from prefect.events.actions import RunDeployment
-from prefect.events.schemas.automations import EventTrigger
+from prefect.blocks.notifications import CustomWebhookNotificationBlock
+from prefect.events import DeploymentEventTrigger, emit_event
+from prefect.events.actions import SendNotification
+from prefect.events.schemas.automations import EventTrigger, Posture
+from prefect.settings import PREFECT_UI_URL
 
 from src.constants import (
     BRONZE_MATCHES_TABLE,
     GOLD_MATCHES_TABLE,
     GOLD_PROFILES_TABLE,
     LOGS,
-    ROOT,
     PREFECT_FLOW_TIMEOUT_SECONDS,
+    ROOT,
     SILVER_ELO_SNAPSHOTS,
     SILVER_PLAYER_MATCHES,
     SILVER_ROLLING_FEATURES,
@@ -53,9 +56,8 @@ DBT_BUILD_CMD = [
 DBT_RUN_RESULTS = ROOT / "dbt" / "target" / "run_results.json"
 
 ETL_DEPLOYMENT_NAME = "etl"
-RANKINGS_FLOW_NAME = "rankings-flow"
-MATCHES_FLOW_NAME = "matches-flow"
-SCRAPE_ETL_AUTOMATION_NAME = "scrape-triggers-etl"
+NTFY_BLOCK_NAME = "tennis-etl-ntfy"
+EMPTY_SCRAPES_AUTOMATION_NAME = "empty-scrapes"
 
 
 def run_dbt_build(
@@ -189,19 +191,20 @@ def _record_incremental_watermark(watermark: datetime | None) -> None:
 
 
 @task()
-def bronze_to_gold(incremental: bool = False) -> int:
+def bronze_to_gold(incremental: bool = False, profile_only: bool = False) -> tuple[int, bool]:
+    """Build bronze-to-gold models with dbt, split around Elo materialization."""
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     mode = "incremental" if incremental else "full_refresh"
     print(f"dbt mode: {mode}")
     if not incremental:
         clear_etl_state()
     source_watermark, built_watermark = _incremental_watermarks()
-    profile_only = (
-        incremental
-        and source_watermark is not None
+    auto_derived = (
+        source_watermark is not None
         and built_watermark is not None
         and source_watermark <= built_watermark
     )
+    profile_only = (profile_only or auto_derived) and incremental
     try:
         logger = get_run_logger()
     except RuntimeError:
@@ -223,7 +226,7 @@ def bronze_to_gold(incremental: bool = False) -> int:
             subcommand="run",
         )
         _report_phase(log_file, incremental, mode, "profiles")
-        return _current_gold_count()
+        return _current_gold_count(), True
 
     # Phase 1 — base dbt models: player_matches, rolling_features, tour_averages, player_profiles.
     # Run without tests so they don't execute against stale Elo/match_features state.
@@ -297,7 +300,7 @@ def bronze_to_gold(incremental: bool = False) -> int:
 
     # Only advance the watermark after every phase above succeeded.
     _record_incremental_watermark(source_watermark)
-    return _current_gold_count()
+    return _current_gold_count(), False
 
 
 def _report_phase(log_file: Path, incremental: bool, mode: str, phase: str) -> None:
@@ -406,7 +409,11 @@ def _etl_flow_run_name() -> str:
     flow_run_name=_etl_flow_run_name,
     timeout_seconds=PREFECT_FLOW_TIMEOUT_SECONDS,
 )
-def etl_flow(incremental: bool = False, source: str | None = None):
+def etl_flow(
+    incremental: bool = False,
+    source: str | None = None,
+    profile_only: bool = False,
+):
     """Build bronze-to-gold models with dbt, split around Elo materialization.
 
     Phase order: base dbt models -> Elo snapshots -> gold.match_features (+ tests).
@@ -417,8 +424,22 @@ def etl_flow(incremental: bool = False, source: str | None = None):
             f"etl_flow source must be one of {sorted(VALID_ETL_SOURCES)} or None, got {source!r}"
         )
     load_env()
-    rows = bronze_to_gold(incremental=incremental)
-    print(f"ETL complete: {rows} gold rows")
+    gold_rows, resolved_profile_only = bronze_to_gold(
+        incremental=incremental, profile_only=profile_only
+    )
+    print(f"ETL complete: {gold_rows} gold rows")
+    try:
+        emit_event(
+            event="etl.completed",
+            resource={"prefect.resource.id": "tennis.gold.match_features"},
+            payload={
+                "source": source,
+                "profile_only": resolved_profile_only,
+                "gold_rows": gold_rows,
+            },
+        )
+    except Exception as exc:
+        print(f"etl.completed emit failed (audit-only): {exc}")
 
 
 def register_deployment() -> None:
@@ -437,64 +458,120 @@ def register_deployment() -> None:
         name=ETL_DEPLOYMENT_NAME,
         work_pool_name=WORK_POOL_NAME,
         parameters={"incremental": True},
+        concurrency_limit=1,
+        triggers=[
+            DeploymentEventTrigger(
+                name="etl_rankings",
+                match={"prefect.resource.id": "tennis.bronze.rankings"},
+                expect={"rankings.scraped"},
+                posture=Posture.Reactive,
+                threshold=1,
+                within=timedelta(0),
+                parameters={
+                    "source": "rankings",
+                    "incremental": True,
+                    "profile_only": True,
+                },
+            ),
+            DeploymentEventTrigger(
+                name="etl_matches",
+                match={"prefect.resource.id": "tennis.bronze.matches"},
+                expect={"matches.scraped"},
+                posture=Posture.Reactive,
+                threshold=1,
+                within=timedelta(0),
+                parameters={"source": "matches", "incremental": True},
+            ),
+        ],
         build=False,
         ignore_warnings=True,
         print_next_steps=False,
     )
     print(
         f"Registered deployment {ETL_DEPLOYMENT_NAME!r} "
-        "(no cron — automation-triggered, incremental)"
+        "(event-triggered, incremental, concurrency_limit=1)"
     )
 
 
-def build_scrape_etl_automation(source: str, etl_deployment_id: UUID) -> Automation:
-    """Build an automation that runs incremental ETL after a named scrape succeeds."""
-    if source not in VALID_ETL_SOURCES:
-        raise ValueError(f"source must be one of {sorted(VALID_ETL_SOURCES)}, got {source!r}")
-    flow_name = RANKINGS_FLOW_NAME if source == "rankings" else MATCHES_FLOW_NAME
-    return Automation(
-        name=f"{SCRAPE_ETL_AUTOMATION_NAME}-{source}",
-        description=f"Run ETL after a successful {source} flow run.",
-        trigger=EventTrigger(
-            expect={"prefect.flow-run.Completed"},
-            match={"prefect.resource.id": "prefect.flow-run.*"},
-            match_related={
-                "prefect.resource.role": "flow",
-                "prefect.resource.name": [flow_name],
-            },
-        ),
-        actions=[
-            RunDeployment.model_validate(
-                {
-                    "deployment_id": etl_deployment_id,
-                    "parameters": {"source": source, "incremental": True},
-                }
-            )
-        ],
-    )
+def _prefect_runs_url() -> str | None:
+    """Prefect UI URL, or None when the server exposes no UI URL."""
+    ui_url = PREFECT_UI_URL.value()
+    if not ui_url:
+        return None
+    return f"{ui_url.rstrip('/')}/runs"
 
 
 def register_automation() -> None:
-    """Register the matches-success -> ETL automation idempotently."""
-    with get_client(sync_client=True) as client:
-        deployment = client.read_deployment_by_name(f"{etl_flow.name}/{ETL_DEPLOYMENT_NAME}")
+    """Register the empty-scrapes automation idempotently."""
     for name in (
-        SCRAPE_ETL_AUTOMATION_NAME,
-        f"{SCRAPE_ETL_AUTOMATION_NAME}-rankings",
-        f"{SCRAPE_ETL_AUTOMATION_NAME}-matches",
+        "scrape-triggers-etl",
+        "scrape-triggers-etl-rankings",
+        "scrape-triggers-etl-matches",
+        "scrape-dead-man-switch",
     ):
         with suppress(ValueError):
             cast(Automation, Automation.read(name=name)).delete()
 
-    for source in ("rankings", "matches"):
-        automation = build_scrape_etl_automation(source, deployment.id)
-        automation.create()
-        flow_name = RANKINGS_FLOW_NAME if source == "rankings" else MATCHES_FLOW_NAME
-        print(
-            f"Registered automation {automation.name!r}: "
-            f"{flow_name} success -> {etl_flow.name}/{ETL_DEPLOYMENT_NAME} "
-            f"(source={source})"
-        )
+    ntfy_url = os.environ.get("NTFY_URL")
+    parsed = urllib.parse.urlparse(ntfy_url) if ntfy_url else None
+    if parsed is None or parsed.scheme not in ("http", "https"):
+        print("NTFY_URL not set — no empty-scrapes notifications registered")
+        return
+    block_url = f"{parsed.scheme}://{parsed.netloc}"
+    topic = parsed.path.strip("/")
+    print(f"ntfy topic: {topic} (anyone who knows it can read alerts — set NTFY_URL to control it)")
+    json_data = {
+        "topic": topic,
+        "title": "{{ subject }}",
+        "message": "{{ body }}",
+        "priority": 5,
+        "tags": ["skull"],
+    }
+    click_url = _prefect_runs_url()
+    if click_url is not None:
+        json_data["click"] = click_url
+    block = CustomWebhookNotificationBlock(
+        name=NTFY_BLOCK_NAME,
+        url=block_url,
+        # basedpyright misreads Field(None) defaults on this block as required.
+        headers=None,
+        cookies=None,
+        json_data=json_data,
+    )
+    block_id = cast(UUID, block.save(name=NTFY_BLOCK_NAME, overwrite=True))
+
+    with suppress(ValueError):
+        cast(Automation, Automation.read(name=EMPTY_SCRAPES_AUTOMATION_NAME)).delete()
+    automation = Automation(
+        name=EMPTY_SCRAPES_AUTOMATION_NAME,
+        description=(
+            "Alert via ntfy when neither rankings.scraped nor matches.scraped fires within 8 days."
+        ),
+        trigger=EventTrigger(
+            posture=Posture.Proactive,
+            expect={"rankings.scraped", "matches.scraped"},
+            match={
+                "prefect.resource.id": [
+                    "tennis.bronze.rankings",
+                    "tennis.bronze.matches",
+                ]
+            },
+            threshold=1,
+            within=timedelta(days=8),
+        ),
+        actions=[
+            SendNotification(
+                block_document_id=block_id,
+                subject="tennis-ml: scrapes stale",
+                body=(
+                    "No rankings.scraped or matches.scraped event in 8 days — "
+                    "check Prefect worker / scraper logs."
+                ),
+            )
+        ],
+    )
+    automation.create()
+    print(f"Registered automation {automation.name!r} (empty-scrapes, 8-day window, ntfy alerts)")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

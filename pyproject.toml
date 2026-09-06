@@ -50,7 +50,6 @@ exclude = [
 ]
 # Untyped notebook MLflow/Lightning APIs need narrow pyright exceptions.
 executionEnvironments = [
-  # Repo-root extra path lets notebooks import src.*.
   { root = "notebooks", extraPaths = [
     ".",
   ], reportPrivateImportUsage = "none", reportArgumentType = "none", reportPossiblyUnboundVariable = 'none' },
@@ -178,4 +177,4 @@ KMP_DUPLICATE_LIB_OK = "TRUE"
 DATABASE_URL = "postgresql://ci:ci@127.0.0.1:6666/tennis"
 POSTGRES_PASSWORD = "ci"
 BENTO_API_KEY = "ci"
-PREFECT_API_URL = "http://127.0.0.1:4200/api"
+PREFECT_API_URL = "http://127.0.0.1:1/api"

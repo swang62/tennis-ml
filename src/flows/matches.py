@@ -15,6 +15,7 @@ from typing import Any, cast
 
 import pandas as pd
 from prefect import flow
+from prefect.events import emit_event
 
 from src.constants import (
     BRONZE_MATCHES_TABLE,
@@ -42,6 +43,7 @@ from src.features.columns import (
 )
 from src.flows import rankings
 from src.flows.rankings import scrape_run_name
+from src.utils.scrape import wait_out_challenge
 
 MATCHES_DEPLOYMENT_NAME = "matches"
 MATCHES_CRON = "30 22 * * 2"
@@ -194,7 +196,9 @@ _DAY_HEADER_RE = re.compile(r'<div class="tournament-day">')
 _DAY_DATE_RE = re.compile(r"(\d{1,2})\s+([A-Za-z]+),?\s+(\d{4})")
 _ROUND_STRONG_RE = re.compile(r"<span><strong>([^<]+)</strong></span>")
 _PLAYER_LINK_RE = re.compile(r'href="/en/players/([^/]+)/([^/]+)/overview"[^>]*>([^<]*)</a>')
-_STATS_LINK_RE = re.compile(r"/en/scores/stats-centre/archive/(\d{4})/(\d+)/(ms\d+)\"")
+_STATS_LINK_RE = re.compile(
+    r"/en/scores/(?:stats-centre|match-stats)/archive/(\d{4})/(\d+)/(ms\d+)\""
+)
 _STATS_ITEM_RE = re.compile(r'class="stats-item"')
 _SCORE_ITEM_RE = re.compile(r'<div class="score-item">(.*?)</div>', re.S)
 _WINNER_DIV_RE = re.compile(r'<div class="winner">')
@@ -337,13 +341,6 @@ def physical_key(match_date: date, tournament_id: str, player1: str, player2: st
     return (match_date, tournament_id, frozenset({player1.upper(), player2.upper()}))
 
 
-def ms_sequence(match_id: Any) -> int:
-    """Return the positive sequence in a valid ``msNNN`` id, else ``0``."""
-    raw = str(match_id or "").strip()
-    digits = raw[2:] if raw.lower().startswith("ms") else ""
-    return int(digits) if digits.isdigit() else 0
-
-
 def build_match_id(year: int, tournament_id: str, sequence: int) -> str:
     """Build a date-independent canonical match id."""
     return canonical_match_id(tournament_id, sequence, year)
@@ -417,7 +414,7 @@ TOURNAMENT_RESULTS_URL = (
 # Per-request navigation budget for a Hawkeye fetch (same class of timeout the
 # rankings flow uses for its pages); a timeout is a per-match skip, never an
 # abort.
-HAWKEYE_NAV_TIMEOUT_MS = 60_000
+HAWKEYE_NAV_TIMEOUT_MS = 10_000
 # Randomized human-like gap between Hawkeye requests (bot-detection hygiene).
 HAWKEYE_SLEEP_MIN_S = 3.0
 HAWKEYE_SLEEP_MAX_S = 8.0
@@ -716,13 +713,7 @@ def hawkeye_to_bronze(
             "match_date": _as_date(discovered_match.get("match_date"))
             if discovered_match
             else None,
-            "match_num": (
-                discovered_match.get("match_num")
-                if discovered_match and discovered_match.get("match_num") is not None
-                else ms_sequence(discovered_match.get("match_id"))
-                if discovered_match
-                else 0
-            ),
+            "match_num": discovered_match.get("match_num") if discovered_match else 0,
             "player1_id": player1_id,
             "player2_id": player2_id,
             "tournament": tier,
@@ -760,12 +751,12 @@ def fetch_hawkeye_match(
     rankings._jitter()
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=HAWKEYE_NAV_TIMEOUT_MS)
-    except Exception as exc:
-        raise RuntimeError(f"Hawkeye {match_id}: navigation failed") from exc
+    except Exception:
+        return None, f"Hawkeye {match_id}: navigation failed"
     try:
         body = page.content()
-    except Exception as exc:
-        raise RuntimeError(f"Hawkeye {match_id}: page content failed") from exc
+    except Exception:
+        return None, f"Hawkeye {match_id}: page content failed"
     # CloakBrowser wraps the raw JSON in an HTML shell; recover the embedded
     # object before parsing so a wrapped payload still parses as JSON.
     if _HTML_BODY_RE.search(body[:2048]):
@@ -1319,10 +1310,11 @@ def sort_raw_match_csv(path: Path) -> None:
 
 # ── Flow orchestration: window, archive, tournaments, enrichment ──
 
-# Tier eligibility: only tour-level singles events qualify; everything else
-# (atp_finals, davis_cup, olympics, challengers, unknown badges) is skipped and
-# reported, never guessed.
-TIER_ELIGIBLE = frozenset({"grand_slam", "masters", "atp_500", "atp_250"})
+# Tier eligibility: tour-level singles events qualify, including the year-end
+# ATP Finals; everything else (davis_cup, olympics, team exhibitions, unknown
+# badges) is skipped and reported, never guessed. Challengers/ITF never appear
+# with a tier: LEVEL_MAP has no entry for them.
+TIER_ELIGIBLE = frozenset({"grand_slam", "masters", "atp_500", "atp_250", "atp_finals"})
 
 # Indoor events observed in the local ATP CSV history from 2022 through 2026.
 # The tier guard keeps names such as Dallas and Astana from crossing levels.
@@ -1656,7 +1648,7 @@ def _id_collision(
     return ""
 
 
-def _fetch_page(page: Any, url: str, label: str) -> tuple[str, str]:
+def _fetch_page(page: Any, url: str, label: str, ready_marker: str) -> tuple[str, str]:
     """(html, "") or ("", reason) — one shared page, jitter around navigation.
 
     The run's single browser page navigates every archive year, tournament
@@ -1665,9 +1657,9 @@ def _fetch_page(page: Any, url: str, label: str) -> tuple[str, str]:
     ``rankings._jitter()`` before the goto and before the content inspection;
     the 3-8s tournament/request pacing lives in the callers.
 
-    A navigation or content failure raises a runtime error; otherwise the
-    page's content is the successful response. A valid empty archive or results
-    page (no content) is still a successful response.
+    A navigation or content failure raises a runtime error; the shared
+    ``wait_out_challenge`` polls until the Cloudflare interstitial resolves
+    (or ``ready_marker`` appears) and raises only when that times out.
     """
     rankings._jitter()
     try:
@@ -1675,11 +1667,7 @@ def _fetch_page(page: Any, url: str, label: str) -> tuple[str, str]:
     except Exception as exc:
         raise RuntimeError(f"{label}: navigation failed") from exc
     rankings._jitter()
-    try:
-        body = page.content()
-    except Exception as exc:
-        raise RuntimeError(f"{label}: page content failed") from exc
-    return body, ""
+    return wait_out_challenge(page, label, ready_marker=ready_marker), ""
 
 
 def _process_tournament(
@@ -1725,7 +1713,7 @@ def _process_tournament(
     )
     print(f"Tournament {tournament_id} ({name}): fetching {url}")
     time.sleep(random.uniform(HAWKEYE_SLEEP_MIN_S, HAWKEYE_SLEEP_MAX_S))
-    html, err = _fetch_page(page, url, f"results {tournament_id}")
+    html, err = _fetch_page(page, url, f"results {tournament_id}", ready_marker="results")
     if err:
         print(f"  Tournament {tournament_id}: skipped ({err})")
         print(
@@ -1761,7 +1749,10 @@ def _process_tournament(
         )
     result["skipped"] += len(duplicates)
     if match_ids is not None:
-        resolved = [match for match in resolved if match.get("match_id") in match_ids]
+        # msXXX ids repeat on every tournament page, so scope by tournament.
+        resolved = [
+            match for match in resolved if f"{tournament_id}/{match.get('match_id')}" in match_ids
+        ]
 
     hawkeye = fetch_hawkeye_batch(resolved, year=year, tournament_id=tournament_id, page=page)
     draw_size = None
@@ -1879,6 +1870,25 @@ def _scrape_flow_run_name() -> str:
     return scrape_run_name(params.get("start_date"), params.get("end_date"))
 
 
+def _emit_matches_scraped(
+    row_count: int, window_start: date | None, window_end: date | None
+) -> None:
+    """Emit the ``matches.scraped`` domain event; log and swallow failures."""
+    payload: dict[str, object] = {"row_count": row_count}
+    if window_start is not None:
+        payload["window_start"] = window_start.isoformat()
+    if window_end is not None:
+        payload["window_end"] = window_end.isoformat()
+    try:
+        emit_event(
+            event="matches.scraped",
+            resource={"prefect.resource.id": "tennis.bronze.matches"},
+            payload=payload,
+        )
+    except Exception as exc:
+        print(f"Failed to emit matches.scraped event: {exc}")
+
+
 @flow(
     log_prints=True,
     retries=1,
@@ -1945,7 +1955,9 @@ def matches_flow(
         for year in years:
             url = RESULTS_ARCHIVE_URL.format(year=year)
             print(f"Archive {year}: fetching {url}")
-            html, err = _fetch_page(page, url, f"results archive {year}")
+            html, err = _fetch_page(
+                page, url, f"results archive {year}", ready_marker="results archive"
+            )
             if err:
                 print(f"  Archive {year}: skipped ({err})")
                 continue
@@ -2015,6 +2027,9 @@ def matches_flow(
         f"inserted={totals['inserted']} updated={totals['updated']} "
         f"noop={totals['noop']} skipped={totals['skipped']}"
     )
+    scraped = totals["inserted"] + totals["updated"]
+    if scraped > 0:
+        _emit_matches_scraped(scraped, start, end)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -2037,7 +2052,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--match-ids",
         type=lambda value: {item.strip() for item in value.split(",") if item.strip()},
-        help="optional comma-separated Hawkeye match ids to retry",
+        help="optional comma-separated tournament-scoped Hawkeye ids to retry (e.g. 7480/ms001)",
     )
     return parser.parse_args(argv)
 

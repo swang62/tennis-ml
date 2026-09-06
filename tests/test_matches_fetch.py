@@ -40,6 +40,27 @@ def _fetch(body: str, monkeypatch: pytest.MonkeyPatch):
     return matches.fetch_hawkeye_match(_Page(body), 2026, "421", "ms001")
 
 
+def test_hawkeye_navigation_and_content_failures_are_skips_not_raises(monkeypatch):
+    """A per-match nav/content failure returns a skip reason so the batch continues."""
+    monkeypatch.setattr(rankings, "_jitter", lambda: None)
+
+    class _NavFailingPage(_Page):
+        def goto(self, *_args, **_kwargs):
+            raise TimeoutError("nav timeout")
+
+    payload, reason = matches.fetch_hawkeye_match(_NavFailingPage(""), 2026, "421", "ms001")
+    assert payload is None
+    assert reason == "Hawkeye ms001: navigation failed"
+
+    class _ContentFailingPage(_Page):
+        def content(self):
+            raise RuntimeError("content boom")
+
+    payload, reason = matches.fetch_hawkeye_match(_ContentFailingPage(""), 2026, "421", "ms001")
+    assert payload is None
+    assert reason == "Hawkeye ms001: page content failed"
+
+
 def test_html_wrapped_json_recovers_payload(monkeypatch):
     # The live shape: raw JSON inside an <html>/<pre> shell.
     payload, reason = _fetch(
