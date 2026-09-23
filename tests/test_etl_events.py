@@ -212,7 +212,10 @@ def test_forced_profile_only_without_incremental_runs_full_refresh(etl_boundarie
     source = datetime(2026, 1, 5)
     monkeypatch.setattr(etl, "_incremental_watermarks", lambda: (source, None))
 
-    assert etl.bronze_to_gold.fn(incremental=False, profile_only=True) == (42, False)
+    assert etl.bronze_to_gold.fn(incremental=False, profile_only=True, source="matches") == (
+        42,
+        False,
+    )
 
     calls = etl_boundaries["dbt_calls"]
     assert [call["select"] for call in calls] == [
@@ -229,7 +232,19 @@ def test_incremental_with_new_matches_runs_full_phases(etl_boundaries, monkeypat
     built = datetime(2025, 12, 1)
     monkeypatch.setattr(etl, "_incremental_watermarks", lambda: (source, built))
 
-    assert etl.bronze_to_gold.fn(incremental=True, profile_only=False) == (42, False)
+    assert etl.bronze_to_gold.fn(incremental=True, profile_only=False, source="matches") == (
+        42,
+        False,
+    )
 
     assert len(etl_boundaries["dbt_calls"]) == 3  # base, final, tests — no profiles-only branch
     assert etl_boundaries["watermarks"] == [source]
+
+
+def test_rankings_etl_never_advances_the_match_watermark(etl_boundaries, monkeypatch):
+    source = datetime(2026, 1, 5)
+    monkeypatch.setattr(etl, "_incremental_watermarks", lambda: (source, None))
+
+    assert etl.bronze_to_gold.fn(incremental=False, source="rankings") == (42, False)
+
+    assert etl_boundaries["watermarks"] == []

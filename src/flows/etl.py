@@ -191,7 +191,11 @@ def _record_incremental_watermark(watermark: datetime | None) -> None:
 
 
 @task()
-def bronze_to_gold(incremental: bool = False, profile_only: bool = False) -> tuple[int, bool]:
+def bronze_to_gold(
+    incremental: bool = False,
+    profile_only: bool = False,
+    source: str | None = None,
+) -> tuple[int, bool]:
     """Build bronze-to-gold models with dbt, split around Elo materialization."""
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     mode = "incremental" if incremental else "full_refresh"
@@ -298,8 +302,9 @@ def bronze_to_gold(incremental: bool = False, profile_only: bool = False) -> tup
     print("TESTS phase complete")
     print("================================================\n")
 
-    # Only advance the watermark after every phase above succeeded.
-    _record_incremental_watermark(source_watermark)
+    # Only a matches-triggered ETL advances the match-source watermark.
+    if source == "matches":
+        _record_incremental_watermark(source_watermark)
     return _current_gold_count(), False
 
 
@@ -417,7 +422,7 @@ def etl_flow(
     """Build bronze-to-gold models with dbt, split around Elo materialization.
 
     Phase order: base dbt models -> Elo snapshots -> gold.match_features (+ tests).
-    The bronze.etl_state watermark advances only after every phase succeeds.
+    The match-source watermark advances only after a matches-triggered run succeeds.
     """
     if source is not None and source not in VALID_ETL_SOURCES:
         raise ValueError(
@@ -425,7 +430,7 @@ def etl_flow(
         )
     load_env()
     gold_rows, resolved_profile_only = bronze_to_gold(
-        incremental=incremental, profile_only=profile_only
+        incremental=incremental, profile_only=profile_only, source=source
     )
     print(f"ETL complete: {gold_rows} gold rows")
     try:

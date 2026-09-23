@@ -43,7 +43,6 @@ from src.features.columns import (
 )
 from src.flows import rankings
 from src.flows.rankings import scrape_run_name
-from src.utils.scrape import wait_out_challenge
 
 MATCHES_DEPLOYMENT_NAME = "matches"
 MATCHES_CRON = "30 22 * * 2"
@@ -411,10 +410,8 @@ TOURNAMENT_RESULTS_URL = (
     "https://www.atptour.com/en/scores/archive/{slug}/{tournament_id}/{year}/results"
 )
 
-# Per-request navigation budget for a Hawkeye fetch (same class of timeout the
-# rankings flow uses for its pages); a timeout is a per-match skip, never an
-# abort.
-HAWKEYE_NAV_TIMEOUT_MS = 10_000
+# Shared navigation and rendered-content budget for match scraping.
+NAVIGATION_TIMEOUT_MS = 15_000
 # Randomized human-like gap between Hawkeye requests (bot-detection hygiene).
 HAWKEYE_SLEEP_MIN_S = 3.0
 HAWKEYE_SLEEP_MAX_S = 8.0
@@ -611,7 +608,10 @@ def hawkeye_to_bronze(
     if not a_id or not b_id:
         _report("side identity missing PlayerId", discovered_match)
         return None
-    winner = str(match.get("WinningPlayerId") or match.get("Winner") or "").upper()
+    discovered_winner = (
+        str(discovered_match.get("winner_id") or "").upper() if discovered_match else ""
+    )
+    winner = str(match.get("WinningPlayerId") or match.get("Winner") or discovered_winner).upper()
     if not winner:
         _report("payload has no WinningPlayerId/Winner", discovered_match)
         return None
@@ -635,9 +635,6 @@ def hawkeye_to_bronze(
     # Reject disagreements rather than inventing an orientation.
     p1_canonical = str(discovered_match.get("player1_id") or "").upper() if discovered_match else ""
     p2_canonical = str(discovered_match.get("player2_id") or "").upper() if discovered_match else ""
-    discovered_winner = (
-        str(discovered_match.get("winner_id") or "").upper() if discovered_match else ""
-    )
     if p1_canonical and p2_canonical:
         if p1_canonical == winner and (not discovered_winner or discovered_winner == winner):
             player1_id, player2_id = p1_canonical, p2_canonical
@@ -750,9 +747,18 @@ def fetch_hawkeye_match(
     url = HAWKEYE_URL.format(year=year, tournament_id=tournament_id, match_id=match_id)
     rankings._jitter()
     try:
-        page.goto(url, wait_until="domcontentloaded", timeout=HAWKEYE_NAV_TIMEOUT_MS)
+        page.goto(url, wait_until="commit", timeout=NAVIGATION_TIMEOUT_MS)
     except Exception:
         return None, f"Hawkeye {match_id}: navigation failed"
+    wait_for_json = getattr(page, "wait_for_function", None)
+    if callable(wait_for_json):
+        try:
+            wait_for_json(
+                '() => document.body?.innerText.trim().startsWith("{")',
+                timeout=NAVIGATION_TIMEOUT_MS,
+            )
+        except Exception:
+            pass
     try:
         body = page.content()
     except Exception:
@@ -1357,10 +1363,6 @@ def indoor_for_tournament(name: str, tier: str) -> int:
     return int(any(keyword in normalized for keyword in INDOOR_TOURNAMENT_KEYWORDS.get(tier, ())))
 
 
-# Per-page navigation budget for archive/results pages (same class of timeout as
-# the Hawkeye requests; a slow page is a per-item skip, never an abort).
-RESULTS_NAV_TIMEOUT_MS = HAWKEYE_NAV_TIMEOUT_MS
-
 # Bronze.match_events projection loaded once per run: the flow's fallback
 # lookups (physical-match id reuse, tier/surface for unknown tournaments, and
 # per-player rank_points/age) all read from these columns.
@@ -1648,7 +1650,7 @@ def _id_collision(
     return ""
 
 
-def _fetch_page(page: Any, url: str, label: str, ready_marker: str) -> tuple[str, str]:
+def _fetch_page(page: Any, url: str, label: str, ready_selector: str) -> tuple[str, str]:
     """(html, "") or ("", reason) — one shared page, jitter around navigation.
 
     The run's single browser page navigates every archive year, tournament
@@ -1657,17 +1659,20 @@ def _fetch_page(page: Any, url: str, label: str, ready_marker: str) -> tuple[str
     ``rankings._jitter()`` before the goto and before the content inspection;
     the 3-8s tournament/request pacing lives in the callers.
 
-    A navigation or content failure raises a runtime error; the shared
-    ``wait_out_challenge`` polls until the Cloudflare interstitial resolves
-    (or ``ready_marker`` appears) and raises only when that times out.
+    Commit accepts the initial document; the selector then waits for ATP's
+    client-rendered archive or results content rather than its static shell.
     """
     rankings._jitter()
     try:
-        page.goto(url, wait_until="domcontentloaded", timeout=RESULTS_NAV_TIMEOUT_MS)
+        page.goto(url, wait_until="commit", timeout=NAVIGATION_TIMEOUT_MS)
     except Exception as exc:
         raise RuntimeError(f"{label}: navigation failed") from exc
     rankings._jitter()
-    return wait_out_challenge(page, label, ready_marker=ready_marker), ""
+    try:
+        page.wait_for_selector(ready_selector, state="attached", timeout=NAVIGATION_TIMEOUT_MS)
+        return page.content(), ""
+    except Exception as exc:
+        raise RuntimeError(f"{label}: content did not render") from exc
 
 
 def _process_tournament(
@@ -1713,7 +1718,7 @@ def _process_tournament(
     )
     print(f"Tournament {tournament_id} ({name}): fetching {url}")
     time.sleep(random.uniform(HAWKEYE_SLEEP_MIN_S, HAWKEYE_SLEEP_MAX_S))
-    html, err = _fetch_page(page, url, f"results {tournament_id}", ready_marker="results")
+    html, err = _fetch_page(page, url, f"results {tournament_id}", ready_selector="div.match")
     if err:
         print(f"  Tournament {tournament_id}: skipped ({err})")
         print(
@@ -1722,7 +1727,6 @@ def _process_tournament(
         )
         return result
     result["results_page_ok"] = True
-
     matches = extract_matches_from_results(html, tournament_id, year)
     result["discovered"] = len(matches)
     if not matches:
@@ -1956,7 +1960,7 @@ def matches_flow(
             url = RESULTS_ARCHIVE_URL.format(year=year)
             print(f"Archive {year}: fetching {url}")
             html, err = _fetch_page(
-                page, url, f"results archive {year}", ready_marker="results archive"
+                page, url, f"results archive {year}", ready_selector="li.tournament-info"
             )
             if err:
                 print(f"  Archive {year}: skipped ({err})")

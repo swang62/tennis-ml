@@ -1,5 +1,7 @@
 """Hermetic tests for Hawkeye response parsing and rejection."""
 
+from copy import deepcopy
+
 import pytest
 
 import src.flows.matches as matches
@@ -75,6 +77,20 @@ def test_html_wrapped_json_recovers_payload(monkeypatch):
 
 def test_raw_json_body_is_accepted(monkeypatch):
     payload, reason = _fetch(_RAW, monkeypatch)
+    assert reason == ""
+    assert payload is not None
+    assert payload["Match"]["Winner"] == "S0S1"
+
+
+def test_hawkeye_fetch_waits_for_a_deferred_json_payload(monkeypatch):
+    class _DeferredPage(_Page):
+        def wait_for_function(self, *_args, **_kwargs) -> None:
+            self._body = _RAW
+
+    monkeypatch.setattr(rankings, "_jitter", lambda: None)
+    payload, reason = matches.fetch_hawkeye_match(
+        _DeferredPage("<html>loading</html>"), 2026, "421", "ms001"
+    )
     assert reason == ""
     assert payload is not None
     assert payload["Match"]["Winner"] == "S0S1"
@@ -208,6 +224,26 @@ def test_hawkeye_to_bronze_stamps_source_metadata_winner_first():
     assert row["player2_name"] == "Brandon Nakashima"
     assert row["winner_id"] == "S0S1"
     assert row["is_indoor"] == 0
+
+
+def test_hawkeye_to_bronze_uses_discovered_winner_when_payload_winner_is_blank():
+    payload = deepcopy(_HAWKEYE_MS001)
+    payload["Match"]["WinningPlayerId"] = None
+    row = matches.hawkeye_to_bronze(
+        payload,
+        {
+            "match_id": "2026-560-127",
+            "match_date": "2026-09-01",
+            "player1_id": "S0S1",
+            "player2_id": "N0AE",
+            "winner_id": "S0S1",
+            "tournament": "grand_slam",
+            "round": "r128",
+        },
+    )
+
+    assert row is not None
+    assert row["winner_id"] == "S0S1"
 
 
 def test_hawkeye_to_bronze_uses_normalized_match_number():
