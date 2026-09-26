@@ -351,7 +351,7 @@ def test_scrambled_bulk_response_rejected_instead_of_silent_05(monkeypatch):
         drift._score_batches(contexts)
 
 
-def test_unsupported_bronze_values_resolved_at_boundary(monkeypatch):
+def test_unrecognized_bronze_values_resolved_at_boundary(monkeypatch):
     """Normalize out-of-schema context values before scoring and analysis."""
     frame = _fake_bronze_window(5, seed=2, round_="rr", tournament="masters")
     frame.loc[1::2, "winner_id"] = frame.loc[1::2, "player2_id"].to_numpy()
@@ -373,7 +373,7 @@ def test_unsupported_bronze_values_resolved_at_boundary(monkeypatch):
 
     boundary = drift._validated_contexts(contexts)
     assert len(boundary) == 10
-    assert all(c["round"] is None for c in boundary)
+    assert all(c["round"] == "rr" for c in boundary)
     # Matches 0/1 carry the out-of-schema values; the others keep their valid
     # bronze values. Both unresolvable surfaces normalize to hard.
     assert boundary[0]["tournament"] is None
@@ -392,8 +392,8 @@ def test_unsupported_bronze_values_resolved_at_boundary(monkeypatch):
     assert len(scored) == 10
     assert scored["p_win"].tolist() == [0.9, 0.1] * 5
     assert scored["match_won"].tolist() == expanded["match_won"].tolist()
-    # The analysis frame stays numeric-only: the out-of-schema round value is
-    # resolved at the boundary and never becomes a drift column.
+    # The analysis frame stays numeric-only: contextual values never become
+    # drift columns.
     assert "round" not in scored.columns
     assert not {"surface", "tournament", "round", "is_indoor"} & set(scored.columns)
 

@@ -422,6 +422,7 @@ class Round(StrEnum):
     QF = "qf"
     SF = "sf"
     F = "f"
+    RR = "rr"
 
 
 class Surface(StrEnum):

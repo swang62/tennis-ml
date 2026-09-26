@@ -650,6 +650,20 @@ def test_predict_from_ids_schema_derives_context_and_defaults():
     assert row.as_of_date == date.today()
 
 
+def test_predict_from_ids_schema_accepts_round_robin():
+    row = PredictFromIdsRow.model_validate(
+        {
+            "player_id": "S0AG",
+            "opponent_id": "Z355",
+            "surface": "hard",
+            "best_of": 3,
+            "round": "rr",
+        }
+    )
+
+    assert row.round == Round.RR
+
+
 def test_predict_from_ids_schema_rejects_numeric_context_fields():
     from pydantic import ValidationError
 

@@ -22,6 +22,9 @@ notify-failure *args:
 # (not covered by the web/.env dotenv above); default dev.
 DOCKER_TAG := env_var_or_default('DOCKER_TAG', shell('grep -q "^DOCKER_TAG=" .env 2>/dev/null && sed -n "s/^DOCKER_TAG=//p" .env | head -n1 || printf dev'))
 
+build *args:
+    just deploy {{ args }}
+
 # Create the local k3d cluster.
 cluster-create:
     ./infra/k3d/start.sh
