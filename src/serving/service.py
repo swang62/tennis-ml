@@ -207,12 +207,9 @@ LIMIT %s
 """
 
 _DIRECTORY_SUMMARY_SQL = f"""
-SELECT (
-       SELECT source_watermark
-           FROM bronze.etl_state
-           WHERE pipeline = 'dbt'
-       ) AS latest_match_date,
-       (SELECT COUNT(match_id) FROM {BRONZE_MATCHES_TABLE}) AS total_matches
+SELECT MAX(match_date) AS latest_match_date,
+       COUNT(match_id) AS total_matches
+FROM {BRONZE_MATCHES_TABLE}
 """
 
 # Set an explicit API description because mounted GET routes are not introspected.

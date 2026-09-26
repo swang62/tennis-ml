@@ -241,10 +241,19 @@ def test_incremental_with_new_matches_runs_full_phases(etl_boundaries, monkeypat
     assert etl_boundaries["watermarks"] == [source]
 
 
-def test_rankings_etl_never_advances_the_match_watermark(etl_boundaries, monkeypatch):
+def test_manual_etl_records_match_watermark(etl_boundaries, monkeypatch):
     source = datetime(2026, 1, 5)
     monkeypatch.setattr(etl, "_incremental_watermarks", lambda: (source, None))
 
-    assert etl.bronze_to_gold.fn(incremental=False, source="rankings") == (42, False)
+    assert etl.bronze_to_gold.fn(incremental=False) == (42, False)
+
+    assert etl_boundaries["watermarks"] == [source]
+
+
+def test_incremental_rankings_etl_does_not_advance_match_watermark(etl_boundaries, monkeypatch):
+    source = datetime(2026, 1, 5)
+    monkeypatch.setattr(etl, "_incremental_watermarks", lambda: (source, None))
+
+    assert etl.bronze_to_gold.fn(incremental=True, source="rankings") == (42, False)
 
     assert etl_boundaries["watermarks"] == []

@@ -302,8 +302,7 @@ def bronze_to_gold(
     print("TESTS phase complete")
     print("================================================\n")
 
-    # Only a matches-triggered ETL advances the match-source watermark.
-    if source == "matches":
+    if not incremental or source == "matches":
         _record_incremental_watermark(source_watermark)
     return _current_gold_count(), False
 

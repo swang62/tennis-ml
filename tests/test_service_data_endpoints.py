@@ -5,6 +5,7 @@ from datetime import date
 from typing import Any, cast
 from unittest.mock import patch
 
+import duckdb
 import numpy as np
 import pandas as pd
 import pytest
@@ -92,6 +93,41 @@ def test_directory_returns_players_and_summary_in_one_envelope():
     assert data["total_players"] == 2
     assert data["latest_match_date"] == "2026-08-10"
     assert data["total_matches"] == 123456
+
+
+def test_directory_summary_uses_latest_physical_match_date():
+    con = duckdb.connect()
+    try:
+        con.execute("CREATE SCHEMA bronze")
+        con.execute("CREATE SCHEMA gold")
+        con.execute(
+            """
+            CREATE TABLE bronze.player_profiles (
+                player_id VARCHAR, display_name VARCHAR, ioc VARCHAR,
+                backhand VARCHAR, handedness VARCHAR, summary VARCHAR,
+                height DOUBLE, birthdate DATE, turned_pro INTEGER
+            )
+            """
+        )
+        con.execute(
+            "CREATE TABLE gold.player_profiles (player_id VARCHAR, match_count BIGINT, current_rank BIGINT)"
+        )
+        con.execute("CREATE TABLE bronze.match_events (match_id VARCHAR, match_date DATE)")
+        con.execute(
+            "INSERT INTO bronze.player_profiles VALUES ('p1', 'A Player', 'ESP', '1H', 'R', '', 180, DATE '1990-01-01', 2010)"
+        )
+        con.execute("INSERT INTO gold.player_profiles VALUES ('p1', 2, 1)")
+        con.execute(
+            "INSERT INTO bronze.match_events VALUES ('m1', DATE '2026-09-22'), ('m2', DATE '2026-09-23')"
+        )
+        with patch("src.serving.service.execute_df", side_effect=lambda sql: con.execute(sql).df()):
+            resp = client.get("/directory")
+    finally:
+        con.close()
+
+    assert resp.status_code == 200
+    assert resp.json()["data"]["latest_match_date"] == "2026-09-23"
+    assert resp.json()["data"]["total_matches"] == 2
 
 
 def test_directory_empty_players_and_summary():

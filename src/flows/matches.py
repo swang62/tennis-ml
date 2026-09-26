@@ -122,8 +122,6 @@ def extract_tournaments_from_archive(html: str, year: int) -> list[dict[str, Any
     """Parse archive entries into tournament rows; incomplete entries are skipped."""
     tournaments: list[dict[str, Any]] = []
     for block in _ARCHIVE_LI_RE.findall(html):
-        if "tournament-info" not in block:
-            continue
         profile = _PROFILE_LINK_RE.search(block)
         if profile is None:
             continue
@@ -330,6 +328,14 @@ def extract_matches_from_results(html: str, tournament_id: str, year: int) -> li
             }
         )
     return matches
+
+
+def _has_tournament_results_content(html: str, tournament_id: str, year: int) -> bool:
+    """Whether results HTML has match cards or this edition's stats links."""
+    return _MATCH_CARD_RE.search(html) is not None or any(
+        match.group(1) == str(year) and match.group(2) == tournament_id
+        for match in _STATS_LINK_RE.finditer(html)
+    )
 
 
 PhysicalKey = tuple[date, str, frozenset[str]]
@@ -1650,7 +1656,7 @@ def _id_collision(
     return ""
 
 
-def _fetch_page(page: Any, url: str, label: str, ready_selector: str) -> tuple[str, str]:
+def _fetch_page(page: Any, url: str, label: str, ready: Callable[[str], bool]) -> tuple[str, str]:
     """(html, "") or ("", reason) — one shared page, jitter around navigation.
 
     The run's single browser page navigates every archive year, tournament
@@ -1659,8 +1665,8 @@ def _fetch_page(page: Any, url: str, label: str, ready_selector: str) -> tuple[s
     ``rankings._jitter()`` before the goto and before the content inspection;
     the 3-8s tournament/request pacing lives in the callers.
 
-    Commit accepts the initial document; the selector then waits for ATP's
-    client-rendered archive or results content rather than its static shell.
+    Commit accepts the initial document; content polling waits for links the
+    corresponding parser consumes rather than unstable ATP CSS classes.
     """
     rankings._jitter()
     try:
@@ -1668,11 +1674,17 @@ def _fetch_page(page: Any, url: str, label: str, ready_selector: str) -> tuple[s
     except Exception as exc:
         raise RuntimeError(f"{label}: navigation failed") from exc
     rankings._jitter()
-    try:
-        page.wait_for_selector(ready_selector, state="attached", timeout=NAVIGATION_TIMEOUT_MS)
-        return page.content(), ""
-    except Exception as exc:
-        raise RuntimeError(f"{label}: content did not render") from exc
+    deadline = time.monotonic() + NAVIGATION_TIMEOUT_MS / 1_000
+    while time.monotonic() < deadline:
+        try:
+            html = page.content()
+        except Exception:
+            time.sleep(0.5)
+            continue
+        if ready(html):
+            return html, ""
+        time.sleep(0.5)
+    raise RuntimeError(f"{label}: content did not render")
 
 
 def _process_tournament(
@@ -1718,7 +1730,12 @@ def _process_tournament(
     )
     print(f"Tournament {tournament_id} ({name}): fetching {url}")
     time.sleep(random.uniform(HAWKEYE_SLEEP_MIN_S, HAWKEYE_SLEEP_MAX_S))
-    html, err = _fetch_page(page, url, f"results {tournament_id}", ready_selector="div.match")
+    html, err = _fetch_page(
+        page,
+        url,
+        f"results {tournament_id}",
+        ready=lambda html: _has_tournament_results_content(html, tournament_id, year),
+    )
     if err:
         print(f"  Tournament {tournament_id}: skipped ({err})")
         print(
@@ -1960,7 +1977,10 @@ def matches_flow(
             url = RESULTS_ARCHIVE_URL.format(year=year)
             print(f"Archive {year}: fetching {url}")
             html, err = _fetch_page(
-                page, url, f"results archive {year}", ready_selector="li.tournament-info"
+                page,
+                url,
+                f"results archive {year}",
+                ready=lambda html: _PROFILE_LINK_RE.search(html) is not None,
             )
             if err:
                 print(f"  Archive {year}: skipped ({err})")
