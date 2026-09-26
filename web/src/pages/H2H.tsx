@@ -136,21 +136,14 @@ export default function H2H() {
     enabled: ready,
   });
   const profileAQ = useQuery({
-    // Home's profile key so both pages share the cache; profile data is
-    // immutable history, so match Home's Infinity staleness to avoid
-    // refetching a cached profile on page switch.
     queryKey: ["profile", playerA],
     queryFn: () => getPlayerProfile(requireId(playerA)),
     enabled: ready,
-    staleTime: Infinity,
-    gcTime: Infinity,
   });
   const profileBQ = useQuery({
     queryKey: ["profile", playerB],
     queryFn: () => getPlayerProfile(requireId(playerB)),
     enabled: ready,
-    staleTime: Infinity,
-    gcTime: Infinity,
   });
 
   const predict = useMutation({ mutationFn: predictFromIds });

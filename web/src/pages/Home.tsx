@@ -92,29 +92,21 @@ export default function Home() {
     queryKey: ["profile", selectedId],
     queryFn: () => getPlayerProfile(requireSelectedId()),
     enabled: selectedId !== null,
-    staleTime: Infinity,
-    gcTime: Infinity,
   });
   const rankQ = useQuery({
     queryKey: ["rank_history", selectedId],
     queryFn: () => getRankHistory(requireSelectedId()),
     enabled: selectedId !== null,
-    staleTime: Infinity,
-    gcTime: Infinity,
   });
   const matchesQ = useQuery({
     queryKey: ["match_history", selectedId, 20],
     queryFn: () => getMatchHistory(requireSelectedId(), 20),
     enabled: selectedId !== null,
-    staleTime: Infinity,
-    gcTime: Infinity,
   });
   const similarQ = useQuery({
     queryKey: ["similar_players", selectedId],
     queryFn: () => getSimilarPlayers(requireSelectedId(), 3),
     enabled: selectedId !== null,
-    staleTime: Infinity,
-    gcTime: Infinity,
   });
 
   // Route head sets the static "Players — Courtside"; once a player is picked

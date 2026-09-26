@@ -1,6 +1,6 @@
 // Shared API-fetched player-directory source for Home, H2H, and the Layout
-// footer. The directory (players + summary) is fetched once per React Query
-// cache lifecycle via GET /directory; no generated artifacts are bundled. The
+// footer. The directory (players + summary) is fetched once per mounted query
+// via GET /directory; no generated artifacts are bundled. The
 // in-memory MiniSearch fuzzy/prefix index is built lazily from the fetched
 // players on the first picker search and shared by every consumer (no
 // localStorage, no polling, no background refresh).
@@ -60,10 +60,6 @@ export function createPlayerSearchLoader(
 
 export const playerIndexQueryKey = ["player-index"] as const;
 
-// One shared query key/source: whichever of Layout/Home/H2H mounts first
-// fetches the directory once; the rest read the same cached result for the
-// page's lifetime. staleTime/gcTime Infinity keep the payload in memory, so
-// a reload retry re-fetches only on error.
 export function usePlayerDirectory() {
   return useQuery({
     queryKey: playerIndexQueryKey,
@@ -78,7 +74,5 @@ export function usePlayerDirectory() {
         loadSearch: createPlayerSearchLoader(directory.players),
       } satisfies PlayerIndexData;
     },
-    staleTime: Infinity,
-    gcTime: Infinity,
   });
 }
