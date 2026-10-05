@@ -25,7 +25,7 @@ from src.constants import (
     WORK_POOL_NAME,
     load_env,
 )
-from src.db.client import connection, execute_df, first_row_dict
+from src.db.client import connection, execute_df
 from src.db.ingest import (
     LEVEL_MAP,
     _canonical_surface,
@@ -857,12 +857,12 @@ def fetch_hawkeye_batch(
     return results
 
 
-# ── Bronze upsert, insert-or-force-replace ─────────────────────────
+# ── Bronze batch upsert, insert-or-force-replace ───────────────────
 #
-# An existing match_id is skipped by default — no write, no selective stat
-# fills. Only an explicit force run replaces the stored row across every
-# non-key column (ON CONFLICT DO UPDATE), so repeated force runs converge to
-# the candidate values.
+# Stored matches are filtered out before the Hawkeye fetch, so a normal run only
+# inserts. Only an explicit force run replaces stored rows across every non-key
+# column (ON CONFLICT DO UPDATE), so repeated force runs converge to the
+# candidate values.
 
 
 def _python_scalar(value: Any) -> Any:
@@ -952,154 +952,51 @@ def validate_new_bronze_row(row: dict[str, Any]) -> str | None:
     return None
 
 
-def _to_frame(row: dict[str, Any]) -> pd.DataFrame:
-    """One bronze row as a DataFrame over BRONZE_COLUMNS, in schema order."""
-    return pd.DataFrame(
-        [{column: row.get(column) for column in BRONZE_COLUMNS}],
-        columns=list(BRONZE_COLUMNS),
-    )
-
-
-def find_existing_match(
-    match_id: str,
-    query: Callable[[str, list[object]], Any] | None = None,
-) -> dict[str, Any] | None:
-    """Stored bronze.match_events row for match_id, or None when absent.
-
-    ``query`` is injectable for hermetic tests (the plan's in-memory fixture):
-    a callable ``(sql, params) -> DataFrame | sequence[Mapping]`` defaulting to
-    ``src.db.client.execute_df``. Returned values are normalized to Python
-    scalars (timestamps to ``date``, numpy scalars to plain int/float) so
-    callers can compare and reuse them without pandas/numpy interop.
-    """
-    if query is None:
-        query = execute_df
-    result = query(f"SELECT * FROM {BRONZE_MATCHES_TABLE} WHERE match_id = %s", [match_id])
-    if isinstance(result, pd.DataFrame):
-        if result.empty:
-            return None
-        row = first_row_dict(result)
-    else:
-        rows = list(result)
-        if not rows:
-            return None
-        row = dict(rows[0])
-    return {column: _python_scalar(row.get(column)) for column in BRONZE_COLUMNS}
-
-
-def upsert_bronze_match(
-    row: dict[str, Any],
+def upsert_bronze_matches(
+    rows: list[dict[str, Any]],
     *,
+    known_ids: dict[str, Any],
     force: bool = False,
-    query: Callable[[str, list[object]], Any] | None = None,
 ) -> dict[str, Any]:
-    """Upsert one winner-first bronze row; returns a result record for the flow.
+    """Validate rows and write them in one batch; rows are already known missing unless ``force``.
 
-    Existing match_id: skipped by default (a ``noop`` record — no write, no
-    selective stat updates). Only with ``force=True`` is the stored row
-    replaced across every non-key column (``update_cols`` = all bronze columns
-    except ``match_id``), so repeated force runs converge to the candidate
-    values.
-
-    New match_id: ``validate_new_bronze_row`` must pass (complete winner-first
-    row). The insert uses ``_copy_df_into`` with ON CONFLICT DO NOTHING, so a
-    repeated insert never duplicates and a concurrent insert is a noop.
-
-    Record shape: {match_id, action: inserted|updated|noop|skipped, reason,
-    update_cols, rows_affected}. Expected per-row failures (validation or DB
-    write errors) become ``skipped`` records with a reason — never swallowed,
-    never raised — so the flow can count and report each one.
+    Without ``force`` the insert is ON CONFLICT DO NOTHING; with it every non-key
+    column of a stored row is replaced. Invalid rows are skipped with a reason, and
+    a failed write raises. Returns {valid, skipped: [(match_id, reason)], inserted,
+    updated, noop}.
     """
-    match_id = str(row.get("match_id") or "")
-    existing = find_existing_match(match_id, query=query)
-    if existing is not None:
-        if not force:
-            return {
-                "match_id": match_id,
-                "action": "noop",
-                "reason": None,
-                "update_cols": [],
-                "rows_affected": 0,
-            }
-        update_cols = [column for column in BRONZE_COLUMNS if column != "match_id"]
-        try:
-            affected = _copy_df_into(
-                BRONZE_MATCHES_TABLE,
-                _to_frame({**existing, **row}),
-                conflict_col="match_id",
-                update_cols=update_cols,
-            )
-        except Exception as exc:
-            return {
-                "match_id": match_id,
-                "action": "skipped",
-                "reason": f"update failed: {type(exc).__name__}: {exc}",
-                "update_cols": update_cols,
-                "rows_affected": 0,
-            }
-        return {
-            "match_id": match_id,
-            "action": "updated",
-            "reason": None,
-            "update_cols": update_cols,
-            "rows_affected": affected,
-        }
-
-    reason = validate_new_bronze_row(row)
-    if reason is not None:
-        return {
-            "match_id": match_id,
-            "action": "skipped",
-            "reason": reason,
-            "update_cols": [],
-            "rows_affected": 0,
-        }
-    try:
-        affected = _copy_df_into(
-            BRONZE_MATCHES_TABLE,
-            _to_frame(row),
-            conflict_col="match_id",
-            update_cols=None,
-        )
-    except Exception as exc:
-        return {
-            "match_id": match_id,
-            "action": "skipped",
-            "reason": f"insert failed: {type(exc).__name__}: {exc}",
-            "update_cols": [],
-            "rows_affected": 0,
-        }
-    return {
-        "match_id": match_id,
-        "action": "inserted" if affected else "noop",
-        "reason": None,
-        "update_cols": [],
-        "rows_affected": affected,
-    }
-
-
-def upsert_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
-    """Counts over upsert result records, for the flow's end-of-run report.
-
-    Folds ``upsert_bronze_match`` records into {inserted, updated, skipped,
-    noop, skipped_reasons}; the ``discovered``/``fetched`` counts come from the
-    flow's discovery and fetch phases and are not part of this fold. Every skip
-    reason is retained — nothing is swallowed.
-    """
-    summary: dict[str, Any] = {
+    valid: list[dict[str, Any]] = []
+    skipped: list[tuple[str, str]] = []
+    for row in rows:
+        reason = validate_new_bronze_row(row)
+        if reason is None:
+            valid.append(row)
+        else:
+            skipped.append((str(row.get("match_id") or ""), reason))
+    outcome: dict[str, Any] = {
+        "valid": valid,
+        "skipped": skipped,
         "inserted": 0,
         "updated": 0,
-        "skipped": 0,
         "noop": 0,
-        "skipped_reasons": [],
     }
-    for record in results:
-        action = record.get("action")
-        if action in summary:
-            summary[action] += 1
-        if record.get("reason"):
-            summary["skipped_reasons"].append(f"{record.get('match_id')}: {record['reason']}")
-    return summary
+    if not valid:
+        return outcome
+    frame = pd.DataFrame(
+        [{column: row.get(column) for column in BRONZE_COLUMNS} for row in valid],
+        columns=list(BRONZE_COLUMNS),
+    )
+    update_cols = [column for column in BRONZE_COLUMNS if column != "match_id"] if force else None
+    affected = _copy_df_into(
+        BRONZE_MATCHES_TABLE, frame, conflict_col="match_id", update_cols=update_cols
+    )
+    if force:
+        outcome["updated"] = sum(row["match_id"] in known_ids for row in valid)
+        outcome["inserted"] = len(valid) - outcome["updated"]
+    else:
+        outcome["inserted"] = affected
+        outcome["noop"] = len(valid) - affected
+    return outcome
 
 
 # ── Sackmann raw CSV persistence (shared sink with the bronze upsert) ─
@@ -1835,7 +1732,7 @@ def _process_tournament(
     match_numbers = {str(item.get("match_id")): item["match_num"] for item in numbered}
     for item in hawkeye:
         item["match_num"] = match_numbers.get(str(item.get("match_id")), 0)
-    upsert_records: list[dict[str, Any]] = []
+    new_rows: list[dict[str, Any]] = []
     for item in hawkeye:
         ms_id = str(item.get("match_id") or "")
         if item.get("hawkeye_error"):
@@ -1867,32 +1764,31 @@ def _process_tournament(
             # hawkeye_to_bronze printed the detailed skip reason.
             result["skipped"] += 1
             continue
-        record = upsert_bronze_match(row, force=force)
-        upsert_records.append(record)
-        if record.get("action") != "skipped":
-            # Same successful path writes both sinks: the CSV append is deduped
-            # against the file (loaded once per year this run) and this run's
-            # appends, so a rescrape never duplicates a row already on disk.
-            csv_path = raw_match_path(year)
-            ids = (csv_ids or {}).setdefault(year, load_csv_match_ids(csv_path))
-            if bronze_match_id not in ids:
-                appended, ids = append_raw_match_rows(
-                    [bronze_row_to_raw_match(row, profiles)], csv_path, existing=ids
-                )
-                result["csv_appended"] += appended
-                if csv_ids is not None:
-                    csv_ids[year] = ids
-        suffix = f" ({record['reason']})" if record.get("reason") else ""
-        print(f"  {bronze_match_id}: {record['action']}{suffix}")
-    summary = upsert_summary(upsert_records)
+        new_rows.append(row)
+    outcome = upsert_bronze_matches(new_rows, known_ids=known_ids, force=force)
+    for skipped_id, skipped_reason in outcome["skipped"]:
+        print(f"  {skipped_id}: skipped ({skipped_reason})")
+    if outcome["valid"]:
+        # Both sinks share the written rows; the CSV append dedupes against the
+        # file (loaded once per year this run), so a rescrape never duplicates a row.
+        csv_path = raw_match_path(year)
+        ids = (csv_ids or {}).setdefault(year, load_csv_match_ids(csv_path))
+        appended, ids = append_raw_match_rows(
+            [bronze_row_to_raw_match(row, profiles) for row in outcome["valid"]],
+            csv_path,
+            existing=ids,
+        )
+        result["csv_appended"] += appended
+        if csv_ids is not None:
+            csv_ids[year] = ids
     result.update(
         {
-            "inserted": summary["inserted"],
-            "updated": summary["updated"],
-            "noop": stored_count + summary["noop"],
+            "inserted": outcome["inserted"],
+            "updated": outcome["updated"],
+            "noop": stored_count + outcome["noop"],
         }
     )
-    result["skipped"] += summary["skipped"]
+    result["skipped"] += len(outcome["skipped"])
     page_candidates: dict[str, dict[str, Any]] = {}
     for match in matches:
         for key in ("player1", "player2"):

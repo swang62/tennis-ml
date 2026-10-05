@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TextIO, cast
 from uuid import UUID
 
+import duckdb
 import psycopg
 from prefect import flow, get_run_logger, task
 from prefect.automations import Automation
@@ -38,7 +39,7 @@ from src.constants import (
     get_database_url,
     load_env,
 )
-from src.db.client import CONNECT_TIMEOUT_S
+from src.db.client import CONNECT_TIMEOUT_S, TRANSIENT_ERRORS
 from src.db.conninfo import dbt_env
 from src.db.ingest import clear_etl_state
 from src.features.elo import materialize_elo
@@ -190,7 +191,26 @@ def _record_incremental_watermark(watermark: datetime | None) -> None:
         )
 
 
-@task()
+ETL_RETRY_DELAYS_S: list[float] = [15, 45, 120]
+
+
+def _is_transient_failure(_task, _task_run, state) -> bool:
+    """Retry network-shaped failures: DB driver errors and dbt subprocess exits."""
+    try:
+        state.result()
+    except (*TRANSIENT_ERRORS, duckdb.IOException, subprocess.CalledProcessError):
+        return True
+    except Exception:
+        return False
+    return False
+
+
+# ponytail: dbt exits are retried too (a test failure repeats up to 3x); classify the log if that costs too much.
+@task(
+    retries=len(ETL_RETRY_DELAYS_S),
+    retry_delay_seconds=ETL_RETRY_DELAYS_S,
+    retry_condition_fn=_is_transient_failure,
+)
 def bronze_to_gold(
     incremental: bool = False,
     profile_only: bool = False,
@@ -276,15 +296,25 @@ def bronze_to_gold(
 
     # Phase 3 — final dbt models: gold.match_features. Tests run separately after
     # all five models are materialized, so base-model tests see current state.
+    # A replayed Elo history changes ratings on matches the incremental build
+    # would not touch, so match_features is rebuilt in full.
+    final_incremental = incremental and elo_result.replay_from is None
+    if not final_incremental and incremental:
+        print(f"ELO replayed from {elo_result.replay_from}: rebuilding gold.match_features in full")
     final_log = _etl_log_file(run_id, "final")
     run_dbt_build(
         log_file=final_log,
-        incremental=incremental,
+        incremental=final_incremental,
         select=FINAL_PHASE_MODELS,
         logger=logger,
         subcommand="run",
     )
-    _report_phase(final_log, incremental, mode, "final")
+    _report_phase(
+        final_log,
+        final_incremental,
+        "incremental" if final_incremental else "full_refresh",
+        "final",
+    )
 
     # Phase 4 — all project data tests. This restores the full 9-test check
     # while avoiding tests against stale Elo during the base phase.
