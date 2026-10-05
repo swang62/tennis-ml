@@ -1,15 +1,13 @@
-"""Atomic, append-only per-player Elo materialization.
+"""Atomic per-player Elo materialization.
 
 Reads ``bronze.match_events`` in strict causal order and writes two
 ``silver.elo_snapshots`` rows per physical match (one per participant), carrying
 both global and current-surface ratings.
 
-Progress is owned solely by ``bronze.etl_state`` (its ``source_watermark``
-TIMESTAMPTZ). ETL advances that watermark only after base dbt, this Elo phase,
-and the final ``gold.match_features`` build all succeed. This materializer reads
-the shared watermark to select new matches and to fail closed on historical
-corrections; it never advances progress itself, so a rerun after a later-phase
-failure reuses the snapshots it already wrote without rating a match twice.
+Unrated matches are appended. If a rated match changed or was removed, or an
+unrated match sorts before an existing rating, every snapshot from the earliest
+affected date onward is deleted and re-rated in one transaction, so the history
+is always consistent with bronze. The ETL watermark is not consulted.
 
 The core is pure (the per-match math) and the database boundary is a small
 repository protocol, so behavior is testable without a live database. The real
@@ -32,7 +30,6 @@ from psycopg.rows import tuple_row
 from tqdm.auto import tqdm
 
 from src.constants import (
-    BRONZE_ETL_STATE,
     BRONZE_MATCHES_TABLE,
     ELO_DEFAULT_RATING,
     ELO_INACTIVITY_GRACE_DAYS,
@@ -48,14 +45,8 @@ from src.constants import (
 from src.db.client import connection
 from src.features.elo_math import regress_rating
 
-# ETL records the shared watermark under this pipeline key; Elo reads the same row.
-ETL_PIPELINE = "dbt"
 ELO_MATCH_BATCH_SIZE = 25_000
 ELO_SNAPSHOT_PATH = ROOT / "data" / "elo_snapshot.duckdb"
-
-
-class EloHistoryChanged(RuntimeError):
-    """Raised when a source match exists at or before the shared ETL watermark."""
 
 
 @dataclass(frozen=True)
@@ -69,7 +60,7 @@ class MatchEvent:
     winner_id: str
     player1_id: str
     player2_id: str
-    ingested_at: datetime  # bronze insert timestamp; drives the timestamp watermark
+    ingested_at: datetime
 
 
 @dataclass
@@ -94,7 +85,7 @@ class EloRunResult:
 
     processed: int
     snapshots: int
-    watermark: datetime | None  # shared etl_state timestamp the run read (diagnostics)
+    replay_from: date | None  # earliest date whose history was deleted and re-rated
 
 
 @dataclass
@@ -124,8 +115,7 @@ def k_factor(prior_matches: int) -> float:
 def elo_source_hash(event: MatchEvent) -> str:
     """Stable sha256 of the source match content that drives Elo.
 
-    Used to detect a historical change (not just an insertion) at or before the
-    ETL watermark during validation, before any snapshot is mutated.
+    Compared against the stored snapshot hash to detect a rewritten match.
     """
     payload = "|".join(
         [
@@ -216,40 +206,24 @@ def _process_event(
 
 
 def _run(repo: EloRepo) -> EloRunResult:
-    # Shared progress watermark (TIMESTAMPTZ) from bronze.etl_state. Elo reads it
-    # but never advances it: ETL owns final advancement after every phase succeeds.
-    watermark = repo.get_watermark()
+    # Source rows are the truth: any rated match whose content changed or vanished,
+    # and any unrated match that sorts before an existing rating, invalidates the
+    # history from its date onward. That slice is deleted and re-rated in the same
+    # transaction as the new matches, so progress never depends on the ETL watermark.
+    replay_from = repo.earliest_stale_date()
+    if replay_from is not None:
+        print(f"ELO REPLAY: rated history changed, re-rating every match from {replay_from}")
 
-    if watermark is not None:
-        # Fail closed before any mutation: every source match at/before the shared
-        # watermark must already be snapshotted with matching content. A historical
-        # insert or change slips in with an old ingested_at (<= watermark) and is
-        # caught here, since etl_state stores only a timestamp. Runs against the
-        # local snapshot built above (same data, no per-run Postgres scans).
-        if repo.count_events_through(watermark) != repo.count_snapshots_through(watermark):
-            raise EloHistoryChanged(
-                "source match introduced at/before the shared ETL watermark "
-                f"{watermark}; run seed --reset before rebuilding"
-            )
-        if repo.count_mismatched_history(watermark) > 0:
-            raise EloHistoryChanged(
-                "source match content changed at/before the shared ETL watermark "
-                f"{watermark}; run seed --reset before rebuilding"
-            )
-
-    # Copy the two Elo source tables into local DuckDB once, then run every read
-    # (validation, selection, prior-state) against that local snapshot so the
-    # rating loop never touches Postgres.
     print("ELO SNAPSHOT: generating snapshot of matches")
     snapshot_started = time.perf_counter()
-    events = repo.snapshot_events(watermark)
+    events = repo.snapshot_events(replay_from)
     print(
         f"ELO SNAPSHOT: captured {len(events)} matches in "
         f"{time.perf_counter() - snapshot_started:.1f}s"
     )
 
-    if not events:
-        return EloRunResult(processed=0, snapshots=0, watermark=watermark)
+    if not events and replay_from is None:
+        return EloRunResult(processed=0, snapshots=0, replay_from=None)
 
     # Strict causal order: ascending match_date, then match_num, with match_id as
     # the deterministic tie-breaker. match_num is per-tournament, so (match_date,
@@ -270,29 +244,31 @@ def _run(repo: EloRepo) -> EloRunResult:
         overall.setdefault(player_id, _PriorState(ELO_DEFAULT_RATING, 0, None))
     n_batches = (len(events) + ELO_MATCH_BATCH_SIZE - 1) // ELO_MATCH_BATCH_SIZE
     rating_started = time.perf_counter()
-    with tqdm(total=len(events), unit="match", desc="ELO RATING") as bar:
-        for batch_idx, start in enumerate(range(0, len(events), ELO_MATCH_BATCH_SIZE), start=1):
-            batch_started = time.perf_counter()
-            batch = events[start : start + ELO_MATCH_BATCH_SIZE]
-            repo.begin()
-            try:
+    repo.begin()
+    try:
+        if replay_from is not None:
+            repo.delete_snapshots_from(replay_from)
+        with tqdm(total=len(events), unit="match", desc="ELO RATING") as bar:
+            for batch_idx, start in enumerate(range(0, len(events), ELO_MATCH_BATCH_SIZE), start=1):
+                batch_started = time.perf_counter()
+                batch = events[start : start + ELO_MATCH_BATCH_SIZE]
                 snapshots: list[SnapshotRow] = []
                 for event in batch:
                     snapshots.extend(_process_event(event, overall))
                 repo.insert_snapshots(snapshots)
-                repo.commit()
-            except Exception:
-                repo.rollback()
-                raise
-            bar.update(len(batch))
-            bar.set_postfix_str(f"batch {batch_idx}/{n_batches}")
-            print(
-                f"ELO BATCH: {batch_idx}/{n_batches} ({len(batch)} matches, "
-                f"{time.perf_counter() - batch_started:.2f}s)"
-            )
+                bar.update(len(batch))
+                bar.set_postfix_str(f"batch {batch_idx}/{n_batches}")
+                print(
+                    f"ELO BATCH: {batch_idx}/{n_batches} ({len(batch)} matches, "
+                    f"{time.perf_counter() - batch_started:.2f}s)"
+                )
+        repo.commit()
+    except Exception:
+        repo.rollback()
+        raise
     print(f"ELO RATING: rated {len(events)} matches in {time.perf_counter() - rating_started:.1f}s")
 
-    return EloRunResult(processed=len(events), snapshots=len(events) * 2, watermark=watermark)
+    return EloRunResult(processed=len(events), snapshots=len(events) * 2, replay_from=replay_from)
 
 
 # --------------------------------------------------------------------------- #
@@ -306,10 +282,7 @@ def materialize_elo(repo: EloRepo | None = None) -> EloRunResult:
     With no ``repo`` the project's PostgreSQL connection is used. Pass a
     repository (e.g. a hermetic fake) to test the logic without a database.
 
-    It preserves existing snapshots and processes only matches without snapshots.
-
-    This does not advance pipeline progress; ETL advances bronze.etl_state only
-    after base dbt, Elo, and gold.match_features all succeed.
+    Rates matches without snapshots and re-rates from the earliest changed match.
     """
     if repo is None:
         repo = PsycopgEloRepo()
@@ -328,11 +301,9 @@ def materialize_elo(repo: EloRepo | None = None) -> EloRunResult:
 class EloRepo(Protocol):
     """Database boundary the materializer depends on."""
 
-    def get_watermark(self) -> datetime | None: ...
-    def count_events_through(self, watermark: datetime) -> int: ...
-    def count_snapshots_through(self, watermark: datetime) -> int: ...
-    def count_mismatched_history(self, watermark: datetime) -> int: ...
-    def snapshot_events(self, watermark: datetime | None) -> list[MatchEvent]: ...
+    def earliest_stale_date(self) -> date | None: ...
+    def delete_snapshots_from(self, day: date) -> None: ...
+    def snapshot_events(self, replay_from: date | None) -> list[MatchEvent]: ...
     def get_prior_overall_many(
         self, player_ids: set[str]
     ) -> dict[str, tuple[float, int, date]]: ...
@@ -364,146 +335,66 @@ class PsycopgEloRepo:
         self._conn.autocommit = self._prev_autocommit
         self._checkout.__exit__(None, None, None)
 
-    def get_watermark(self) -> datetime | None:
+    def earliest_stale_date(self) -> date | None:
+        stale: list[date] = []
+        # Rated matches whose source content changed or no longer exists.
         self._cur.execute(
-            f"SELECT source_watermark FROM {BRONZE_ETL_STATE} WHERE pipeline = %s",
-            (ETL_PIPELINE,),
+            f"SELECT s.match_id, s.match_date, s.hashes, m.match_date, m.match_num, "
+            f"m.surface, m.winner_id, m.player1_id, m.player2_id "
+            f"FROM (SELECT match_id, MIN(match_date) AS match_date, "
+            f"ARRAY_AGG(DISTINCT source_hash) AS hashes "
+            f"FROM {SILVER_ELO_SNAPSHOTS} GROUP BY match_id) s "
+            f"LEFT JOIN {BRONZE_MATCHES_TABLE} m ON m.match_id = s.match_id"
         )
-        row = self._cur.fetchone()
-        if row is None or row[0] is None:
-            return None
-        return row[0]
-
-    def count_events_through(self, watermark: datetime) -> int:
-        # Runs against the local DuckDB snapshot (set by snapshot_events), which
-        # is an exact copy of bronze.match_events for this run.
-        con = self._snapshot_con
-        if con is not None:
-            row = con.execute(
-                "SELECT COUNT(*) FROM bronze_match_events WHERE ingested_at <= ?",
-                (watermark,),
-            ).fetchone()
-            return int(row[0]) if row else 0
-        self._cur.execute(
-            f"SELECT COUNT(*) FROM {BRONZE_MATCHES_TABLE} WHERE ingested_at <= %s",
-            (watermark,),
-        )
-        row = self._cur.fetchone()
-        if row is None:
-            return 0
-        return int(row[0])
-
-    def count_snapshots_through(self, watermark: datetime) -> int:
-        con = self._snapshot_con
-        if con is not None:
-            row = con.execute(
-                "SELECT COUNT(DISTINCT match_id) FROM silver_elo_snapshots "
-                "WHERE match_id IN (SELECT match_id FROM bronze_match_events "
-                "WHERE ingested_at <= ?)",
-                (watermark,),
-            ).fetchone()
-            return int(row[0]) if row else 0
-        self._cur.execute(
-            f"SELECT COUNT(DISTINCT match_id) FROM {SILVER_ELO_SNAPSHOTS} "
-            f"WHERE match_id IN "
-            f"(SELECT match_id FROM {BRONZE_MATCHES_TABLE} WHERE ingested_at <= %s)",
-            (watermark,),
-        )
-        row = self._cur.fetchone()
-        if row is None:
-            return 0
-        return int(row[0])
-
-    def count_mismatched_history(self, watermark: datetime) -> int:
-        con = self._snapshot_con
-        if con is not None:
-            # Compute full source hashes locally from the snapshot and compare to
-            # the stored source_hash for every snapped match through the watermark.
-            sources = con.execute(
-                "SELECT match_id, match_date, match_num, surface, winner_id, "
-                "player1_id, player2_id FROM bronze_match_events WHERE ingested_at <= ?",
-                (watermark,),
-            ).fetchall()
-            if not sources:
-                return 0
-            ids = [r[0] for r in sources]
-            stored_rows = con.execute(
-                "SELECT DISTINCT match_id, source_hash FROM silver_elo_snapshots "
-                "WHERE match_id IN (SELECT UNNEST(?))",
-                (ids,),
-            ).fetchall()
-            snap_stored: dict[str, set[str | None]] = {}
-            for match_id, source_hash in stored_rows:
-                snap_stored.setdefault(str(match_id), set()).add(source_hash)
-            mismatches = 0
-            for r in sources:
-                event = MatchEvent(
-                    match_id=r[0],
-                    match_date=r[1],
-                    match_num=int(r[2]),
-                    surface=r[3],
-                    winner_id=r[4],
-                    player1_id=r[5],
-                    player2_id=r[6],
-                    ingested_at=watermark,
-                )
-                hashes = snap_stored.get(event.match_id)
-                if not hashes or elo_source_hash(event) not in hashes:
-                    mismatches += 1
-            return mismatches
-        self._cur.execute(
-            f"SELECT match_id, match_date, match_num, surface, winner_id, "
-            f"player1_id, player2_id FROM {BRONZE_MATCHES_TABLE} "
-            f"WHERE ingested_at <= %s",
-            (watermark,),
-        )
-        sources = self._cur.fetchall()
-        if not sources:
-            return 0
-        ids = [r[0] for r in sources]
-        self._cur.execute(
-            f"SELECT DISTINCT match_id, source_hash FROM {SILVER_ELO_SNAPSHOTS} "
-            f"WHERE match_id = ANY(%s)",
-            (ids,),
-        )
-        stored: dict[str, set[str | None]] = {}
-        for match_id, source_hash in self._cur.fetchall():
-            stored.setdefault(match_id, set()).add(source_hash)
-
-        mismatches = 0
-        for r in sources:
+        for match_id, rated_date, hashes, *source in self._cur.fetchall():
+            if source[0] is None:
+                stale.append(rated_date)
+                continue
             event = MatchEvent(
-                match_id=r[0],
-                match_date=r[1],
-                match_num=int(r[2]),
-                surface=r[3],
-                winner_id=r[4],
-                player1_id=r[5],
-                player2_id=r[6],
-                ingested_at=watermark,
+                match_id=match_id,
+                match_date=source[0],
+                match_num=int(source[1]),
+                surface=source[2],
+                winner_id=source[3],
+                player1_id=source[4],
+                player2_id=source[5],
+                ingested_at=datetime.min,
             )
-            hashes = stored.get(event.match_id)
-            if not hashes or elo_source_hash(event) not in hashes:
-                mismatches += 1
-        return mismatches
+            if elo_source_hash(event) not in hashes:
+                stale.append(min(rated_date, source[0]))
+        # Unrated matches that sort before a rating either participant already has.
+        self._cur.execute(
+            f"SELECT MIN(m.match_date) FROM {BRONZE_MATCHES_TABLE} m "
+            f"WHERE NOT EXISTS (SELECT 1 FROM {SILVER_ELO_SNAPSHOTS} e "
+            f"WHERE e.match_id = m.match_id) "
+            f"AND EXISTS (SELECT 1 FROM {SILVER_ELO_SNAPSHOTS} s "
+            f"WHERE s.player_id IN (m.player1_id, m.player2_id) "
+            f"AND (s.match_date, s.match_num, s.match_id) "
+            f"> (m.match_date, m.match_num, m.match_id))"
+        )
+        row = self._cur.fetchone()
+        if row is not None and row[0] is not None:
+            stale.append(row[0])
+        return min(stale, default=None)
 
-    def snapshot_events(self, watermark: datetime | None) -> list[MatchEvent]:
+    def delete_snapshots_from(self, day: date) -> None:
+        self._cur.execute(f"DELETE FROM {SILVER_ELO_SNAPSHOTS} WHERE match_date >= %s", (day,))
+
+    def snapshot_events(self, replay_from: date | None) -> list[MatchEvent]:
         """Copy the Elo work set and required prior state to DuckDB."""
-        if watermark is not None:
+        if replay_from is None:
             self._cur.execute(
                 f"""
                 SELECT EXISTS (
                     SELECT 1
                     FROM {BRONZE_MATCHES_TABLE} m
-                    WHERE m.ingested_at > %s
-                      AND NOT EXISTS (
-                          SELECT 1
-                          FROM {SILVER_ELO_SNAPSHOTS} e
-                          WHERE e.match_id = m.match_id
-                      )
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM {SILVER_ELO_SNAPSHOTS} e
+                        WHERE e.match_id = m.match_id
+                    )
                 )
-                """,
-                (watermark,),
+                """
             )
             row = self._cur.fetchone()
             if row is None or not row[0]:
@@ -511,40 +402,33 @@ class PsycopgEloRepo:
 
         ELO_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = ELO_SNAPSHOT_PATH.with_name(f".{ELO_SNAPSHOT_PATH.name}.{os.getpid()}.tmp")
-        scope = "full source" if watermark is None else "incremental work set"
-        print(f"ELO SNAPSHOT: writing {scope} to {ELO_SNAPSHOT_PATH}")
+        cutoff = replay_from or date.max
+        print(f"ELO SNAPSHOT: writing work set to {ELO_SNAPSHOT_PATH}")
         con = duckdb.connect(str(tmp_path))
         try:
             pg_url = get_database_url().replace("'", "''")
             con.execute(f"ATTACH '{pg_url}' AS pg (TYPE postgres)")
             con.execute("BEGIN TRANSACTION")
-            if watermark is None:
-                con.execute(
-                    'CREATE TABLE bronze_match_events AS SELECT * FROM pg."bronze"."match_events"'
-                )
-                con.execute(
-                    'CREATE TABLE silver_elo_snapshots AS SELECT * FROM pg."silver"."elo_snapshots"'
-                )
-            else:
-                con.execute(
-                    "CREATE TABLE bronze_match_events AS "
-                    'SELECT * FROM pg."bronze"."match_events" m '
-                    "WHERE m.ingested_at > ? "
-                    "AND NOT EXISTS ( "
-                    'SELECT 1 FROM pg."silver"."elo_snapshots" e '
-                    "WHERE e.match_id = m.match_id "
-                    ")",
-                    (watermark,),
-                )
-                con.execute(
-                    "CREATE TABLE silver_elo_snapshots AS "
-                    'SELECT e.* FROM pg."silver"."elo_snapshots" e '
-                    "WHERE e.player_id IN ( "
-                    "SELECT player1_id FROM bronze_match_events "
-                    "UNION "
-                    "SELECT player2_id FROM bronze_match_events "
-                    ")"
-                )
+            con.execute(
+                "CREATE TABLE bronze_match_events AS "
+                'SELECT * FROM pg."bronze"."match_events" m '
+                "WHERE m.match_date >= ? "
+                "OR NOT EXISTS ( "
+                'SELECT 1 FROM pg."silver"."elo_snapshots" e '
+                "WHERE e.match_id = m.match_id "
+                ")",
+                (cutoff,),
+            )
+            con.execute(
+                "CREATE TABLE silver_elo_snapshots AS "
+                'SELECT e.* FROM pg."silver"."elo_snapshots" e '
+                "WHERE e.match_date < ? AND e.player_id IN ( "
+                "SELECT player1_id FROM bronze_match_events "
+                "UNION "
+                "SELECT player2_id FROM bronze_match_events "
+                ")",
+                (cutoff,),
+            )
             con.execute("COMMIT")
             if self._snapshot_con is not None:
                 self._snapshot_con.close()
@@ -557,14 +441,8 @@ class PsycopgEloRepo:
                 SELECT m.match_id, m.match_date, m.match_num, m.surface, m.winner_id,
                        m.player1_id, m.player2_id, m.ingested_at
                 FROM bronze_match_events m
-                WHERE (? IS NULL OR m.ingested_at > ?)
-                  AND NOT EXISTS (
-                      SELECT 1 FROM silver_elo_snapshots e
-                      WHERE e.match_id = m.match_id
-                  )
                 ORDER BY m.match_date, m.match_num, m.match_id
-                """,
-                (watermark, watermark),
+                """
             ).fetchall()
         finally:
             if con is not None:

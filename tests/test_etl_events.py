@@ -164,6 +164,7 @@ def test_emit_matches_scraped_swallows_emit_failure(monkeypatch):
 class _EloResult:
     processed = 7
     snapshots = 3
+    replay_from = None
 
 
 @pytest.fixture
