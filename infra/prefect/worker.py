@@ -6,6 +6,8 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -40,11 +42,29 @@ def _register_automations() -> None:
     register_automation()
 
 
-_register_deployments()
-_register_automations()
+RETRY_SECONDS = 300
+
+
+def _retry_forever(step: Callable[[], None]) -> None:
+    """Run a step until it succeeds, waiting RETRY_SECONDS between attempts."""
+    while True:
+        try:
+            step()
+        except Exception as error:
+            print(f"{step.__name__} failed: {error!r}; retrying in {RETRY_SECONDS}s", flush=True)
+            time.sleep(RETRY_SECONDS)
+        else:
+            return
+
+
+_retry_forever(_register_deployments)
+_retry_forever(_register_automations)
 # Imported after the PREFECT_API_URL check: src.constants loads .env with
 # override=True, which must not shadow the value read above.
 from src.constants import WORK_POOL_NAME  # noqa: E402
 
 cmd = ["prefect", "worker", "start", "--pool", WORK_POOL_NAME]
-raise SystemExit(subprocess.call(cmd))
+while True:
+    exit_code = subprocess.call(cmd)
+    print(f"prefect worker exited with {exit_code}; restarting in {RETRY_SECONDS}s", flush=True)
+    time.sleep(RETRY_SECONDS)

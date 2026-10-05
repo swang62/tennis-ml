@@ -45,6 +45,7 @@ def _fetch(body: str, monkeypatch: pytest.MonkeyPatch):
 def test_hawkeye_navigation_and_content_failures_are_skips_not_raises(monkeypatch):
     """A per-match nav/content failure returns a skip reason so the batch continues."""
     monkeypatch.setattr(rankings, "_jitter", lambda: None)
+    monkeypatch.setattr(matches.time, "sleep", lambda _seconds: None)
 
     class _NavFailingPage(_Page):
         def goto(self, *_args, **_kwargs):
@@ -80,6 +81,37 @@ def test_raw_json_body_is_accepted(monkeypatch):
     assert reason == ""
     assert payload is not None
     assert payload["Match"]["Winner"] == "S0S1"
+
+
+def test_hawkeye_fetch_retries_a_bad_response_then_succeeds(monkeypatch):
+    monkeypatch.setattr(rankings, "_jitter", lambda: None)
+    monkeypatch.setattr(matches.time, "sleep", lambda _seconds: None)
+    page = _SequencePage(['{"Match":{"Winner"', _RAW])
+    payload, reason = matches.fetch_hawkeye_match(page, 2026, "421", "ms001")
+    assert reason == ""
+    assert payload is not None
+    assert page.goto_count == 2
+
+
+def test_hawkeye_fetch_gives_up_with_the_last_reason_after_all_attempts(monkeypatch):
+    monkeypatch.setattr(rankings, "_jitter", lambda: None)
+    monkeypatch.setattr(matches.time, "sleep", lambda _seconds: None)
+    page = _SequencePage(["<html>blocked</html>"] * matches.HAWKEYE_ATTEMPTS)
+    payload, reason = matches.fetch_hawkeye_match(page, 2026, "421", "ms001")
+    assert payload is None
+    assert reason.startswith("invalid JSON response")
+    assert page.goto_count == matches.HAWKEYE_ATTEMPTS
+
+
+def test_hawkeye_fetch_reports_an_unresolved_cloudflare_challenge(monkeypatch):
+    monkeypatch.setattr(rankings, "_jitter", lambda: None)
+    monkeypatch.setattr(matches.time, "sleep", lambda _seconds: None)
+    page = _SequencePage(
+        ["<html><title>Just a moment...</title></html>"] * matches.HAWKEYE_ATTEMPTS
+    )
+    payload, reason = matches.fetch_hawkeye_match(page, 2026, "421", "ms001")
+    assert payload is None
+    assert "Cloudflare" in reason
 
 
 def test_hawkeye_fetch_waits_for_a_deferred_json_payload(monkeypatch):
