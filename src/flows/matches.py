@@ -9,6 +9,7 @@ import random
 import re
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import date
 from pathlib import Path
 from typing import Any, cast
@@ -419,14 +420,20 @@ TOURNAMENT_RESULTS_URL = (
 # Shared navigation and rendered-content budget for match scraping.
 NAVIGATION_TIMEOUT_MS = 15_000
 # Randomized human-like gap between Hawkeye requests (bot-detection hygiene).
-HAWKEYE_SLEEP_MIN_S = 3.0
-HAWKEYE_SLEEP_MAX_S = 8.0
+HAWKEYE_SLEEP_MIN_S = 6.0
+HAWKEYE_SLEEP_MAX_S = 15.0
+HAWKEYE_ATTEMPTS = 3
+HAWKEYE_BACKOFF_MIN_S = 3.0
+HAWKEYE_BACKOFF_MAX_S = 10.0
 
 # JSON is served raw, but CloakBrowser renders it wrapped in an HTML shell
 # (<html>...<pre>{...}</pre>... — seen in the probes and the live run); the
 # embedded object is recovered with _JSON_BODY_RE.
 _HTML_BODY_RE = re.compile(r"<\s*(?:!doctype|html)\b", re.I)
 _JSON_BODY_RE = re.compile(r"(\{.*\})", re.S)
+_CLOUDFLARE_RE = re.compile(
+    r"just a moment|attention required|you have been blocked|cf-turnstile", re.I
+)
 
 # Match.Round.ShortName (F/SF/QF/...) -> bronze round vocabulary; unmapped
 # rounds (qualifying etc.) resolve to None and the caller skips/reports.
@@ -745,10 +752,28 @@ def fetch_hawkeye_match(
     tournament_id: str,
     match_id: str,
 ) -> tuple[dict[str, Any] | None, str]:
-    """Fetch one Hawkeye Complete stats payload; (payload, "") or (None, reason).
+    """Fetch one Hawkeye payload with backoff retries; (payload, "") or (None, last reason)."""
+    reason = ""
+    for attempt in range(HAWKEYE_ATTEMPTS):
+        if attempt:
+            delay = random.uniform(HAWKEYE_BACKOFF_MIN_S, HAWKEYE_BACKOFF_MAX_S)
+            print(f"  Hawkeye {match_id}: retry {attempt}/{HAWKEYE_ATTEMPTS - 1} in {delay:.0f}s")
+            time.sleep(delay)
+        payload, reason = _fetch_hawkeye_once(page, year, tournament_id, match_id)
+        if payload is not None:
+            return payload, ""
+    return None, reason
 
-    Navigation, JSON, and payload errors become skip reasons so the batch
-    continues. Use the run's shared page.
+
+def _fetch_hawkeye_once(
+    page: Any,
+    year: int | str,
+    tournament_id: str,
+    match_id: str,
+) -> tuple[dict[str, Any] | None, str]:
+    """One fetch attempt; navigation, JSON, and payload errors become reasons.
+
+    Use the run's shared page.
     """
     url = HAWKEYE_URL.format(year=year, tournament_id=tournament_id, match_id=match_id)
     rankings._jitter()
@@ -758,17 +783,19 @@ def fetch_hawkeye_match(
         return None, f"Hawkeye {match_id}: navigation failed"
     wait_for_json = getattr(page, "wait_for_function", None)
     if callable(wait_for_json):
-        try:
+        with suppress(Exception):
             wait_for_json(
-                '() => document.body?.innerText.trim().startsWith("{")',
+                "() => { try { JSON.parse(document.body.innerText); return true; }"
+                " catch { return false; } }",
                 timeout=NAVIGATION_TIMEOUT_MS,
+                polling=250,
             )
-        except Exception:
-            pass
     try:
         body = page.content()
     except Exception:
         return None, f"Hawkeye {match_id}: page content failed"
+    if _CLOUDFLARE_RE.search(body):
+        return None, f"Hawkeye {match_id}: Cloudflare challenge/block not resolved"
     # CloakBrowser wraps the raw JSON in an HTML shell; recover the embedded
     # object before parsing so a wrapped payload still parses as JSON.
     if _HTML_BODY_RE.search(body[:2048]):
@@ -778,8 +805,8 @@ def fetch_hawkeye_match(
         candidate = body
     try:
         payload = json.loads(candidate)
-    except ValueError:
-        return None, f"invalid JSON response ({len(body)} bytes)"
+    except ValueError as exc:
+        return None, f"invalid JSON response ({len(body)} bytes): {exc}; head={body[:200]!r}"
     if not isinstance(payload, dict):
         return None, f"unexpected JSON shape ({type(payload).__name__})"
     match = payload.get("Match")
@@ -1544,6 +1571,15 @@ def _bronze_match_id(
     return build_match_id(year, tournament_id, sequence), "", key
 
 
+def _is_stored(match: dict[str, Any], physical: dict[tuple[date, frozenset[str]], str]) -> bool:
+    """Whether bronze already holds this physical match (same date and player pair)."""
+    match_date = _as_date(match.get("match_date"))
+    players = frozenset(
+        {str(match.get("player1_id") or "").upper(), str(match.get("player2_id") or "").upper()}
+    )
+    return match_date is not None and (match_date, players) in physical
+
+
 def dedupe_physical_matches(
     matches: list[dict[str, Any]], tournament_id: str
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1769,13 +1805,20 @@ def _process_tournament(
             "skipped (duplicate physical match)"
         )
     result["skipped"] += len(duplicates)
+    # Numbering uses the full resolved list; only matches missing from bronze are fetched.
+    to_fetch = [match for match in resolved if force or not _is_stored(match, physical)]
+    stored_count = len(resolved) - len(to_fetch)
+    if stored_count:
+        print(
+            f"  Tournament {tournament_id}: {stored_count} match(es) already in bronze, not fetched"
+        )
     if match_ids is not None:
         # msXXX ids repeat on every tournament page, so scope by tournament.
-        resolved = [
-            match for match in resolved if f"{tournament_id}/{match.get('match_id')}" in match_ids
+        to_fetch = [
+            match for match in to_fetch if f"{tournament_id}/{match.get('match_id')}" in match_ids
         ]
 
-    hawkeye = fetch_hawkeye_batch(resolved, year=year, tournament_id=tournament_id, page=page)
+    hawkeye = fetch_hawkeye_batch(to_fetch, year=year, tournament_id=tournament_id, page=page)
     draw_size = None
     for item in hawkeye:
         payload = item.get("payload")
@@ -1846,7 +1889,7 @@ def _process_tournament(
         {
             "inserted": summary["inserted"],
             "updated": summary["updated"],
-            "noop": summary["noop"],
+            "noop": stored_count + summary["noop"],
         }
     )
     result["skipped"] += summary["skipped"]
